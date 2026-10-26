@@ -39,6 +39,7 @@ import (
 	"github.com/vettid/service-vault/internal/keystore"
 	"github.com/vettid/service-vault/internal/peer"
 	"github.com/vettid/service-vault/internal/service"
+	"github.com/vettid/service-vault/internal/signin"
 	"github.com/vettid/service-vault/internal/store"
 	"github.com/vettid/service-vault/internal/tlsid"
 	"github.com/vettid/service-vault/internal/webhook"
@@ -85,6 +86,8 @@ type Config struct {
 	APIKeyHashes  [][32]byte
 	WebhookSecret []byte
 	Profile       peer.Profile
+	EmailLimits   []signin.Limit // SV_SIGNIN_LIMITS_EMAIL
+	SourceLimits  []signin.Limit // SV_SIGNIN_LIMITS_SOURCE
 }
 
 // configFromEnv reads and checks the SV_* variables.
@@ -118,6 +121,12 @@ func configFromEnv(getenv func(string) string) (*Config, error) {
 	}
 	if c.Profile, err = splitName(c.ServiceName); err != nil {
 		return nil, err
+	}
+	if c.EmailLimits, err = signin.ParseLimits(getenv("SV_SIGNIN_LIMITS_EMAIL"), signin.DefaultEmailLimits); err != nil {
+		return nil, fmt.Errorf("SV_SIGNIN_LIMITS_EMAIL: %w", err)
+	}
+	if c.SourceLimits, err = signin.ParseLimits(getenv("SV_SIGNIN_LIMITS_SOURCE"), signin.DefaultSourceLimits); err != nil {
+		return nil, fmt.Errorf("SV_SIGNIN_LIMITS_SOURCE: %w", err)
 	}
 	return c, nil
 }
@@ -222,7 +231,8 @@ func serve(args []string) error {
 		rc.HTTP = hc
 	}
 	svc := &service.Service{Store: tbl.Peer(), ServiceName: cfg.ServiceName, Log: log,
-		Webhooks: &webhook.Dispatcher{URL: cfg.WebhookURL, Secret: cfg.WebhookSecret}}
+		Webhooks: &webhook.Dispatcher{URL: cfg.WebhookURL, Secret: cfg.WebhookSecret},
+		Limiter:  &signin.Limiter{Counters: tbl.Counters(), Email: cfg.EmailLimits, Source: cfg.SourceLimits}}
 	p, err := peer.New(peer.Config{Keys: keys, Relay: rc, RelayURL: cfg.RelayURL, Profile: cfg.Profile, Store: tbl.Peer(),
 		Events: svc, Log: log})
 	if err != nil {

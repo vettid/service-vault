@@ -688,3 +688,52 @@ func TestStoreConflictStops(t *testing.T) {
 		t.Fatal("flush over another writer's change succeeded")
 	}
 }
+
+func TestCancelChallengeAndDenyEnds(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "tag")
+	ctx := context.Background()
+
+	// Cancelled: forgotten, a later signed answer is ignored, no event.
+	id, err := f.p.Authenticate(ctx, cid, "x", 2*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.pump()
+	if ok, err := f.p.CancelChallenge(ctx, id); !ok || err != nil {
+		t.Fatalf("cancel: %v %v", ok, err)
+	}
+	if ok, _ := f.p.CancelChallenge(ctx, id); ok {
+		t.Fatal("cancelled twice")
+	}
+	r, _ := peerwire.SignConnAuth(m.Cred, f.keys.IKPublic(), m.IK.Public().(ed25519.PublicKey), m.Challenges[0], f.clk.Now(), nil)
+	m.Send(peerwire.TypeConnAuthResponse, r.Marshal())
+	f.pump()
+	f.clk.Advance(3 * time.Minute)
+	f.tick()
+	if n := len(f.ev.of(EventSignInApproved)) + len(f.ev.of(EventSignInExpired)) + len(f.ev.of(EventSignInDenied)); n != 0 {
+		t.Fatalf("%d events for a cancelled challenge", n)
+	}
+	// It stays cancelled across a restart.
+	f.start()
+	if ok, _ := f.p.CancelChallenge(ctx, id); ok {
+		t.Fatal("cancelled challenge came back")
+	}
+
+	// Denied on the phone: the challenge ends; a signed answer after the
+	// denial is ignored.
+	id2, _ := f.p.Authenticate(ctx, cid, "x", 2*time.Minute)
+	f.pump()
+	m.Send(peerwire.TypeConnAuthResponse, peerwire.DeniedConnAuth(id2).Marshal())
+	f.pump()
+	r2, _ := peerwire.SignConnAuth(m.Cred, f.keys.IKPublic(), m.IK.Public().(ed25519.PublicKey), m.Challenges[1], f.clk.Now(), nil)
+	m.Send(peerwire.TypeConnAuthResponse, r2.Marshal())
+	f.pump()
+	if len(f.ev.of(EventSignInDenied)) != 1 || len(f.ev.of(EventSignInApproved)) != 0 {
+		t.Fatal("answer after a denial counted")
+	}
+	if ok, _ := f.p.CancelChallenge(ctx, id2); ok {
+		t.Fatal("denied challenge still pending")
+	}
+}

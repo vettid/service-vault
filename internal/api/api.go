@@ -55,14 +55,39 @@ type Invitation struct {
 
 // SignIns starts and reports email sign-ins.
 type SignIns interface {
-	// Start begins a sign-in for emailKey with the given match code. It
-	// returns the same kind of id whether or not a connection has the
-	// email; for an unknown email the sign-in stays pending until it
+	// Start begins a sign-in. It returns the same kind of id whether or
+	// not a connection has the email and whether or not a rate limit was
+	// reached; a sign-in that sends no challenge stays pending until it
 	// expires.
-	Start(ctx context.Context, emailKey, code string) (id string, err error)
-	// Status reports a sign-in: "pending", "approved", "denied" or
-	// "expired"; connectionID is set only when approved.
-	Status(ctx context.Context, id string) (status, connectionID string, err error)
+	Start(ctx context.Context, req SignInRequest) (id string, err error)
+	// Status reports a sign-in; ErrNotFound for an unknown id.
+	Status(ctx context.Context, id string) (*SignInStatus, error)
+}
+
+// SignInRequest is a sign-in to start.
+type SignInRequest struct {
+	EmailKey  string // the email's index key
+	SourceKey string // the source's key (connect.EmailIndex.SourceKey); "" when none was given
+	MatchCode string
+}
+
+// Sign-in statuses.
+const (
+	SignInPending  = "pending"
+	SignInApproved = "approved"
+	SignInDenied   = "denied"
+	SignInExpired  = "expired" // no answer in time, or superseded by a newer sign-in for the same email
+)
+
+// SignInStatus is what became of a sign-in.
+type SignInStatus struct {
+	ID           string `json:"signin_id"`
+	Status       string `json:"status"`
+	ConnectionID string `json:"connection_id,omitempty"` // approved only
+	// KeyChanged is set when approved: true when the member signed with a
+	// credential key other than the one pinned at the connection's first
+	// sign-in and no rotation chain reaches it (VAULT-MESSAGING §10.4).
+	KeyChanged *bool `json:"key_changed,omitempty"`
 }
 
 // ErrNotFound is returned by Invites.Status and SignIns.Status for an
@@ -159,6 +184,11 @@ func (s *Server) createInvite(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, inv)
 }
 
+type signInBody struct {
+	Email  string `json:"email"`
+	Source string `json:"source,omitempty"`
+}
+
 func (s *Server) inviteStatus(w http.ResponseWriter, r *http.Request) {
 	st, err := s.Invites.Status(r.Context(), r.PathValue("id"))
 	switch {
@@ -178,15 +208,22 @@ type signInResponse struct {
 }
 
 // startSignIn answers the same way, after the same delay, whether or not
-// the email belongs to a connection (MEMBER-SERVICE-PLAN §4.2).
+// the email belongs to a connection and whether or not a rate limit was
+// reached (MEMBER-SERVICE-PLAN §4.2). source is the end user's address
+// as the application sees it, used only for the per-source rate limit.
 func (s *Server) startSignIn(w http.ResponseWriter, r *http.Request) {
-	var b emailBody
+	var b signInBody
 	if !readJSON(w, r, &b) {
 		return
 	}
 	k, err := s.Email.Key(b.Email)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_email")
+		return
+	}
+	src, err := s.Email.SourceKey(b.Source)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_source")
 		return
 	}
 	code, err := signin.MatchCode()
@@ -201,7 +238,7 @@ func (s *Server) startSignIn(w http.ResponseWriter, r *http.Request) {
 	var id string
 	var startErr error
 	if signin.Uniform(r.Context(), floor, func(ctx context.Context) {
-		id, startErr = s.SignIns.Start(ctx, k, code)
+		id, startErr = s.SignIns.Start(ctx, SignInRequest{EmailKey: k, SourceKey: src, MatchCode: code})
 	}) {
 		s.log().Warn("signin lookup overran the uniform floor", "floor", floor)
 	}
@@ -213,15 +250,8 @@ func (s *Server) startSignIn(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, signInResponse{ID: id, MatchCode: code})
 }
 
-type statusResponse struct {
-	ID           string `json:"signin_id"`
-	Status       string `json:"status"`
-	ConnectionID string `json:"connection_id,omitempty"`
-}
-
 func (s *Server) signInStatus(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	st, cid, err := s.SignIns.Status(r.Context(), id)
+	st, err := s.SignIns.Status(r.Context(), r.PathValue("id"))
 	switch {
 	case errors.Is(err, ErrNotFound):
 		writeError(w, http.StatusNotFound, "not_found")
@@ -229,7 +259,7 @@ func (s *Server) signInStatus(w http.ResponseWriter, r *http.Request) {
 		s.log().Error("signin status", "err", err)
 		writeError(w, http.StatusServiceUnavailable, "unavailable")
 	default:
-		writeJSON(w, http.StatusOK, statusResponse{ID: id, Status: st, ConnectionID: cid})
+		writeJSON(w, http.StatusOK, st)
 	}
 }
 

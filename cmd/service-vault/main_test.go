@@ -30,12 +30,20 @@ func TestConfigFromEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	if c.RelayURL != "https://relay.vettid.org" || len(c.APIKeyHashes) != 2 ||
-		c.Profile.FirstName != "VettID" || c.Profile.LastName != "Member Service" {
+		c.Profile.FirstName != "VettID" || c.Profile.LastName != "Member Service" ||
+		len(c.EmailLimits) != 2 || c.EmailLimits[0].String() != "5/15m" || c.EmailLimits[1].String() != "20/24h" ||
+		len(c.SourceLimits) != 1 || c.SourceLimits[0].String() != "20/15m" {
 		t.Fatalf("%+v", c)
+	}
+	e := goodEnv()
+	e["SV_SIGNIN_LIMITS_EMAIL"], e["SV_SIGNIN_LIMITS_SOURCE"] = "3/10m", "none"
+	if c, err := configFromEnv(env(e)); err != nil || len(c.EmailLimits) != 1 || c.EmailLimits[0].Max != 3 || c.SourceLimits != nil {
+		t.Fatalf("limits %+v %v", c, err)
 	}
 	for k, v := range map[string]string{
 		"SV_TABLE": "", "SV_WEBHOOK_URL": "http://member.example/", "SV_WEBHOOK_SECRET": "short",
 		"SV_API_KEY_HASHES": "zz", "SV_SERVICE_NAME": "VettID",
+		"SV_SIGNIN_LIMITS_EMAIL": "5", "SV_SIGNIN_LIMITS_SOURCE": "0/1m",
 	} {
 		e := goodEnv()
 		e[k] = v

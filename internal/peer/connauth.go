@@ -74,6 +74,30 @@ func (p *Peer) Authenticate(ctx context.Context, connID, ctxt string, ttl time.D
 	return wc.RequestID, nil
 }
 
+// CancelChallenge withdraws a pending challenge on the service's side: it
+// is forgotten, so a later answer matches no pending request and is
+// ignored (§8.1), and no event is emitted for it. VAULT-MESSAGING §10.4
+// has no message to withdraw a challenge, so the member's vault keeps
+// showing it until its exp. It reports whether the challenge was pending.
+func (p *Peer) CancelChallenge(ctx context.Context, requestID string) (bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.started {
+		return false, ErrNotStarted
+	}
+	ch := p.challenges[requestID]
+	if ch == nil {
+		return false, nil
+	}
+	delete(p.challenges, requestID)
+	p.markDirty(kindAuth, requestID)
+	if err := p.flush(ctx); err != nil {
+		return false, err
+	}
+	p.log().Info("challenge cancelled", "connection_id", ch.ConnID, "request_id", requestID)
+	return true, nil
+}
+
 func (p *Peer) sendInnerExp(c *Connection, typ string, body []byte, exp, now time.Time) string {
 	in := newInner(p.newID(now), typ, body, now)
 	in.Exp = exp

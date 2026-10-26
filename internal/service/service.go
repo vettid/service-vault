@@ -8,7 +8,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"hash/fnv"
 	"log/slog"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vettid/service-vault/internal/api"
@@ -20,9 +23,10 @@ import (
 
 // Record kinds the service keeps in the peer's store.
 const (
-	kindEmail     = "email"      // email index key -> connection id
+	kindEmail     = "email"      // email index key -> the one connection bound to it
 	kindSignIn    = "signin"     // a sign-in
 	kindSignInReq = "signin_req" // challenge request id -> sign-in id
+	kindSignInCur = "signin_cur" // email index key -> its latest sign-in id
 )
 
 // signInRetention keeps a finished sign-in readable (chosen; not in the
@@ -35,6 +39,7 @@ type Peer interface {
 	Invite(id string) (peer.InviteRecord, bool)
 	Connection(id string) (peer.ConnectionInfo, bool)
 	Authenticate(ctx context.Context, connID, ctxt string, ttl time.Duration) (string, error)
+	CancelChallenge(ctx context.Context, requestID string) (bool, error)
 }
 
 // Webhooks delivers webhook events (webhook.Dispatcher).
@@ -49,8 +54,14 @@ type Service struct {
 	Store       peer.Store
 	ServiceName string // in the sign-in challenge's context
 	Webhooks    Webhooks
-	Now         func() time.Time
-	Log         *slog.Logger
+	// Limiter applies the per-email and per-source sign-in limits
+	// (MEMBER-SERVICE-PLAN §4.2); nil applies none.
+	Limiter *signin.Limiter
+	Now     func() time.Time
+	Log     *slog.Logger
+
+	limited atomic.Uint64 // sign-ins started over a limit
+	locks   [64]sync.Mutex
 }
 
 var _ peer.Events = (*Service)(nil)
@@ -73,11 +84,11 @@ func (i invites) Status(ctx context.Context, id string) (*api.InviteStatus, erro
 
 type signIns struct{ s *Service }
 
-func (x signIns) Start(ctx context.Context, emailKey, code string) (string, error) {
-	return x.s.StartSignIn(ctx, emailKey, code)
+func (x signIns) Start(ctx context.Context, req api.SignInRequest) (string, error) {
+	return x.s.StartSignIn(ctx, req)
 }
 
-func (x signIns) Status(ctx context.Context, id string) (string, string, error) {
+func (x signIns) Status(ctx context.Context, id string) (*api.SignInStatus, error) {
 	return x.s.SignInStatus(ctx, id)
 }
 
@@ -96,7 +107,9 @@ func (s *Service) log() *slog.Logger {
 }
 
 // CreateInvite makes an in-person invitation tagged with the
-// email index key of the address the visitor entered.
+// email index key of the address the visitor entered. It answers the
+// same whether or not the email is bound already: binding is decided
+// when the connection is added.
 func (s *Service) CreateInvite(ctx context.Context, emailKey string) (*api.Invitation, error) {
 	inv, err := s.Peer.CreateInvite(ctx, emailKey)
 	if err != nil {
@@ -121,52 +134,64 @@ func (s *Service) InviteStatus(_ context.Context, id string) (*api.InviteStatus,
 	return st, nil
 }
 
-// Sign-in statuses (api.SignIns).
-const (
-	signInPending  = "pending"
-	signInApproved = "approved"
-	signInDenied   = "denied"
-	signInExpired  = "expired"
-)
-
 type signInRecord struct {
-	ID        string    `json:"id"`
-	ConnID    string    `json:"connection_id,omitempty"`
-	RequestID string    `json:"request_id,omitempty"`
-	Status    string    `json:"status"`
-	Exp       time.Time `json:"exp"`
+	ID         string    `json:"id"`
+	ConnID     string    `json:"connection_id,omitempty"`
+	RequestID  string    `json:"request_id,omitempty"`
+	Status     string    `json:"status"`
+	KeyChanged bool      `json:"key_changed,omitempty"`
+	Exp        time.Time `json:"exp"`
 }
 
-// StartSignIn begins an email sign-in (MEMBER-SERVICE-PLAN §4.2): with a
-// connection bound to the email, a challenge whose context carries the
-// match code goes to the member's vault; without one, the sign-in only
-// expires. Either way it returns a fresh id and nothing else.
-func (s *Service) StartSignIn(ctx context.Context, emailKey, code string) (string, error) {
+// lock serializes sign-ins for one email key in this process (one task
+// runs the service vault), so that "one pending sign-in per email" holds
+// under concurrent starts.
+func (s *Service) lock(emailKey string) *sync.Mutex {
+	h := fnv.New32a()
+	h.Write([]byte(emailKey))
+	return &s.locks[h.Sum32()%uint32(len(s.locks))]
+}
+
+// LimitedSignIns is the number of sign-ins started over a rate limit
+// since the process started.
+func (s *Service) LimitedSignIns() uint64 { return s.limited.Load() }
+
+// StartSignIn begins an email sign-in (MEMBER-SERVICE-PLAN §4.2). It is
+// counted against the per-email and per-source limits; it supersedes the
+// email's pending sign-in, if any (one pending sign-in per member: the
+// older one reads expired and its challenge is cancelled); and with a
+// connection bound to the email, and within the limits, a challenge
+// whose context carries the match code goes to the member's vault.
+// Otherwise the sign-in only expires. Either way it returns a fresh id
+// and nothing else.
+func (s *Service) StartSignIn(ctx context.Context, req api.SignInRequest) (string, error) {
+	mu := s.lock(req.EmailKey)
+	mu.Lock()
+	defer mu.Unlock()
 	now := s.now()
+	over, err := s.Limiter.Count(ctx, req.EmailKey, req.SourceKey, now)
+	if err != nil {
+		return "", err
+	}
 	id, err := envelope.NewULID(now)
 	if err != nil {
 		return "", err
 	}
-	rec := &signInRecord{ID: id, Status: signInPending, Exp: now.Add(signin.ChallengeTTL)}
-	if b, ok, err := s.Store.Get(ctx, kindEmail, emailKey); err != nil {
+	if over != "" {
+		// Neither the email nor the source is logged.
+		s.log().Info("signin rate limited", "signin_id", id, "limit", over, "limited_total", s.limited.Add(1))
+	}
+	if err := s.supersede(ctx, req.EmailKey); err != nil {
 		return "", err
-	} else if ok {
-		connID := string(b)
-		if c, ok := s.Peer.Connection(connID); ok && c.State == peer.StateActive {
-			ctxt, err := signin.Context(s.ServiceName, code)
-			if err != nil {
-				return "", err
-			}
-			reqID, err := s.Peer.Authenticate(ctx, connID, ctxt, signin.ChallengeTTL)
-			if err != nil {
-				// Answered as any other sign-in: it stays pending and expires.
-				s.log().Warn("signin challenge", "signin_id", id, "err", errName(err))
-			} else {
-				rec.ConnID, rec.RequestID = connID, reqID
-			}
+	}
+	rec := &signInRecord{ID: id, Status: api.SignInPending, Exp: now.Add(signin.ChallengeTTL)}
+	if over == "" {
+		if err := s.challenge(ctx, req, rec); err != nil {
+			return "", err
 		}
 	}
-	changes := []peer.Change{s.signInChange(rec)}
+	changes := []peer.Change{s.signInChange(rec),
+		{Kind: kindSignInCur, ID: req.EmailKey, Data: []byte(id), Expires: rec.Exp}}
 	if rec.RequestID != "" {
 		changes = append(changes, peer.Change{Kind: kindSignInReq, ID: rec.RequestID, Data: []byte(id),
 			Expires: rec.Exp.Add(signInRetention), IfAbsent: true})
@@ -175,6 +200,54 @@ func (s *Service) StartSignIn(ctx context.Context, emailKey, code string) (strin
 		return "", err
 	}
 	return id, nil
+}
+
+// challenge sends the challenge when a connection is bound to the email
+// and active.
+func (s *Service) challenge(ctx context.Context, req api.SignInRequest, rec *signInRecord) error {
+	b, ok, err := s.Store.Get(ctx, kindEmail, req.EmailKey)
+	if err != nil || !ok {
+		return err
+	}
+	connID := string(b)
+	if c, ok := s.Peer.Connection(connID); !ok || c.State != peer.StateActive {
+		return nil
+	}
+	ctxt, err := signin.Context(s.ServiceName, req.MatchCode)
+	if err != nil {
+		return err
+	}
+	reqID, err := s.Peer.Authenticate(ctx, connID, ctxt, signin.ChallengeTTL)
+	if err != nil {
+		// Answered as any other sign-in: it stays pending and expires.
+		s.log().Warn("signin challenge", "signin_id", rec.ID, "err", errName(err))
+		return nil
+	}
+	rec.ConnID, rec.RequestID = connID, reqID
+	return nil
+}
+
+// supersede ends the email's pending sign-in, if any: its challenge is
+// cancelled on the service's side and it reads expired. It does so for
+// every email, bound or not, so that superseding reveals nothing.
+func (s *Service) supersede(ctx context.Context, emailKey string) error {
+	b, ok, err := s.Store.Get(ctx, kindSignInCur, emailKey)
+	if err != nil || !ok {
+		return err
+	}
+	old, err := s.signIn(ctx, string(b))
+	if err != nil || old == nil || old.Status != api.SignInPending {
+		return err
+	}
+	if old.RequestID != "" {
+		// Cancelled first, so no outcome is emitted for it afterwards; an
+		// outcome emitted already finds the sign-in expired and is dropped.
+		if _, err := s.Peer.CancelChallenge(ctx, old.RequestID); err != nil {
+			return err
+		}
+	}
+	old.Status = api.SignInExpired
+	return s.Store.Apply(ctx, []peer.Change{s.signInChange(old)})
 }
 
 func errName(err error) string {
@@ -204,23 +277,46 @@ func (s *Service) signIn(ctx context.Context, id string) (*signInRecord, error) 
 	return rec, nil
 }
 
-// SignInStatus reports a sign-in: pending, approved (with the
-// connection), denied or expired.
-func (s *Service) SignInStatus(ctx context.Context, id string) (status, connectionID string, err error) {
+// SignInStatus reports a sign-in: pending, approved (with the connection
+// and key_changed), denied or expired.
+func (s *Service) SignInStatus(ctx context.Context, id string) (*api.SignInStatus, error) {
 	rec, err := s.signIn(ctx, id)
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
 	if rec == nil {
-		return "", "", api.ErrNotFound
+		return nil, api.ErrNotFound
 	}
-	if rec.Status == signInPending && !s.now().Before(rec.Exp) {
-		return signInExpired, "", nil
+	st := &api.SignInStatus{ID: rec.ID, Status: rec.Status}
+	switch {
+	case rec.Status == api.SignInPending && !s.now().Before(rec.Exp):
+		st.Status = api.SignInExpired
+	case rec.Status == api.SignInApproved:
+		kc := rec.KeyChanged
+		st.ConnectionID, st.KeyChanged = rec.ConnID, &kc
 	}
-	if rec.Status == signInApproved {
-		return rec.Status, rec.ConnID, nil
+	return st, nil
+}
+
+// bindEmail binds the email key of a new connection's invitation to it
+// unless another connection holds it (the first active connection keeps
+// it; the binding is freed when that connection is removed). The write is
+// conditional, so two connections added at once cannot both bind. It
+// reports whether this connection holds the binding (also on a
+// redelivered event).
+func (s *Service) bindEmail(ctx context.Context, emailKey, connID string) (bool, error) {
+	err := s.Store.Apply(ctx, []peer.Change{{Kind: kindEmail, ID: emailKey, Data: []byte(connID), IfAbsent: true}})
+	if err == nil {
+		return true, nil
 	}
-	return rec.Status, "", nil
+	if !errors.Is(err, peer.ErrConflict) {
+		return false, err
+	}
+	b, ok, err := s.Store.Get(ctx, kindEmail, emailKey)
+	if err != nil {
+		return false, err
+	}
+	return ok && string(b) == connID, nil
 }
 
 // Deliver implements peer.Events: the email binding follows the
@@ -230,14 +326,17 @@ func (s *Service) SignInStatus(ctx context.Context, id string) (status, connecti
 func (s *Service) Deliver(ctx context.Context, e *peer.Event) error {
 	switch e.Type {
 	case peer.EventConnectionAdded:
+		// The email the visitor entered names this connection
+		// (MEMBER-SERVICE-PLAN §4.1 step 4) unless an active connection
+		// holds it already.
+		bound := false
 		if e.Tag != "" {
-			// The email the visitor entered now names this connection
-			// (MEMBER-SERVICE-PLAN §4.1 step 4); a later connection with
-			// the same email takes it over.
-			if err := s.Store.Apply(ctx, []peer.Change{{Kind: kindEmail, ID: e.Tag, Data: []byte(e.ConnectionID)}}); err != nil {
+			var err error
+			if bound, err = s.bindEmail(ctx, e.Tag, e.ConnectionID); err != nil {
 				return err
 			}
 		}
+		return s.webhook(ctx, e, map[string]any{"invite_id": e.InviteID, "name": e.Name, "email_bound": bound})
 	case peer.EventConnectionRemoved:
 		if e.Tag != "" {
 			b, ok, err := s.Store.Get(ctx, kindEmail, e.Tag)
@@ -256,7 +355,7 @@ func (s *Service) Deliver(ctx context.Context, e *peer.Event) error {
 			return err
 		}
 		if sid == "" {
-			return nil // not a sign-in (an approval challenge, later)
+			return nil // not a sign-in (an approval challenge, later), or superseded
 		}
 		data := map[string]any{"signin_id": sid}
 		switch e.Type {
@@ -271,8 +370,6 @@ func (s *Service) Deliver(ctx context.Context, e *peer.Event) error {
 	switch e.Type {
 	case peer.EventConnectionPending:
 		data = map[string]string{"invite_id": e.InviteID, "sas": e.SAS, "name": e.Name}
-	case peer.EventConnectionAdded:
-		data = map[string]string{"invite_id": e.InviteID, "name": e.Name}
 	case peer.EventConnectionDeclined, peer.EventConnectionExpired:
 		data = map[string]string{"invite_id": e.InviteID}
 	case peer.EventConnectionRemoved:
@@ -281,7 +378,9 @@ func (s *Service) Deliver(ctx context.Context, e *peer.Event) error {
 	return s.webhook(ctx, e, data)
 }
 
-// finishSignIn records a sign-in's outcome; it returns the sign-in id.
+// finishSignIn records a sign-in's outcome; it returns the sign-in id,
+// or "" when the event is not for a sign-in or the sign-in ended
+// otherwise (superseded), in which case no webhook is sent.
 func (s *Service) finishSignIn(ctx context.Context, e *peer.Event) (string, error) {
 	b, ok, err := s.Store.Get(ctx, kindSignInReq, e.RequestID)
 	if err != nil || !ok {
@@ -291,18 +390,23 @@ func (s *Service) finishSignIn(ctx context.Context, e *peer.Event) (string, erro
 	if err != nil || rec == nil {
 		return "", err
 	}
-	if rec.Status == signInPending {
-		switch e.Type {
-		case peer.EventSignInApproved:
-			rec.Status = signInApproved
-		case peer.EventSignInDenied:
-			rec.Status = signInDenied
-		default:
-			rec.Status = signInExpired
-		}
+	status := api.SignInExpired
+	switch e.Type {
+	case peer.EventSignInApproved:
+		status = api.SignInApproved
+	case peer.EventSignInDenied:
+		status = api.SignInDenied
+	}
+	switch rec.Status {
+	case api.SignInPending:
+		rec.Status = status
+		rec.KeyChanged = status == api.SignInApproved && e.KeyChanged
 		if err := s.Store.Apply(ctx, []peer.Change{s.signInChange(rec)}); err != nil {
 			return "", err
 		}
+	case status: // a redelivered event
+	default:
+		return "", nil
 	}
 	return rec.ID, nil
 }

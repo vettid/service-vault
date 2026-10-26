@@ -34,14 +34,17 @@ type fakeSignIns struct {
 	mu      sync.Mutex
 	known   string
 	started map[string]string // id -> email key
+	last    SignInRequest
 }
 
-func (f *fakeSignIns) Start(_ context.Context, emailKey, code string) (string, error) {
+func (f *fakeSignIns) Start(_ context.Context, req SignInRequest) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.started == nil {
 		f.started = map[string]string{}
 	}
+	f.last = req
+	emailKey := req.EmailKey
 	id := "s" + string(rune('0'+len(f.started)))
 	f.started[id] = emailKey
 	if emailKey == f.known {
@@ -50,17 +53,18 @@ func (f *fakeSignIns) Start(_ context.Context, emailKey, code string) (string, e
 	return id, nil
 }
 
-func (f *fakeSignIns) Status(_ context.Context, id string) (string, string, error) {
+func (f *fakeSignIns) Status(_ context.Context, id string) (*SignInStatus, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	k, ok := f.started[id]
 	if !ok {
-		return "", "", ErrNotFound
+		return nil, ErrNotFound
 	}
 	if k == f.known {
-		return "approved", "conn1", nil
+		kc := true
+		return &SignInStatus{ID: id, Status: SignInApproved, ConnectionID: "conn1", KeyChanged: &kc}, nil
 	}
-	return "pending", "", nil
+	return &SignInStatus{ID: id, Status: SignInPending}, nil
 }
 
 const apiKey = "test-api-key-not-a-secret-0123456789"
@@ -157,10 +161,12 @@ func TestSignInUniform(t *testing.T) {
 			t.Fatalf("took %v, floor %v", r.took, s.LookupFloor)
 		}
 	}
-	if _, m := do(t, h, "GET", "/v1/signins/"+known.id, apiKey, ""); m["status"] != "approved" || m["connection_id"] != "conn1" {
+	if _, m := do(t, h, "GET", "/v1/signins/"+known.id, apiKey, ""); m["status"] != "approved" || m["connection_id"] != "conn1" ||
+		m["key_changed"] != true || m["signin_id"] != known.id {
 		t.Fatalf("known status %v", m)
 	}
-	if _, m := do(t, h, "GET", "/v1/signins/"+unknown.id, apiKey, ""); m["status"] != "pending" || m["connection_id"] != nil {
+	if _, m := do(t, h, "GET", "/v1/signins/"+unknown.id, apiKey, ""); m["status"] != "pending" || m["connection_id"] != nil ||
+		m["key_changed"] != nil {
 		t.Fatalf("unknown status %v", m)
 	}
 	if rec, _ := do(t, h, "GET", "/v1/signins/none", apiKey, ""); rec.Code != 404 {
@@ -183,5 +189,27 @@ func TestInviteStatus(t *testing.T) {
 	}
 	if rec, _ := do(t, h, "GET", "/v1/invites/nope", apiKey, ""); rec.Code != 404 {
 		t.Fatalf("unknown: %d", rec.Code)
+	}
+}
+
+func TestSignInSource(t *testing.T) {
+	s, _, si := newServer(t)
+	h := s.Handler()
+	rec, m := do(t, h, "POST", "/v1/signins", apiKey, `{"email":"a@example.org","source":"2001:db8:1:2::/64"}`)
+	if rec.Code != 202 || m["signin_id"] == nil {
+		t.Fatalf("%d %v", rec.Code, m)
+	}
+	want, _ := s.Email.SourceKey("2001:db8:1:2::/64")
+	if si.last.SourceKey != want || want == "" || si.last.MatchCode != m["match_code"] {
+		t.Fatalf("request %+v", si.last)
+	}
+	if rec, _ := do(t, h, "POST", "/v1/signins", apiKey, `{"email":"a@example.org"}`); rec.Code != 202 || si.last.SourceKey != "" {
+		t.Fatalf("no source: %d %+v", rec.Code, si.last)
+	}
+	long := strings.Repeat("1", 65)
+	for _, body := range []string{`{"email":"a@example.org","source":"` + long + `"}`, `{"email":"a@example.org","source":"a b"}`} {
+		if rec, m := do(t, h, "POST", "/v1/signins", apiKey, body); rec.Code != 400 || m["error"] != "invalid_source" {
+			t.Errorf("%s: %d %v", body, rec.Code, m)
+		}
 	}
 }
