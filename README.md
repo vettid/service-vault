@@ -11,7 +11,10 @@ It is designed to be cheap and ordinary to run: one container, no enclave,
 
 ## Status
 
-**Phase 0: skeleton.** Nothing runs yet beyond `service-vault version`.
+**Phase 1, in progress.** `service-vault serve` runs the peer (members
+connect from an invitation and sign in by approving a challenge on their
+phone, [docs/SERVICE-VAULT.md](docs/SERVICE-VAULT.md) §5) and the private
+API.
 The plan, its decisions and its phases are in
 [MEMBER-SERVICE-PLAN](https://github.com/vettid/member-service/blob/main/docs/MEMBER-SERVICE-PLAN.md).
 The first deployment is vettid.org's own member service
@@ -100,7 +103,7 @@ exported security group instead of passing `apiClientSecurityGroupId`.
 | `SV_KMS_KEY_ID` | env | KMS key ARN for the keystore |
 | `SV_LISTEN` | env | API listen address (`:8080`) |
 | `SV_WEBHOOK_URL` | env | Webhook destination |
-| `SV_SERVICE_NAME` | env | Display name |
+| `SV_SERVICE_NAME` | env | Display name, at least two words: the first is the service's first name and the rest its last name in the profile members see (`VettID Member Service` → `VettID` / `Member Service`, VAULT-MESSAGING §10.8) |
 | `SV_TLS_NAME` | env | DNS name in the private API's self-signed certificate |
 | `SV_TLS_PIN_PARAM` | env | SSM parameter the daemon writes its TLS key pin to |
 | `SV_API_KEY_HASHES` | Secrets Manager | Comma-separated hex SHA-256 of the accepted API keys |
@@ -112,7 +115,8 @@ exported ARN), and the API key hashes start as a random 64-hex placeholder
 that matches no known key, so no API key works until the operator stores
 the real hashes with `aws secretsmanager put-secret-value` and restarts
 the task. The container runs `/service-vault serve` and its health check
-is `/service-vault healthcheck`, which probes `GET /health` (the image has
+is `/service-vault healthcheck`, which probes `GET /health` on
+`127.0.0.1` at the `SV_LISTEN` port (the image has
 no shell).
 
 **Cost** (us-east-1, MEMBER-SERVICE-PLAN §9): the Spot task is about
@@ -120,6 +124,28 @@ $3/month (~$8 on-demand); DynamoDB on-demand, the KMS key ($1), two
 secrets ($0.80), logs and transfer are a few dollars more at the member
 service's scale. No NAT gateway, interface endpoint or load balancer is
 billed.
+
+**Private API.** Every `/v1` route takes `Authorization: Bearer <API key>`.
+
+| Route | Answer |
+|---|---|
+| `POST /v1/invites` `{email}` | `201 {invite_id, url, expires_at}`: a 10-minute, in-person invitation; `url` is the button on mobile and the QR on desktop |
+| `GET /v1/invites/{id}` | `{invite_id, status, sas?, connection_id?}`; `status` is `waiting`, `sas` (show `sas`: the member compares it on the phone and approves), `connected`, `declined` or `expired` |
+| `POST /v1/signins` `{email}` | `202 {signin_id, match_code}`, the same way and after the same delay whether or not the email is known |
+| `GET /v1/signins/{id}` | `{signin_id, status, connection_id?}`; `status` is `pending`, `approved`, `denied` or `expired` |
+| `GET /health` | `{status: "ok"}` (no key) |
+
+**Webhooks** (signed as `sdk/go/webhook` verifies): `connection.pending`
+`{invite_id, sas, name}`, `connection.added` `{invite_id, name}`,
+`connection.declined` / `connection.expired` `{invite_id}`,
+`connection.removed` `{direction: in|out}`, `signin.approved`
+`{signin_id, key_changed}`, `signin.denied` `{signin_id, reason}`,
+`signin.expired` `{signin_id}`, each with its `connection_id`. `name` is
+the member's account name as their vault presents it.
+
+**Local development** flags of `serve`, never on by default:
+`-dev-aws-endpoint URL` (KMS, DynamoDB and SSM at LocalStack) and
+`-dev-relay-ca FILE` (also trust a dev relay's CA).
 
 ## Documents
 

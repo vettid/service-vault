@@ -138,6 +138,9 @@ export class ServiceVaultStack extends cdk.Stack {
       partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      // Records that end (dedupe markers, cached responses, finished
+      // invitations and sign-ins, spent tokens) carry their expiry here.
+      timeToLiveAttribute: 'ttl',
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       deletionProtection: true,
       removalPolicy: cdk.RemovalPolicy.RETAIN,

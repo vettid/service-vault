@@ -16,6 +16,13 @@ import (
 
 type fakeInvites struct{ lastKey string }
 
+func (f *fakeInvites) Status(_ context.Context, id string) (*InviteStatus, error) {
+	if id != "inv1" {
+		return nil, ErrNotFound
+	}
+	return &InviteStatus{ID: id, Status: InviteSAS, SAS: "123456", ConnectionID: "c1"}, nil
+}
+
 func (f *fakeInvites) Create(_ context.Context, emailKey string) (*Invitation, error) {
 	f.lastKey = emailKey
 	return &Invitation{ID: "inv1", URL: "https://relay.vettid.test/connect#x", Exp: time.Unix(1_800_000_600, 0).UTC()}, nil
@@ -161,5 +168,20 @@ func TestSignInUniform(t *testing.T) {
 	}
 	if rec, _ := do(t, h, "POST", "/v1/signins", apiKey, `{"email":"bad"}`); rec.Code != 400 {
 		t.Fatalf("bad email: %d", rec.Code)
+	}
+}
+
+func TestInviteStatus(t *testing.T) {
+	s, _, _ := newServer(t)
+	h := s.Handler()
+	if rec, _ := do(t, h, "GET", "/v1/invites/inv1", "", ""); rec.Code != 401 {
+		t.Fatalf("unauthenticated: %d", rec.Code)
+	}
+	rec, m := do(t, h, "GET", "/v1/invites/inv1", apiKey, "")
+	if rec.Code != 200 || m["status"] != "sas" || m["sas"] != "123456" || m["connection_id"] != "c1" || m["invite_id"] != "inv1" {
+		t.Fatalf("%d %v", rec.Code, m)
+	}
+	if rec, _ := do(t, h, "GET", "/v1/invites/nope", apiKey, ""); rec.Code != 404 {
+		t.Fatalf("unknown: %d", rec.Code)
 	}
 }

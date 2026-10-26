@@ -172,6 +172,7 @@ describe('data', () => {
         BillingMode: 'PAY_PER_REQUEST',
         PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true },
         DeletionProtectionEnabled: true,
+        TimeToLiveSpecification: { AttributeName: 'ttl', Enabled: true },
       }),
     });
   });
