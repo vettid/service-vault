@@ -3,12 +3,16 @@ BIN     ?= bin
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -buildid= -X main.version=$(VERSION)
 
-.PHONY: all build test race lint vet staticcheck fmt scan tidy clean integration image cdk-test devstack-up devstack-test
+.PHONY: all build svctl test race lint vet staticcheck fmt scan tidy clean integration image cdk-test devstack-up devstack-test
 
 all: lint test build
 
 build:
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o $(BIN)/service-vault ./cmd/service-vault
+
+# svctl: the operator CLI over the SDK (README "svctl").
+svctl:
+	CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o $(BIN)/svctl ./cmd/svctl
 
 test:
 	$(GO) test ./...
