@@ -35,6 +35,15 @@ make lint         # go vet + staticcheck
 
 Requires Go 1.26 (`go.mod` pins the toolchain).
 
+`make integration` runs the store and keystore tests on LocalStack.
+`make devstack-test` (not in CI) runs the service vault in process
+against a real member vault: vettid-vault's dev stack at the pinned
+commit (`make devstack-up` in another terminal; about 8 GB of memory and
+podman or docker compose), with the member played by its `vaultctl`. It
+connects from an invitation, checks that both sides show the same SAS,
+approves, checks the title the member's vault shows, signs in with the
+match code in the challenge and removes the connection.
+
 ## Deployment
 
 The container image is built from the [Dockerfile](Dockerfile) (static
