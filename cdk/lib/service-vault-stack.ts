@@ -8,6 +8,7 @@ import * as kms from 'aws-cdk-lib/aws-kms';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as servicediscovery from 'aws-cdk-lib/aws-servicediscovery';
+import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 
 /** The port the daemon's private API listens on (SV_LISTEN). */
@@ -174,6 +175,17 @@ export class ServiceVaultStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
+    // The private API's TLS key pin ("sha256/…" of its SubjectPublicKeyInfo).
+    // The daemon writes it at start from the key in its keystore; the
+    // application's client reads it and accepts only that key. "unset" until
+    // the first start.
+    const tlsPin = new ssm.StringParameter(this, 'TlsPin', {
+      parameterName: `/vettid/service-vault/${envName}/tls-pin`,
+      description: 'SHA-256 SPKI pin of the service vault private API key (SV_TLS_PIN_PARAM)',
+      stringValue: 'unset',
+      tier: ssm.ParameterTier.STANDARD,
+    });
+
     // ---- Compute ---------------------------------------------------------
     const cluster = new ecs.Cluster(this, 'Cluster', {
       clusterName: prefix,
@@ -193,6 +205,13 @@ export class ServiceVaultStack extends cdk.Stack {
         sid: 'KeystoreKey',
         actions: ['kms:GenerateDataKey', 'kms:Decrypt'],
         resources: [this.key.keyArn],
+      }),
+    );
+    taskDef.taskRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'PublishTlsPin',
+        actions: ['ssm:PutParameter'],
+        resources: [tlsPin.parameterArn],
       }),
     );
 
@@ -226,6 +245,8 @@ export class ServiceVaultStack extends cdk.Stack {
         SV_LISTEN: `:${API_PORT}`,
         SV_WEBHOOK_URL: props.webhookUrl,
         SV_SERVICE_NAME: props.serviceName ?? DEFAULT_SERVICE_NAME,
+        SV_TLS_PIN_PARAM: tlsPin.parameterName,
+        SV_TLS_NAME: `${DISCOVERY_NAME}.${this.namespace.namespaceName}`,
         AWS_REGION: this.region,
       },
       secrets: {
@@ -279,7 +300,9 @@ export class ServiceVaultStack extends cdk.Stack {
     out('NamespaceId', this.namespace.namespaceId, 'Cloud Map private DNS namespace id');
     out('NamespaceArn', this.namespace.namespaceArn, 'Cloud Map private DNS namespace ARN');
     out('NamespaceName', this.namespace.namespaceName, 'Cloud Map private DNS namespace name');
-    out('ApiUrl', `http://${DISCOVERY_NAME}.${this.namespace.namespaceName}:${API_PORT}`, 'Private API base URL');
+    out('ApiUrl', `https://${DISCOVERY_NAME}.${this.namespace.namespaceName}:${API_PORT}`, 'Private API base URL (TLS 1.3, key pinned)');
+    out('TlsPinParameterName', tlsPin.parameterName, 'SSM parameter holding the private API key pin');
+    out('TlsPinParameterArn', tlsPin.parameterArn, 'SSM parameter holding the private API key pin (grant ssm:GetParameter to the client)');
     out('WebhookSecretArn', webhookSecret.secretArn, 'Webhook signing secret (the application verifies with it)');
   }
 }

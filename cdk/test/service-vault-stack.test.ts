@@ -79,7 +79,7 @@ describe('network', () => {
       DnsConfig: Match.objectLike({ DnsRecords: [{ Type: 'A', TTL: 10 }] }),
     });
     const outputs = t.findOutputs('*');
-    for (const id of ['VpcId', 'PublicSubnetIds', 'SecurityGroupId', 'NamespaceId', 'NamespaceArn', 'NamespaceName', 'ApiUrl', 'WebhookSecretArn']) {
+    for (const id of ['VpcId', 'PublicSubnetIds', 'SecurityGroupId', 'NamespaceId', 'NamespaceArn', 'NamespaceName', 'ApiUrl', 'WebhookSecretArn', 'TlsPinParameterName', 'TlsPinParameterArn']) {
       expect(outputs[id]?.Export?.Name).toBe(`ServiceVault-test-${id}`);
     }
   });
@@ -138,7 +138,7 @@ describe('compute', () => {
     const c = container();
     const env = Object.fromEntries(c.Environment.map((e: any) => [e.Name, e.Value]));
     expect(Object.keys(env).sort()).toEqual(
-      ['AWS_REGION', 'SV_KMS_KEY_ID', 'SV_LISTEN', 'SV_RELAY_URL', 'SV_SERVICE_NAME', 'SV_TABLE', 'SV_WEBHOOK_URL'],
+      ['AWS_REGION', 'SV_KMS_KEY_ID', 'SV_LISTEN', 'SV_RELAY_URL', 'SV_SERVICE_NAME', 'SV_TABLE', 'SV_TLS_NAME', 'SV_TLS_PIN_PARAM', 'SV_WEBHOOK_URL'],
     );
     expect(env.SV_RELAY_URL).toBe('https://relay.vettid.org');
     expect(env.SV_LISTEN).toBe(`:${API_PORT}`);
@@ -194,11 +194,24 @@ describe('data', () => {
     expect(kmsStatements[0].Resource).toEqual({ 'Fn::GetAtt': [keyId, 'Arn'] });
   });
 
+  test('task role: only ssm:PutParameter, on the TLS pin parameter', () => {
+    const paramId = Object.keys(t.findResources('AWS::SSM::Parameter'))[0];
+    const ssmStatements = taskRoleStatements().filter((s) => asList(s.Action).some((a: string) => a.startsWith('ssm:')));
+    expect(ssmStatements).toHaveLength(1);
+    expect(asList(ssmStatements[0].Action)).toEqual(['ssm:PutParameter']);
+    expect(JSON.stringify(ssmStatements[0].Resource)).toContain(paramId);
+  });
+
+  test('API URL is https', () => {
+    const outputs = t.toJSON().Outputs;
+    expect(JSON.stringify(outputs.ApiUrl.Value)).toContain('https://');
+  });
+
   test('task role: DynamoDB only on the table; nothing else', () => {
     const tableId = Object.keys(t.findResources('AWS::DynamoDB::Table'))[0];
     for (const s of taskRoleStatements()) {
       const actions = asList(s.Action);
-      if (actions.some((a: string) => a.startsWith('kms:'))) continue;
+      if (actions.some((a: string) => a.startsWith('kms:') || a.startsWith('ssm:'))) continue;
       expect(actions.every((a: string) => a.startsWith('dynamodb:'))).toBe(true);
       for (const r of asList(s.Resource)) {
         expect(JSON.stringify(r)).toContain(tableId);

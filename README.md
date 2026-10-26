@@ -79,9 +79,15 @@ private DNS (`service-vault.<envName>.vettid.internal:8080`), and the
 service vault's security group admits the API port from the member API's
 security group only. An internal ALB would add ~$16/month and an
 interface endpoint or PrivateLink more, for no extra isolation; the API is
-still authenticated with an API key on every `/v1` route. The stack
+still authenticated with an API key on every `/v1` route, and it is
+served over TLS 1.3 with a self-signed certificate whose key is pinned:
+the daemon keeps its TLS key with its other secrets and writes the key's
+pin (`sha256/…` of the SubjectPublicKeyInfo) to an SSM parameter at
+start, and the application's client (`sdk/go/pinned`) accepts only that
+key. No certificate authority is involved. The stack
 exports `ServiceVault-<envName>-{VpcId, PublicSubnetIds, SecurityGroupId,
-NamespaceId, NamespaceArn, NamespaceName, ApiUrl, WebhookSecretArn}` for
+NamespaceId, NamespaceArn, NamespaceName, ApiUrl, WebhookSecretArn,
+TlsPinParameterName, TlsPinParameterArn}` for
 the member-service stack, which can add its own ingress rule to the
 exported security group instead of passing `apiClientSecurityGroupId`.
 
@@ -95,6 +101,8 @@ exported security group instead of passing `apiClientSecurityGroupId`.
 | `SV_LISTEN` | env | API listen address (`:8080`) |
 | `SV_WEBHOOK_URL` | env | Webhook destination |
 | `SV_SERVICE_NAME` | env | Display name |
+| `SV_TLS_NAME` | env | DNS name in the private API's self-signed certificate |
+| `SV_TLS_PIN_PARAM` | env | SSM parameter the daemon writes its TLS key pin to |
 | `SV_API_KEY_HASHES` | Secrets Manager | Comma-separated hex SHA-256 of the accepted API keys |
 | `SV_WEBHOOK_SECRET` | Secrets Manager | Webhook signing secret (≥ 32 bytes) |
 
