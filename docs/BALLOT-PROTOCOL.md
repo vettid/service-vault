@@ -30,7 +30,7 @@ This document will specify:
    caught.
 9. Test vectors.
 
-## Availability requirement (owner decision 2026-10-27)
+## Availability requirement (owner decision 2026-10-26)
 
 No one other than the member may prevent an eligible member from
 obtaining a certificate and casting a counted ballot during the voting
