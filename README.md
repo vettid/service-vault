@@ -156,6 +156,80 @@ the member's account name as their vault presents it.
 `-dev-aws-endpoint URL` (KMS, DynamoDB and SSM at LocalStack) and
 `-dev-relay-ca FILE` (also trust a dev relay's CA).
 
+## Go SDK
+
+[`sdk/go/servicevault`](sdk/go/servicevault) is the client for the
+private API and the receiver for webhooks; the member API
+([vettid/member-service](https://github.com/vettid/member-service)) uses
+it exactly as a third party would. It depends only on the standard
+library and the two packages beside it: [`sdk/go/pinned`](sdk/go/pinned)
+(TLS 1.3, one pinned server key) and [`sdk/go/webhook`](sdk/go/webhook)
+(signatures).
+
+```go
+c, err := servicevault.New(servicevault.Config{
+	BaseURL: "https://service-vault.prod.vettid.internal:8080",
+	APIKey:  apiKey, // one whose SHA-256 is in SV_API_KEY_HASHES
+	Pin:     pin,    // "sha256/…": the TlsPinParameterName parameter's value
+})
+inv, err := c.CreateInvite(ctx, email)              // POST /v1/invites
+st, err := c.InviteStatus(ctx, inv.ID)              // GET /v1/invites/{id}
+si, err := c.StartSignIn(ctx, servicevault.SignInRequest{Email: email, Source: clientIP})
+ss, err := c.SignInStatus(ctx, si.ID)               // GET /v1/signins/{id}
+err = c.Health(ctx)                                 // GET /health
+```
+
+- **Errors.** A non-2xx answer is an `*servicevault.APIError{Status,
+  Code}` (`Code` is the body's `error`: `invalid_email`, `not_found`, …);
+  `servicevault.IsNotFound(err)` for an unknown id. A server key that
+  does not match the pin fails with `pinned.ErrPin`.
+- **Retries.** GETs (`InviteStatus`, `SignInStatus`, `Health`) are tried
+  up to `GetAttempts` times (3) on network errors and 5xx, with backoff
+  from `RetryBackoff` (200 ms, doubling, at most 2 s); 4xx and a pin
+  mismatch are not retried. POSTs create something and are never
+  retried. `Timeout` (10 s) bounds each attempt; `POST /v1/signins`
+  answers after its uniform delay (about 1.5 s).
+- **Tests only:** `servicevault.WithHTTPClient(c)` replaces the pinned
+  client (then `Pin` is not checked and `BaseURL` may be http).
+- **Configuration is the application's.** The SDK has no AWS dependency
+  and fetches nothing: the application reads the pin from the SSM
+  parameter the stack exports (`ServiceVault-<envName>-TlsPinParameterName`)
+  and the webhook secret from the exported `WebhookSecretArn`, and passes
+  the values in. The pin changes only if the service vault's TLS key does.
+
+**Webhooks.** `servicevault.Receiver` verifies the signature
+(`VettID-Signature` over timestamp, `VettID-Event-Id` and body; default
+tolerance 5 minutes), limits the body (64 KiB), checks that the body's
+`id` is the signed event id and decodes the event into
+`*ConnectionPending{InviteID, SAS, Name}`, `*ConnectionAdded{InviteID,
+Name, EmailBound}`, `*ConnectionDeclined{InviteID}`,
+`*ConnectionExpired{InviteID}`, `*ConnectionRemoved{Direction}`,
+`*SignInApproved{SignInID, KeyChanged}`, `*SignInDenied{SignInID,
+Reason}`, `*SignInExpired{SignInID}`, or `*UnknownEvent{Data}` for a
+type added later; each embeds `Header{ID, Type, ConnectionID,
+CreatedAt}`. With `Replay` set (a `ReplayCache`;
+`MemoryReplayCache` is in-process, a shared store makes the check hold
+across several receivers) an event id seen within the window is refused.
+
+```go
+rc := &servicevault.Receiver{Secret: secret, Replay: &servicevault.MemoryReplayCache{}}
+http.Handle("POST /webhooks/service-vault", rc.Handler(func(ctx context.Context, e servicevault.Event) error {
+	switch e := e.(type) {
+	case *servicevault.SignInApproved:
+		// e.SignInID, e.ConnectionID, e.KeyChanged
+	}
+	return nil
+}))
+```
+
+`Handler` answers 204 when the function returns nil, 200 for a replayed
+event (not handled again), 401 for a signature that is not accepted, 400
+for a malformed event, 413 for an oversized body, and 500 when the
+function fails, in which case the event id is forgotten and the service
+vault's redelivery is handled. Delivery is at least once, so handlers
+should be idempotent by event id. `ParseWebhook(r, secret, now)` and
+`Receiver.Parse` are the same checks without the handler.
+
 ## Documents
 
 | Document | Contents |
