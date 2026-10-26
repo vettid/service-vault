@@ -1,0 +1,35 @@
+#!/usr/bin/env node
+import * as cdk from 'aws-cdk-lib';
+import { ServiceVaultStack } from '../lib/service-vault-stack';
+
+// Parameters come from context (cdk.json, ~/.cdk.json or -c key=value):
+//   envName (default prod), image (required, by digest), webhookUrl
+//   (required), relayUrl, serviceName, apiClientSecurityGroupId,
+//   apiClientCidr, vpcCidr. See README "Deployment".
+const app = new cdk.App();
+const ctx = (key: string): string | undefined => {
+  const v = app.node.tryGetContext(key);
+  return v === undefined || v === '' ? undefined : String(v);
+};
+const required = (key: string): string => {
+  const v = ctx(key);
+  if (v === undefined) throw new Error(`context "${key}" is required (cdk synth -c ${key}=...)`);
+  return v;
+};
+
+const envName = ctx('envName') ?? 'prod';
+const stack = new ServiceVaultStack(app, `ServiceVault-${envName}`, {
+  envName,
+  image: required('image'),
+  webhookUrl: required('webhookUrl'),
+  relayUrl: ctx('relayUrl'),
+  serviceName: ctx('serviceName'),
+  apiClientSecurityGroupId: ctx('apiClientSecurityGroupId'),
+  apiClientCidr: ctx('apiClientCidr'),
+  vpcCidr: ctx('vpcCidr'),
+  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
+  description: `VettID service vault (${envName})`,
+});
+cdk.Tags.of(stack).add('project', 'vettid');
+cdk.Tags.of(stack).add('component', 'service-vault');
+cdk.Tags.of(stack).add('env', envName);
