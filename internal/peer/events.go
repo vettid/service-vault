@@ -32,19 +32,27 @@ const (
 // ids and outcomes only; Tag is the application's own tag of the
 // invitation (for example its email index key), never sent to a member.
 type Event struct {
-	ID           string    `json:"id"` // a ULID, stable across redeliveries
-	Seq          uint64    `json:"seq"`
-	Type         string    `json:"type"`
-	ConnectionID string    `json:"connection_id,omitempty"`
-	InviteID     string    `json:"invite_id,omitempty"`
-	RequestID    string    `json:"request_id,omitempty"` // a sign-in challenge
-	SAS          string    `json:"sas,omitempty"`        // connection.pending only
-	Name         string    `json:"name,omitempty"`       // the member's account name (self-asserted, §6.4)
-	Tag          string    `json:"tag,omitempty"`
-	Reason       string    `json:"reason,omitempty"`      // signin.denied: denied | bad_signature
-	KeyChanged   bool      `json:"key_changed,omitempty"` // signin.approved: the pinned key changed (§10.4)
-	Direction    string    `json:"direction,omitempty"`   // connection.removed: in (the member) | out (the service)
-	At           time.Time `json:"at"`
+	ID           string `json:"id"` // a ULID, stable across redeliveries
+	Seq          uint64 `json:"seq"`
+	Type         string `json:"type"`
+	ConnectionID string `json:"connection_id,omitempty"`
+	InviteID     string `json:"invite_id,omitempty"`
+	RequestID    string `json:"request_id,omitempty"` // a sign-in challenge
+	SAS          string `json:"sas,omitempty"`        // connection.pending only
+	Name         string `json:"name,omitempty"`       // the member's account name (self-asserted, §6.4)
+	Tag          string `json:"tag,omitempty"`
+	Reason       string `json:"reason,omitempty"`      // signin.denied: denied | bad_signature
+	KeyChanged   bool   `json:"key_changed,omitempty"` // signin.approved: the pinned key changed (§10.4)
+	Direction    string `json:"direction,omitempty"`   // connection.removed: in (the member) | out (the service)
+	// The evidence of a challenge's answer (signin.*): the challenge's
+	// context, and for a signed answer the credential key, the signature
+	// and its signed_at (§10.4). Kept with the event and given to Events;
+	// never logged.
+	Context   string    `json:"context,omitempty"`
+	Key       []byte    `json:"key,omitempty"`
+	Signature []byte    `json:"signature,omitempty"`
+	SignedAt  time.Time `json:"signed_at,omitzero"`
+	At        time.Time `json:"at"`
 }
 
 // Events receives the peer's events after they are persisted. Deliver is

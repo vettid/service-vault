@@ -37,10 +37,12 @@ import (
 	"github.com/vettid/vettid-relay/relayclient"
 
 	"github.com/vettid/service-vault/internal/api"
+	"github.com/vettid/service-vault/internal/approval"
 	"github.com/vettid/service-vault/internal/connect"
 	"github.com/vettid/service-vault/internal/peer"
 	"github.com/vettid/service-vault/internal/service"
 	"github.com/vettid/service-vault/internal/webhook"
+	"github.com/vettid/service-vault/sdk/go/servicevault"
 )
 
 const relayOrigin = "https://relay.vettid.test"
@@ -264,18 +266,23 @@ func TestConnectAndSignInAgainstDevStack(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc.Peer = p
+	email, err := connect.NewEmailIndex(bytes.Repeat([]byte{7}, 32)) // TEST-ONLY pepper
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootKey, _ := email.Key("member@example.org")
+	approvals := &approval.Manager{Peer: p, Store: st, Pager: st, Webhooks: hk, ServiceName: svc.ServiceName, Threshold: 1,
+		BootstrapKey: bootKey, BoundConnection: svc.BoundConnection, Log: log}
+	svc.Approvals = approvals
+	go approvals.Run(ctx)
 	runDone := make(chan error, 1)
 	go func() { runDone <- p.Run(ctx) }()
 	defer func() {
 		cancel()
 		<-runDone
 	}()
-	email, err := connect.NewEmailIndex(bytes.Repeat([]byte{7}, 32)) // TEST-ONLY pepper
-	if err != nil {
-		t.Fatal(err)
-	}
 	srv := httptest.NewTLSServer((&api.Server{Keys: [][32]byte{api.HashKey(apiKey)}, Email: email, Invites: svc.Invites(),
-		SignIns: svc.SignIns(), LookupFloor: 50 * time.Millisecond, Log: log}).Handler())
+		SignIns: svc.SignIns(), Approvals: approvals, LookupFloor: 50 * time.Millisecond, Log: log}).Handler())
 	defer srv.Close()
 
 	// The member: a fresh test vault with an app, its credential unlocked.
@@ -357,7 +364,42 @@ func TestConnectAndSignInAgainstDevStack(t *testing.T) {
 	}
 	t.Log("sign-in approved and verified")
 
-	// 5. The member removes the connection; the service learns it.
+	// 5. The member is the bootstrap admin; a governance action reaches
+	// their phone with its hash, and their approval approves it.
+	if ad := call(t, srv, "GET", "/v1/admins", ""); fmt.Sprint(ad["admins"]) != "["+svcConn+"]" {
+		t.Fatalf("admins %v", ad)
+	}
+	ap := call(t, srv, "POST", "/v1/approvals", `{"action":"vote.open","summary":"Open the vote on proposal 7","payload":{"proposal":7}}`)
+	apID, _ := ap["approval_id"].(string)
+	hash, _ := ap["action_hash"].(string)
+	if want, _ := servicevault.ActionHash("vote.open", "Open the vote on proposal 7", json.RawMessage(`{"proposal":7}`)); hash != want {
+		t.Fatalf("action hash %q, want %q", hash, want)
+	}
+	pend = m.waitEvent("connection.authenticate.pending", func(b map[string]any) bool {
+		c, _ := b["context"].(string)
+		return b["connection_id"] == connID && strings.Contains(c, "ref "+hash[:8])
+	}, &seen)
+	t.Logf("approval challenge context: %q", pend["context"])
+	_, evs = m.request("connection.authenticate.approve", fmt.Sprintf(`{"request_id":%q}`, pend["request_id"]))
+	seen = append(seen, evs...)
+	hk.wait(t, approval.EventApproved)
+	if r := call(t, srv, "GET", "/v1/approvals/"+apID, ""); r["status"] != "approved" {
+		t.Fatalf("approval %v", r)
+	}
+	audit := call(t, srv, "GET", "/v1/audit", "")
+	entries, _ := audit["entries"].([]any)
+	signed := false
+	for _, e := range entries {
+		if e, _ := e.(map[string]any); e["type"] == "approval.response" && e["answer"] == "approved" && e["signature"] != nil {
+			signed = true
+		}
+	}
+	if !signed {
+		t.Fatalf("audit %v", audit)
+	}
+	t.Log("approval approved on the phone; signature in the audit log")
+
+	// 6. The member removes the connection; the service learns it.
 	m.request("connection.remove", fmt.Sprintf(`{"connection_id":%q}`, connID))
 	rm := hk.wait(t, peer.EventConnectionRemoved)
 	if rm.ConnectionID != svcConn {

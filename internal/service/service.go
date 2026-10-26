@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/vettid/service-vault/internal/api"
+	"github.com/vettid/service-vault/internal/approval"
 	"github.com/vettid/service-vault/internal/peer"
 	"github.com/vettid/service-vault/internal/signin"
 	"github.com/vettid/service-vault/internal/webhook"
@@ -57,8 +58,12 @@ type Service struct {
 	// Limiter applies the per-email and per-source sign-in limits
 	// (MEMBER-SERVICE-PLAN §4.2); nil applies none.
 	Limiter *signin.Limiter
-	Now     func() time.Time
-	Log     *slog.Logger
+	// Approvals runs admin approvals (MEMBER-SERVICE-PLAN §4.5); nil runs
+	// none. Its challenges' outcomes, the bootstrap admin and the removal
+	// of an admin's connection reach it from Deliver.
+	Approvals *approval.Manager
+	Now       func() time.Time
+	Log       *slog.Logger
 
 	limited atomic.Uint64 // sign-ins started over a limit
 	locks   [64]sync.Mutex
@@ -298,6 +303,13 @@ func (s *Service) SignInStatus(ctx context.Context, id string) (*api.SignInStatu
 	return st, nil
 }
 
+// BoundConnection returns the connection bound to an email index key
+// (approval.Manager.BoundConnection).
+func (s *Service) BoundConnection(ctx context.Context, emailKey string) (string, bool, error) {
+	b, ok, err := s.Store.Get(ctx, kindEmail, emailKey)
+	return string(b), ok, err
+}
+
 // bindEmail binds the email key of a new connection's invitation to it
 // unless another connection holds it (the first active connection keeps
 // it; the binding is freed when that connection is removed). The write is
@@ -336,6 +348,11 @@ func (s *Service) Deliver(ctx context.Context, e *peer.Event) error {
 				return err
 			}
 		}
+		if s.Approvals != nil {
+			if err := s.Approvals.ConnectionAdded(ctx, e.ConnectionID, e.Tag, bound); err != nil {
+				return err
+			}
+		}
 		return s.webhook(ctx, e, map[string]any{"invite_id": e.InviteID, "name": e.Name, "email_bound": bound})
 	case peer.EventConnectionRemoved:
 		if e.Tag != "" {
@@ -349,13 +366,26 @@ func (s *Service) Deliver(ctx context.Context, e *peer.Event) error {
 				}
 			}
 		}
+		// After the binding is freed, so the bootstrap cannot pick the
+		// removed connection again.
+		if s.Approvals != nil {
+			if err := s.Approvals.ConnectionRemoved(ctx, e.ConnectionID); err != nil {
+				return err
+			}
+		}
 	case peer.EventSignInApproved, peer.EventSignInDenied, peer.EventSignInExpired:
+		if s.Approvals != nil {
+			// An admin's answer to an approval challenge.
+			if ok, err := s.Approvals.Answer(ctx, e); err != nil || ok {
+				return err
+			}
+		}
 		sid, err := s.finishSignIn(ctx, e)
 		if err != nil {
 			return err
 		}
 		if sid == "" {
-			return nil // not a sign-in (an approval challenge, later), or superseded
+			return nil // not a sign-in, or superseded
 		}
 		data := map[string]any{"signin_id": sid}
 		switch e.Type {

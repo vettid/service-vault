@@ -117,3 +117,47 @@ never answers challenges and never rotates its identity.
   pending sign-in and sends its webhook (`key_changed` with
   `signin.approved`); an outcome for a sign-in that was superseded in the
   meantime is dropped without a webhook.
+
+## 7. Admin approvals (`internal/approval`)
+
+MEMBER-SERVICE-PLAN §4.5 and §5.2; the operator's view is in the README,
+"Admin approvals".
+
+- **Admin set.** Connection ids in one record. The first admin comes from
+  `SV_ADMIN_BOOTSTRAP_EMAIL` while the set is empty: at `connection.added`
+  for the connection that binds that email, or at a periodic tick for one
+  that is bound and active already. Changing the set is an approval
+  (`admin_set.add`, `admin_set.remove`) applied by the service vault; a
+  removed connection leaves the set; the set never becomes empty by
+  approval.
+- **Creating an approval.** The action, summary and payload are checked;
+  the payload is put in RFC 8785 canonical form and
+  `action_hash = SHA-256(JCS({action, payload, summary}))`. m (the
+  configured threshold) must not exceed the admins there are. The
+  approval records m and the admins asked, and a
+  `connection.authenticate.challenge` whose context names the action and
+  the first 8 hex digits of the hash goes to each of them (10-minute
+  inner `exp`). Request, record and audit entry are written together.
+- **Answers** arrive as the peer's challenge outcomes, now carrying the
+  evidence (context, credential key, signature, `signed_at`). Each answer
+  is audited with it, together with a marker of the peer event, so a
+  redelivered event changes nothing. An answer counts when it is to the
+  admin's outstanding challenge, the admin is still in the set and has
+  not answered, and the approval is pending and not past its time; a bad
+  signature never counts. m approvals settle it `approved`; when the
+  approvals plus the admins who can still answer fall below m, `denied`.
+  Settling cancels the other admins' challenges on the service's side.
+- **Periodic work** (every 15 s and at once after a change): bootstrap,
+  expiry (`expired`), re-checking open approvals after admins left, and
+  webhook delivery. Webhooks are written to an outbox in the same write
+  as the change that causes them and delivered in order, at least once.
+- **Audit log.** One record per entry under its own partition, ids
+  increasing in the order written (ULIDs, made monotonic in process),
+  written with a condition that the entry does not exist and never
+  updated or deleted; `GET /v1/audit` reads it with one Query per page.
+- **Trust.** An approval is as strong as the admins' credential keys and
+  the member vault's own checks: the service vault verifies each
+  signature over the challenge it sent and pins the key per connection
+  (a different key is reported as `key_changed` and still counts). The
+  ask gate of VAULT-MESSAGING §10.4.1 applies: a suppressed challenge
+  reads as a denial.

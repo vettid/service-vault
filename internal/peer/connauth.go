@@ -123,7 +123,10 @@ func (p *Peer) connAuthResponse(c *Connection, body []byte, now time.Time) {
 	}
 	delete(p.challenges, ch.ID)
 	p.markDirty(kindAuth, ch.ID)
-	ev := &Event{ConnectionID: c.ID, RequestID: ch.ID, Tag: c.Tag}
+	ev := &Event{ConnectionID: c.ID, RequestID: ch.ID, Tag: c.Tag, Context: ch.Context}
+	if r.Status == peerwire.ConnAuthSigned {
+		ev.Key, ev.Signature, ev.SignedAt = append([]byte(nil), r.Key...), append([]byte(nil), r.Sig...), r.SignedAt.UTC()
+	}
 	switch {
 	case r.Status == peerwire.ConnAuthDenied:
 		ev.Type, ev.Reason = EventSignInDenied, "denied"
@@ -170,6 +173,6 @@ func (p *Peer) expireChallenges(now time.Time) {
 		if c := p.conns[ch.ConnID]; c != nil {
 			tag = c.Tag
 		}
-		p.emit(&Event{Type: EventSignInExpired, ConnectionID: ch.ConnID, RequestID: id, Tag: tag}, now)
+		p.emit(&Event{Type: EventSignInExpired, ConnectionID: ch.ConnID, RequestID: id, Tag: tag, Context: ch.Context}, now)
 	}
 }

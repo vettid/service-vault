@@ -120,3 +120,20 @@ func (s *MemStore) Apply(_ context.Context, changes []Change) error {
 	}
 	return nil
 }
+
+// Page returns at most limit records of a kind whose ids sort after
+// after ("" for the first), in id order: the read side of an
+// append-only kind such as the audit log (store.Table has the same).
+func (s *MemStore) Page(ctx context.Context, kind, after string, limit int) ([]Record, error) {
+	all, err := s.Load(ctx, kind)
+	if err != nil {
+		return nil, err
+	}
+	var out []Record
+	for _, r := range all {
+		if r.ID > after && len(out) < limit {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}

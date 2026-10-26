@@ -23,6 +23,10 @@ const (
 	TypeSignInApproved     = "signin.approved"
 	TypeSignInDenied       = "signin.denied"
 	TypeSignInExpired      = "signin.expired"
+	TypeApprovalApproved   = "approval.approved"
+	TypeApprovalDenied     = "approval.denied"
+	TypeApprovalExpired    = "approval.expired"
+	TypeAdminSetChanged    = "admin_set.changed"
 )
 
 // Header is what every webhook event carries.
@@ -38,8 +42,9 @@ func (h Header) EventHeader() Header { return h }
 
 // Event is a verified webhook event: one of *ConnectionPending,
 // *ConnectionAdded, *ConnectionDeclined, *ConnectionExpired,
-// *ConnectionRemoved, *SignInApproved, *SignInDenied, *SignInExpired, or
-// *UnknownEvent for a type this package does not know yet.
+// *ConnectionRemoved, *SignInApproved, *SignInDenied, *SignInExpired,
+// *ApprovalApproved, *ApprovalDenied, *ApprovalExpired, *AdminSetChanged,
+// or *UnknownEvent for a type this package does not know yet.
 type Event interface {
 	EventHeader() Header
 }
@@ -108,6 +113,52 @@ type SignInDenied struct {
 type SignInExpired struct {
 	Header
 	SignInID string `json:"signin_id"`
+}
+
+// ApprovalApproved: m admins approved. The application applies the
+// action (the service vault applied an admin_set.* one itself: Applied).
+// Check ActionHash against the action it submitted.
+type ApprovalApproved struct {
+	Header
+	ApprovalID string `json:"approval_id"`
+	Action     string `json:"action"`
+	ActionHash string `json:"action_hash"`
+	Applied    *bool  `json:"applied,omitempty"` // admin_set.* only
+}
+
+// ApprovalDenied: the threshold can no longer be reached.
+type ApprovalDenied struct {
+	Header
+	ApprovalID string `json:"approval_id"`
+	Action     string `json:"action"`
+	ActionHash string `json:"action_hash"`
+	Reason     string `json:"reason"` // denied | admins_removed
+}
+
+// ApprovalExpired: the approval's time ran out before m admins approved.
+type ApprovalExpired struct {
+	Header
+	ApprovalID string `json:"approval_id"`
+	Action     string `json:"action"`
+	ActionHash string `json:"action_hash"`
+}
+
+// Admin set change reasons (AdminSetChanged.Reason).
+const (
+	AdminSetBootstrap         = "bootstrap"
+	AdminSetApproval          = "approval"
+	AdminSetConnectionRemoved = "connection_removed"
+)
+
+// AdminSetChanged: the admin set changed. Header.ConnectionID is the
+// connection added or removed.
+type AdminSetChanged struct {
+	Header
+	Admins     []string `json:"admins"` // the set after the change
+	Added      string   `json:"added,omitempty"`
+	Removed    string   `json:"removed,omitempty"`
+	Reason     string   `json:"reason"`
+	ApprovalID string   `json:"approval_id,omitempty"` // with reason approval
 }
 
 // UnknownEvent is an event of a type this package does not know. A
@@ -334,6 +385,14 @@ func decodeEvent(h Header, data json.RawMessage) (Event, error) {
 		ev = &SignInDenied{Header: h}
 	case TypeSignInExpired:
 		ev = &SignInExpired{Header: h}
+	case TypeApprovalApproved:
+		ev = &ApprovalApproved{Header: h}
+	case TypeApprovalDenied:
+		ev = &ApprovalDenied{Header: h}
+	case TypeApprovalExpired:
+		ev = &ApprovalExpired{Header: h}
+	case TypeAdminSetChanged:
+		ev = &AdminSetChanged{Header: h}
 	default:
 		return &UnknownEvent{Header: h, Data: data}, nil
 	}

@@ -13,8 +13,8 @@ It is designed to be cheap and ordinary to run: one container, no enclave,
 
 **Phase 1, in progress.** `service-vault serve` runs the peer (members
 connect from an invitation and sign in by approving a challenge on their
-phone, [docs/SERVICE-VAULT.md](docs/SERVICE-VAULT.md) §5) and the private
-API.
+phone, [docs/SERVICE-VAULT.md](docs/SERVICE-VAULT.md) §5), admin approvals
+of governance actions (§7) and the private API.
 The plan, its decisions and its phases are in
 [MEMBER-SERVICE-PLAN](https://github.com/vettid/member-service/blob/main/docs/MEMBER-SERVICE-PLAN.md).
 The first deployment is vettid.org's own member service
@@ -69,6 +69,9 @@ npx cdk deploy \
 | `serviceName` | no (`VettID Member Service`) | The name members see. |
 | `apiClientSecurityGroupId` / `apiClientCidr` | no | Who may reach the API port. Neither: nobody until a rule is added. An open CIDR is refused. |
 | `vpcCidr` | no (`10.60.0.0/24`) | The VPC (two /26 public subnets). |
+| `adminBootstrapEmail` | no | `SV_ADMIN_BOOTSTRAP_EMAIL` (see "Admin approvals") |
+| `adminThreshold` | no (1) | `SV_ADMIN_THRESHOLD` |
+| `approvalTtl` | no (`24h`) | `SV_APPROVAL_TTL` |
 
 **What it creates.** A VPC with public subnets in two AZs, no NAT gateway,
 the free DynamoDB gateway endpoint and no interface endpoints. An ECS
@@ -119,6 +122,9 @@ exported security group instead of passing `apiClientSecurityGroupId`.
 | `SV_WEBHOOK_SECRET` | Secrets Manager | Webhook signing secret (≥ 32 bytes) |
 | `SV_SIGNIN_LIMITS_EMAIL` | env, optional | Sign-in limits per email, comma-separated `N/window` (default `5/15m,20/24h`; `none` for none) |
 | `SV_SIGNIN_LIMITS_SOURCE` | env, optional | Sign-in limits per source (default `20/15m`; `none` for none) |
+| `SV_ADMIN_BOOTSTRAP_EMAIL` | env, optional | While the admin set is empty, the connection bound to this email becomes the first admin; ignored once the set is not empty |
+| `SV_ADMIN_THRESHOLD` | env, optional | m: how many distinct admins must approve a governance action (default 1; 1–64) |
+| `SV_APPROVAL_TTL` | env, optional | How long an approval stays open (default `24h`; `10m` to `168h`) |
 
 Secret values are never in the repository. The stack generates both: the
 webhook secret is usable as is (the application reads it from the
@@ -144,6 +150,11 @@ billed.
 | `GET /v1/invites/{id}` | `{invite_id, status, sas?, connection_id?}`; `status` is `waiting`, `sas` (show `sas`: the member compares it on the phone and approves), `connected`, `declined` or `expired` |
 | `POST /v1/signins` `{email, source?}` | `202 {signin_id, match_code}`, the same way and after the same delay whether or not the email is known and whether or not a rate limit was reached; `source` (optional, at most 64 printable ASCII bytes) is the end user's address as the application sees it, e.g. an IP or its /64, used only for the per-source limit |
 | `GET /v1/signins/{id}` | `{signin_id, status, connection_id?, key_changed?}`; `status` is `pending`, `approved`, `denied` or `expired`; `connection_id` and `key_changed` come with `approved` |
+| `POST /v1/approvals` `{action, summary, payload}` | `201 {approval_id, action_hash, status: "pending", expires_at}`; refused with `invalid_action`, `invalid_summary`, `invalid_payload` (400), `invalid_connection`, `unreachable`, `last_admin` (422) |
+| `GET /v1/approvals/{id}` | `{approval_id, action, summary, action_hash, status, reason?, threshold, admins, approvals: [{connection_id, at, key_changed}], denials: [{connection_id, at}], created_at, expires_at, applied?}`; `status` is `pending`, `approved`, `denied` or `expired` |
+| `POST /v1/approvals/{id}/remind` | `{approval_id, reminded: [connection_id]}`: the challenge again to the admins who have not answered; `too_soon` (429) within 10 minutes of the last, `not_pending` (409) once settled |
+| `GET /v1/admins` | `{admins: [connection_id], threshold}` |
+| `GET /v1/audit?since=&limit=` | `{entries: [...], next?}`: the audit log after entry `since`, oldest first, `limit` 1–100 (default 100); pass `next` as `since` for the next page |
 | `GET /health` | `{status: "ok"}` (no key) |
 
 **Webhooks** (signed as `sdk/go/webhook` verifies): `connection.pending`
@@ -152,7 +163,12 @@ billed.
 `connection.removed` `{direction: in|out}`, `signin.approved`
 `{signin_id, key_changed}`, `signin.denied` `{signin_id, reason}`,
 `signin.expired` `{signin_id}`, each with its `connection_id`. `name` is
-the member's account name as their vault presents it.
+the member's account name as their vault presents it. Admin approvals add
+`approval.approved` `{approval_id, action, action_hash, applied?}`,
+`approval.denied` `{approval_id, action, action_hash, reason}`,
+`approval.expired` `{approval_id, action, action_hash}` and
+`admin_set.changed` `{admins, added?, removed?, reason, approval_id?}`
+(its `connection_id` is the connection added or removed).
 
 **Email binding.** The email entered for an invitation is bound to the
 connection it becomes (MEMBER-SERVICE-PLAN §4.1), as an HMAC under the
@@ -194,6 +210,80 @@ both bind.
   The sign-in is still approved; the application decides what to do
   with it (for example ask the member to confirm, or alert).
 
+**Admin approvals** (MEMBER-SERVICE-PLAN §4.5, §5.2). Governance actions
+need the approval of m admins, signed on their phones. Until contracts
+land (Phase 3, `admin-v1`), an approval is a
+`connection.authenticate.challenge` (VAULT-MESSAGING §10.4) to each
+admin's connection.
+
+- *Admins* are connections, kept in DynamoDB. **Bootstrap:** while the set
+  is empty, the connection whose bound email (see "Email binding") is
+  `SV_ADMIN_BOOTSTRAP_EMAIL` becomes the first admin, when it is added or,
+  if it is connected already, within seconds of the start. Once the set
+  is not empty the setting is ignored (the start logs so). The email is
+  not verified, so whoever binds it first becomes the admin: set it just
+  before the first admin connects, and remove it once they have. If the
+  set becomes empty again (the last admin removed their connection) and
+  the setting is still there, it applies again (chosen; not in the spec).
+- *Changing the set* is itself a governance action: `admin_set.add` and
+  `admin_set.remove`, with payload `{"connection_id": "…"}`. The service
+  vault applies them when approved (`applied` says whether it still could)
+  and sends `admin_set.changed`. The last admin cannot be removed by
+  approval (`last_admin`), nor can one whose removal would leave fewer
+  admins than m (`unreachable`); with two such removals approved at once
+  the second is not applied. A member can always remove their connection,
+  though: that takes them out of the set, even the last admin, and is
+  recovered only by the bootstrap setting or by lowering m.
+- *Threshold.* m = `SV_ADMIN_THRESHOLD` (default 1, 1-of-n); each
+  approval keeps the m it was created with, so m changes by configuration
+  only. m distinct admins (connections) among those asked must approve. A
+  denial does not veto: the approval is `denied` only when m can no
+  longer be reached (`reason: denied`, or `admins_removed` when admins
+  left the set) (chosen; not in the spec). m larger than the number of
+  admins is refused at creation (`unreachable`).
+- *The request.* `action` is one of `proposal.create`, `vote.open`,
+  `vote.close`, `contract_template.change`, `admin_set.add`,
+  `admin_set.remove`, `assignment.push`; `summary` is plain text, 1–120
+  bytes, without control characters, line separators or bidirectional
+  controls; `payload` is a JSON object of at most 16 KiB in canonical
+  form. Every admin gets a challenge whose context is
+  `Approve on <service name>: <summary> — ref <first 8 hex of action_hash>`
+  (at most 256 bytes; a long summary is cut and ends in `…`).
+- *The action hash* is
+  `hex(SHA-256(JCS({"action": …, "payload": …, "summary": …})))`, JCS
+  being the JSON Canonicalization Scheme (RFC 8785): sorted keys (by
+  UTF-16 code units), no whitespace, minimal string escaping, numbers as
+  ECMAScript prints doubles (carry large integers as strings). Duplicate
+  keys, invalid UTF-8 and lone surrogates are refused. The SDK's
+  `servicevault.ActionHash` computes it, so the application can check the
+  hash it is given; fixed vectors are in
+  `sdk/go/servicevault/testdata/action_hash.json`.
+- *Timing.* An approval stays open for `SV_APPROVAL_TTL` (24 h); each
+  challenge lives 10 minutes, the connauth maximum. `POST
+  /v1/approvals/{id}/remind` sends it again to the admins who have not
+  answered, at most once per 10 minutes per approval.
+- *The member vault's ask gate* (VAULT-MESSAGING §10.4.1) applies to
+  admins as to anyone: at most 5 asks per connection in 24 hours, sign-in
+  challenges included; after a denial, the service's challenges are in a
+  7-day cooldown; three denials within 30 days pause its asks. A
+  suppressed challenge is answered as a denial after a delay of 1 to 20
+  minutes, so it counts as that admin's denial. Remind sparingly.
+- *Outcomes.* `approval.approved` when m admins approved; the application
+  applies the action (except `admin_set.*`, applied by the service
+  vault). A signature that does not verify is audited and not counted;
+  a signature by a changed key counts and is reported
+  (`key_changed`).
+- *The audit log* (DynamoDB, append-only: each entry written once,
+  never changed or deleted; ids increase): every request
+  (`approval.requested`, with the canonical payload, the hash, m, the
+  admins asked and the challenges), every reminder, every admin's answer
+  (`approval.response`: the connection, the request id, the context as
+  signed, the answer, whether it counted, and for a signed answer the
+  credential key, the signature and `signed_at` — the evidence, which
+  verifies against the challenge as VAULT-MESSAGING §10.4 defines it), every
+  outcome, and every change of the admin set. Logs carry ids and counts,
+  never contexts, summaries or signatures.
+
 **Local development** flags of `serve`, never on by default:
 `-dev-aws-endpoint URL` (KMS, DynamoDB and SSM at LocalStack) and
 `-dev-relay-ca FILE` (also trust a dev relay's CA).
@@ -218,6 +308,14 @@ inv, err := c.CreateInvite(ctx, email)              // POST /v1/invites
 st, err := c.InviteStatus(ctx, inv.ID)              // GET /v1/invites/{id}
 si, err := c.StartSignIn(ctx, servicevault.SignInRequest{Email: email, Source: clientIP})
 ss, err := c.SignInStatus(ctx, si.ID)               // GET /v1/signins/{id}
+ap, err := c.CreateApproval(ctx, servicevault.ApprovalRequest{
+	Action: servicevault.ActionVoteOpen, Summary: "Open the vote on proposal 7",
+	Payload: json.RawMessage(`{"proposal":7}`)})   // POST /v1/approvals
+st2, err := c.Approval(ctx, ap.ID)                  // GET /v1/approvals/{id}
+rm, err := c.RemindApproval(ctx, ap.ID)             // POST /v1/approvals/{id}/remind
+ad, err := c.Admins(ctx)                            // GET /v1/admins
+pg, err := c.Audit(ctx, since, 100)                 // GET /v1/audit
+h, err := servicevault.ActionHash(action, summary, payload) // compare with ap.ActionHash
 err = c.Health(ctx)                                 // GET /health
 ```
 
@@ -225,7 +323,8 @@ err = c.Health(ctx)                                 // GET /health
   Code}` (`Code` is the body's `error`: `invalid_email`, `not_found`, …);
   `servicevault.IsNotFound(err)` for an unknown id. A server key that
   does not match the pin fails with `pinned.ErrPin`.
-- **Retries.** GETs (`InviteStatus`, `SignInStatus`, `Health`) are tried
+- **Retries.** GETs (`InviteStatus`, `SignInStatus`, `Approval`,
+  `Admins`, `Audit`, `Health`) are tried
   up to `GetAttempts` times (3) on network errors and 5xx, with backoff
   from `RetryBackoff` (200 ms, doubling, at most 2 s); 4xx and a pin
   mismatch are not retried. POSTs create something and are never
@@ -247,7 +346,11 @@ tolerance 5 minutes), limits the body (64 KiB), checks that the body's
 Name, EmailBound}`, `*ConnectionDeclined{InviteID}`,
 `*ConnectionExpired{InviteID}`, `*ConnectionRemoved{Direction}`,
 `*SignInApproved{SignInID, KeyChanged}`, `*SignInDenied{SignInID,
-Reason}`, `*SignInExpired{SignInID}`, or `*UnknownEvent{Data}` for a
+Reason}`, `*SignInExpired{SignInID}`, `*ApprovalApproved{ApprovalID,
+Action, ActionHash, Applied}`, `*ApprovalDenied{ApprovalID, Action,
+ActionHash, Reason}`, `*ApprovalExpired{ApprovalID, Action, ActionHash}`,
+`*AdminSetChanged{Admins, Added, Removed, Reason, ApprovalID}`, or
+`*UnknownEvent{Data}` for a
 type added later; each embeds `Header{ID, Type, ConnectionID,
 CreatedAt}`. With `Replay` set (a `ReplayCache`;
 `MemoryReplayCache` is in-process, a shared store makes the check hold

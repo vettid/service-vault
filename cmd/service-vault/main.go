@@ -1,7 +1,8 @@
 // Command service-vault is the VettID service vault: the component an
 // application runs to connect with VettID members. It is a VMS v2 peer on
 // the relay (VAULT-MESSAGING §6.4, §10.4) and serves the application a
-// private HTTPS API and signed webhooks (MEMBER-SERVICE-PLAN §3, §7.2).
+// private HTTPS API and signed webhooks (MEMBER-SERVICE-PLAN §3, §7.2),
+// including admin approvals of governance actions (§4.5).
 //
 //	service-vault serve        run (configuration from SV_* variables, README "Deployment")
 //	service-vault healthcheck  probe GET /health on the local API; exit 0 or 1
@@ -21,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -35,6 +37,7 @@ import (
 	"github.com/vettid/vettid-relay/relayclient"
 
 	"github.com/vettid/service-vault/internal/api"
+	"github.com/vettid/service-vault/internal/approval"
 	"github.com/vettid/service-vault/internal/connect"
 	"github.com/vettid/service-vault/internal/keystore"
 	"github.com/vettid/service-vault/internal/peer"
@@ -88,7 +91,18 @@ type Config struct {
 	Profile       peer.Profile
 	EmailLimits   []signin.Limit // SV_SIGNIN_LIMITS_EMAIL
 	SourceLimits  []signin.Limit // SV_SIGNIN_LIMITS_SOURCE
+	// Admin approvals (MEMBER-SERVICE-PLAN §4.5).
+	AdminBootstrapEmail string        // SV_ADMIN_BOOTSTRAP_EMAIL, normalized; "" for none
+	AdminThreshold      int           // SV_ADMIN_THRESHOLD (m), default 1
+	ApprovalTTL         time.Duration // SV_APPROVAL_TTL, default 24h
 }
+
+// Bounds of the approval settings (chosen; not in the spec).
+const (
+	maxAdminThreshold = 64
+	minApprovalTTL    = approval.RemindInterval
+	maxApprovalTTL    = 7 * 24 * time.Hour
+)
 
 // configFromEnv reads and checks the SV_* variables.
 func configFromEnv(getenv func(string) string) (*Config, error) {
@@ -127,6 +141,26 @@ func configFromEnv(getenv func(string) string) (*Config, error) {
 	}
 	if c.SourceLimits, err = signin.ParseLimits(getenv("SV_SIGNIN_LIMITS_SOURCE"), signin.DefaultSourceLimits); err != nil {
 		return nil, fmt.Errorf("SV_SIGNIN_LIMITS_SOURCE: %w", err)
+	}
+	if v := strings.TrimSpace(getenv("SV_ADMIN_BOOTSTRAP_EMAIL")); v != "" {
+		if c.AdminBootstrapEmail, err = connect.NormalizeEmail(v); err != nil {
+			return nil, errors.New("SV_ADMIN_BOOTSTRAP_EMAIL: not an email address")
+		}
+	}
+	c.AdminThreshold = 1
+	if v := strings.TrimSpace(getenv("SV_ADMIN_THRESHOLD")); v != "" {
+		if c.AdminThreshold, err = strconv.Atoi(v); err != nil || c.AdminThreshold < 1 || c.AdminThreshold > maxAdminThreshold {
+			return nil, fmt.Errorf("SV_ADMIN_THRESHOLD: an integer from 1 to %d", maxAdminThreshold)
+		}
+	}
+	c.ApprovalTTL = approval.DefaultTTL
+	if v := strings.TrimSpace(getenv("SV_APPROVAL_TTL")); v != "" {
+		if c.ApprovalTTL, err = time.ParseDuration(v); err != nil || c.ApprovalTTL < minApprovalTTL || c.ApprovalTTL > maxApprovalTTL {
+			return nil, fmt.Errorf("SV_APPROVAL_TTL: a duration from %v to %v", minApprovalTTL, maxApprovalTTL)
+		}
+	}
+	if _, err := approval.ChallengeContext(c.ServiceName, "x", strings.Repeat("0", 64)); err != nil {
+		return nil, errors.New("SV_SERVICE_NAME: too long for an approval challenge's context")
 	}
 	return c, nil
 }
@@ -233,16 +267,30 @@ func serve(args []string) error {
 	svc := &service.Service{Store: tbl.Peer(), ServiceName: cfg.ServiceName, Log: log,
 		Webhooks: &webhook.Dispatcher{URL: cfg.WebhookURL, Secret: cfg.WebhookSecret},
 		Limiter:  &signin.Limiter{Counters: tbl.Counters(), Email: cfg.EmailLimits, Source: cfg.SourceLimits}}
+	bootKey := ""
+	if cfg.AdminBootstrapEmail != "" {
+		if bootKey, err = email.Key(cfg.AdminBootstrapEmail); err != nil {
+			return errors.New("SV_ADMIN_BOOTSTRAP_EMAIL: not an email address")
+		}
+	}
+	approvals := &approval.Manager{Store: tbl.Peer(), Pager: tbl, Webhooks: svc.Webhooks, ServiceName: cfg.ServiceName,
+		Threshold: cfg.AdminThreshold, TTL: cfg.ApprovalTTL, BootstrapKey: bootKey, BoundConnection: svc.BoundConnection, Log: log}
+	if err := approvals.Start(ctx); err != nil {
+		return fmt.Errorf("approvals: %w", err)
+	}
+	svc.Approvals = approvals
 	p, err := peer.New(peer.Config{Keys: keys, Relay: rc, RelayURL: cfg.RelayURL, Profile: cfg.Profile, Store: tbl.Peer(),
 		Events: svc, Log: log})
 	if err != nil {
 		return err
 	}
 	svc.Peer = p
+	approvals.Peer = p
 
 	srv := &http.Server{
-		Addr:              cfg.Listen,
-		Handler:           (&api.Server{Keys: cfg.APIKeyHashes, Email: email, Invites: svc.Invites(), SignIns: svc.SignIns(), Log: log}).Handler(),
+		Addr: cfg.Listen,
+		Handler: (&api.Server{Keys: cfg.APIKeyHashes, Email: email, Invites: svc.Invites(), SignIns: svc.SignIns(),
+			Approvals: approvals, Log: log}).Handler(),
 		TLSConfig:         tlsid.ServerConfig(cert),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -252,6 +300,7 @@ func serve(args []string) error {
 	}
 	peerErr := make(chan error, 1)
 	go func() { peerErr <- p.Run(ctx) }()
+	go approvals.Run(ctx)
 	srvErr := make(chan error, 1)
 	go func() { srvErr <- srv.ListenAndServeTLS("", "") }()
 	log.Info("serving", "version", version, "listen", cfg.Listen, "mailbox", keys.Mailbox())

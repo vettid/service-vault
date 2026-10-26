@@ -113,6 +113,51 @@ func (s peerStore) Get(ctx context.Context, kind, id string) ([]byte, bool, erro
 	return r.Data, true, nil
 }
 
+// Page returns at most limit records of a kind whose ids sort after
+// after ("" for the first), in id order, with one Query on the kind's
+// partition: the read side of an append-only kind such as the audit log.
+func (t *Table) Page(ctx context.Context, kind, after string, limit int) ([]peer.Record, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	now := time.Now()
+	cond := "pk = :pk"
+	vals := map[string]types.AttributeValue{":pk": &types.AttributeValueMemberS{Value: recPK(kind)}}
+	if after != "" { // an empty string is not a valid key value
+		cond += " AND sk > :after"
+		vals[":after"] = &types.AttributeValueMemberS{Value: after}
+	}
+	in := &dynamodb.QueryInput{
+		TableName:                 aws.String(t.Name),
+		KeyConditionExpression:    aws.String(cond),
+		ExpressionAttributeValues: vals,
+		ConsistentRead:            aws.Bool(true),
+	}
+	var out []peer.Record
+	for len(out) < limit {
+		in.Limit = aws.Int32(int32(limit - len(out)))
+		page, err := t.Client.Query(ctx, in)
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range page.Items {
+			if expired(item, now) {
+				continue
+			}
+			r, err := toRecord(kind, item)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, r)
+		}
+		if len(page.LastEvaluatedKey) == 0 {
+			break
+		}
+		in.ExclusiveStartKey = page.LastEvaluatedKey
+	}
+	return out, nil
+}
+
 // Apply implements peer.Store: the changes are written in transactions of
 // at most 100 items and 3 MiB each, each conditional as peer.Change says
 // (an expired item counts as absent).
