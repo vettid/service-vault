@@ -22,8 +22,8 @@ var InviteTTL = invite.TTLInPerson
 // token's exp (§7.1).
 const tokenBackdate = 60 * time.Second
 
-// Relay is the part of relayclient.Client the peer uses.
-type Relay interface {
+// ClaimRelay is the part of relayclient.Client an Inviter uses.
+type ClaimRelay interface {
 	MintOpenToken(audience string, ttl time.Duration, jti string) (string, error)
 	PutClaim(ctx context.Context, data []byte, ttl time.Duration) (claimID string, expiresAt time.Time, err error)
 }
@@ -41,7 +41,7 @@ type Invite struct {
 // Inviter makes connection invitations.
 type Inviter struct {
 	Keys     *Keys
-	Relay    Relay
+	Relay    ClaimRelay
 	RelayURL string // the service's relay, as in the bundle (RELAY-PROTOCOL §3)
 	HintName string // shown to the member before they accept (§6.4)
 	Now      func() time.Time
