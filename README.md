@@ -42,7 +42,9 @@ commit (`make devstack-up` in another terminal; about 8 GB of memory and
 podman or docker compose), with the member played by its `vaultctl`. It
 connects from an invitation, checks that both sides show the same SAS,
 approves, checks the title the member's vault shows, signs in with the
-match code in the challenge and removes the connection.
+match code in the challenge, approves a governance action as the
+bootstrap admin (checking the hash in the challenge and the signature in
+the audit log) and removes the connection.
 
 ## Deployment
 
