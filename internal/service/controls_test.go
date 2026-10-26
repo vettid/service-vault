@@ -308,3 +308,87 @@ func TestSignInCountersDown(t *testing.T) {
 		t.Fatal("started without counters")
 	}
 }
+
+// A start over a limit makes its own sign-in, which reads pending and
+// then expired, and leaves the email's pending sign-in alone: it is
+// still answerable. Starts within the limits still supersede.
+func TestOverLimitDoesNotSupersede(t *testing.T) {
+	f := newFixture(t)
+	f.svc.Limiter = limiter(&signin.MemCounters{})
+	f.connect(f.m, "email-key")
+	f.clk.Advance(15 * time.Minute) // a fresh window
+	var ids []string
+	for i := 0; i < 5; i++ {
+		ids = append(ids, f.start("email-key", "", "12"))
+		f.pump()
+	}
+	for _, id := range ids[:4] { // within the limits: superseded
+		if s := f.status(id); s.Status != "expired" {
+			t.Fatalf("within limits, not superseded: %+v", s)
+		}
+	}
+	cur := ids[4]
+	over1 := f.start("email-key", "", "13") // over the per-email limit
+	over2 := f.start("email-key", "source-key", "14")
+	f.pump()
+	if len(f.m.Challenges) != 5 {
+		t.Fatalf("%d challenges", len(f.m.Challenges))
+	}
+	for _, id := range []string{cur, over1, over2} {
+		if s := f.status(id); s.Status != "pending" || len(id) != len(cur) {
+			t.Fatalf("%s: %+v", id, s)
+		}
+	}
+	// The member approves the pending one.
+	f.sign(f.m, f.m.Challenges[4], f.m.Cred)
+	if s := f.status(cur); s.Status != "approved" {
+		t.Fatalf("pending sign-in after over-limit starts: %+v", s)
+	}
+	if ap := f.hk.of(peer.EventSignInApproved); len(ap) != 1 || !strings.Contains(string(ap[0].Data), cur) {
+		t.Fatalf("webhooks %+v", ap)
+	}
+	f.clk.Advance(signin.ChallengeTTL)
+	for _, id := range []string{over1, over2} {
+		if s := f.status(id); s.Status != "expired" {
+			t.Fatalf("over-limit %+v", s)
+		}
+	}
+}
+
+// Over the per-source limit: the email's pending sign-in is not
+// superseded either.
+func TestOverSourceLimitDoesNotSupersede(t *testing.T) {
+	f := newFixture(t)
+	f.svc.Limiter = limiter(&signin.MemCounters{})
+	f.connect(f.m, "email-key")
+	f.clk.Advance(15 * time.Minute)
+	cur := f.start("email-key", "", "12")
+	f.pump()
+	for i := 0; i < 20; i++ {
+		f.start(fmt.Sprint("k", i), "source-key", "12")
+	}
+	over := f.start("email-key", "source-key", "13") // 21st from the source
+	f.pump()
+	if s := f.status(cur); s.Status != "pending" {
+		t.Fatalf("superseded by an over-limit start: %+v", s)
+	}
+	f.sign(f.m, f.m.Challenges[0], f.m.Cred)
+	if s := f.status(cur); s.Status != "approved" {
+		t.Fatalf("%+v", s)
+	}
+	f.clk.Advance(signin.ChallengeTTL)
+	if s := f.status(over); s.Status != "expired" {
+		t.Fatalf("over-limit %+v", s)
+	}
+	// Within the limits again (another source): it supersedes.
+	next := f.start("email-key", "other-source", "15")
+	f.pump()
+	again := f.start("email-key", "other-source", "16")
+	f.pump()
+	if s := f.status(next); s.Status != "expired" {
+		t.Fatalf("within limits, not superseded: %+v", s)
+	}
+	if s := f.status(again); s.Status != "pending" {
+		t.Fatalf("%+v", s)
+	}
+}
