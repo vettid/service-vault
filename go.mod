@@ -32,3 +32,6 @@ require (
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 )
+
+// The CDK app's node_modules carries Go templates that are not code.
+ignore ./cdk/node_modules

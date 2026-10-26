@@ -26,7 +26,7 @@ staticcheck:
 lint: vet staticcheck
 
 fmt:
-	test -z "$$(gofmt -l .)" || { gofmt -l .; exit 1; }
+	test -z "$$(gofmt -l $$(git ls-files '*.go'))" || { gofmt -l $$(git ls-files '*.go'); exit 1; }
 
 scan:
 	gitleaks git --redact .
