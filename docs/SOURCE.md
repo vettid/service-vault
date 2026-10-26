@@ -19,4 +19,5 @@ that adds them, with their licence checked for AGPL-3.0 compatibility:
 |---|---|---|---|
 | `github.com/aws/aws-sdk-go-v2` (`service/kms`) | `kms` v1.61.1 (the version vettid-vault uses) | Apache-2.0 | `internal/keystore` (KMS envelope) |
 | `github.com/aws/aws-sdk-go-v2` (`service/dynamodb`) | `dynamodb` v1.70.0 | Apache-2.0 | `internal/store` (keystore blobs, the peer's records) |
-| `github.com/aws/aws-sdk-go-v2` (`service/ssm`) | `ssm` v1.81.0 | Apache-2.0 | `cmd/service-vault` (publishes the TLS key pin) |
+| `github.com/aws/aws-sdk-go-v2` (`service/ssm`) | `ssm` v1.81.0 | Apache-2.0 | `cmd/service-vault` (publishes the TLS key pin), `cmd/svctl` (reads it) |
+| `rsc.io/qr` | v0.2.0 | BSD-3-Clause | `cmd/svctl` (the invitation's QR code in the terminal; pure Go, its cgo `libqrencode` subpackage is not used) |

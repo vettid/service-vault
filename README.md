@@ -31,6 +31,7 @@ a NATS-based prototype that is retired; none of its code is reused.
 make build        # bin/service-vault
 make test         # go test ./...
 make lint         # go vet + staticcheck
+make svctl        # bin/svctl, the operator CLI (see "svctl")
 ```
 
 Requires Go 1.26 (`go.mod` pins the toolchain).
@@ -411,6 +412,53 @@ function fails, in which case the event id is forgotten and the service
 vault's redelivery is handled. Delivery is at least once, so handlers
 should be idempotent by event id. `ParseWebhook(r, secret, now)` and
 `Receiver.Parse` are the same checks without the handler.
+
+## svctl
+
+`cmd/svctl` (`make svctl`) is a small operator CLI over the private API,
+for trying a deployment (staging) before an application is in front of
+it. It calls the API only through `sdk/go/servicevault`, so it sees what
+an application sees.
+
+| Setting | From |
+|---|---|
+| API URL | `-url` or `SVCTL_URL` |
+| API key | `SVCTL_API_KEY` only: never a flag, never printed |
+| Pin | `-pin` or `SVCTL_PIN`; or `-pin-param <name>` (the stack's `TlsPinParameterName`) read from SSM with the default AWS credentials, `-profile` and `-region` optional |
+
+Global flags go before the command; `-poll` (2 s) is how often a flow is
+polled.
+
+```sh
+svctl invite -email E [-verified] [-no-qr] [-qr-invert] [-wait 11m]
+svctl signin -email E [-source S] [-wait 3m]
+svctl approve -action vote.open -summary "Open the vote" -payload '{"proposal":7}' [-wait 30m]
+svctl remind <approval id>
+svctl admins
+svctl audit [-since <entry id>] [-limit 100]
+svctl health
+```
+
+- `invite` prints the invitation's id, expiry and URL and the URL as a QR
+  code (half-block characters, for a dark terminal; `-qr-invert` for a
+  light one), then follows the invitation, printing each status, the
+  `sas` when it appears (compare it with the phone) and the connection
+  id. `-verified` sends `email_verified: true`: use it only for an
+  address whose control was verified (see "Email binding"); without it
+  the invitation carries no email.
+- `signin` prints the match code (the member finds it in the request on
+  the phone) and follows the sign-in to `approved` (with `connection_id`
+  and `key_changed`), `denied` or `expired`.
+- `approve` prints the approval's id and action hash, checks the hash
+  against `servicevault.ActionHash` of what it sent, and follows it to
+  its outcome (the approving admins, `reason`, `applied`).
+- `audit` prints one JSON entry per line; when there are more, stderr
+  says which `-since` gives the next page.
+- `-wait 0` creates without following. Exit status: 0 done (connected,
+  approved), 3 another outcome (declined, denied, expired), 1 an error or
+  stopped waiting, 2 a usage or configuration error.
+
+Emails are sent as given and are not printed back.
 
 ## Documents
 
