@@ -188,8 +188,9 @@ both bind.
 
 - *Two-minute TTL.* The challenge's inner `exp` is two minutes; an
   unanswered sign-in reads `expired`.
-- *One pending sign-in per member.* A new sign-in for an email supersedes
-  that email's pending one, whether or not the email is bound: the older
+- *One pending sign-in per member.* A new sign-in for an email that is
+  within the rate limits supersedes that email's pending one, whether or
+  not the email is bound: the older
   one reads `expired` at once, gets no webhook, and its challenge is
   cancelled on the service's side, so approving it on the phone does
   nothing (VAULT-MESSAGING §10.4 has no message to withdraw a challenge;
@@ -202,7 +203,9 @@ both bind.
   `signin_id` and match code — but sends no challenge and expires, so a
   limit reveals nothing about whether an email is known. Every start
   counts, limited or not. The service logs a counter of limited
-  sign-ins, never the email or source.
+  sign-ins, never the email or source. A sign-in over a limit does not
+  supersede the email's pending sign-in, so starting sign-ins with
+  someone's email cannot cancel theirs (chosen; not in the spec).
 - *Denying on the phone* ends the challenge: the sign-in reads `denied`
   (`signin.denied` with `reason: denied`) and a later answer is ignored.
 - *Key change.* `signin.approved` carries `key_changed: true` (and

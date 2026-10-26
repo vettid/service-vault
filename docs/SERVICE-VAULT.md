@@ -101,18 +101,23 @@ never answers challenges and never rotates its identity.
   (`email_bound: false`), and removing the bound connection frees it for
   the next. Creating an invitation answers the same either way.
 - **Starting a sign-in** (§4.2). Under a per-email lock, the start is
-  counted against the rate limits, the email's pending sign-in (if any)
-  is superseded — it reads `expired` and its challenge is cancelled on
-  the service's side, so a later answer to it matches nothing — and, if
-  the start is within the limits and the email is bound to an active
-  connection, the challenge goes out. All of this happens inside the
-  uniform response floor, and the answer is the same in every case.
+  counted against the rate limits. If it is within the limits, the
+  email's pending sign-in (if any) is superseded — it reads `expired`
+  and its challenge is cancelled on the service's side, so a later
+  answer to it matches nothing — and, if the email is bound to an active
+  connection, the challenge goes out. A start over a limit makes its own
+  sign-in, which only expires, and leaves the email's pending sign-in
+  alone: otherwise anyone who knows a member's email could cancel the
+  member's sign-in by starting more (chosen; not in the spec). All of
+  this happens inside the uniform response floor, and the answer is the
+  same in every case.
 - **Rate limits.** Fixed-window counters per email key and per source
   key (the source the application passes, HMAC'd under the pepper with
   its own label), one DynamoDB item per window updated with an atomic
   `ADD` and a TTL past the window. Defaults 5/15 min and 20/24 h per
   email, 20/15 min per source (configurable). Over a limit the sign-in
-  sends no challenge and expires; only a count is logged.
+  sends no challenge, supersedes nothing and expires; only a count is
+  logged.
 - **Outcomes.** An approved, denied or expired challenge settles a
   pending sign-in and sends its webhook (`key_changed` with
   `signin.approved`); an outcome for a sign-in that was superseded in the
