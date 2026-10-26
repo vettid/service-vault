@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/vettid/service-vault/internal/api"
+	"github.com/vettid/service-vault/internal/approval"
 	"github.com/vettid/service-vault/internal/connect"
 	"github.com/vettid/service-vault/internal/peer"
 	"github.com/vettid/service-vault/internal/service"
@@ -65,7 +66,8 @@ func (*fakePeer) CancelChallenge(context.Context, string) (bool, error) { return
 // private API (internal/api) over TLS 1.3 with a tlsid key.
 type fixture struct {
 	svc      *service.Service
-	emailKey string // the index key of knownEmail
+	apv      *approval.Manager // bootstrap email: knownEmail
+	emailKey string            // the index key of knownEmail
 	url, pin string
 	key      string // the API key
 }
@@ -81,11 +83,13 @@ func newFixture(t *testing.T, hooks service.Webhooks) *fixture {
 		t.Fatal(err)
 	}
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
-	svc := &service.Service{Peer: &fakePeer{}, Store: peer.NewMemStore(), ServiceName: "VettID Member Service",
-		Webhooks: hooks, Log: quiet}
-	f := &fixture{svc: svc, emailKey: ek, key: randomHex(t, 24)}
+	fp, st := &fakePeer{}, peer.NewMemStore()
+	svc := &service.Service{Peer: fp, Store: st, ServiceName: "VettID Member Service", Webhooks: hooks, Log: quiet}
+	svc.Approvals = &approval.Manager{Peer: fp, Store: st, Pager: st, Webhooks: hooks, ServiceName: svc.ServiceName,
+		Threshold: 1, BootstrapKey: ek, BoundConnection: svc.BoundConnection, Log: quiet}
+	f := &fixture{svc: svc, apv: svc.Approvals, emailKey: ek, key: randomHex(t, 24)}
 	s := &api.Server{Keys: [][32]byte{api.HashKey(f.key)}, Email: idx, Invites: svc.Invites(), SignIns: svc.SignIns(),
-		LookupFloor: 10 * time.Millisecond, Log: quiet}
+		Approvals: svc.Approvals, LookupFloor: 10 * time.Millisecond, Log: quiet}
 	var srv *httptest.Server
 	srv, f.pin = tlsServer(t, s.Handler())
 	f.url = srv.URL

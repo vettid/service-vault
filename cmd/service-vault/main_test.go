@@ -40,7 +40,22 @@ func TestConfigFromEnv(t *testing.T) {
 	if c, err := configFromEnv(env(e)); err != nil || len(c.EmailLimits) != 1 || c.EmailLimits[0].Max != 3 || c.SourceLimits != nil {
 		t.Fatalf("limits %+v %v", c, err)
 	}
+	if c.AdminBootstrapEmail != "" || c.AdminThreshold != 1 || c.ApprovalTTL != 24*time.Hour {
+		t.Fatalf("approval defaults %+v", c)
+	}
+	e = goodEnv()
+	e["SV_ADMIN_BOOTSTRAP_EMAIL"], e["SV_ADMIN_THRESHOLD"], e["SV_APPROVAL_TTL"] = " Admin@Example.org ", "2", "48h"
+	if c, err := configFromEnv(env(e)); err != nil || c.AdminBootstrapEmail != "admin@example.org" || c.AdminThreshold != 2 ||
+		c.ApprovalTTL != 48*time.Hour {
+		t.Fatalf("approvals %+v %v", c, err)
+	}
+	e = goodEnv()
+	e["SV_SERVICE_NAME"] = "VettID " + strings.Repeat("x", 250)
+	if _, err := configFromEnv(env(e)); err == nil {
+		t.Error("a service name too long for an approval context accepted")
+	}
 	for k, v := range map[string]string{
+		"SV_ADMIN_BOOTSTRAP_EMAIL": "nope", "SV_ADMIN_THRESHOLD": "0", "SV_APPROVAL_TTL": "1m",
 		"SV_TABLE": "", "SV_WEBHOOK_URL": "http://member.example/", "SV_WEBHOOK_SECRET": "short",
 		"SV_API_KEY_HASHES": "zz", "SV_SERVICE_NAME": "VettID",
 		"SV_SIGNIN_LIMITS_EMAIL": "5", "SV_SIGNIN_LIMITS_SOURCE": "0/1m",

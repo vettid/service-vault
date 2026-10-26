@@ -5,8 +5,8 @@
 // key, identified by the pin the service vault publishes (package
 // pinned); every /v1 call carries the application's API key. GET calls
 // are retried a bounded number of times on network errors and 5xx
-// answers; POST calls, which create invitations and sign-ins, are never
-// retried.
+// answers; POST calls, which create invitations, sign-ins and approvals
+// and send reminders, are never retried.
 //
 // The pin and the webhook secret are configuration: in the AWS
 // deployment the application reads the pin from the SSM parameter the
@@ -38,6 +38,7 @@ const (
 	DefaultRetryBackoff = 200 * time.Millisecond
 	maxRetryBackoff     = 2 * time.Second
 	maxResponseBody     = 64 << 10
+	maxAuditBody        = 8 << 20 // a page of up to 100 entries with payloads of up to 16 KiB
 )
 
 // Config configures a Client.
@@ -125,6 +126,15 @@ const (
 	CodeUnauthorized  = "unauthorized"   // the API key was missing or not accepted
 	CodeNotFound      = "not_found"      // no invitation or sign-in with that id
 	CodeUnavailable   = "unavailable"    // the service vault could not do it now
+	// Admin approvals.
+	CodeInvalidAction     = "invalid_action"     // not one of the Action constants (400)
+	CodeInvalidSummary    = "invalid_summary"    // empty, over 120 bytes, or control or bidi characters (400)
+	CodeInvalidPayload    = "invalid_payload"    // not a JSON object of at most 16 KiB canonical, or a bad admin_set payload (400)
+	CodeInvalidConnection = "invalid_connection" // admin_set.*: not an active connection, not an admin, or already one (422)
+	CodeUnreachable       = "unreachable"        // the threshold is more than the admins there are, or would be (422)
+	CodeLastAdmin         = "last_admin"         // admin_set.remove of the only admin (422)
+	CodeNotPending        = "not_pending"        // the approval is settled or expired (409)
+	CodeTooSoon           = "too_soon"           // a reminder within 10 minutes of the last challenges (429)
 )
 
 // APIError is a non-2xx answer from the API.
@@ -204,6 +214,199 @@ type SignInStatus struct {
 	// key other than the one pinned for the connection. nil when the
 	// service vault does not report it.
 	KeyChanged *bool `json:"key_changed,omitempty"`
+}
+
+// Actions an approval can be for (MEMBER-SERVICE-PLAN §4.5).
+const (
+	ActionProposalCreate         = "proposal.create"
+	ActionVoteOpen               = "vote.open"
+	ActionVoteClose              = "vote.close"
+	ActionContractTemplateChange = "contract_template.change"
+	ActionAdminSetAdd            = "admin_set.add"    // payload {"connection_id": "..."}; applied by the service vault
+	ActionAdminSetRemove         = "admin_set.remove" // payload {"connection_id": "..."}; applied by the service vault
+	ActionAssignmentPush         = "assignment.push"
+)
+
+// Approval statuses (Approval.Status).
+const (
+	ApprovalStatusPending  = "pending"
+	ApprovalStatusApproved = "approved"
+	ApprovalStatusDenied   = "denied" // the threshold can no longer be reached
+	ApprovalStatusExpired  = "expired"
+)
+
+// ApprovalRequest submits an action for admin approval.
+type ApprovalRequest struct {
+	Action string `json:"action"` // one of the Action constants
+	// Summary is what the admins read on the phone: plain text, 1 to 120
+	// bytes, no control or bidirectional characters.
+	Summary string `json:"summary"`
+	// Payload is the action itself, a JSON object of at most 16 KiB in
+	// canonical form. ActionHash(Action, Summary, Payload) is the hash
+	// the admins approve.
+	Payload json.RawMessage `json:"payload"`
+}
+
+// ApprovalCreated is a new approval.
+type ApprovalCreated struct {
+	ID         string    `json:"approval_id"`
+	ActionHash string    `json:"action_hash"`
+	Status     string    `json:"status"`
+	ExpiresAt  time.Time `json:"expires_at"`
+}
+
+// Approver is an admin's counted approval.
+type Approver struct {
+	ConnectionID string    `json:"connection_id"`
+	At           time.Time `json:"at"`
+	// KeyChanged: the admin signed with a key other than the one pinned
+	// for the connection. The approval counts; the application decides.
+	KeyChanged bool `json:"key_changed"`
+}
+
+// Denier is an admin's counted denial.
+type Denier struct {
+	ConnectionID string    `json:"connection_id"`
+	At           time.Time `json:"at"`
+}
+
+// Approval reports an approval.
+type Approval struct {
+	ID         string     `json:"approval_id"`
+	Action     string     `json:"action"`
+	Summary    string     `json:"summary"`
+	ActionHash string     `json:"action_hash"`
+	Status     string     `json:"status"`
+	Reason     string     `json:"reason,omitempty"` // with denied: denied | admins_removed
+	Threshold  int        `json:"threshold"`
+	Admins     []string   `json:"admins"` // the admins asked
+	Approvals  []Approver `json:"approvals"`
+	Denials    []Denier   `json:"denials"`
+	CreatedAt  time.Time  `json:"created_at"`
+	ExpiresAt  time.Time  `json:"expires_at"`
+	// Applied, for an approved admin_set.* action: whether the service
+	// vault changed the admin set.
+	Applied *bool `json:"applied,omitempty"`
+}
+
+// Reminder answers RemindApproval.
+type Reminder struct {
+	ID       string   `json:"approval_id"`
+	Reminded []string `json:"reminded"` // the admins challenged again
+}
+
+// Admins is the admin set and the threshold m.
+type Admins struct {
+	Admins    []string `json:"admins"`
+	Threshold int      `json:"threshold"`
+}
+
+// AuditChallenge is a challenge sent to an admin.
+type AuditChallenge struct {
+	ConnectionID string `json:"connection_id"`
+	RequestID    string `json:"request_id"`
+}
+
+// AuditEntry is one entry of the audit log (README "Admin approvals").
+type AuditEntry struct {
+	ID           string           `json:"id"`
+	At           time.Time        `json:"at"`
+	Type         string           `json:"type"` // approval.requested | approval.response | approval.reminded | approval.approved | approval.denied | approval.expired | admin_set.changed
+	ApprovalID   string           `json:"approval_id,omitempty"`
+	Action       string           `json:"action,omitempty"`
+	Summary      string           `json:"summary,omitempty"`
+	ActionHash   string           `json:"action_hash,omitempty"`
+	Payload      json.RawMessage  `json:"payload,omitempty"`
+	Threshold    int              `json:"threshold,omitempty"`
+	ExpiresAt    *time.Time       `json:"expires_at,omitempty"`
+	Admins       []string         `json:"admins,omitempty"`
+	Challenges   []AuditChallenge `json:"challenges,omitempty"`
+	ConnectionID string           `json:"connection_id,omitempty"`
+	RequestID    string           `json:"request_id,omitempty"`
+	Context      string           `json:"context,omitempty"`
+	Answer       string           `json:"answer,omitempty"` // approved | denied | bad_signature
+	Counted      *bool            `json:"counted,omitempty"`
+	Key          []byte           `json:"key,omitempty"`
+	Signature    []byte           `json:"signature,omitempty"`
+	SignedAt     *time.Time       `json:"signed_at,omitempty"`
+	KeyChanged   bool             `json:"key_changed,omitempty"`
+	Status       string           `json:"status,omitempty"`
+	Reason       string           `json:"reason,omitempty"`
+	Applied      *bool            `json:"applied,omitempty"`
+	Added        string           `json:"added,omitempty"`
+	Removed      string           `json:"removed,omitempty"`
+}
+
+// AuditPage is a page of the audit log.
+type AuditPage struct {
+	Entries []AuditEntry `json:"entries"`
+	Next    string       `json:"next,omitempty"` // pass as since for the next page; "" at the end
+}
+
+// CreateApproval submits an action for admin approval; every admin is
+// asked on the phone. Check ApprovalCreated.ActionHash against
+// ActionHash before relying on the approval.
+func (c *Client) CreateApproval(ctx context.Context, req ApprovalRequest) (*ApprovalCreated, error) {
+	out := &ApprovalCreated{}
+	if err := c.do(ctx, http.MethodPost, "/v1/approvals", req, true, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// Approval reports an approval; IsNotFound(err) for an unknown id.
+func (c *Client) Approval(ctx context.Context, id string) (*Approval, error) {
+	if id == "" {
+		return nil, errors.New("servicevault: empty approval id")
+	}
+	out := &Approval{}
+	if err := c.do(ctx, http.MethodGet, "/v1/approvals/"+url.PathEscape(id), nil, true, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// RemindApproval challenges again the admins who have not answered, at
+// most once per 10 minutes per approval (CodeTooSoon otherwise).
+func (c *Client) RemindApproval(ctx context.Context, id string) (*Reminder, error) {
+	if id == "" {
+		return nil, errors.New("servicevault: empty approval id")
+	}
+	out := &Reminder{}
+	if err := c.do(ctx, http.MethodPost, "/v1/approvals/"+url.PathEscape(id)+"/remind", nil, true, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// Admins returns the admin set (connection ids) and the threshold.
+func (c *Client) Admins(ctx context.Context) (*Admins, error) {
+	out := &Admins{}
+	if err := c.do(ctx, http.MethodGet, "/v1/admins", nil, true, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// Audit returns up to limit (1..100; 0 for 100) audit entries written
+// after the entry since ("" for the first).
+func (c *Client) Audit(ctx context.Context, since string, limit int) (*AuditPage, error) {
+	q := url.Values{}
+	if since != "" {
+		q.Set("since", since)
+	}
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	path := "/v1/audit"
+	if len(q) > 0 {
+		path += "?" + q.Encode()
+	}
+	out := &AuditPage{}
+	if err := c.do(ctx, http.MethodGet, path, nil, true, out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // Health checks that the service vault answers GET /health with ok.
@@ -323,11 +526,15 @@ func (c *Client) once(ctx context.Context, method, path string, body []byte, aut
 		return !errors.Is(err, pinned.ErrPin), fmt.Errorf("servicevault: %s %s: %w", method, routeName(path), err)
 	}
 	defer resp.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody+1))
+	limit := int64(maxResponseBody)
+	if strings.HasPrefix(path, "/v1/audit") {
+		limit = maxAuditBody
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return true, fmt.Errorf("servicevault: %s %s: %w", method, routeName(path), err)
 	}
-	if len(b) > maxResponseBody {
+	if int64(len(b)) > limit {
 		return false, fmt.Errorf("servicevault: %s %s: response too large", method, routeName(path))
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
@@ -348,8 +555,12 @@ func (c *Client) once(ctx context.Context, method, path string, body []byte, aut
 
 // routeName names a route without its id, for error messages.
 func routeName(path string) string {
-	for _, p := range []string{"/v1/invites/", "/v1/signins/"} {
-		if strings.HasPrefix(path, p) {
+	path, _, _ = strings.Cut(path, "?")
+	for _, p := range []string{"/v1/invites/", "/v1/signins/", "/v1/approvals/"} {
+		if rest, ok := strings.CutPrefix(path, p); ok {
+			if strings.HasSuffix(rest, "/remind") {
+				return p + "{id}/remind"
+			}
 			return p + "{id}"
 		}
 	}

@@ -47,6 +47,16 @@ export interface ServiceVaultStackProps extends cdk.StackProps {
   readonly apiClientCidr?: string;
   /** The VPC's CIDR (two /26 public subnets are carved from it). */
   readonly vpcCidr?: string;
+  /**
+   * The first admin's email (SV_ADMIN_BOOTSTRAP_EMAIL): while the admin set
+   * is empty, the connection bound to it becomes the first admin. Remove it
+   * once the first admin is set (README "Admin approvals").
+   */
+  readonly adminBootstrapEmail?: string;
+  /** How many distinct admins must approve (SV_ADMIN_THRESHOLD; default 1). */
+  readonly adminThreshold?: number;
+  /** How long an approval stays open, a Go duration such as `24h` (SV_APPROVAL_TTL). */
+  readonly approvalTtl?: string;
 }
 
 /**
@@ -92,6 +102,16 @@ export class ServiceVaultStack extends cdk.Stack {
     if (props.apiClientCidr !== undefined && /\/0$/.test(props.apiClientCidr)) {
       throw new Error('apiClientCidr must not be open to the internet');
     }
+    if (props.adminThreshold !== undefined && !(Number.isInteger(props.adminThreshold) && props.adminThreshold >= 1 && props.adminThreshold <= 64)) {
+      throw new Error(`adminThreshold must be an integer from 1 to 64 (got ${props.adminThreshold})`);
+    }
+    if (props.approvalTtl !== undefined && !/^([0-9]+(h|m|s))+$/.test(props.approvalTtl)) {
+      throw new Error(`approvalTtl must be a duration such as 24h (got "${props.approvalTtl}")`);
+    }
+    const approvalEnv: Record<string, string> = {};
+    if (props.adminBootstrapEmail) approvalEnv.SV_ADMIN_BOOTSTRAP_EMAIL = props.adminBootstrapEmail;
+    if (props.adminThreshold !== undefined) approvalEnv.SV_ADMIN_THRESHOLD = String(props.adminThreshold);
+    if (props.approvalTtl) approvalEnv.SV_APPROVAL_TTL = props.approvalTtl;
     const prefix = `vettid-service-vault-${envName}`;
     const exportPrefix = `ServiceVault-${envName}`;
 
@@ -251,6 +271,7 @@ export class ServiceVaultStack extends cdk.Stack {
         SV_TLS_PIN_PARAM: tlsPin.parameterName,
         SV_TLS_NAME: `${DISCOVERY_NAME}.${this.namespace.namespaceName}`,
         AWS_REGION: this.region,
+        ...approvalEnv,
       },
       secrets: {
         SV_API_KEY_HASHES: ecs.Secret.fromSecretsManager(apiKeyHashes),

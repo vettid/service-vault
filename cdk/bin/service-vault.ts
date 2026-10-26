@@ -5,7 +5,8 @@ import { ServiceVaultStack } from '../lib/service-vault-stack';
 // Parameters come from context (cdk.json, ~/.cdk.json or -c key=value):
 //   envName (default prod), image (required, by digest), webhookUrl
 //   (required), relayUrl, serviceName, apiClientSecurityGroupId,
-//   apiClientCidr, vpcCidr. See README "Deployment".
+//   apiClientCidr, vpcCidr, adminBootstrapEmail, adminThreshold,
+//   approvalTtl. See README "Deployment".
 const app = new cdk.App();
 const ctx = (key: string): string | undefined => {
   const v = app.node.tryGetContext(key);
@@ -27,6 +28,9 @@ const stack = new ServiceVaultStack(app, `ServiceVault-${envName}`, {
   apiClientSecurityGroupId: ctx('apiClientSecurityGroupId'),
   apiClientCidr: ctx('apiClientCidr'),
   vpcCidr: ctx('vpcCidr'),
+  adminBootstrapEmail: ctx('adminBootstrapEmail'),
+  adminThreshold: ctx('adminThreshold') === undefined ? undefined : Number(ctx('adminThreshold')),
+  approvalTtl: ctx('approvalTtl'),
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
   description: `VettID service vault (${envName})`,
 });

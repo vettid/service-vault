@@ -1,0 +1,74 @@
+[
+  {
+    "action": "vote.open",
+    "action_hash": "7bfa475ed12f91d1a6aa87943df4cc9dd8e036bca4742a632d03b6484174d789",
+    "canonical": "{\"action\":\"vote.open\",\"payload\":{},\"summary\":\"Open the vote\"}",
+    "name": "minimal",
+    "payload": "{}",
+    "summary": "Open the vote"
+  },
+  {
+    "action": "proposal.create",
+    "action_hash": "e1106a43f6fd6f9491e38f9f564606cb298398c01314d8ac11af35b939d11f1b",
+    "canonical": "{\"action\":\"proposal.create\",\"payload\":{\"body\":{\"a\":null,\"z\":[3,2,1]},\"draft\":false,\"id\":7,\"title\":\"Bylaws v2\"},\"summary\":\"Create proposal 7: bylaws\"}",
+    "name": "sorted keys and whitespace",
+    "payload": "{ \"title\" : \"Bylaws v2\", \"id\": 7, \"body\": {\"z\": [3, 2, 1], \"a\": null}, \"draft\": false }",
+    "summary": "Create proposal 7: bylaws"
+  },
+  {
+    "action": "admin_set.add",
+    "action_hash": "fb401c31ef485a21add2831d8262cab9d1f4cfab02f74633e7f44d51c528482c",
+    "canonical": "{\"action\":\"admin_set.add\",\"payload\":{\"connection_id\":\"01JB2V3W4X5Y6Z7A8B9C0D1E2F\"},\"summary\":\"Add an admin\"}",
+    "name": "admin_set.add",
+    "payload": "{\"connection_id\":\"01JB2V3W4X5Y6Z7A8B9C0D1E2F\"}",
+    "summary": "Add an admin"
+  },
+  {
+    "action": "admin_set.remove",
+    "action_hash": "23eac2435b035f09c8ed64d18aa1358bb840fe6fa9e2c408f45b8aa8ddbc799b",
+    "canonical": "{\"action\":\"admin_set.remove\",\"payload\":{\"connection_id\":\"01JB2V3W4X5Y6Z7A8B9C0D1E2F\"},\"summary\":\"Remove an admin\"}",
+    "name": "admin_set.remove",
+    "payload": "{\"connection_id\":\"01JB2V3W4X5Y6Z7A8B9C0D1E2F\"}",
+    "summary": "Remove an admin"
+  },
+  {
+    "action": "contract_template.change",
+    "action_hash": "8f8700ae9a30c31b7124fe26f51c758f2a5f55d310fa7549f5e6d5799ebb68cf",
+    "canonical": "{\"action\":\"contract_template.change\",\"payload\":{\"big\":1e+30,\"fee\":4.5,\"int\":100,\"neg0\":0,\"small\":0.002,\"tiny\":1e-7},\"summary\":\"Fee 4.50\"}",
+    "name": "numbers",
+    "payload": "{\"fee\": 4.50, \"big\": 1E30, \"small\": 2e-3, \"tiny\": 1e-7, \"neg0\": -0, \"int\": 100.0}",
+    "summary": "Fee 4.50"
+  },
+  {
+    "action": "assignment.push",
+    "action_hash": "3bb7f1b1348b6f25a5da86c6a7e6bc599c3cec1b27e18f8c2f54c71144ace650",
+    "canonical": "{\"action\":\"assignment.push\",\"payload\":{\"note\":\"line1\\nline2\\t\\\"q\\\" € 😀\",\"€\":\"/\"},\"summary\":\"Tâche — test ✓\"}",
+    "name": "unicode and escapes",
+    "payload": "{\"note\": \"line1\\nline2\\t\\\"q\\\" \\u20ac \\ud83d\\ude00\", \"€\": \"\\/\"}",
+    "summary": "Tâche — test ✓"
+  },
+  {
+    "action": "vote.close",
+    "action_hash": "189393642024ccc6c42d06fd36fb88824ae6925cdb16ec1c88b15a3c416f3e0c",
+    "canonical": "{\"action\":\"vote.close\",\"payload\":{\"a\":3,\"😀\":2,\"דּ\":1},\"summary\":\"Close\"}",
+    "name": "utf16 key order",
+    "payload": "{\"\\ufb33\": 1, \"😀\": 2, \"a\": 3}",
+    "summary": "Close"
+  },
+  {
+    "action": "proposal.create",
+    "action_hash": "1ec2d10abcf857440d0e97ea0713a1d57cddcc227209b8a861d8bb3b61e75da6",
+    "canonical": "{\"action\":\"proposal.create\",\"payload\":{\"meta\":{},\"options\":[{\"label\":\"Yes\",\"n\":1},{\"label\":\"No\",\"n\":2}]},\"summary\":\"P\"}",
+    "name": "nested arrays",
+    "payload": "{\"options\": [{\"label\": \"Yes\", \"n\": 1}, {\"n\": 2, \"label\": \"No\"}], \"meta\": {}}",
+    "summary": "P"
+  },
+  {
+    "action": "vote.open",
+    "action_hash": "a651f4ed99b2584f61739f12457fc80d52d3b582424511f1b7a6548854f5daa7",
+    "canonical": "{\"action\":\"vote.open\",\"payload\":{\"c\":\"a\\u0001b\\u001f\"},\"summary\":\"x\"}",
+    "name": "control character",
+    "payload": "{\"c\": \"a\\u0001b\\u001f\"}",
+    "summary": "x"
+  }
+]

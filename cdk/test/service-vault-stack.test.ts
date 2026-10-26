@@ -150,6 +150,18 @@ describe('compute', () => {
     t.hasResourceProperties('AWS::Logs::LogGroup', { RetentionInDays: 30 });
   });
 
+  test('admin approval settings: unset by default, passed through when given, checked', () => {
+    const td = Object.values<any>(
+      synth({ adminBootstrapEmail: 'admin@example.org', adminThreshold: 2, approvalTtl: '48h' }).findResources('AWS::ECS::TaskDefinition'),
+    )[0].Properties;
+    const env = Object.fromEntries(td.ContainerDefinitions[0].Environment.map((e: any) => [e.Name, e.Value]));
+    expect(env.SV_ADMIN_BOOTSTRAP_EMAIL).toBe('admin@example.org');
+    expect(env.SV_ADMIN_THRESHOLD).toBe('2');
+    expect(env.SV_APPROVAL_TTL).toBe('48h');
+    expect(() => synth({ adminThreshold: 0 })).toThrow(/adminThreshold/);
+    expect(() => synth({ approvalTtl: 'a day' })).toThrow(/approvalTtl/);
+  });
+
   test('secrets are generated, never given a value, and retained', () => {
     const secrets = t.findResources('AWS::SecretsManager::Secret');
     expect(Object.keys(secrets)).toHaveLength(2);

@@ -1,6 +1,6 @@
 // Package api is the service vault's private HTTPS API for the
-// application (MEMBER-SERVICE-PLAN §3): invitations, email sign-in and
-// health. It is reachable only from the application's network and every
+// application (MEMBER-SERVICE-PLAN §3): invitations, email sign-in, admin
+// approvals and health. It is reachable only from the application's network and every
 // /v1 route requires an API key.
 package api
 
@@ -12,9 +12,11 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/vettid/service-vault/internal/approval"
 	"github.com/vettid/service-vault/internal/connect"
 	"github.com/vettid/service-vault/internal/signin"
 )
@@ -90,6 +92,15 @@ type SignInStatus struct {
 	KeyChanged *bool `json:"key_changed,omitempty"`
 }
 
+// Approvals runs admin approvals (approval.Manager).
+type Approvals interface {
+	Create(ctx context.Context, req approval.Request) (*approval.Created, error)
+	Status(ctx context.Context, id string) (*approval.Status, error)
+	Remind(ctx context.Context, id string) (*approval.Reminder, error)
+	Admins(ctx context.Context) (*approval.Admins, error)
+	Audit(ctx context.Context, since string, limit int) (*approval.AuditPage, error)
+}
+
 // ErrNotFound is returned by Invites.Status and SignIns.Status for an
 // unknown id.
 var ErrNotFound = errors.New("api: not found")
@@ -100,6 +111,7 @@ type Server struct {
 	Email       *connect.EmailIndex
 	Invites     Invites
 	SignIns     SignIns
+	Approvals   Approvals     // nil: the approval routes are not served
 	LookupFloor time.Duration // uniform response time for POST /v1/signin; default 1.5 s
 	Log         *slog.Logger
 }
@@ -118,6 +130,13 @@ func (s *Server) Handler() http.Handler {
 	v1.HandleFunc("GET /v1/invites/{id}", s.inviteStatus)
 	v1.HandleFunc("POST /v1/signins", s.startSignIn)
 	v1.HandleFunc("GET /v1/signins/{id}", s.signInStatus)
+	if s.Approvals != nil {
+		v1.HandleFunc("POST /v1/approvals", s.createApproval)
+		v1.HandleFunc("GET /v1/approvals/{id}", s.approvalStatus)
+		v1.HandleFunc("POST /v1/approvals/{id}/remind", s.remindApproval)
+		v1.HandleFunc("GET /v1/admins", s.admins)
+		v1.HandleFunc("GET /v1/audit", s.audit)
+	}
 	mux.Handle("/v1/", s.auth(v1))
 	return mux
 }
@@ -151,8 +170,16 @@ func (s *Server) auth(next http.Handler) http.Handler {
 
 const maxBody = 4 << 10
 
+// maxApprovalBody bounds POST /v1/approvals: a payload of up to
+// approval.MaxPayload canonical bytes, with room for whitespace.
+const maxApprovalBody = 2*approval.MaxPayload + maxBody
+
 func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody))
+	return readJSONMax(w, r, v, maxBody)
+}
+
+func readJSONMax(w http.ResponseWriter, r *http.Request, v any, max int64) bool {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, max))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil || dec.More() {
 		writeError(w, http.StatusBadRequest, "bad_request")
@@ -260,6 +287,96 @@ func (s *Server) signInStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable")
 	default:
 		writeJSON(w, http.StatusOK, st)
+	}
+}
+
+func (s *Server) createApproval(w http.ResponseWriter, r *http.Request) {
+	var b approval.Request
+	if !readJSONMax(w, r, &b, maxApprovalBody) {
+		return
+	}
+	c, err := s.Approvals.Create(r.Context(), b)
+	if err != nil {
+		s.approvalError(w, "approval", err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, c)
+}
+
+func (s *Server) approvalStatus(w http.ResponseWriter, r *http.Request) {
+	st, err := s.Approvals.Status(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.approvalError(w, "approval status", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+func (s *Server) remindApproval(w http.ResponseWriter, r *http.Request) {
+	rm, err := s.Approvals.Remind(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.approvalError(w, "approval remind", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rm)
+}
+
+func (s *Server) admins(w http.ResponseWriter, r *http.Request) {
+	a, err := s.Approvals.Admins(r.Context())
+	if err != nil {
+		s.approvalError(w, "admins", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, a)
+}
+
+// audit serves GET /v1/audit?since=<entry id>&limit=<1..100>.
+func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit := 0
+	if v := q.Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > approval.MaxAuditPage {
+			writeError(w, http.StatusBadRequest, "bad_request")
+			return
+		}
+		limit = n
+	}
+	since := q.Get("since")
+	if len(since) > 64 {
+		writeError(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	p, err := s.Approvals.Audit(r.Context(), since, limit)
+	if err != nil {
+		s.approvalError(w, "audit", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
+}
+
+// approvalStatusCodes maps the approval error codes to HTTP statuses.
+var approvalStatusCodes = map[string]int{
+	approval.CodeInvalidAction:     http.StatusBadRequest,
+	approval.CodeInvalidSummary:    http.StatusBadRequest,
+	approval.CodeInvalidPayload:    http.StatusBadRequest,
+	approval.CodeInvalidConnection: http.StatusUnprocessableEntity,
+	approval.CodeUnreachable:       http.StatusUnprocessableEntity,
+	approval.CodeLastAdmin:         http.StatusUnprocessableEntity,
+	approval.CodeNotPending:        http.StatusConflict,
+	approval.CodeTooSoon:           http.StatusTooManyRequests,
+}
+
+func (s *Server) approvalError(w http.ResponseWriter, what string, err error) {
+	var ae *approval.Error
+	switch {
+	case errors.Is(err, approval.ErrNotFound):
+		writeError(w, http.StatusNotFound, "not_found")
+	case errors.As(err, &ae) && approvalStatusCodes[ae.Code] != 0:
+		writeError(w, approvalStatusCodes[ae.Code], ae.Code)
+	default:
+		s.log().Error(what, "err", err)
+		writeError(w, http.StatusServiceUnavailable, "unavailable")
 	}
 }
 
