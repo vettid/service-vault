@@ -48,9 +48,10 @@ export interface ServiceVaultStackProps extends cdk.StackProps {
   /** The VPC's CIDR (two /26 public subnets are carved from it). */
   readonly vpcCidr?: string;
   /**
-   * The first admin's email (SV_ADMIN_BOOTSTRAP_EMAIL): while the admin set
-   * is empty, the connection bound to it becomes the first admin. Remove it
-   * once the first admin is set (README "Admin approvals").
+   * The first admin's email (SV_ADMIN_BOOTSTRAP_EMAIL): the connection bound
+   * to it (from an invitation with a verified email) becomes the first
+   * admin, once; the bootstrap is one-shot and recorded in the table
+   * (README "Admin approvals").
    */
   readonly adminBootstrapEmail?: string;
   /** How many distinct admins must approve (SV_ADMIN_THRESHOLD; default 1). */

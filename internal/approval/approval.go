@@ -19,17 +19,19 @@ import (
 // Record kinds the manager keeps in the peer's store (DynamoDB in a
 // deployment).
 const (
-	kindApproval = "apv"       // an approval
-	kindOpen     = "apv_open"  // approval id -> "" while it is pending
-	kindReq      = "apv_req"   // challenge request id -> approval id
-	kindSeen     = "apv_seen"  // peer event id -> "": an answer already handled
-	kindHook     = "apv_hook"  // a webhook event waiting to be delivered
-	kindAdmins   = "admin_set" // "admins" -> the admin set
+	kindApproval = "apv"        // an approval
+	kindOpen     = "apv_open"   // approval id -> "" while it is pending
+	kindReq      = "apv_req"    // challenge request id -> approval id
+	kindSeen     = "apv_seen"   // peer event id -> "": an answer already handled
+	kindHook     = "apv_hook"   // a webhook event waiting to be delivered
+	kindAdmins   = "admin_set"  // "admins" -> the admin set
+	kindBoot     = "admin_boot" // "state" -> the bootstrap state (bootState)
 	// KindAudit is the append-only audit log: one record per entry, by
 	// increasing id, written once (IfAbsent), never updated or deleted.
 	KindAudit = "audit"
 
 	adminsID      = "admins"
+	bootID        = "state"
 	seenRetention = 16 * 24 * time.Hour // as the peer's dedupe markers (VAULT-MESSAGING §8)
 	reqRetention  = 24 * time.Hour      // past the approval's expiry
 )
@@ -68,8 +70,11 @@ type Manager struct {
 	// DefaultTTL).
 	TTL time.Duration
 	// BootstrapKey is the email index key of SV_ADMIN_BOOTSTRAP_EMAIL
-	// ("" for none): while the admin set is empty, the connection bound
-	// to it becomes the first admin.
+	// ("" for none): while the admin set is empty and no bootstrap has
+	// happened, the connection bound to it becomes the first admin. The
+	// bootstrap is one-shot: once it has happened (or once the set was
+	// seen not empty) it is recorded in the store and the setting is never
+	// used again; only ArmBootstrap arms a new one.
 	BootstrapKey string
 	// BoundConnection returns the connection bound to an email index key.
 	BoundConnection func(ctx context.Context, emailKey string) (string, bool, error)
@@ -773,25 +778,82 @@ func (m *Manager) reevaluate(ctx context.Context) error {
 	return nil
 }
 
+// Bootstrap states (bootState.State).
+const (
+	bootArmed = "armed" // ArmBootstrap armed a bootstrap for EmailKey
+	bootDone  = "done"  // the first admin was set: no bootstrap applies
+)
+
+// bootState is the stored bootstrap state. With none stored, the
+// configured BootstrapKey applies.
+type bootState struct {
+	State    string    `json:"state"`
+	EmailKey string    `json:"email_key,omitempty"` // armed
+	At       time.Time `json:"at"`
+}
+
+// ErrAdminsExist is returned by ArmBootstrap when the admin set is not
+// empty.
+var ErrAdminsExist = errors.New("approval: the admin set is not empty")
+
+func (m *Manager) bootState(ctx context.Context) (*bootState, error) {
+	data, ok, err := m.Store.Get(ctx, kindBoot, bootID)
+	if err != nil || !ok {
+		return nil, err
+	}
+	st := &bootState{}
+	if err := json.Unmarshal(data, st); err != nil {
+		return nil, err
+	}
+	return st, nil
+}
+
+// bootstrapKey returns the email index key that may make the first
+// admin now: the armed one, else the configured one unless a bootstrap
+// has happened; "" for none.
+func (m *Manager) bootstrapKey(ctx context.Context) (string, error) {
+	st, err := m.bootState(ctx)
+	switch {
+	case err != nil:
+		return "", err
+	case st == nil:
+		return m.BootstrapKey, nil
+	case st.State == bootArmed:
+		return st.EmailKey, nil
+	}
+	return "", nil
+}
+
 // ConnectionAdded makes the connection the first admin when the admin
-// set is empty and the connection holds the binding of the bootstrap
-// email (SV_ADMIN_BOOTSTRAP_EMAIL).
+// set is empty, a bootstrap applies, and the connection holds the binding
+// of the bootstrap email. Only an email the application verified is
+// bound (api: email_verified), so only a verified email makes an admin.
 func (m *Manager) ConnectionAdded(ctx context.Context, connID, emailKey string, bound bool) error {
-	if m.BootstrapKey == "" || !bound || emailKey != m.BootstrapKey {
+	if !bound || emailKey == "" {
 		return nil
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	key, err := m.bootstrapKey(ctx)
+	if err != nil || key == "" || key != emailKey {
+		return err
+	}
 	return m.bootstrap(ctx, connID)
 }
 
+// bootstrap makes connID the first admin and records, in the same
+// write, that the bootstrap has happened.
 func (m *Manager) bootstrap(ctx context.Context, connID string) error {
 	set, err := m.admins(ctx)
 	if err != nil || len(set) > 0 {
 		return err
 	}
-	b := m.batch(m.now())
+	now := m.now()
+	b := m.batch(now)
 	if err := b.adminSetChanged([]string{connID}, connID, "", ChangeBootstrap, ""); err != nil {
+		return err
+	}
+	if err := b.put(kindBoot, bootID, &bootState{State: bootDone, At: now.UTC()}, time.Time{}); err != nil {
 		return err
 	}
 	if err := b.apply(ctx); err != nil {
@@ -799,6 +861,40 @@ func (m *Manager) bootstrap(ctx context.Context, connID string) error {
 	}
 	m.log().Info("admin set bootstrapped", "connection_id", connID)
 	m.wake()
+	return nil
+}
+
+// ArmBootstrap arms a new one-shot bootstrap for an email index key: the
+// connection bound to it (from an invitation with a verified email)
+// becomes the first admin, once. It is the operator's recovery when the
+// admin set has become empty (`service-vault admin bootstrap`); it is
+// refused with ErrAdminsExist while the set is not empty, and it replaces
+// a bootstrap armed earlier. It is audited without the email.
+func (m *Manager) ArmBootstrap(ctx context.Context, emailKey string) error {
+	if emailKey == "" {
+		return errors.New("approval: empty bootstrap email key")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	set, err := m.admins(ctx)
+	if err != nil {
+		return err
+	}
+	if len(set) > 0 {
+		return ErrAdminsExist
+	}
+	now := m.now()
+	b := m.batch(now)
+	if err := b.put(kindBoot, bootID, &bootState{State: bootArmed, EmailKey: emailKey, At: now.UTC()}, time.Time{}); err != nil {
+		return err
+	}
+	if err := b.audit(&AuditEntry{Type: AuditBootstrapArmed}); err != nil {
+		return err
+	}
+	if err := b.apply(ctx); err != nil {
+		return err
+	}
+	m.log().Info("admin bootstrap armed")
 	return nil
 }
 
@@ -825,21 +921,43 @@ func (m *Manager) ConnectionRemoved(ctx context.Context, connID string) error {
 	return m.reevaluate(ctx)
 }
 
-// Start checks the bootstrap setting against the stored admin set; it is
-// logged when the set is not empty (the setting is then ignored).
+// Start checks the bootstrap setting against the stored state. A store
+// whose admin set is not empty but has no bootstrap state (one from
+// before the bootstrap was one-shot) is marked as bootstrapped. The
+// setting is logged as ignored when a bootstrap has happened.
 func (m *Manager) Start(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	set, err := m.admins(ctx)
 	if err != nil {
 		return err
 	}
-	if m.BootstrapKey != "" && len(set) > 0 {
-		m.log().Info("admin bootstrap setting ignored: the admin set is not empty", "admins", len(set))
+	st, err := m.bootState(ctx)
+	if err != nil {
+		return err
+	}
+	if st == nil && len(set) > 0 {
+		now := m.now()
+		b := m.batch(now)
+		if err := b.put(kindBoot, bootID, &bootState{State: bootDone, At: now.UTC()}, time.Time{}); err != nil {
+			return err
+		}
+		if err := b.apply(ctx); err != nil {
+			return err
+		}
+		st = &bootState{State: bootDone}
+	}
+	switch {
+	case st != nil && st.State == bootArmed:
+		m.log().Info("admin bootstrap armed: waiting for its connection", "admins", len(set))
+	case m.BootstrapKey != "" && st != nil && st.State == bootDone:
+		m.log().Info("admin bootstrap setting ignored: the bootstrap has happened", "admins", len(set))
 	}
 	return nil
 }
 
 // Tick does the periodic work: bootstrap from an already bound, active
-// connection while the set is empty; expire or settle the open
+// connection while the set is empty and a bootstrap applies; expire or settle the open
 // approvals; deliver the waiting webhooks.
 func (m *Manager) Tick(ctx context.Context) error {
 	err := m.tickState(ctx)
@@ -849,13 +967,17 @@ func (m *Manager) Tick(ctx context.Context) error {
 func (m *Manager) tickState(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.BootstrapKey != "" && m.BoundConnection != nil {
+	key, err := m.bootstrapKey(ctx)
+	if err != nil {
+		return err
+	}
+	if key != "" && m.BoundConnection != nil {
 		set, err := m.admins(ctx)
 		if err != nil {
 			return err
 		}
 		if len(set) == 0 {
-			c, ok, err := m.BoundConnection(ctx, m.BootstrapKey)
+			c, ok, err := m.BoundConnection(ctx, key)
 			if err != nil {
 				return err
 			}

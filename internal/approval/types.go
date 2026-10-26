@@ -63,6 +63,9 @@ const (
 	AuditDenied          = "approval.denied"
 	AuditExpired         = "approval.expired"
 	AuditAdminSetChanged = "admin_set.changed"
+	// AuditBootstrapArmed: the operator armed a new one-shot bootstrap
+	// (`service-vault admin bootstrap`); the email is not recorded.
+	AuditBootstrapArmed = "admin_set.bootstrap_armed"
 )
 
 // Answers in an approval.response audit entry.

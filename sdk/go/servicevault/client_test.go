@@ -25,9 +25,12 @@ func TestClientAgainstAPI(t *testing.T) {
 		t.Fatalf("Health: %v", err)
 	}
 
-	inv, err := c.CreateInvite(ctx, knownEmail)
+	inv, err := c.CreateInvite(ctx, knownEmail, servicevault.EmailVerified)
 	if err != nil || inv.ID != "inv1" || !strings.HasPrefix(inv.URL, "https://") || !inv.ExpiresAt.Equal(inviteExp) {
 		t.Fatalf("CreateInvite %+v, %v", inv, err)
+	}
+	if tag := f.p.tag.Load(); tag == nil || *tag != f.emailKey {
+		t.Fatal("a verified invitation does not carry the email's key")
 	}
 	st, err := c.InviteStatus(ctx, inv.ID)
 	if err != nil || st.Status != servicevault.InviteStatusSAS || st.SAS != "123456" || st.ConnectionID != "c1" {
@@ -68,18 +71,52 @@ func TestClientErrors(t *testing.T) {
 	if _, err := c.SignInStatus(ctx, "nope"); !servicevault.IsNotFound(err) {
 		t.Fatalf("unknown sign-in: %v", err)
 	}
-	if _, err := c.CreateInvite(ctx, "not an email"); !errors.As(err, &ae) || ae.Status != http.StatusBadRequest || ae.Code != servicevault.CodeInvalidEmail {
+	if _, err := c.CreateInvite(ctx, "not an email", servicevault.EmailVerified); !errors.As(err, &ae) || ae.Status != http.StatusBadRequest || ae.Code != servicevault.CodeInvalidEmail {
 		t.Fatalf("bad email: %v", err)
 	}
 
 	wrongKey := randomHex(t, 24)
 	wrong, _ := servicevault.New(servicevault.Config{BaseURL: f.url, APIKey: wrongKey, Pin: f.pin})
-	_, err = wrong.CreateInvite(ctx, knownEmail)
+	_, err = wrong.CreateInvite(ctx, knownEmail, servicevault.EmailVerified)
 	if !errors.As(err, &ae) || ae.Status != http.StatusUnauthorized || ae.Code != servicevault.CodeUnauthorized {
 		t.Fatalf("wrong key: %v", err)
 	}
 	if strings.Contains(err.Error(), wrongKey) {
 		t.Fatal("error mentions the API key")
+	}
+}
+
+// An unverified email is not sent to be bound: the invitation carries no
+// email, so the connection binds nothing and makes no admin. The zero
+// EmailVerification is refused before any request.
+func TestClientUnverifiedInvite(t *testing.T) {
+	f := newFixture(t, nil)
+	c := f.client(t)
+	ctx := context.Background()
+	for _, v := range []servicevault.EmailVerification{0, 3} {
+		if _, err := c.CreateInvite(ctx, knownEmail, v); !errors.Is(err, servicevault.ErrEmailVerification) {
+			t.Fatalf("verification %d: %v", v, err)
+		}
+	}
+	if f.p.tag.Load() != nil {
+		t.Fatal("a refused CreateInvite reached the server")
+	}
+	if _, err := c.CreateInvite(ctx, knownEmail, servicevault.EmailUnverified); err != nil {
+		t.Fatal(err)
+	}
+	tag := f.p.tag.Load()
+	if tag == nil || *tag != "" {
+		t.Fatal("an unverified invitation carries the email")
+	}
+	f.deliver(t, peer.Event{ID: "01JEVT1", Type: peer.EventConnectionAdded, ConnectionID: "c1", InviteID: "inv1", Tag: *tag})
+	if err := f.apv.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if a, err := c.Admins(ctx); err != nil || len(a.Admins) != 0 {
+		t.Fatalf("admins %+v, %v", a, err)
+	}
+	if bound, _, _ := f.svc.BoundConnection(ctx, f.emailKey); bound != "" {
+		t.Fatal("bound to an unverified email")
 	}
 }
 

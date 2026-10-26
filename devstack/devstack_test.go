@@ -293,7 +293,7 @@ func TestConnectAndSignInAgainstDevStack(t *testing.T) {
 	var seen []map[string]any
 
 	// 1. Connect from the service's invitation link.
-	inv := call(t, srv, "POST", "/v1/invites", `{"email":"member@example.org"}`)
+	inv := call(t, srv, "POST", "/v1/invites", `{"email":"member@example.org","email_verified":true}`)
 	invID, _ := inv["invite_id"].(string)
 	url, _ := inv["url"].(string)
 	link := url[strings.IndexByte(url, '#')+1:]
