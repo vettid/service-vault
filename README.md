@@ -117,6 +117,8 @@ exported security group instead of passing `apiClientSecurityGroupId`.
 | `SV_TLS_PIN_PARAM` | env | SSM parameter the daemon writes its TLS key pin to |
 | `SV_API_KEY_HASHES` | Secrets Manager | Comma-separated hex SHA-256 of the accepted API keys |
 | `SV_WEBHOOK_SECRET` | Secrets Manager | Webhook signing secret (≥ 32 bytes) |
+| `SV_SIGNIN_LIMITS_EMAIL` | env, optional | Sign-in limits per email, comma-separated `N/window` (default `5/15m,20/24h`; `none` for none) |
+| `SV_SIGNIN_LIMITS_SOURCE` | env, optional | Sign-in limits per source (default `20/15m`; `none` for none) |
 
 Secret values are never in the repository. The stack generates both: the
 webhook secret is usable as is (the application reads it from the
@@ -140,17 +142,57 @@ billed.
 |---|---|
 | `POST /v1/invites` `{email}` | `201 {invite_id, url, expires_at}`: a 10-minute, in-person invitation; `url` is the button on mobile and the QR on desktop |
 | `GET /v1/invites/{id}` | `{invite_id, status, sas?, connection_id?}`; `status` is `waiting`, `sas` (show `sas`: the member compares it on the phone and approves), `connected`, `declined` or `expired` |
-| `POST /v1/signins` `{email}` | `202 {signin_id, match_code}`, the same way and after the same delay whether or not the email is known |
-| `GET /v1/signins/{id}` | `{signin_id, status, connection_id?}`; `status` is `pending`, `approved`, `denied` or `expired` |
+| `POST /v1/signins` `{email, source?}` | `202 {signin_id, match_code}`, the same way and after the same delay whether or not the email is known and whether or not a rate limit was reached; `source` (optional, at most 64 printable ASCII bytes) is the end user's address as the application sees it, e.g. an IP or its /64, used only for the per-source limit |
+| `GET /v1/signins/{id}` | `{signin_id, status, connection_id?, key_changed?}`; `status` is `pending`, `approved`, `denied` or `expired`; `connection_id` and `key_changed` come with `approved` |
 | `GET /health` | `{status: "ok"}` (no key) |
 
 **Webhooks** (signed as `sdk/go/webhook` verifies): `connection.pending`
-`{invite_id, sas, name}`, `connection.added` `{invite_id, name}`,
+`{invite_id, sas, name}`, `connection.added` `{invite_id, name, email_bound}`,
 `connection.declined` / `connection.expired` `{invite_id}`,
 `connection.removed` `{direction: in|out}`, `signin.approved`
 `{signin_id, key_changed}`, `signin.denied` `{signin_id, reason}`,
 `signin.expired` `{signin_id}`, each with its `connection_id`. `name` is
 the member's account name as their vault presents it.
+
+**Email binding.** The email entered for an invitation is bound to the
+connection it becomes (MEMBER-SERVICE-PLAN §4.1), as an HMAC under the
+pepper, and sign-in looks the member up by it. The first active
+connection with an email keeps the binding: a later connection made with
+the same email is connected but not bound (`email_bound: false` on its
+`connection.added`), so it cannot be signed in to by email. When the
+bound connection is removed, the binding is freed and the next
+connection made with that email binds. `POST /v1/invites` answers the
+same either way; the binding is decided when the connection is added,
+with a conditional write so that two connections added at once cannot
+both bind.
+
+**Sign-in controls** (MEMBER-SERVICE-PLAN §4.2):
+
+- *Two-minute TTL.* The challenge's inner `exp` is two minutes; an
+  unanswered sign-in reads `expired`.
+- *One pending sign-in per member.* A new sign-in for an email supersedes
+  that email's pending one, whether or not the email is bound: the older
+  one reads `expired` at once, gets no webhook, and its challenge is
+  cancelled on the service's side, so approving it on the phone does
+  nothing (VAULT-MESSAGING §10.4 has no message to withdraw a challenge;
+  the phone shows it until its `exp`). (chosen; not in the spec)
+- *Rate limits*, counted per email and per `source` in fixed windows in
+  DynamoDB (so a restart does not reset them): by default 5 per 15
+  minutes and 20 per 24 hours per email, and 20 per 15 minutes per
+  source (chosen; not in the spec). A sign-in over a limit is answered
+  exactly like any other — the same shape, the same delay, a fresh
+  `signin_id` and match code — but sends no challenge and expires, so a
+  limit reveals nothing about whether an email is known. Every start
+  counts, limited or not. The service logs a counter of limited
+  sign-ins, never the email or source.
+- *Denying on the phone* ends the challenge: the sign-in reads `denied`
+  (`signin.denied` with `reason: denied`) and a later answer is ignored.
+- *Key change.* `signin.approved` carries `key_changed: true` (and
+  `GET /v1/signins/{id}` `"key_changed": true`) when the member signed
+  with a credential key other than the one pinned at the connection's
+  first sign-in that no rotation chain reaches (VAULT-MESSAGING §10.4).
+  The sign-in is still approved; the application decides what to do
+  with it (for example ask the member to confirm, or alert).
 
 **Local development** flags of `serve`, never on by default:
 `-dev-aws-endpoint URL` (KMS, DynamoDB and SSM at LocalStack) and

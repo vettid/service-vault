@@ -16,9 +16,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 
+	"github.com/vettid/service-vault/internal/api"
 	"github.com/vettid/service-vault/internal/peer"
 	"github.com/vettid/service-vault/internal/peer/peertest"
 	"github.com/vettid/service-vault/internal/service"
+	"github.com/vettid/service-vault/internal/signin"
 	"github.com/vettid/service-vault/internal/store"
 	"github.com/vettid/vettid-vault/vms/peerwire"
 )
@@ -126,7 +128,8 @@ func TestPeerOnDynamoDB(t *testing.T) {
 	var p *peer.Peer
 	var svc *service.Service
 	start := func() {
-		svc = &service.Service{Store: tbl.Peer(), ServiceName: "VettID Member Service", Now: clk.Now, Log: log}
+		svc = &service.Service{Store: tbl.Peer(), ServiceName: "VettID Member Service", Now: clk.Now, Log: log,
+			Limiter: &signin.Limiter{Counters: tbl.Counters(), Email: signin.DefaultEmailLimits, Source: signin.DefaultSourceLimits}}
 		p, err = peer.New(peer.Config{Keys: keys, Relay: w.View(keys.Relay), RelayURL: peertest.RelayURL, Store: tbl.Peer(),
 			Events: svc, Now: clk.Now, Log: log, Profile: peer.Profile{FirstName: "VettID", LastName: "Member Service"}})
 		if err != nil {
@@ -168,20 +171,37 @@ func TestPeerOnDynamoDB(t *testing.T) {
 	if st, _ := svc.Invites().Status(ctx, inv.ID); st.Status != "connected" {
 		t.Fatalf("status %+v", st)
 	}
-	id, err := svc.SignIns().Start(ctx, "email-key", "42")
+	// A first sign-in, superseded by a second (one pending per email).
+	old, err := svc.SignIns().Start(ctx, api.SignInRequest{EmailKey: "email-key", MatchCode: "41"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	pump()
-	if len(m.Challenges) != 1 {
+	id, err := svc.SignIns().Start(ctx, api.SignInRequest{EmailKey: "email-key", SourceKey: "source-key", MatchCode: "42"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pump()
+	if len(m.Challenges) != 2 {
 		t.Fatal("no challenge")
 	}
+	if s, err := svc.SignIns().Status(ctx, old); err != nil || s.Status != "expired" {
+		t.Fatalf("superseded %+v %v", s, err)
+	}
 	start() // restart with the sign-in in flight
-	r, _ := peerwire.SignConnAuth(m.Cred, keys.IKPublic(), m.IK.Public().(ed25519.PublicKey), m.Challenges[0], clk.Now(), nil)
+	// The superseded challenge was cancelled: answering it does nothing.
+	r0, _ := peerwire.SignConnAuth(m.Cred, keys.IKPublic(), m.IK.Public().(ed25519.PublicKey), m.Challenges[0], clk.Now(), nil)
+	m.Send(peerwire.TypeConnAuthResponse, r0.Marshal())
+	pump()
+	if s, _ := svc.SignIns().Status(ctx, old); s.Status != "expired" {
+		t.Fatalf("superseded answered %+v", s)
+	}
+	r, _ := peerwire.SignConnAuth(m.Cred, keys.IKPublic(), m.IK.Public().(ed25519.PublicKey), m.Challenges[1], clk.Now(), nil)
 	m.Send(peerwire.TypeConnAuthResponse, r.Marshal())
 	pump()
-	if s, cid, err := svc.SignIns().Status(ctx, id); err != nil || s != "approved" || cid != st.ConnectionID {
-		t.Fatalf("sign-in %q %q %v", s, cid, err)
+	if s, err := svc.SignIns().Status(ctx, id); err != nil || s.Status != "approved" || s.ConnectionID != st.ConnectionID ||
+		s.KeyChanged == nil || *s.KeyChanged {
+		t.Fatalf("sign-in %+v %v", s, err)
 	}
 	// The member rekeys a day later; the epoch moves on DynamoDB too.
 	clk.Advance(24 * time.Hour)

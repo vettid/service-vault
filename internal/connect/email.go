@@ -76,3 +76,34 @@ func NormalizeEmail(addr string) (string, error) {
 	}
 	return strings.ToLower(s), nil
 }
+
+// MaxSourceLen bounds the source an application passes with a sign-in.
+const MaxSourceLen = 64
+
+// ErrSource is returned for a source that is too long or not printable.
+var ErrSource = errors.New("connect: invalid source")
+
+// SourceKey returns the rate-limit key for the source of a sign-in (the
+// end user's address as the application sees it, an IP or a prefix such
+// as a /64): HMAC-SHA256 under the same pepper with its own label, so the
+// stored counters carry no address. Surrounding space is trimmed and the
+// source lower-cased; an empty source has no key ("", nil). A source is
+// at most MaxSourceLen bytes of printable ASCII.
+func (x *EmailIndex) SourceKey(src string) (string, error) {
+	s := strings.ToLower(strings.TrimSpace(src))
+	if s == "" {
+		return "", nil
+	}
+	if len(s) > MaxSourceLen {
+		return "", ErrSource
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] <= ' ' || s[i] > '~' {
+			return "", ErrSource
+		}
+	}
+	h := hmac.New(sha256.New, x.pepper)
+	h.Write([]byte("vettid/service-vault/source-index/v1\x00"))
+	h.Write([]byte(s))
+	return hex.EncodeToString(h.Sum(nil)), nil
+}

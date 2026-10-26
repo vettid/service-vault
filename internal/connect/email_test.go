@@ -63,3 +63,30 @@ func TestEmailIndexKey(t *testing.T) {
 		t.Fatalf("bad address: %v", err)
 	}
 }
+
+func TestSourceKey(t *testing.T) {
+	x, err := NewEmailIndex(bytes.Repeat([]byte{5}, MinPepperLen))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k, err := x.SourceKey("  "); k != "" || err != nil {
+		t.Fatalf("empty: %q %v", k, err)
+	}
+	a, err := x.SourceKey("2001:DB8::/64")
+	b, _ := x.SourceKey(" 2001:db8::/64 ")
+	if err != nil || a == "" || a != b || strings.Contains(a, "2001") {
+		t.Fatalf("%q %q %v", a, b, err)
+	}
+	e, _ := x.Key("2001:db8::/64@example.org")
+	if c, _ := x.SourceKey("198.51.100.7"); c == a || c == e {
+		t.Fatal("keys collide")
+	}
+	if _, err := x.SourceKey(strings.Repeat("1", MaxSourceLen)); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{strings.Repeat("1", MaxSourceLen+1), "a b", "a\x00", "é"} {
+		if _, err := x.SourceKey(bad); err != ErrSource {
+			t.Errorf("%q: %v", bad, err)
+		}
+	}
+}

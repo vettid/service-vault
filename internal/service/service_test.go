@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
-	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -45,13 +44,34 @@ func (h *hooks) of(typ string) []*webhook.Event {
 }
 
 type fixture struct {
-	t    *testing.T
-	clk  *peertest.Clock
-	p    *peer.Peer
-	svc  *Service
-	hk   *hooks
-	keys *peer.Keys
-	m    *peertest.Member
+	t       *testing.T
+	clk     *peertest.Clock
+	w       *peertest.World
+	p       *peer.Peer
+	svc     *Service
+	hk      *hooks
+	keys    *peer.Keys
+	m       *peertest.Member
+	members []*peertest.Member
+	logs    *syncBuffer
+}
+
+// syncBuffer collects the service's logs.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -65,7 +85,8 @@ func newFixture(t *testing.T) *fixture {
 	st := peer.NewMemStore()
 	st.Now = clk.Now
 	hk := &hooks{}
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logs := &syncBuffer{}
+	log := slog.New(slog.NewTextHandler(logs, nil))
 	svc := &Service{Store: st, ServiceName: "VettID Member Service", Webhooks: hk, Now: clk.Now, Log: log}
 	p, err := peer.New(peer.Config{Keys: keys, Relay: w.View(keys.Relay), RelayURL: peertest.RelayURL, Store: st, Events: svc,
 		Now: clk.Now, Log: log, Profile: peer.Profile{FirstName: "VettID", LastName: "Member Service"}})
@@ -76,7 +97,65 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 	svc.Peer = p
-	return &fixture{t: t, clk: clk, p: p, svc: svc, hk: hk, keys: keys, m: peertest.NewMember(t, w, 10)}
+	m := peertest.NewMember(t, w, 10)
+	return &fixture{t: t, clk: clk, w: w, p: p, svc: svc, hk: hk, keys: keys, m: m, members: []*peertest.Member{m}, logs: logs}
+}
+
+func (f *fixture) member(seed byte) *peertest.Member {
+	m := peertest.NewMember(f.t, f.w, seed)
+	f.members = append(f.members, m)
+	return m
+}
+
+// connect connects m from an invitation for emailKey; it returns the
+// connection id and the connection.added webhook's data.
+func (f *fixture) connect(m *peertest.Member, emailKey string) (string, map[string]any) {
+	f.t.Helper()
+	inv, err := f.svc.Invites().Create(context.Background(), emailKey)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	n := len(f.hk.of(peer.EventConnectionAdded))
+	m.Accept(inv.URL[strings.IndexByte(inv.URL, '#')+1:], "")
+	f.pump()
+	m.Approve()
+	f.pump()
+	added := f.hk.of(peer.EventConnectionAdded)
+	if len(added) != n+1 {
+		f.t.Fatalf("no connection.added")
+	}
+	var d map[string]any
+	if err := json.Unmarshal(added[n].Data, &d); err != nil {
+		f.t.Fatal(err)
+	}
+	return added[n].ConnectionID, d
+}
+
+func (f *fixture) start(emailKey, source, code string) string {
+	f.t.Helper()
+	id, err := f.svc.SignIns().Start(context.Background(), api.SignInRequest{EmailKey: emailKey, SourceKey: source, MatchCode: code})
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return id
+}
+
+func (f *fixture) status(id string) *api.SignInStatus {
+	f.t.Helper()
+	st, err := f.svc.SignIns().Status(context.Background(), id)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return st
+}
+
+func (f *fixture) sign(m *peertest.Member, ch *peerwire.ConnAuthChallenge, key ed25519.PrivateKey) {
+	r, err := peerwire.SignConnAuth(key, f.keys.IKPublic(), m.IK.Public().(ed25519.PublicKey), ch, f.clk.Now(), nil)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	m.Send(peerwire.TypeConnAuthResponse, r.Marshal())
+	f.pump()
 }
 
 func (f *fixture) pump() {
@@ -86,7 +165,9 @@ func (f *fixture) pump() {
 		if err != nil {
 			f.t.Fatal(err)
 		}
-		n += f.m.Step()
+		for _, m := range f.members {
+			n += m.Step()
+		}
 		f.p.DeliverEvents(ctx)
 		if n == 0 {
 			return
@@ -124,10 +205,7 @@ func TestConnectAndSignIn(t *testing.T) {
 	}
 
 	// Sign-in: the challenge carries the match code; the member signs.
-	id, err := f.svc.SignIns().Start(ctx, "email-key", "42")
-	if err != nil {
-		t.Fatal(err)
-	}
+	id := f.start("email-key", "", "42")
 	f.pump()
 	if len(f.m.Challenges) != 1 {
 		t.Fatal("no challenge")
@@ -136,50 +214,54 @@ func TestConnectAndSignIn(t *testing.T) {
 	if f.m.Challenges[0].Context != want {
 		t.Fatalf("context %q", f.m.Challenges[0].Context)
 	}
-	if s, _, _ := f.svc.SignIns().Status(ctx, id); s != "pending" {
-		t.Fatalf("status %q", s)
+	if s := f.status(id); s.Status != "pending" || s.KeyChanged != nil {
+		t.Fatalf("status %+v", s)
 	}
-	r, _ := peerwire.SignConnAuth(f.m.Cred, f.keys.IKPublic(), f.m.IK.Public().(ed25519.PublicKey), f.m.Challenges[0],
-		f.clk.Now(), nil)
-	f.m.Send(peerwire.TypeConnAuthResponse, r.Marshal())
-	f.pump()
-	s, cid, err := f.svc.SignIns().Status(ctx, id)
-	if err != nil || s != "approved" || cid != st.ConnectionID {
-		t.Fatalf("status %q %q %v", s, cid, err)
+	f.sign(f.m, f.m.Challenges[0], f.m.Cred)
+	if s := f.status(id); s.Status != "approved" || s.ConnectionID != st.ConnectionID || s.KeyChanged == nil || *s.KeyChanged {
+		t.Fatalf("status %+v", s)
 	}
 	ap := f.hk.of(peer.EventSignInApproved)
 	var d map[string]any
-	if len(ap) != 1 || json.Unmarshal(ap[0].Data, &d) != nil || d["signin_id"] != id {
+	if len(ap) != 1 || json.Unmarshal(ap[0].Data, &d) != nil || d["signin_id"] != id || d["key_changed"] != false {
 		t.Fatalf("approved webhook %+v", ap)
 	}
 
 	// Denied.
-	id2, _ := f.svc.SignIns().Start(ctx, "email-key", "17")
+	id2 := f.start("email-key", "", "17")
 	f.pump()
 	f.m.Send(peerwire.TypeConnAuthResponse, peerwire.DeniedConnAuth(f.m.Challenges[1].RequestID).Marshal())
 	f.pump()
-	if s, _, _ := f.svc.SignIns().Status(ctx, id2); s != "denied" {
-		t.Fatalf("status %q", s)
+	if s := f.status(id2); s.Status != "denied" || s.ConnectionID != "" || s.KeyChanged != nil {
+		t.Fatalf("status %+v", s)
+	}
+	// Denying ended the challenge: a signed answer after it changes nothing.
+	f.sign(f.m, f.m.Challenges[1], f.m.Cred)
+	if s := f.status(id2); s.Status != "denied" || len(f.hk.of(peer.EventSignInApproved)) != 1 {
+		t.Fatalf("after denial %+v", s)
+	}
+	if dn := f.hk.of(peer.EventSignInDenied); len(dn) != 1 || !strings.Contains(string(dn[0].Data), `"reason":"denied"`) {
+		t.Fatalf("denied webhook %+v", dn)
 	}
 
 	// An unknown email: the same kind of id, pending, then expired; no
 	// challenge goes anywhere.
-	id3, err := f.svc.SignIns().Start(ctx, "unknown-key", "55")
-	if err != nil || len(id3) != len(id) {
-		t.Fatalf("%q %v", id3, err)
+	id3 := f.start("unknown-key", "", "55")
+	if len(id3) != len(id) {
+		t.Fatalf("%q", id3)
 	}
 	f.pump()
 	if len(f.m.Challenges) != 2 {
 		t.Fatal("challenge for an unknown email")
 	}
-	if s, _, _ := f.svc.SignIns().Status(ctx, id3); s != "pending" {
-		t.Fatalf("status %q", s)
+	if s := f.status(id3); s.Status != "pending" {
+		t.Fatalf("status %+v", s)
 	}
 	f.clk.Advance(signin.ChallengeTTL)
-	if s, _, _ := f.svc.SignIns().Status(ctx, id3); s != "expired" {
-		t.Fatalf("status %q", s)
+	if s := f.status(id3); s.Status != "expired" {
+		t.Fatalf("status %+v", s)
 	}
-	if _, _, err := f.svc.SignIns().Status(ctx, "nope"); err != api.ErrNotFound {
+	if _, err := f.svc.SignIns().Status(ctx, "nope"); err != api.ErrNotFound {
 		t.Fatalf("unknown: %v", err)
 	}
 
@@ -189,12 +271,12 @@ func TestConnectAndSignIn(t *testing.T) {
 	if len(f.hk.of(peer.EventConnectionRemoved)) != 1 {
 		t.Fatal("no removed webhook")
 	}
-	id4, _ := f.svc.SignIns().Start(ctx, "email-key", "66")
+	id4 := f.start("email-key", "", "66")
 	f.pump()
 	if len(f.m.Challenges) != 2 {
 		t.Fatal("challenge after removal")
 	}
-	if s, _, _ := f.svc.SignIns().Status(ctx, id4); s != "pending" {
-		t.Fatalf("status %q", s)
+	if s := f.status(id4); s.Status != "pending" {
+		t.Fatalf("status %+v", s)
 	}
 }
