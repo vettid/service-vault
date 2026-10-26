@@ -1,0 +1,30 @@
+# Binaries
+/bin/
+/service-vault
+*.exe
+*.so
+*.dylib
+
+# Test
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Local configuration and state: never committed
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Go workspace
+go.work
+go.work.sum
+
+# IDE and OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store

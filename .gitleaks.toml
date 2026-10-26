@@ -1,0 +1,5 @@
+# gitleaks: the default rules. Test keys come only from fixed, public test
+# seeds; an allowlist for vettid-vault's public test vectors is added with
+# the first PR that copies any (VAULT-MESSAGING §16).
+[extend]
+useDefault = true

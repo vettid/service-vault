@@ -1,0 +1,2 @@
+# Vectors are compared byte for byte (and by sha256): never convert line endings.
+testdata/** -text
