@@ -157,13 +157,14 @@ func (s *Service) lock(emailKey string) *sync.Mutex {
 func (s *Service) LimitedSignIns() uint64 { return s.limited.Load() }
 
 // StartSignIn begins an email sign-in (MEMBER-SERVICE-PLAN §4.2). It is
-// counted against the per-email and per-source limits; it supersedes the
-// email's pending sign-in, if any (one pending sign-in per member: the
-// older one reads expired and its challenge is cancelled); and with a
-// connection bound to the email, and within the limits, a challenge
-// whose context carries the match code goes to the member's vault.
-// Otherwise the sign-in only expires. Either way it returns a fresh id
-// and nothing else.
+// counted against the per-email and per-source limits. Within the
+// limits it supersedes the email's pending sign-in, if any (one pending
+// sign-in per member: the older one reads expired and its challenge is
+// cancelled), and with a connection bound to the email a challenge whose
+// context carries the match code goes to the member's vault. Over a
+// limit it neither supersedes nor sends a challenge: the sign-in only
+// expires, and the email's pending sign-in stays as it was. Either way
+// it returns a fresh id and nothing else.
 func (s *Service) StartSignIn(ctx context.Context, req api.SignInRequest) (string, error) {
 	mu := s.lock(req.EmailKey)
 	mu.Lock()
@@ -181,17 +182,21 @@ func (s *Service) StartSignIn(ctx context.Context, req api.SignInRequest) (strin
 		// Neither the email nor the source is logged.
 		s.log().Info("signin rate limited", "signin_id", id, "limit", over, "limited_total", s.limited.Add(1))
 	}
-	if err := s.supersede(ctx, req.EmailKey); err != nil {
-		return "", err
-	}
 	rec := &signInRecord{ID: id, Status: api.SignInPending, Exp: now.Add(signin.ChallengeTTL)}
+	var changes []peer.Change
 	if over == "" {
+		// Only a start within the limits supersedes: otherwise anyone who
+		// knows a member's email could cancel their sign-in by starting
+		// more (chosen; not in the spec).
+		if err := s.supersede(ctx, req.EmailKey); err != nil {
+			return "", err
+		}
 		if err := s.challenge(ctx, req, rec); err != nil {
 			return "", err
 		}
+		changes = append(changes, peer.Change{Kind: kindSignInCur, ID: req.EmailKey, Data: []byte(id), Expires: rec.Exp})
 	}
-	changes := []peer.Change{s.signInChange(rec),
-		{Kind: kindSignInCur, ID: req.EmailKey, Data: []byte(id), Expires: rec.Exp}}
+	changes = append(changes, s.signInChange(rec))
 	if rec.RequestID != "" {
 		changes = append(changes, peer.Change{Kind: kindSignInReq, ID: rec.RequestID, Data: []byte(id),
 			Expires: rec.Exp.Add(signInRetention), IfAbsent: true})
