@@ -3,7 +3,7 @@ BIN     ?= bin
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -buildid= -X main.version=$(VERSION)
 
-.PHONY: all build test race lint vet staticcheck fmt scan tidy clean integration image cdk-test
+.PHONY: all build test race lint vet staticcheck fmt scan tidy clean integration image cdk-test devstack-up devstack-test
 
 all: lint test build
 
@@ -54,3 +54,17 @@ image:
 
 cdk-test:
 	cd cdk && npm ci && npm run typecheck && npm test
+
+# ---- End to end against a real member vault (not in CI) ----------------
+# vettid-vault's dev stack at the commit pinned in go.mod (its README,
+# "Local dev stack"): about 8 GB of memory, podman or docker compose. Run
+# `make devstack-up` in one terminal and `make devstack-test` in another;
+# SV_DEVSTACK_DATA picks the stack's data directory (default: the user
+# cache directory's vettid-devstack).
+VAULT_VERSION = $(shell $(GO) list -m -f '{{.Version}}' github.com/vettid/vettid-vault)
+
+devstack-up:
+	$(GO) run -tags devenclave github.com/vettid/vettid-vault/cmd/devstack@$(VAULT_VERSION) $(if $(SV_DEVSTACK_DATA),-data $(SV_DEVSTACK_DATA))
+
+devstack-test:
+	$(GO) test -count=1 -tags devstack -timeout 30m -v ./devstack/
