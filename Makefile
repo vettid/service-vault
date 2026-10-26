@@ -3,7 +3,7 @@ BIN     ?= bin
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -buildid= -X main.version=$(VERSION)
 
-.PHONY: all build test race lint vet staticcheck fmt scan tidy clean
+.PHONY: all build test race lint vet staticcheck fmt scan tidy clean integration
 
 all: lint test build
 
@@ -36,3 +36,12 @@ tidy:
 
 clean:
 	rm -rf $(BIN)
+
+# ---- Integration tests (LocalStack: KMS, DynamoDB) ---------------------
+COMPOSE ?= $(shell command -v podman >/dev/null && echo podman compose || echo docker compose)
+
+integration:
+	$(COMPOSE) -f integration/docker-compose.yml up -d
+	@for i in $$(seq 1 90); do curl -sf http://127.0.0.1:4566/_localstack/health >/dev/null && break; sleep 1; done
+	SV_IT_LOCALSTACK=http://127.0.0.1:4566 $(GO) test -count=1 -tags integration ./integration/; \
+	  status=$$?; $(COMPOSE) -f integration/docker-compose.yml down; exit $$status
