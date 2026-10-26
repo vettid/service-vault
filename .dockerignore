@@ -1,0 +1,8 @@
+.git
+.github
+bin
+cdk
+docs
+integration
+*.md
+!go.sum
