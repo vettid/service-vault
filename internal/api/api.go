@@ -23,6 +23,27 @@ import (
 // entered so the connection can be bound to it when it is accepted.
 type Invites interface {
 	Create(ctx context.Context, emailKey string) (*Invitation, error)
+	// Status reports what became of an invitation, so that the site can
+	// show the SAS once the member's vault completed the handshake
+	// (VAULT-MESSAGING §6.4). ErrNotFound for an unknown id.
+	Status(ctx context.Context, id string) (*InviteStatus, error)
+}
+
+// Invitation statuses.
+const (
+	InviteWaiting   = "waiting"   // not accepted yet, or the handshake runs
+	InviteSAS       = "sas"       // the SAS is known: show it; the member compares and approves
+	InviteConnected = "connected" // the member approved: the connection is active
+	InviteDeclined  = "declined"  // the member declined
+	InviteExpired   = "expired"   // nobody accepted it in time, or the request ended unapproved
+)
+
+// InviteStatus is what became of an invitation.
+type InviteStatus struct {
+	ID           string `json:"invite_id"`
+	Status       string `json:"status"`
+	SAS          string `json:"sas,omitempty"`           // with status sas
+	ConnectionID string `json:"connection_id,omitempty"` // with status sas or connected
 }
 
 // Invitation is what the application shows the member.
@@ -44,7 +65,8 @@ type SignIns interface {
 	Status(ctx context.Context, id string) (status, connectionID string, err error)
 }
 
-// ErrNotFound is returned by SignIns.Status for an unknown id.
+// ErrNotFound is returned by Invites.Status and SignIns.Status for an
+// unknown id.
 var ErrNotFound = errors.New("api: not found")
 
 // Server is the HTTP API.
@@ -68,6 +90,7 @@ func (s *Server) Handler() http.Handler {
 	})
 	v1 := http.NewServeMux()
 	v1.HandleFunc("POST /v1/invites", s.createInvite)
+	v1.HandleFunc("GET /v1/invites/{id}", s.inviteStatus)
 	v1.HandleFunc("POST /v1/signins", s.startSignIn)
 	v1.HandleFunc("GET /v1/signins/{id}", s.signInStatus)
 	mux.Handle("/v1/", s.auth(v1))
@@ -134,6 +157,19 @@ func (s *Server) createInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, inv)
+}
+
+func (s *Server) inviteStatus(w http.ResponseWriter, r *http.Request) {
+	st, err := s.Invites.Status(r.Context(), r.PathValue("id"))
+	switch {
+	case errors.Is(err, ErrNotFound):
+		writeError(w, http.StatusNotFound, "not_found")
+	case err != nil:
+		s.log().Error("invite status", "err", err)
+		writeError(w, http.StatusServiceUnavailable, "unavailable")
+	default:
+		writeJSON(w, http.StatusOK, st)
+	}
 }
 
 type signInResponse struct {

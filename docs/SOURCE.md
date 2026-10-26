@@ -18,3 +18,5 @@ that adds them, with their licence checked for AGPL-3.0 compatibility:
 | Module | Version | Licence | Used by |
 |---|---|---|---|
 | `github.com/aws/aws-sdk-go-v2` (`service/kms`) | `kms` v1.61.1 (the version vettid-vault uses) | Apache-2.0 | `internal/keystore` (KMS envelope) |
+| `github.com/aws/aws-sdk-go-v2` (`service/dynamodb`) | `dynamodb` v1.70.0 | Apache-2.0 | `internal/store` (keystore blobs, the peer's records) |
+| `github.com/aws/aws-sdk-go-v2` (`service/ssm`) | `ssm` v1.81.0 | Apache-2.0 | `cmd/service-vault` (publishes the TLS key pin) |
