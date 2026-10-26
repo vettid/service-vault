@@ -9,7 +9,7 @@ or its exported API changes shape.
 
 | Module | Version in `go.mod` | Commit | Date (UTC) |
 |---|---|---|---|
-| `github.com/vettid/vettid-vault` | `v0.0.0-20261026162438-7eae0a6d36b7` | `7eae0a6d36b722b1ebdce1704aa1d38499ecbd4b` (`main`, #150) | 2026-10-26 16:24:38 |
+| `github.com/vettid/vettid-vault` | `v0.0.0-20261026203241-3222a7ad8f54` | `3222a7ad8f54285c754ee87fe01609a4906bfec0` (`main`, `vms/peerwire`, #152) | 2026-10-26 20:32:41 |
 | `github.com/vettid/vettid-relay` (the version vettid-vault requires) | `v0.0.0-20261015153542-cc3ce892f9dc` | `cc3ce892f9dcb990e9e9752f19c3e0e296dd12b9` (`main`, RELAY-PROTOCOL 0.9.4 byte budgets, #14) | 2026-10-15 15:35:42 |
 
 Other direct dependencies are ordinary tagged releases chosen in the PR
