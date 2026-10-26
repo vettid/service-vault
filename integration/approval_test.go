@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -160,4 +161,63 @@ func (h *hookList) all() []*webhook.Event {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return append([]*webhook.Event(nil), h.evs...)
+}
+
+// The bootstrap is one-shot on DynamoDB: its state survives a restart, so
+// a new Manager with the same setting does not bootstrap again after the
+// set empties; an armed bootstrap applies once.
+func TestBootstrapOneShotOnDynamoDB(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	tbl := newTable(t, ctx)
+	p := &approvalPeer{}
+	bound := map[string]string{"boot-key": "c1"}
+	newManager := func() *approval.Manager {
+		return &approval.Manager{Peer: p, Store: tbl.Peer(), Pager: tbl, Threshold: 1, BootstrapKey: "boot-key",
+			BoundConnection: func(_ context.Context, k string) (string, bool, error) { c, ok := bound[k]; return c, ok, nil }}
+	}
+	admins := func(m *approval.Manager) []string {
+		t.Helper()
+		a, err := m.Admins(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a.Admins
+	}
+	m := newManager()
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Tick(ctx); err != nil || len(admins(m)) != 1 {
+		t.Fatalf("bootstrap: %v %v", err, admins(m))
+	}
+	if err := m.ConnectionRemoved(ctx, "c1"); err != nil || len(admins(m)) != 0 {
+		t.Fatalf("remove: %v", err)
+	}
+	// A restart with the setting still there: no second bootstrap.
+	m = newManager()
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	bound["boot-key"] = "c2"
+	if err := m.Tick(ctx); err != nil || len(admins(m)) != 0 {
+		t.Fatalf("second bootstrap: %v %v", err, admins(m))
+	}
+	// The operator arms a new one (another process, as the CLI is).
+	if err := newManager().ArmBootstrap(ctx, "new-key"); err != nil {
+		t.Fatal(err)
+	}
+	bound["new-key"] = "c3"
+	if err := m.Tick(ctx); err != nil || len(admins(m)) != 1 || admins(m)[0] != "c3" {
+		t.Fatalf("armed bootstrap: %v %v", err, admins(m))
+	}
+	if err := newManager().ArmBootstrap(ctx, "new-key"); !errors.Is(err, approval.ErrAdminsExist) {
+		t.Fatalf("armed with admins: %v", err)
+	}
+	if err := m.ConnectionRemoved(ctx, "c3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Tick(ctx); err != nil || len(admins(m)) != 0 {
+		t.Fatalf("armed bootstrap applied twice: %v %v", err, admins(m))
+	}
 }

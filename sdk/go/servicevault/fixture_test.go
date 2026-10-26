@@ -41,9 +41,13 @@ var inviteExp = time.Unix(1_800_000_600, 0).UTC()
 // fakePeer stands in for the relay side: one invitation, inv1, whose
 // handshake reached the SAS for connection c1; c1 is active, and every
 // challenge is sent, numbered req1, req2, ...
-type fakePeer struct{ n atomic.Int32 }
+type fakePeer struct {
+	n   atomic.Int32
+	tag atomic.Pointer[string] // the last invitation's tag
+}
 
-func (*fakePeer) CreateInvite(_ context.Context, tag string) (*peer.InviteRecord, error) {
+func (p *fakePeer) CreateInvite(_ context.Context, tag string) (*peer.InviteRecord, error) {
+	p.tag.Store(&tag)
 	return &peer.InviteRecord{ID: "inv1", URL: "https://relay.vettid.test/connect#x", Exp: inviteExp, Tag: tag,
 		Status: peer.InviteWaiting}, nil
 }
@@ -65,6 +69,7 @@ func (*fakePeer) CancelChallenge(context.Context, string) (bool, error) { return
 // fixture is the service (internal/service on a fake peer) behind the
 // private API (internal/api) over TLS 1.3 with a tlsid key.
 type fixture struct {
+	p        *fakePeer
 	svc      *service.Service
 	apv      *approval.Manager // bootstrap email: knownEmail
 	emailKey string            // the index key of knownEmail
@@ -87,7 +92,7 @@ func newFixture(t *testing.T, hooks service.Webhooks) *fixture {
 	svc := &service.Service{Peer: fp, Store: st, ServiceName: "VettID Member Service", Webhooks: hooks, Log: quiet}
 	svc.Approvals = &approval.Manager{Peer: fp, Store: st, Pager: st, Webhooks: hooks, ServiceName: svc.ServiceName,
 		Threshold: 1, BootstrapKey: ek, BoundConnection: svc.BoundConnection, Log: quiet}
-	f := &fixture{svc: svc, apv: svc.Approvals, emailKey: ek, key: randomHex(t, 24)}
+	f := &fixture{p: fp, svc: svc, apv: svc.Approvals, emailKey: ek, key: randomHex(t, 24)}
 	s := &api.Server{Keys: [][32]byte{api.HashKey(f.key)}, Email: idx, Invites: svc.Invites(), SignIns: svc.SignIns(),
 		Approvals: svc.Approvals, LookupFloor: 10 * time.Millisecond, Log: quiet}
 	var srv *httptest.Server

@@ -6,6 +6,8 @@
 //
 //	service-vault serve        run (configuration from SV_* variables, README "Deployment")
 //	service-vault healthcheck  probe GET /health on the local API; exit 0 or 1
+//	service-vault admin bootstrap -email E
+//	                           arm a new one-shot admin bootstrap (the same environment as serve)
 //	service-vault version
 package main
 
@@ -17,6 +19,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -54,7 +57,7 @@ var version = "dev"
 
 func main() {
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "usage: service-vault serve [flags] | healthcheck | version\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "usage: service-vault serve [flags] | healthcheck | admin bootstrap -email E | version\n")
 	}
 	flag.Parse()
 	switch flag.Arg(0) {
@@ -63,6 +66,11 @@ func main() {
 	case "serve":
 		if err := serve(flag.Args()[1:]); err != nil {
 			slog.Error("serve", "err", err)
+			os.Exit(1)
+		}
+	case "admin":
+		if err := admin(flag.Args()[1:], os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "admin:", err)
 			os.Exit(1)
 		}
 	case "healthcheck":
@@ -221,21 +229,14 @@ func serve(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	awsCfg, err := config.LoadDefaultConfig(ctx)
+	ac, err := newAWSClients(ctx, dev.awsEndpoint)
 	if err != nil {
-		return fmt.Errorf("aws config: %w", err)
+		return err
 	}
-	endpoint := func(u *string) {
-		if dev.awsEndpoint != "" {
-			*u = dev.awsEndpoint
-		}
-	}
-	ddb := dynamodb.NewFromConfig(awsCfg, func(o *dynamodb.Options) { setEndpoint(&o.BaseEndpoint, endpoint) })
-	kc := kms.NewFromConfig(awsCfg, func(o *kms.Options) { setEndpoint(&o.BaseEndpoint, endpoint) })
-	sc := ssm.NewFromConfig(awsCfg, func(o *ssm.Options) { setEndpoint(&o.BaseEndpoint, endpoint) })
-	tbl := &store.Table{Client: ddb, Name: cfg.Table}
+	sc := ac.ssm
+	tbl := &store.Table{Client: ac.ddb, Name: cfg.Table}
 
-	secrets, err := keystore.LoadOrCreate(ctx, &keystore.AWSKMS{Client: kc}, cfg.KMSKeyID, tbl.Blobs(), keystore.SecretsName, keystore.NewSecrets)
+	secrets, err := keystore.LoadOrCreate(ctx, &keystore.AWSKMS{Client: ac.kms}, cfg.KMSKeyID, tbl.Blobs(), keystore.SecretsName, keystore.NewSecrets)
 	if err != nil {
 		return fmt.Errorf("keystore: %w", err)
 	}
@@ -324,6 +325,101 @@ func serve(args []string) error {
 	}
 	log.Info("stopped")
 	return runErr
+}
+
+// awsClients are the AWS clients the daemon uses.
+type awsClients struct {
+	ddb *dynamodb.Client
+	kms *kms.Client
+	ssm *ssm.Client
+}
+
+// newAWSClients loads the default AWS configuration; endpoint, when set,
+// sends every call there (LocalStack, local development only).
+func newAWSClients(ctx context.Context, endpoint string) (*awsClients, error) {
+	awsCfg, err := config.LoadDefaultConfig(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("aws config: %w", err)
+	}
+	ep := func(u *string) {
+		if endpoint != "" {
+			*u = endpoint
+		}
+	}
+	return &awsClients{
+		ddb: dynamodb.NewFromConfig(awsCfg, func(o *dynamodb.Options) { setEndpoint(&o.BaseEndpoint, ep) }),
+		kms: kms.NewFromConfig(awsCfg, func(o *kms.Options) { setEndpoint(&o.BaseEndpoint, ep) }),
+		ssm: ssm.NewFromConfig(awsCfg, func(o *ssm.Options) { setEndpoint(&o.BaseEndpoint, ep) }),
+	}, nil
+}
+
+// errNoSecrets: the admin command found no keystore; it never makes one.
+var errNoSecrets = errors.New("the service vault has no keys yet: run serve first")
+
+// admin runs `service-vault admin bootstrap -email E`: it arms a new
+// one-shot admin bootstrap in the store, the operator's recovery when the
+// admin set has become empty (README "Admin approvals"). It runs with the
+// same environment as serve (it needs the table and the KMS key to
+// compute the email's index key) and refuses while the set is not empty.
+// The running daemon picks the armed bootstrap up within seconds.
+func admin(args []string, out io.Writer) error {
+	if len(args) == 0 || args[0] != "bootstrap" {
+		return errors.New("usage: service-vault admin bootstrap -email E")
+	}
+	fs := flag.NewFlagSet("admin bootstrap", flag.ContinueOnError)
+	addr := fs.String("email", "", "the email of the member to become the first admin; their connection must come from an invitation with a verified email")
+	awsEndpoint := fs.String("dev-aws-endpoint", "", "local development only: send KMS and DynamoDB calls to this URL (LocalStack)")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return errors.New("usage: service-vault admin bootstrap -email E")
+	}
+	if *addr == "" {
+		return errors.New("-email is required")
+	}
+	if _, err := connect.NormalizeEmail(*addr); err != nil {
+		return errors.New("-email: not an email address")
+	}
+	cfg, err := configFromEnv(os.Getenv)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	ac, err := newAWSClients(ctx, *awsEndpoint)
+	if err != nil {
+		return err
+	}
+	tbl := &store.Table{Client: ac.ddb, Name: cfg.Table}
+	return armBootstrap(ctx, &keystore.AWSKMS{Client: ac.kms}, cfg.KMSKeyID, tbl.Blobs(), tbl.Peer(), *addr, out)
+}
+
+// armBootstrap computes the email's index key under the service vault's
+// pepper and arms the bootstrap for it.
+func armBootstrap(ctx context.Context, kc keystore.KMS, keyID string, blobs keystore.Blobs, st peer.Store, addr string, out io.Writer) error {
+	secrets, err := keystore.LoadOrCreate(ctx, kc, keyID, blobs, keystore.SecretsName,
+		func() (*keystore.Secrets, error) { return nil, errNoSecrets })
+	if err != nil {
+		return fmt.Errorf("keystore: %w", err)
+	}
+	idx, err := connect.NewEmailIndex(secrets.EmailPepper)
+	if err != nil {
+		return err
+	}
+	key, err := idx.Key(addr)
+	if err != nil {
+		return errors.New("-email: not an email address")
+	}
+	m := &approval.Manager{Store: st, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	if err := m.ArmBootstrap(ctx, key); err != nil {
+		if errors.Is(err, approval.ErrAdminsExist) {
+			return errors.New("the admin set is not empty: a bootstrap is armed only while it is empty")
+		}
+		return err
+	}
+	fmt.Fprintln(out, "admin bootstrap armed: the next connection bound to this email (from an invitation with a verified email) becomes the first admin, once")
+	return nil
 }
 
 func setEndpoint(dst **string, f func(*string)) {

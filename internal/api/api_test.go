@@ -114,7 +114,7 @@ func TestAuth(t *testing.T) {
 func TestCreateInvite(t *testing.T) {
 	s, inv, _ := newServer(t)
 	h := s.Handler()
-	rec, m := do(t, h, "POST", "/v1/invites", apiKey, `{"email":" Member@Example.org "}`)
+	rec, m := do(t, h, "POST", "/v1/invites", apiKey, `{"email":" Member@Example.org ","email_verified":true}`)
 	if rec.Code != 201 || m["invite_id"] != "inv1" || m["url"] != "https://relay.vettid.test/connect#x" {
 		t.Fatalf("%d %v", rec.Code, m)
 	}
@@ -122,10 +122,36 @@ func TestCreateInvite(t *testing.T) {
 	if inv.lastKey != want {
 		t.Fatal("invite not bound to the email's index key")
 	}
-	for _, body := range []string{`{"email":"nope"}`, `{"email":"a@example.org","x":1}`, `not json`, `{"email":"a@example.org"}{}`} {
+	for _, body := range []string{`{"email":"nope","email_verified":true}`, `{"email":"nope","email_verified":false}`,
+		`{"email":"a@example.org","email_verified":true,"x":1}`, `not json`, `{"email":"a@example.org","email_verified":true}{}`,
+		`{"email":"a@example.org","email_verified":"true"}`, `{"email":"a@example.org","email_verified":1}`} {
 		if rec, _ := do(t, h, "POST", "/v1/invites", apiKey, body); rec.Code != 400 {
 			t.Errorf("body %s: %d", body, rec.Code)
 		}
+	}
+}
+
+// email_verified is required: missing (or null) is a bad request, so
+// that every application decides.
+func TestCreateInviteVerifiedRequired(t *testing.T) {
+	s, inv, _ := newServer(t)
+	h := s.Handler()
+	for _, body := range []string{`{"email":"a@example.org"}`, `{"email":"a@example.org","email_verified":null}`} {
+		inv.lastKey = "untouched"
+		rec, m := do(t, h, "POST", "/v1/invites", apiKey, body)
+		if rec.Code != 400 || m["error"] != "bad_request" || inv.lastKey != "untouched" {
+			t.Errorf("body %s: %d %v", body, rec.Code, m)
+		}
+	}
+}
+
+// An unverified email is not carried by the invitation at all.
+func TestCreateInviteUnverified(t *testing.T) {
+	s, inv, _ := newServer(t)
+	inv.lastKey = "untouched"
+	rec, m := do(t, s.Handler(), "POST", "/v1/invites", apiKey, `{"email":"member@example.org","email_verified":false}`)
+	if rec.Code != 201 || m["invite_id"] != "inv1" || inv.lastKey != "" {
+		t.Fatalf("%d %v key %q", rec.Code, m, inv.lastKey)
 	}
 }
 

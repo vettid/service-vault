@@ -93,7 +93,12 @@ never answers challenges and never rotates its identity.
 
 ## 6. Email binding and sign-in (`internal/service`, `internal/signin`)
 
-- **Binding** (MEMBER-SERVICE-PLAN §4.1 step 4). The invitation carries
+- **Binding** (MEMBER-SERVICE-PLAN §4.1 step 4). Only a verified email
+  is bound: `POST /v1/invites` requires `email_verified`, which the
+  application sends as `true` only after verifying, with a one-time code
+  it emails, that the member controls the address (the service vault
+  cannot send email). With `false` the invitation carries no email and
+  its connection is never bound. A verified invitation carries
   the email's index key (HMAC under the pepper, `internal/connect`). On
   `connection.added` the key is bound to the connection with a write
   conditional on no binding existing; the first active connection keeps
@@ -130,8 +135,15 @@ MEMBER-SERVICE-PLAN §4.5 and §5.2; the operator's view is in the README,
 
 - **Admin set.** Connection ids in one record. The first admin comes from
   `SV_ADMIN_BOOTSTRAP_EMAIL` while the set is empty: at `connection.added`
-  for the connection that binds that email, or at a periodic tick for one
-  that is bound and active already. Changing the set is an approval
+  for the connection that binds that email (only a verified email binds),
+  or at a periodic tick for one that is bound and active already. The
+  bootstrap is one-shot: a bootstrap-state record (`admin_boot`) is
+  written with the first admin, and from then on the setting is ignored,
+  even if the set empties. A store with a non-empty set and no such
+  record is marked at the start. `service-vault admin bootstrap -email E`
+  (the operator, with the daemon's environment) arms a new one-shot
+  bootstrap for E in that record, only while the set is empty, and
+  audits it without the email. Changing the set is an approval
   (`admin_set.add`, `admin_set.remove`) applied by the service vault; a
   removed connection leaves the set; the set never becomes empty by
   approval.

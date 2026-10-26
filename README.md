@@ -124,7 +124,7 @@ exported security group instead of passing `apiClientSecurityGroupId`.
 | `SV_WEBHOOK_SECRET` | Secrets Manager | Webhook signing secret (≥ 32 bytes) |
 | `SV_SIGNIN_LIMITS_EMAIL` | env, optional | Sign-in limits per email, comma-separated `N/window` (default `5/15m,20/24h`; `none` for none) |
 | `SV_SIGNIN_LIMITS_SOURCE` | env, optional | Sign-in limits per source (default `20/15m`; `none` for none) |
-| `SV_ADMIN_BOOTSTRAP_EMAIL` | env, optional | While the admin set is empty, the connection bound to this email becomes the first admin; ignored once the set is not empty |
+| `SV_ADMIN_BOOTSTRAP_EMAIL` | env, optional | The connection bound to this email (from an invitation with a verified email) becomes the first admin, once: the bootstrap is one-shot, and the setting is ignored after it (see "Admin approvals") |
 | `SV_ADMIN_THRESHOLD` | env, optional | m: how many distinct admins must approve a governance action (default 1; 1–64) |
 | `SV_APPROVAL_TTL` | env, optional | How long an approval stays open (default `24h`; `10m` to `168h`) |
 
@@ -148,7 +148,7 @@ billed.
 
 | Route | Answer |
 |---|---|
-| `POST /v1/invites` `{email}` | `201 {invite_id, url, expires_at}`: a 10-minute, in-person invitation; `url` is the button on mobile and the QR on desktop |
+| `POST /v1/invites` `{email, email_verified}` | `201 {invite_id, url, expires_at}`: a 10-minute, in-person invitation; `url` is the button on mobile and the QR on desktop. `email_verified` (boolean) is required (`bad_request` without it); see "Email binding" |
 | `GET /v1/invites/{id}` | `{invite_id, status, sas?, connection_id?}`; `status` is `waiting`, `sas` (show `sas`: the member compares it on the phone and approves), `connected`, `declined` or `expired` |
 | `POST /v1/signins` `{email, source?}` | `202 {signin_id, match_code}`, the same way and after the same delay whether or not the email is known and whether or not a rate limit was reached; `source` (optional, at most 64 printable ASCII bytes) is the end user's address as the application sees it, e.g. an IP or its /64, used only for the per-source limit |
 | `GET /v1/signins/{id}` | `{signin_id, status, connection_id?, key_changed?}`; `status` is `pending`, `approved`, `denied` or `expired`; `connection_id` and `key_changed` come with `approved` |
@@ -174,7 +174,22 @@ the member's account name as their vault presents it. Admin approvals add
 
 **Email binding.** The email entered for an invitation is bound to the
 connection it becomes (MEMBER-SERVICE-PLAN §4.1), as an HMAC under the
-pepper, and sign-in looks the member up by it. The first active
+pepper, and sign-in looks the member up by it — **only if the application
+has verified that the member controls it.** The service vault cannot send
+email, so the application verifies: it emails a one-time code to the
+address and has the visitor enter it, and only then asks for the
+invitation with `email_verified: true`. With `email_verified: false` the
+invitation carries no email at all: the connection is made but never
+bound (`email_bound: false`), so it cannot be signed in to by email and
+cannot become the first admin. The application **must not** send `true`
+for an address it has not verified this way: the first connection bound
+to an email keeps it, so binding an unverified address would let anyone
+who types someone else's email squat on it: sign-ins with that email
+would then challenge the squatter's vault, the owner's own connection
+would not be bound, and, when the address is `SV_ADMIN_BOOTSTRAP_EMAIL`,
+the squatter would become the first admin. `email_verified` has
+no default (a request without it is refused with `bad_request`), so every
+application decides. The first active
 connection with an email keeps the binding: a later connection made with
 the same email is connected but not bound (`email_bound: false` on its
 `connection.added`), so it cannot be signed in to by email. When the
@@ -224,12 +239,22 @@ admin's connection.
 - *Admins* are connections, kept in DynamoDB. **Bootstrap:** while the set
   is empty, the connection whose bound email (see "Email binding") is
   `SV_ADMIN_BOOTSTRAP_EMAIL` becomes the first admin, when it is added or,
-  if it is connected already, within seconds of the start. Once the set
-  is not empty the setting is ignored (the start logs so). The email is
-  not verified, so whoever binds it first becomes the admin: set it just
-  before the first admin connects, and remove it once they have. If the
-  set becomes empty again (the last admin removed their connection) and
-  the setting is still there, it applies again (chosen; not in the spec).
+  if it is connected already, within seconds of the start. Only an email
+  the application verified is ever bound, so only a member who proved
+  control of that address can become the first admin. The bootstrap is
+  **one-shot**: when it sets the first admin it records so in DynamoDB,
+  and from then on the setting is ignored (the start logs so), even if
+  the set later becomes empty. A store whose set was not empty before
+  this record existed is marked at the start. (chosen; not in the spec)
+- *Recovering an empty set* takes an explicit operator action:
+  `service-vault admin bootstrap -email <address>`, run with the same
+  environment as `serve` (for example as a one-off ECS task with the
+  service's task definition and the command overridden), arms a new
+  one-shot bootstrap in DynamoDB for that address. It is refused while
+  the set is not empty, replaces a bootstrap armed earlier, is audited
+  (`admin_set.bootstrap_armed`, without the email) and is picked up by
+  the running task within seconds; the member then connects from an
+  invitation with a verified email, as for the first bootstrap.
 - *Changing the set* is itself a governance action: `admin_set.add` and
   `admin_set.remove`, with payload `{"connection_id": "…"}`. The service
   vault applies them when approved (`applied` says whether it still could)
@@ -238,7 +263,7 @@ admin's connection.
   admins than m (`unreachable`); with two such removals approved at once
   the second is not applied. A member can always remove their connection,
   though: that takes them out of the set, even the last admin, and is
-  recovered only by the bootstrap setting or by lowering m.
+  recovered only by `service-vault admin bootstrap` or by lowering m.
 - *Threshold.* m = `SV_ADMIN_THRESHOLD` (default 1, 1-of-n); each
   approval keeps the m it was created with, so m changes by configuration
   only. m distinct admins (connections) among those asked must approve. A
@@ -291,7 +316,8 @@ admin's connection.
 
 **Local development** flags of `serve`, never on by default:
 `-dev-aws-endpoint URL` (KMS, DynamoDB and SSM at LocalStack) and
-`-dev-relay-ca FILE` (also trust a dev relay's CA).
+`-dev-relay-ca FILE` (also trust a dev relay's CA); `admin bootstrap`
+takes `-dev-aws-endpoint` too.
 
 ## Go SDK
 
@@ -309,7 +335,7 @@ c, err := servicevault.New(servicevault.Config{
 	APIKey:  apiKey, // one whose SHA-256 is in SV_API_KEY_HASHES
 	Pin:     pin,    // "sha256/…": the TlsPinParameterName parameter's value
 })
-inv, err := c.CreateInvite(ctx, email)              // POST /v1/invites
+inv, err := c.CreateInvite(ctx, email, servicevault.EmailVerified) // POST /v1/invites; after a one-time code
 st, err := c.InviteStatus(ctx, inv.ID)              // GET /v1/invites/{id}
 si, err := c.StartSignIn(ctx, servicevault.SignInRequest{Email: email, Source: clientIP})
 ss, err := c.SignInStatus(ctx, si.ID)               // GET /v1/signins/{id}
@@ -324,6 +350,12 @@ h, err := servicevault.ActionHash(action, summary, payload) // compare with ap.A
 err = c.Health(ctx)                                 // GET /health
 ```
 
+- **Invitations.** `CreateInvite` takes `servicevault.EmailVerified`
+  only when the application has just verified that the visitor controls
+  the address (a one-time code sent to it), otherwise
+  `servicevault.EmailUnverified`; the zero value is refused
+  (`ErrEmailVerification`), so the choice is always explicit (see
+  "Email binding").
 - **Errors.** A non-2xx answer is an `*servicevault.APIError{Status,
   Code}` (`Code` is the body's `error`: `invalid_email`, `not_found`, …);
   `servicevault.IsNotFound(err)` for an unknown id. A server key that

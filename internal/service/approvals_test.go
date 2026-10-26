@@ -107,3 +107,20 @@ func TestSignInWithApprovals(t *testing.T) {
 		t.Fatalf("%+v", s)
 	}
 }
+
+// An invitation without an email (the application did not verify it)
+// binds nothing and makes no admin, even while a bootstrap applies.
+func TestBootstrapNeedsVerifiedInvite(t *testing.T) {
+	f := newFixture(t)
+	m := f.withApprovals(1, "admin-key")
+	conn, d := f.connect(f.m, "")
+	if d["email_bound"] != false {
+		t.Fatalf("connection.added %v", d)
+	}
+	if err := m.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := m.Admins(context.Background()); len(a.Admins) != 0 {
+		t.Fatalf("admins %v (connection %s)", a.Admins, conn)
+	}
+}

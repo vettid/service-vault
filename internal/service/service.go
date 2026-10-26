@@ -111,10 +111,11 @@ func (s *Service) log() *slog.Logger {
 	return slog.Default()
 }
 
-// CreateInvite makes an in-person invitation tagged with the
-// email index key of the address the visitor entered. It answers the
-// same whether or not the email is bound already: binding is decided
-// when the connection is added.
+// CreateInvite makes an in-person invitation tagged with the email index
+// key of the verified address the visitor entered, or untagged ("") when
+// the application did not verify it: an untagged invitation's connection
+// is never bound. It answers the same whether or not the email is bound
+// already: binding is decided when the connection is added.
 func (s *Service) CreateInvite(ctx context.Context, emailKey string) (*api.Invitation, error) {
 	inv, err := s.Peer.CreateInvite(ctx, emailKey)
 	if err != nil {

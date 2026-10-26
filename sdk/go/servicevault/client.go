@@ -311,7 +311,7 @@ type AuditChallenge struct {
 type AuditEntry struct {
 	ID           string           `json:"id"`
 	At           time.Time        `json:"at"`
-	Type         string           `json:"type"` // approval.requested | approval.response | approval.reminded | approval.approved | approval.denied | approval.expired | admin_set.changed
+	Type         string           `json:"type"` // approval.requested | approval.response | approval.reminded | approval.approved | approval.denied | approval.expired | admin_set.changed | admin_set.bootstrap_armed
 	ApprovalID   string           `json:"approval_id,omitempty"`
 	Action       string           `json:"action,omitempty"`
 	Summary      string           `json:"summary,omitempty"`
@@ -423,11 +423,43 @@ func (c *Client) Health(ctx context.Context) error {
 	return nil
 }
 
+// EmailVerification says whether the application has verified that the
+// member controls the email of an invitation. It has no usable zero
+// value: CreateInvite refuses anything but EmailVerified and
+// EmailUnverified, so the choice is always explicit.
+type EmailVerification int
+
+const (
+	_ EmailVerification = iota
+	// EmailUnverified: the invitation carries no email; the connection
+	// is never bound to one (no email sign-in, no admin bootstrap).
+	EmailUnverified
+	// EmailVerified: the application verified, just before, that the
+	// member controls the address (for example by a one-time code sent
+	// to it). The connection is bound to it, so it is used for email
+	// sign-in and can make the first admin. Use it for nothing else:
+	// binding an address that was not verified lets whoever typed it
+	// take it (and, with SV_ADMIN_BOOTSTRAP_EMAIL, the first admin).
+	EmailVerified
+)
+
+// ErrEmailVerification is returned by CreateInvite for an
+// EmailVerification other than EmailVerified and EmailUnverified.
+var ErrEmailVerification = errors.New("servicevault: CreateInvite needs EmailVerified or EmailUnverified")
+
 // CreateInvite makes a 10-minute, in-person invitation for the email the
-// visitor entered; the connection that results is bound to it.
-func (c *Client) CreateInvite(ctx context.Context, email string) (*Invite, error) {
+// visitor entered. With EmailVerified the connection that results is
+// bound to it; with EmailUnverified the invitation carries no email.
+func (c *Client) CreateInvite(ctx context.Context, email string, v EmailVerification) (*Invite, error) {
+	if v != EmailVerified && v != EmailUnverified {
+		return nil, ErrEmailVerification
+	}
+	body := struct {
+		Email         string `json:"email"`
+		EmailVerified bool   `json:"email_verified"`
+	}{email, v == EmailVerified}
 	inv := &Invite{}
-	if err := c.do(ctx, http.MethodPost, "/v1/invites", map[string]string{"email": email}, true, inv); err != nil {
+	if err := c.do(ctx, http.MethodPost, "/v1/invites", body, true, inv); err != nil {
 		return nil, err
 	}
 	return inv, nil

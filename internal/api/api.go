@@ -24,6 +24,9 @@ import (
 // Invites makes connection invitations, remembering the email the member
 // entered so the connection can be bound to it when it is accepted.
 type Invites interface {
+	// Create makes an invitation. emailKey is the index key of an email
+	// the application verified the member controls, or "" for an
+	// invitation that carries no email (it is never bound).
 	Create(ctx context.Context, emailKey string) (*Invitation, error)
 	// Status reports what became of an invitation, so that the site can
 	// show the SAS once the member's vault completed the handshake
@@ -188,19 +191,34 @@ func readJSONMax(w http.ResponseWriter, r *http.Request, v any, max int64) bool 
 	return true
 }
 
-type emailBody struct {
+type inviteBody struct {
 	Email string `json:"email"`
+	// EmailVerified is required: true only when the application has
+	// verified that the member controls the address (a one-time code
+	// sent to it). Only a verified email is bound to the connection, and
+	// only a bound email can make the first admin.
+	EmailVerified *bool `json:"email_verified"`
 }
 
+// createInvite makes an invitation. With email_verified false the
+// invitation carries no email at all, so the connection it becomes is
+// never bound to one (chosen; not in the spec).
 func (s *Server) createInvite(w http.ResponseWriter, r *http.Request) {
-	var b emailBody
+	var b inviteBody
 	if !readJSON(w, r, &b) {
+		return
+	}
+	if b.EmailVerified == nil {
+		writeError(w, http.StatusBadRequest, "bad_request")
 		return
 	}
 	k, err := s.Email.Key(b.Email)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_email")
 		return
+	}
+	if !*b.EmailVerified {
+		k = ""
 	}
 	inv, err := s.Invites.Create(r.Context(), k)
 	if err != nil {

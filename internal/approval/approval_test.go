@@ -539,6 +539,109 @@ func TestBootstrapAtStart(t *testing.T) {
 	}
 }
 
+// The bootstrap is one-shot: once the first admin is set, the setting
+// is not used again even when the set empties; the operator arms a new
+// one, which is one-shot too.
+func TestBootstrapOneShot(t *testing.T) {
+	f := newFixture(t, 1)
+	f.m.BootstrapKey = "boot-key"
+	bound := map[string]string{}
+	f.m.BoundConnection = func(_ context.Context, k string) (string, bool, error) { c, ok := bound[k]; return c, ok, nil }
+	ctx := context.Background()
+	if err := f.m.ConnectionAdded(ctx, "c1", "boot-key", true); err != nil || len(f.admins()) != 1 {
+		t.Fatalf("%v %v", err, f.admins())
+	}
+	// Armed while the set is not empty: refused.
+	if err := f.m.ArmBootstrap(ctx, "new-key"); !errors.Is(err, ErrAdminsExist) {
+		t.Fatalf("arm with admins: %v", err)
+	}
+	if err := f.m.ConnectionRemoved(ctx, "c1"); err != nil || len(f.admins()) != 0 {
+		t.Fatalf("%v %v", err, f.admins())
+	}
+	// The set is empty, the setting is still there: no second bootstrap,
+	// neither when a connection binds the email nor at a tick.
+	if err := f.m.ConnectionAdded(ctx, "c2", "boot-key", true); err != nil || len(f.admins()) != 0 {
+		t.Fatalf("second bootstrap: %v %v", err, f.admins())
+	}
+	bound["boot-key"], f.p.active["c2"] = "c2", true
+	f.tick()
+	if len(f.admins()) != 0 {
+		t.Fatalf("second bootstrap at a tick: %v", f.admins())
+	}
+	if err := f.m.Start(ctx); err != nil || !strings.Contains(f.logs.String(), "bootstrap setting ignored") {
+		t.Fatalf("start: %v", err)
+	}
+
+	// The operator arms a new bootstrap for another email: the old one
+	// still does nothing, the armed one makes the admin, once.
+	if err := f.m.ArmBootstrap(ctx, ""); err == nil {
+		t.Fatal("armed an empty key")
+	}
+	if err := f.m.ArmBootstrap(ctx, "new-key"); err != nil {
+		t.Fatal(err)
+	}
+	f.tick()
+	if len(f.admins()) != 0 {
+		t.Fatalf("the configured email bootstrapped after arming another: %v", f.admins())
+	}
+	bound["new-key"], f.p.active["c3"] = "c3", true
+	f.tick()
+	if a := f.admins(); len(a) != 1 || a[0] != "c3" {
+		t.Fatalf("armed bootstrap: %v", a)
+	}
+	if err := f.m.ConnectionRemoved(ctx, "c3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.m.ConnectionAdded(ctx, "c4", "new-key", true); err != nil || len(f.admins()) != 0 {
+		t.Fatalf("armed bootstrap applied twice: %v %v", err, f.admins())
+	}
+	n := 0
+	for _, e := range f.audit() {
+		if e.Type == AuditBootstrapArmed {
+			n++
+			if e.Added != "" || e.ConnectionID != "" {
+				t.Fatalf("armed entry %+v", e)
+			}
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d bootstrap_armed entries", n)
+	}
+}
+
+// A store whose admin set is not empty but that has no bootstrap state
+// (written before the bootstrap was one-shot) is marked as bootstrapped
+// at the start.
+func TestBootstrapStartMarksExistingSet(t *testing.T) {
+	f := newFixture(t, 1, "c1")
+	f.m.BootstrapKey = "boot-key"
+	ctx := context.Background()
+	if err := f.m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.m.ConnectionRemoved(ctx, "c1"); err != nil || len(f.admins()) != 0 {
+		t.Fatalf("%v %v", err, f.admins())
+	}
+	if err := f.m.ConnectionAdded(ctx, "c2", "boot-key", true); err != nil || len(f.admins()) != 0 {
+		t.Fatalf("bootstrapped after the set had admins: %v %v", err, f.admins())
+	}
+}
+
+// An unbound connection, or one without an email, never bootstraps.
+func TestBootstrapNeedsBoundEmail(t *testing.T) {
+	f := newFixture(t, 1)
+	f.m.BootstrapKey = "boot-key"
+	ctx := context.Background()
+	for _, c := range []struct {
+		key   string
+		bound bool
+	}{{"", true}, {"", false}, {"boot-key", false}} {
+		if err := f.m.ConnectionAdded(ctx, "c1", c.key, c.bound); err != nil || len(f.admins()) != 0 {
+			t.Fatalf("%+v: %v %v", c, err, f.admins())
+		}
+	}
+}
+
 // admin_set.add and admin_set.remove are governance actions; the service
 // applies them when approved.
 func TestAdminSetChanges(t *testing.T) {
