@@ -1,0 +1,19 @@
+# LocalStack for the integration tests (KMS, DynamoDB). Run with
+# `make integration`.
+services:
+  localstack:
+    # public.ecr.aws/localstack/localstack:4.9@sha256:59373b4a27dba3ec15c4db0b7455f0cb68c8a42300e2cbbe362b440f9a131697
+    # from VettID's mirror of the same digest (vettid.org .github/mirror)
+    image: ghcr.io/vettid/mirror/localstack@sha256:59373b4a27dba3ec15c4db0b7455f0cb68c8a42300e2cbbe362b440f9a131697
+    ports:
+      - "127.0.0.1:4566:4566"
+    environment:
+      SERVICES: kms,dynamodb
+      LOCALSTACK_HOST: 127.0.0.1:4566
+      DEBUG: "0"
+    mem_limit: 1536m
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:4566/_localstack/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
