@@ -17,4 +17,4 @@ that adds them, with their licence checked for AGPL-3.0 compatibility:
 
 | Module | Version | Licence | Used by |
 |---|---|---|---|
-| `github.com/aws/aws-sdk-go-v2` (`config`, `service/kms`) | `config` v1.33.6, `kms` v1.61.1 (the versions vettid-vault uses) | Apache-2.0 | `internal/keystore` (KMS envelope) |
+| `github.com/aws/aws-sdk-go-v2` (`service/kms`) | `kms` v1.61.1 (the version vettid-vault uses) | Apache-2.0 | `internal/keystore` (KMS envelope) |
