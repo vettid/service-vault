@@ -12,6 +12,7 @@ import (
 
 	"github.com/vettid/vettid-relay/relayclient"
 	"github.com/vettid/vettid-vault/vms/invite"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -33,6 +34,20 @@ func TestPinnedPackagesCompile(t *testing.T) {
 	// vms/invite: a malformed link is refused.
 	if _, err := invite.ParseLink("not a link"); err == nil {
 		t.Fatal("invite.ParseLink accepted a malformed link")
+	}
+
+	// vms/peerwire: a connection.approved body round-trips, and a
+	// connauth challenge carries the 32-byte nonce.
+	tok, rtok, err := peerwire.ParseConnectionApproved(peerwire.ConnectionApprovedBody("a", "b"))
+	if err != nil || tok != "a" || rtok != "b" {
+		t.Fatalf("peerwire connection.approved: %q %q %v", tok, rtok, err)
+	}
+	ch, err := peerwire.NewConnAuthChallenge("01JAAAAAAAAAAAAAAAAAAAAAAA", "compile test")
+	if err != nil || len(ch.Nonce) != peerwire.ConnAuthNonceSize {
+		t.Fatalf("peerwire challenge: %v", err)
+	}
+	if _, err := peerwire.ParseConnAuthChallenge(ch.Marshal()); err != nil {
+		t.Fatalf("peerwire challenge parse: %v", err)
 	}
 
 	// relayclient: a client from the same key reports a mailbox id.

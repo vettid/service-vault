@@ -36,8 +36,8 @@ github.com/coder/websocket v1.8.15 h1:6B2JPeOGlpff2Uz6vOEH1Vzpi0iUz20A+lPVhPHtNU
 github.com/coder/websocket v1.8.15/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
 github.com/vettid/vettid-relay v0.0.0-20261015153542-cc3ce892f9dc h1:46+DZ3MlXvPw1fVaR/my2hssCjbBCq3KwuAhs9PKOjQ=
 github.com/vettid/vettid-relay v0.0.0-20261015153542-cc3ce892f9dc/go.mod h1:d+zS5Kxndcr/zEndHaDVEZaWeuGWFuE9Mh45k3PiCxg=
-github.com/vettid/vettid-vault v0.0.0-20261026162438-7eae0a6d36b7 h1:woXHkBXcGWdQ8Duw1NAwRYAoN39Pg9gf8hKntX94IyE=
-github.com/vettid/vettid-vault v0.0.0-20261026162438-7eae0a6d36b7/go.mod h1:/O9fPHzrLzsp1lpgMENRRl2civR+mHRHkEbs1ETO5lo=
+github.com/vettid/vettid-vault v0.0.0-20261026203241-3222a7ad8f54 h1:WwKtNKL54EyNQo0QgEPkIkguMIdYQSwyw6RqgtLWHeg=
+github.com/vettid/vettid-vault v0.0.0-20261026203241-3222a7ad8f54/go.mod h1:/O9fPHzrLzsp1lpgMENRRl2civR+mHRHkEbs1ETO5lo=
 golang.org/x/crypto v0.57.0 h1:3ZVCjf8Ggz7zneR/EHRVx68Ctf+2pmIMP2UFhh9cC6M=
 golang.org/x/crypto v0.57.0/go.mod h1:Fdz0i5U6CoizGwLda9DttjSk6qlZo25zYNtR+ycvuZA=
 golang.org/x/sys v0.48.0 h1:bbX/i/6MgT9BVLM9RT1thmxL04yeTAhbEz4SyadbXoo=
