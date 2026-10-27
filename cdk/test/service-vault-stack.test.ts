@@ -284,8 +284,30 @@ describe('alarms', () => {
       TreatMissingData: 'breaching',
     });
     const alarms = Object.values<any>(t.findResources('AWS::CloudWatch::Alarm'));
-    expect(alarms).toHaveLength(Object.keys(ALARMS).length + 1);
+    expect(alarms).toHaveLength(Object.keys(ALARMS).length + 2);
     for (const a of alarms) expect(a.Properties.AlarmActions).toEqual([base.alarmTopicArn]);
+  });
+
+  test('the key policy gives the account no way to grant itself use of the key', () => {
+    const key = Object.values<any>(t.findResources('AWS::KMS::Key'))[0].Properties.KeyPolicy;
+    const admin = key.Statement.find((st: any) => st.Sid === 'Administer');
+    const actions: string[] = [admin.Action].flat();
+    for (const a of actions) expect(['kms:Create*', 'kms:CreateGrant', 'kms:*', 'kms:Decrypt', 'kms:GenerateDataKey', 'kms:Encrypt']).not.toContain(a);
+    expect(actions).toContain('kms:CreateAlias');
+  });
+
+  test('recordSealMigrate sets the migration variable, and only then', () => {
+    const env = (t2: Template) => Object.values<any>(t2.findResources('AWS::ECS::TaskDefinition'))[0].Properties.ContainerDefinitions[0].Environment;
+    expect(env(t).find((e: any) => e.Name === 'SV_RECORD_SEAL_MIGRATE')).toBeUndefined();
+    expect(env(synth({ recordSealMigrate: true })).find((e: any) => e.Name === 'SV_RECORD_SEAL_MIGRATE')?.Value).toBe('1');
+  });
+
+  test('key_change: CloudTrail KMS events for the keystore key reach a log group and alarm', () => {
+    const rule = Object.values<any>(t.findResources('AWS::Events::Rule'))[0].Properties;
+    expect(rule.EventPattern.source).toEqual(['aws.kms']);
+    for (const e of ['CreateGrant', 'PutKeyPolicy', 'ScheduleKeyDeletion', 'DisableKey']) expect(rule.EventPattern.detail.eventName).toContain(e);
+    expect(JSON.stringify(rule.EventPattern.detail.resources)).toContain('KeystoreKey');
+    t.hasResourceProperties('AWS::CloudWatch::Alarm', { AlarmName: 'vettid-service-vault-test-key_change' });
   });
 
   test('with an address instead, a topic of its own with that subscription', () => {

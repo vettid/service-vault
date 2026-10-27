@@ -465,3 +465,7 @@ func (s *Service) webhook(ctx context.Context, e *peer.Event, data any) error {
 	key := fmt.Sprintf("%013d.%016x.%s", e.At.UnixMilli(), e.Seq, e.ID)
 	return s.Hooks.Add(ctx, key, w)
 }
+
+// Kinds lists every record kind the service stores (its webhook outbox
+// included), for a migration that must touch them all.
+func Kinds() []string { return []string{kindEmail, kindSignIn, kindSignInReq, kindSignInCur, HookKind} }

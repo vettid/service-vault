@@ -27,6 +27,13 @@ const (
 	kindResp     = "resp"     // cached responses (§8.2)
 )
 
+// Kinds lists every record kind the peer stores, for a migration that
+// must touch them all (internal/sealstore).
+func Kinds() []string {
+	return []string{kindConn, kindInvite, kindAwait, kindRequest, kindOutgoing, kindToken, kindOutbox, kindAuth, kindEvent,
+		kindMsg, kindInner, kindResp}
+}
+
 // Retention (VAULT-MESSAGING §8.2, §6.4).
 const (
 	DedupeRetention   = 16 * 24 * time.Hour

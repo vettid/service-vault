@@ -67,6 +67,21 @@ func NewMemStore() *MemStore { return &MemStore{m: map[string]map[string]Record{
 
 func (s *MemStore) live(r Record) bool { return r.Expires.IsZero() || s.Now().Before(r.Expires) }
 
+// Kinds returns the kinds the store holds records of (tests check that
+// every kind written is one a migration knows).
+func (s *MemStore) Kinds() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for k, m := range s.m {
+		if len(m) > 0 {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Load implements Store.
 func (s *MemStore) Load(_ context.Context, kind string) ([]Record, error) {
 	s.mu.Lock()
