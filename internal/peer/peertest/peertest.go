@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -278,7 +279,11 @@ type Member struct {
 	LastName  string
 
 	rekey    *handshake.Initiator
+	recon    *handshake.Initiator
 	awaitFin *handshake.Responder
+	// Rotations are the identity.rotate links since the session's epoch
+	// (for a reconnect, §6.6).
+	Rotations []*handshake.Rotation
 
 	Got        []*envelope.Inner // messages received in the session
 	Challenges []*peerwire.ConnAuthChallenge
@@ -394,6 +399,16 @@ func (m *Member) handle(msg relayclient.Message) bool {
 			}
 			m.SvcReq, m.SAS, m.ReqEp, m.ini = res.Resp.Token, res.SAS, res.Epoch, nil
 			m.DepositTo(m.SvcReq, res.Fin)
+		case m.recon != nil && env.RecipientKid().Equal(m.recon.EphKid()):
+			res, err := m.recon.HandleResp(msg.Payload, sender, now)
+			if err != nil {
+				m.t.Fatalf("Member: reconnect hs.resp: %v", err)
+			}
+			m.recon = nil
+			m.SvcStand, m.SvcRecon = res.Resp.Token, res.Resp.ReconnectToken
+			m.DepositTo(m.SvcStand, res.Fin)
+			m.KR.Activate(res.Epoch, now)
+			m.Rotations = nil
 		case m.rekey != nil && env.RecipientKid().Equal(m.rekey.EphKid()):
 			res, err := m.rekey.HandleResp(msg.Payload, sender, now)
 			if err != nil {
@@ -415,6 +430,19 @@ func (m *Member) handle(msg relayclient.Message) bool {
 				return true
 			}
 			m.Got = append(m.Got, in)
+			if in.Type == peerwire.TypeTokenIssued {
+				kind, tok, err := peerwire.ParseTokenIssued(in.Body)
+				if err != nil {
+					m.t.Fatalf("Member: token issued: %v", err)
+				}
+				if _, err := peerwire.VerifyHeldToken(tok, m.svc.Relay.PK, m.svc.Relay.Mailbox, m.svc.Relay.URL, m.Addr.PK); err == nil {
+					if kind == "reconnect" {
+						m.SvcRecon = tok
+					} else {
+						m.SvcStand = tok
+					}
+				}
+			}
 			if in.Type == peerwire.TypeConnAuthChallenge {
 				c, err := peerwire.ParseConnAuthChallenge(in.Body)
 				if err != nil {
@@ -565,4 +593,87 @@ func (m *Member) Received(typ string) []*envelope.Inner {
 		}
 	}
 	return out
+}
+
+// RotateIdentity rotates the Member vault's identity and KEM keys (§3.4):
+// identity.rotate signed by both keys in the session, then a rekey under
+// the new key, unless later is set (the session is down: the link waits
+// for a reconnect, §6.6).
+func (m *Member) RotateIdentity(seed byte, later bool) *handshake.Rotation {
+	m.t.Helper()
+	newIK := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed}, 32))
+	newKEM, err := suite.NewPrivateKey(bytes.Repeat([]byte{seed + 1}, 32))
+	if err != nil {
+		m.t.Fatal(err)
+	}
+	r, err := handshake.NewRotation(m.IK, newIK, newKEM.Public())
+	if err != nil {
+		m.t.Fatal(err)
+	}
+	if later {
+		m.Rotations = append(m.Rotations, r)
+	} else {
+		m.SendRotation(r)
+	}
+	m.IK, m.kem = newIK, newKEM
+	if !later {
+		m.StartRekey()
+	}
+	return r
+}
+
+// SendRotation sends one identity.rotate statement in the session.
+func (m *Member) SendRotation(r *handshake.Rotation) {
+	m.t.Helper()
+	body, _ := json.Marshal(map[string]json.RawMessage{"rotation": r.Marshal()})
+	m.Send("identity.rotate", body)
+}
+
+// RotateRelay rotates the Member vault's relay key (§3.4): the new
+// mailbox and tokens for it go out as relay.address.update, deposited with
+// the old key; the service's tokens for the new key then arrive there.
+// The old view is returned (it can still deposit).
+func (m *Member) RotateRelay(w *World, seed byte) *View {
+	m.t.Helper()
+	old := m.R
+	rk := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed}, 32))
+	nv := w.View(rk)
+	if _, err := nv.Register(context.Background()); err != nil {
+		m.t.Fatal(err)
+	}
+	pk := rk.Public().(ed25519.PublicKey)
+	addr := handshake.RelayAddr{URL: RelayURL, Mailbox: relayauth.MailboxID(pk), PK: pk}
+	mint := func(ttl time.Duration) string {
+		tok, err := nv.MintToken(relayauth.EncodeKey(m.svc.Relay.PK), RelayURL, relayclient.TokenOptions{TTL: ttl})
+		if err != nil {
+			m.t.Fatal(err)
+		}
+		return tok
+	}
+	body, _ := json.Marshal(map[string]any{
+		"relay":           map[string]string{"url": addr.URL, "mailbox": addr.Mailbox, "pk": base64.StdEncoding.EncodeToString(pk)},
+		"token":           mint(peerwire.StandingMax),
+		"reconnect_token": mint(300 * 24 * time.Hour),
+	})
+	m.Send("relay.address.update", body) // with the old key
+	m.R, m.rk, m.Addr = nv, rk, addr
+	return old
+}
+
+// Reconnect sends a reconnect hs.init (§6.6) on the service's reconnect
+// token, carrying the rotations since the last epoch.
+func (m *Member) Reconnect() {
+	m.t.Helper()
+	ini, err := handshake.NewInitiator(handshake.InitiatorConfig{
+		Purpose: handshake.PurposeReconnect, Ctx: handshake.EpochCtx(m.KR.Current().ID()),
+		Identity: m.IK, StaticKEM: m.kem.Public(), Relay: m.Addr,
+		Token: m.Mint(peerwire.StandingMax), ReconnectToken: m.Mint(300 * 24 * time.Hour), Rotations: m.Rotations,
+		ResponderIK: m.svc.IK, ResponderEK: m.svc.KEM, ResponderRelayKey: m.svc.Relay.PK,
+		Policy: handshake.PolicyVaultToVault, Now: m.clk.Now(),
+	})
+	if err != nil {
+		m.t.Fatal(err)
+	}
+	m.recon = ini
+	m.DepositTo(m.SvcRecon, ini.Envelope())
 }

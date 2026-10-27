@@ -40,6 +40,7 @@ const (
 const (
 	StateActive = "active"
 	StateStale  = "stale" // the relay refused its token or mailbox (§8.6)
+	// StateSuspended (rotation.go): a rotation conflict.
 )
 
 // RelayRef is a principal's relay address as stored.
@@ -84,6 +85,14 @@ type Connection struct {
 
 	Created   time.Time `json:"created"`
 	Activated time.Time `json:"activated"`
+
+	// Chain is the member's identity.rotate links followed (§3.4), for
+	// "one successor per key"; the last MaxRotations are kept.
+	Chain []json.RawMessage `json:"chain,omitempty"`
+	// PrevRelayPK is the member's relay key before its last
+	// relay.address.update, still recognized until PrevRelayUntil.
+	PrevRelayPK    ed25519.PublicKey `json:"prev_relay_pk,omitempty"`
+	PrevRelayUntil time.Time         `json:"prev_relay_until,omitzero"`
 
 	// The member's credential key pinned at the first signed
 	// connection.authenticate.response (§10.4).
