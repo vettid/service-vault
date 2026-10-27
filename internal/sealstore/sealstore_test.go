@@ -26,7 +26,7 @@ func TestSealedRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	mem := peer.NewMemStore()
 	s := newStore(t, mem, false)
-	secret := []byte(`{"send_key":"c2VjcmV0LXNlc3Npb24ta2V5"}`)
+	secret := []byte(`{"send_key":"test-only"}`)
 	if err := s.Apply(ctx, []peer.Change{{Kind: "conn", ID: "c1", Data: secret}}); err != nil {
 		t.Fatal(err)
 	}
