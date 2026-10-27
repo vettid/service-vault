@@ -258,10 +258,31 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := sc.PutParameter(ctx, &ssm.PutParameterInput{Name: aws.String(cfg.TLSPinParam), Value: aws.String(pin),
-		Type: ssmtypes.ParameterTypeString, Overwrite: aws.Bool(true)}); err != nil {
+	publishPin := func(ctx context.Context) error {
+		_, err := sc.PutParameter(ctx, &ssm.PutParameterInput{Name: aws.String(cfg.TLSPinParam), Value: aws.String(pin),
+			Type: ssmtypes.ParameterTypeString, Overwrite: aws.Bool(true)})
+		return err
+	}
+	if err := publishPin(ctx); err != nil {
 		return fmt.Errorf("publish TLS pin: %w", err)
 	}
+	// Published again every hour: a stack update that touches the
+	// parameter puts back its "unset", and the API's client would then
+	// refuse to start until this task restarts.
+	go func() {
+		t := time.NewTicker(time.Hour)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if err := publishPin(ctx); err != nil {
+					log.Warn("publish TLS pin", "err", err.Error())
+				}
+			}
+		}
+	}()
 
 	rc := relayclient.New(cfg.RelayURL, keys.Relay)
 	if dev.relayCA != "" {

@@ -402,7 +402,9 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false) // payloads are served as their canonical bytes
+	_ = enc.Encode(v)
 }
 
 func writeError(w http.ResponseWriter, status int, code string) {

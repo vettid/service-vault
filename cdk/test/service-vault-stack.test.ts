@@ -76,7 +76,7 @@ describe('network', () => {
     expect(() => synth({ apiClientCidr: '300.0.113.7/32' })).toThrow(/IPv4/);
     expect(() => synth({ apiClientCidr: '203.0.113.7/33' })).toThrow(/IPv4/);
     expect(() => synth({ apiClientCidr: '10.0.0.0/16' })).not.toThrow();
-    expect(() => synth({ apiClientCidr: '203.0.113.7/32' })).not.toThrow();
+    expect(() => synth({ apiClientCidr: '203.0.113.7/32' })).toThrow(/private/); // public: the task has a public IP
   });
 
   test('no load balancer; API discovered through a Cloud Map private DNS namespace', () => {
@@ -325,5 +325,19 @@ describe('alarms', () => {
     ['a bad topic', { alarmTopicArn: 'alerts' }],
   ])('refuses %s', (_n, props) => {
     expect(() => synth(props as Partial<ServiceVaultStackProps>)).toThrow();
+  });
+});
+
+describe('hardening', () => {
+  test('apiClientCidr must be private: the task has a public IP', () => {
+    expect(() => synth({ apiClientCidr: '52.0.0.0/16' })).toThrow(/private/);
+    expect(() => synth({ apiClientCidr: '203.0.113.7/32' })).toThrow(/private/);
+    expect(() => synth({ apiClientCidr: '10.60.0.0/24' })).not.toThrow();
+    expect(() => synth({ apiClientCidr: '172.16.0.0/16' })).not.toThrow();
+  });
+
+  test('the container drops every Linux capability', () => {
+    const c = Object.values<any>(t.findResources('AWS::ECS::TaskDefinition'))[0].Properties.ContainerDefinitions[0];
+    expect(c.LinuxParameters.Capabilities.Drop).toEqual(['ALL']);
   });
 });

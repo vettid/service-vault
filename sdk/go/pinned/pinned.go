@@ -10,7 +10,6 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"net/http"
@@ -39,18 +38,15 @@ func TLSConfig(pin string) (*tls.Config, error) {
 	}
 	return &tls.Config{
 		MinVersion: tls.VersionTLS13,
-		// The chain is not checked against any CA; VerifyPeerCertificate
-		// checks the one thing that matters, the leaf key.
+		// The chain is not checked against any CA; VerifyConnection checks
+		// the one thing that matters, the leaf key. Unlike
+		// VerifyPeerCertificate it also runs on resumed sessions.
 		InsecureSkipVerify: true,
-		VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
-			if len(raw) == 0 {
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
 				return ErrPin
 			}
-			c, err := x509.ParseCertificate(raw[0])
-			if err != nil {
-				return ErrPin
-			}
-			got := sha256.Sum256(c.RawSubjectPublicKeyInfo)
+			got := sha256.Sum256(cs.PeerCertificates[0].RawSubjectPublicKeyInfo)
 			if subtle.ConstantTimeCompare(got[:], want) != 1 {
 				return ErrPin
 			}
@@ -68,5 +64,8 @@ func Client(pin string, timeout time.Duration) (*http.Client, error) {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.TLSClientConfig = cfg
 	t.Proxy = nil
-	return &http.Client{Transport: t, Timeout: timeout}, nil
+	// No redirects: the API never sends one, and following it would carry
+	// the API key somewhere else.
+	return &http.Client{Transport: t, Timeout: timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, nil
 }

@@ -61,6 +61,15 @@ type StatusError struct{ Code int }
 
 func (e *StatusError) Error() string { return fmt.Sprintf("webhook: status %d", e.Code) }
 
+// defaultClient follows no redirect (a 3xx is an answer, not a place to
+// send a signed event) and ignores proxy settings in the environment.
+var defaultClient = func() *http.Client {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.Proxy = nil
+	return &http.Client{Timeout: 15 * time.Second, Transport: t,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+}()
+
 // Deliver posts e once. The body and event id are the same on every
 // attempt; each is signed afresh. It returns nil on 2xx, ErrRejected
 // (wrapped) on a 4xx other than 408 and 429, and another error when the
@@ -91,7 +100,7 @@ func (d *Dispatcher) post(ctx context.Context, id string, body []byte, now time.
 	req.Header.Set(webhook.HeaderSignature, sig)
 	c := d.Client
 	if c == nil {
-		c = &http.Client{Timeout: 15 * time.Second}
+		c = defaultClient
 	}
 	resp, err := c.Do(req)
 	if err != nil {

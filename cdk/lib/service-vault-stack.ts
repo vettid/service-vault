@@ -184,6 +184,12 @@ export class ServiceVaultStack extends cdk.Stack {
       if (Number(m[5]) < MIN_API_CIDR_PREFIX) {
         throw new Error(`apiClientCidr must not be open to the internet: a prefix of /${MIN_API_CIDR_PREFIX} or longer (got "${props.apiClientCidr}")`);
       }
+      // The task has a public IP: a public range would reach the API port
+      // from the internet. Private ranges only (RFC 1918).
+      const [a, b] = [Number(m[1]), Number(m[2])];
+      if (!(a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168))) {
+        throw new Error(`apiClientCidr must be a private (RFC 1918) range: the task has a public IP (got "${props.apiClientCidr}")`);
+      }
     }
     if (props.adminThreshold !== undefined && !(Number.isInteger(props.adminThreshold) && props.adminThreshold >= 1 && props.adminThreshold <= 64)) {
       throw new Error(`adminThreshold must be an integer from 1 to 64 (got ${props.adminThreshold})`);
@@ -369,9 +375,14 @@ export class ServiceVaultStack extends cdk.Stack {
         )
       : ecs.ContainerImage.fromRegistry(props.image);
 
+    // No Linux capabilities: the daemon needs none (an unprivileged port,
+    // a non-root user).
+    const linuxParameters = new ecs.LinuxParameters(this, 'Linux');
+    linuxParameters.dropCapabilities(ecs.Capability.ALL);
     taskDef.addContainer('ServiceVault', {
       image: containerImage,
       essential: true,
+      linuxParameters,
       portMappings: [{ containerPort: API_PORT }],
       readonlyRootFilesystem: true,
       environment: {
