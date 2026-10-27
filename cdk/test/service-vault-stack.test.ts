@@ -1,6 +1,6 @@
 import * as cdk from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
-import { API_PORT, CLIENT_PARAMS, ServiceVaultStack, ssmPrefix, ServiceVaultStackProps, TASK_CPU, TASK_MEMORY_MIB } from '../lib/service-vault-stack';
+import { ALARMS, API_PORT, CLIENT_PARAMS, ServiceVaultStack, ssmPrefix, ServiceVaultStackProps, TASK_CPU, TASK_MEMORY_MIB } from '../lib/service-vault-stack';
 
 const DIGEST = 'sha256:' + 'a'.repeat(64);
 const CLIENT_SG = 'sg-0123456789abcdef0';
@@ -9,6 +9,7 @@ const base: ServiceVaultStackProps = {
   image: `ghcr.io/vettid/service-vault@${DIGEST}`,
   webhookUrl: 'https://member.example.org/webhooks/service-vault',
   apiClientSecurityGroupId: CLIENT_SG,
+  alarmTopicArn: 'arn:aws:sns:us-east-1:123456789012:alerts',
   env: { account: '123456789012', region: 'us-east-1' },
 };
 const synth = (props: Partial<ServiceVaultStackProps> = {}) => {
@@ -262,5 +263,45 @@ describe('data', () => {
         expect(JSON.stringify(r)).toContain(tableId);
       }
     }
+  });
+});
+
+describe('alarms', () => {
+  test('one per marked log line, and one for no running task; all notify the topic', () => {
+    for (const name of Object.keys(ALARMS)) {
+      t.hasResourceProperties('AWS::Logs::MetricFilter', {
+        FilterPattern: `{ $.alarm = "${name}" }`,
+        MetricTransformations: [Match.objectLike({ MetricName: name, MetricNamespace: 'VettID/ServiceVault/test' })],
+      });
+      t.hasResourceProperties('AWS::CloudWatch::Alarm', { AlarmName: `vettid-service-vault-test-${name}`, Threshold: 1 });
+    }
+    t.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      AlarmName: 'vettid-service-vault-test-down',
+      MetricName: 'CPUUtilization',
+      Namespace: 'AWS/ECS',
+      Statistic: 'SampleCount',
+      ComparisonOperator: 'LessThanThreshold',
+      TreatMissingData: 'breaching',
+    });
+    const alarms = Object.values<any>(t.findResources('AWS::CloudWatch::Alarm'));
+    expect(alarms).toHaveLength(Object.keys(ALARMS).length + 1);
+    for (const a of alarms) expect(a.Properties.AlarmActions).toEqual([base.alarmTopicArn]);
+  });
+
+  test('with an address instead, a topic of its own with that subscription', () => {
+    const t2 = synth({ alarmTopicArn: undefined, alarmEmail: 'ops@example.org' });
+    t2.hasResourceProperties('AWS::SNS::Subscription', { Protocol: 'email', Endpoint: 'ops@example.org' });
+    const topicId = Object.keys(t2.findResources('AWS::SNS::Topic'))[0];
+    for (const a of Object.values<any>(t2.findResources('AWS::CloudWatch::Alarm'))) {
+      expect(a.Properties.AlarmActions).toEqual([{ Ref: topicId }]);
+    }
+  });
+
+  test.each([
+    ['no destination', { alarmTopicArn: undefined }],
+    ['two destinations', { alarmEmail: 'ops@example.org' }],
+    ['a bad topic', { alarmTopicArn: 'alerts' }],
+  ])('refuses %s', (_n, props) => {
+    expect(() => synth(props as Partial<ServiceVaultStackProps>)).toThrow();
   });
 });

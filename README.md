@@ -60,7 +60,8 @@ npx cdk deploy \
   -c envName=prod \
   -c image=ghcr.io/vettid/service-vault@sha256:<digest> \
   -c webhookUrl=https://<application>/webhooks/service-vault \
-  -c apiClientSecurityGroupId=sg-<member API task>
+  -c apiClientSecurityGroupId=sg-<member API task> \
+  -c alarmTopicArn=arn:aws:sns:<region>:<account>:<topic>
 ```
 
 | Context | Required | Meaning |
@@ -75,6 +76,17 @@ npx cdk deploy \
 | `adminBootstrapEmail` | no | `SV_ADMIN_BOOTSTRAP_EMAIL` (see "Admin approvals"). It is plain text in the task definition and stays in that definition's revisions after a redeploy without it: use an address you don't mind being kept there (a staging test member), or arm the bootstrap with `service-vault admin bootstrap` instead |
 | `adminThreshold` | no (1) | `SV_ADMIN_THRESHOLD` |
 | `approvalTtl` | no (`24h`) | `SV_APPROVAL_TTL` |
+| `alarmTopicArn` or `alarmEmail` | one of them | Where the alarms go (below). Either an SNS topic that reaches a person, or an address for a topic of the stack's own; confirm that subscription from the email AWS sends. For staging, use vettid.org's vault alerts topic, which emails the admin address: `aws ssm get-parameter --name /vettid-org/staging/vault/alerts-topic-arn` |
+
+**Alarms.** They always notify someone: synth fails without a
+destination.
+- `rotate_conflict`: a member's identity key got two successors, so a
+  connection is suspended (see "When a member moves phones").
+- `webhook_dropped`: a webhook was given up after 24 hours, so the
+  application missed an event.
+- `down`: no task has run for 10 minutes. It watches the ECS service's
+  CPU samples, which ECS reports without Container Insights. A
+  reclaimed Spot task is replaced well within that time.
 
 **What it creates.** A VPC with public subnets in two AZs, no NAT gateway,
 the free DynamoDB gateway endpoint and no interface endpoints. An ECS
