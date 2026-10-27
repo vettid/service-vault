@@ -38,7 +38,9 @@ func infoFromPrincipal(pr handshake.Principal) *peerInfo {
 // KEM key (§6.1): first contact on an invitation's open token, or a
 // reconnect (§6.6). It applies the member vault's checks for a
 // connection inviter (§6.3, §6.4, §10.4).
-func (p *Peer) handleInit(raw []byte, sender ed25519.PublicKey, c *Connection, onReconnectToken bool, now time.Time) disposition {
+// jti is the collect jti: a first contact must come on its invitation's
+// own open token.
+func (p *Peer) handleInit(raw []byte, sender ed25519.PublicKey, c *Connection, onReconnectToken bool, jti string, now time.Time) disposition {
 	pi, err := handshake.OpenInit(raw, p.lookupKEM, now)
 	if err != nil {
 		p.audit("hs_init_rejected", connID(c))
@@ -91,7 +93,9 @@ func (p *Peer) handleInit(raw []byte, sender ed25519.PublicKey, c *Connection, o
 		return ackAfterFlush
 	}
 	inv := p.invites[body.Ctx]
-	if inv == nil || inv.Used || inv.Withdrew || !now.Before(inv.Exp) {
+	if inv == nil || inv.Used || inv.Withdrew || !now.Before(inv.Exp) || jti == "" || jti != inv.OpenJTI {
+		// The open token deposited with must be the invitation's own: an
+		// invitation id with another invitation's token does not redeem it.
 		p.audit("invite_invalid", "")
 		pi.Discard()
 		return ackAfterFlush // single use; expired, used or revoked invites are rejected (§6.4)

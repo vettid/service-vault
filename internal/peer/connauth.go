@@ -121,6 +121,12 @@ func (p *Peer) connAuthResponse(c *Connection, body []byte, now time.Time) {
 	if ch == nil || ch.ConnID != c.ID {
 		return // §8.1: matches no pending request
 	}
+	if !now.Before(ch.Exp) {
+		// Past its exp the challenge is no longer pending, though the
+		// housekeeping that expires it may not have run yet.
+		p.audit("auth_response_late", c.ID)
+		return
+	}
 	delete(p.challenges, ch.ID)
 	p.markDirty(kindAuth, ch.ID)
 	ev := &Event{ConnectionID: c.ID, RequestID: ch.ID, Tag: c.Tag, Context: ch.Context}
