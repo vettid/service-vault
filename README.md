@@ -70,9 +70,9 @@ npx cdk deploy \
 | `envName` | no (`prod`) | Part of every name and export: stack `ServiceVault-<envName>`. |
 | `relayUrl` | no (`https://relay.vettid.org`) | The relay. |
 | `serviceName` | no (`VettID Member Service`) | The name members see. |
-| `apiClientSecurityGroupId` / `apiClientCidr` | no | Who may reach the API port. Neither: nobody until a rule is added. An open CIDR is refused. |
+| `apiClientSecurityGroupId` / `apiClientCidr` | no | Who may reach the API port. Neither: nobody until a rule is added. `apiClientCidr` is IPv4, /16 or narrower (an operator is /32). |
 | `vpcCidr` | no (`10.60.0.0/24`) | The VPC (two /26 public subnets). |
-| `adminBootstrapEmail` | no | `SV_ADMIN_BOOTSTRAP_EMAIL` (see "Admin approvals") |
+| `adminBootstrapEmail` | no | `SV_ADMIN_BOOTSTRAP_EMAIL` (see "Admin approvals"). It is plain text in the task definition and stays in that definition's revisions after a redeploy without it: use an address you don't mind being kept there (a staging test member), or arm the bootstrap with `service-vault admin bootstrap` instead |
 | `adminThreshold` | no (1) | `SV_ADMIN_THRESHOLD` |
 | `approvalTtl` | no (`24h`) | `SV_APPROVAL_TTL` |
 
@@ -214,8 +214,10 @@ both bind.
 
 **Sign-in controls** (MEMBER-SERVICE-PLAN §4.2):
 
-- *Two-minute TTL.* The challenge's inner `exp` is two minutes; an
-  unanswered sign-in reads `expired`.
+- *Five-minute TTL.* The challenge's inner `exp` is five minutes; an
+  unanswered sign-in reads `expired`. The member finds the request on
+  the phone and enters the credential password, so a website should say
+  that the phone will ask for it.
 - *One pending sign-in per member.* A new sign-in for an email that is
   within the rate limits supersedes that email's pending one, whether or
   not the email is bound: the older
