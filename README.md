@@ -84,6 +84,10 @@ destination.
   connection is suspended (see "When a member moves phones").
 - `webhook_dropped`: a webhook was given up after 24 hours, so the
   application missed an event.
+- `key_change`: the keystore KMS key was changed (a grant, its
+  policy, disabled, or scheduled for deletion). CloudTrail's KMS
+  management events reach EventBridge from the account's or the
+  organization's trail. They are kept a year in a log group of their own.
 - `down`: no task has run for 10 minutes. It watches the ECS service's
   CPU samples, which ECS reports without Container Insights. A
   reclaimed Spot task is replaced well within that time.
@@ -129,6 +133,24 @@ exports, `ServiceVault-<envName>-{VpcId, PublicSubnetIds,
 SecurityGroupId, NamespaceId, NamespaceArn, NamespaceName, ApiUrl,
 WebhookSecretArn, TlsPinParameterName, TlsPinParameterArn}`. Importing
 those locks them, so prefer the parameters.
+
+**Records at rest.** The peer's records (connections with their
+session keys, handshakes in flight, the tokens members issued, the
+outbox, the dedupe markers and cached responses) are sealed with
+AES-256-GCM before they reach DynamoDB (`internal/sealstore`). The
+associated data is the record's kind and id, so a record can't be moved
+to another place. The record key is kept in the keystore, sealed by the
+KMS key that only the task role may use. So the table, or a backup of it,
+gives away no traffic and lets nobody forge records. The KMS key policy
+lets the account administer the key but not grant itself its use: there
+is no `CreateGrant`.
+
+Records written before sealing are sealed in place on the start that
+creates the record key. After that, a record that is not sealed is
+refused and the start fails, because whoever can write the table must not
+be able to slip in a forged plaintext record. If that first start was cut
+short, run one start with `SV_RECORD_SEAL_MIGRATE=1` to finish the
+migration, then remove it.
 
 **Container configuration.**
 

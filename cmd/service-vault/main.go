@@ -43,6 +43,7 @@ import (
 	"github.com/vettid/service-vault/internal/approval"
 	"github.com/vettid/service-vault/internal/connect"
 	"github.com/vettid/service-vault/internal/keystore"
+	"github.com/vettid/service-vault/internal/sealstore"
 	"github.com/vettid/service-vault/internal/peer"
 	"github.com/vettid/service-vault/internal/service"
 	"github.com/vettid/service-vault/internal/signin"
@@ -240,6 +241,10 @@ func serve(args []string) error {
 	if err != nil {
 		return fmt.Errorf("keystore: %w", err)
 	}
+	peerStore, err := sealedPeerStore(ctx, &keystore.AWSKMS{Client: ac.kms}, cfg.KMSKeyID, tbl.Blobs(), tbl.Peer(), os.Getenv(sealstore.MigrateEnv) == "1", log)
+	if err != nil {
+		return err
+	}
 	keys, err := peer.KeysFromSeeds(secrets.Peer)
 	if err != nil {
 		return err
@@ -282,7 +287,7 @@ func serve(args []string) error {
 		return fmt.Errorf("approvals: %w", err)
 	}
 	svc.Approvals = approvals
-	p, err := peer.New(peer.Config{Keys: keys, Relay: rc, RelayURL: cfg.RelayURL, Profile: cfg.Profile, Store: tbl.Peer(),
+	p, err := peer.New(peer.Config{Keys: keys, Relay: rc, RelayURL: cfg.RelayURL, Profile: cfg.Profile, Store: peerStore,
 		Events: svc, Log: log})
 	if err != nil {
 		return err
@@ -476,4 +481,32 @@ func healthcheck(listen string) error {
 		return fmt.Errorf("status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// sealedPeerStore returns the peer's record store sealed under the record
+// key (internal/sealstore), creating the key on first use. On the start
+// that creates it, or with migrate, records written before sealing are
+// sealed in place first.
+func sealedPeerStore(ctx context.Context, kc keystore.KMS, keyID string, blobs keystore.Blobs, inner peer.Store, migrate bool, log *slog.Logger) (*sealstore.Store, error) {
+	created := false
+	rk, err := keystore.LoadOrCreate(ctx, kc, keyID, blobs, sealstore.KeyName, func() (*sealstore.RecordKey, error) {
+		created = true
+		return sealstore.NewRecordKey()
+	})
+	if err != nil {
+		return nil, fmt.Errorf("keystore: %w", err)
+	}
+	st, err := sealstore.New(inner, rk.Key, created || migrate)
+	clear(rk.Key)
+	if err != nil {
+		return nil, err
+	}
+	if st.Legacy {
+		if err := st.Migrate(ctx, peer.Kinds()); err != nil {
+			return nil, fmt.Errorf("seal records: %w", err)
+		}
+		st.Legacy = false
+		log.Info("peer records sealed")
+	}
+	return st, nil
 }

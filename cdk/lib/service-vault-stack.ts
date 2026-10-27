@@ -5,6 +5,8 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as eventTargets from 'aws-cdk-lib/aws-events-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as logs from 'aws-cdk-lib/aws-logs';
@@ -30,12 +32,23 @@ export const DEFAULT_SERVICE_NAME = 'VettID Member Service';
 export const DEFAULT_VPC_CIDR = '10.60.0.0/24';
 
 /**
+ * KMS calls on the keystore key that change who may use it, or whether it
+ * works: each one raises the key_change alarm (CloudTrail via EventBridge).
+ */
+export const KEY_CHANGE_EVENTS = [
+  'CreateGrant', 'RetireGrant', 'RevokeGrant', 'PutKeyPolicy', 'DisableKey', 'EnableKey', 'ScheduleKeyDeletion',
+  'CancelKeyDeletion', 'DisableKeyRotation', 'UpdateKeyDescription', 'DeleteAlias', 'UpdateAlias',
+];
+
+/**
  * What the account may do with the keystore key: administer it, never
  * encrypt or decrypt with it. PutKeyPolicy stays, so the policy can be
  * corrected without AWS support.
  */
 export const KEY_ADMIN_ACTIONS = [
-  'kms:Create*', 'kms:Describe*', 'kms:Enable*', 'kms:List*', 'kms:Put*', 'kms:Update*',
+  // CreateAlias only: kms:Create* would include CreateGrant, with which
+  // any principal the account allows it could grant itself Decrypt.
+  'kms:CreateAlias', 'kms:Describe*', 'kms:Enable*', 'kms:List*', 'kms:Put*', 'kms:Update*',
   'kms:Revoke*', 'kms:Disable*', 'kms:Get*', 'kms:Delete*', 'kms:TagResource', 'kms:UntagResource',
   'kms:ScheduleKeyDeletion', 'kms:CancelKeyDeletion', 'kms:RotateKeyOnDemand',
 ];
@@ -442,6 +455,39 @@ export class ServiceVaultStack extends cdk.Stack {
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
       }));
     }
+    // Key changes: CloudTrail's KMS management events for the keystore key
+    // (an organization or account trail delivers them to EventBridge) go
+    // to a log group of their own, kept a year, and any of them alarms.
+    const keyEvents = new logs.LogGroup(this, 'KeyEvents', {
+      retention: logs.RetentionDays.ONE_YEAR,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+    new events.Rule(this, 'KeyChangeRule', {
+      description: 'KMS calls that change the service vault keystore key (key_change alarm)',
+      eventPattern: {
+        source: ['aws.kms'],
+        detailType: ['AWS API Call via CloudTrail'],
+        detail: { eventName: KEY_CHANGE_EVENTS, resources: { ARN: [this.key.keyArn] } },
+      },
+      targets: [new eventTargets.CloudWatchLogGroup(keyEvents)],
+    });
+    const keyChanges = new logs.MetricFilter(this, 'Alarm-key_change', {
+      logGroup: keyEvents,
+      filterPattern: logs.FilterPattern.allEvents(),
+      metricNamespace: `VettID/ServiceVault/${envName}`,
+      metricName: 'key_change',
+      metricValue: '1',
+    }).metric({ statistic: 'Sum', period: cdk.Duration.minutes(5) });
+    notify(new cloudwatch.Alarm(this, 'Alarm-key_change-alarm', {
+      alarmName: `${prefix}-key_change`,
+      alarmDescription: 'The keystore KMS key was changed: a grant, its policy, disabled, or scheduled for deletion',
+      metric: keyChanges,
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    }));
+
     // Down: ECS reports the service's CPU every minute while a task runs
     // (without Container Insights too); no data for 10 minutes means no
     // task (a Spot reclamation is replaced in a minute or two).
