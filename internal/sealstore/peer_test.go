@@ -74,6 +74,16 @@ func TestPeerOnSealedStore(t *testing.T) {
 			}
 		}
 	}
+	// The peer writes only kinds the migration knows.
+	known := map[string]bool{}
+	for _, k := range peer.Kinds() {
+		known[k] = true
+	}
+	for _, k := range mem.Kinds() {
+		if !known[k] {
+			t.Fatalf("the peer wrote kind %q, which peer.Kinds() does not list", k)
+		}
+	}
 	// A restart reads it all back, and the session still works: a
 	// challenge reaches the member.
 	rec, _ := p.Invite(inv.ID)

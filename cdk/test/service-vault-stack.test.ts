@@ -296,6 +296,12 @@ describe('alarms', () => {
     expect(actions).toContain('kms:CreateAlias');
   });
 
+  test('recordSealMigrate sets the migration variable, and only then', () => {
+    const env = (t2: Template) => Object.values<any>(t2.findResources('AWS::ECS::TaskDefinition'))[0].Properties.ContainerDefinitions[0].Environment;
+    expect(env(t).find((e: any) => e.Name === 'SV_RECORD_SEAL_MIGRATE')).toBeUndefined();
+    expect(env(synth({ recordSealMigrate: true })).find((e: any) => e.Name === 'SV_RECORD_SEAL_MIGRATE')?.Value).toBe('1');
+  });
+
   test('key_change: CloudTrail KMS events for the keystore key reach a log group and alarm', () => {
     const rule = Object.values<any>(t.findResources('AWS::Events::Rule'))[0].Properties;
     expect(rule.EventPattern.source).toEqual(['aws.kms']);

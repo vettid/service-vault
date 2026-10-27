@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -43,8 +44,8 @@ import (
 	"github.com/vettid/service-vault/internal/approval"
 	"github.com/vettid/service-vault/internal/connect"
 	"github.com/vettid/service-vault/internal/keystore"
-	"github.com/vettid/service-vault/internal/sealstore"
 	"github.com/vettid/service-vault/internal/peer"
+	"github.com/vettid/service-vault/internal/sealstore"
 	"github.com/vettid/service-vault/internal/service"
 	"github.com/vettid/service-vault/internal/signin"
 	"github.com/vettid/service-vault/internal/store"
@@ -241,7 +242,7 @@ func serve(args []string) error {
 	if err != nil {
 		return fmt.Errorf("keystore: %w", err)
 	}
-	peerStore, err := sealedPeerStore(ctx, &keystore.AWSKMS{Client: ac.kms}, cfg.KMSKeyID, tbl.Blobs(), tbl.Peer(), os.Getenv(sealstore.MigrateEnv) == "1", log)
+	records, err := sealedStore(ctx, &keystore.AWSKMS{Client: ac.kms}, cfg.KMSKeyID, tbl.Blobs(), tbl.Peer(), tbl, true, os.Getenv(sealstore.MigrateEnv) == "1", log)
 	if err != nil {
 		return err
 	}
@@ -271,8 +272,8 @@ func serve(args []string) error {
 		rc.HTTP = hc
 	}
 	sender := &webhook.Dispatcher{URL: cfg.WebhookURL, Secret: cfg.WebhookSecret}
-	svc := &service.Service{Store: tbl.Peer(), ServiceName: cfg.ServiceName, Log: log,
-		Hooks:   &webhook.Outbox{Store: tbl.Peer(), Kind: service.HookKind, Sender: sender, Log: log},
+	svc := &service.Service{Store: records, ServiceName: cfg.ServiceName, Log: log,
+		Hooks:   &webhook.Outbox{Store: records, Kind: service.HookKind, Sender: sender, Log: log},
 		Limiter: &signin.Limiter{Counters: tbl.Counters(), Email: cfg.EmailLimits, Source: cfg.SourceLimits}}
 	bootKey := ""
 	if cfg.AdminBootstrapEmail != "" {
@@ -280,14 +281,14 @@ func serve(args []string) error {
 			return errors.New("SV_ADMIN_BOOTSTRAP_EMAIL: not an email address")
 		}
 	}
-	approvals := &approval.Manager{Store: tbl.Peer(), Pager: tbl, ServiceName: cfg.ServiceName,
+	approvals := &approval.Manager{Store: records, Pager: records, ServiceName: cfg.ServiceName,
 		Threshold: cfg.AdminThreshold, TTL: cfg.ApprovalTTL, BootstrapKey: bootKey, BoundConnection: svc.BoundConnection, Log: log,
-		Hooks: &webhook.Outbox{Store: tbl.Peer(), Kind: approval.HookKind, Sender: sender, Log: log}}
+		Hooks: &webhook.Outbox{Store: records, Kind: approval.HookKind, Sender: sender, Log: log}}
 	if err := approvals.Start(ctx); err != nil {
 		return fmt.Errorf("approvals: %w", err)
 	}
 	svc.Approvals = approvals
-	p, err := peer.New(peer.Config{Keys: keys, Relay: rc, RelayURL: cfg.RelayURL, Profile: cfg.Profile, Store: peerStore,
+	p, err := peer.New(peer.Config{Keys: keys, Relay: rc, RelayURL: cfg.RelayURL, Profile: cfg.Profile, Store: records,
 		Events: svc, Log: log})
 	if err != nil {
 		return err
@@ -401,7 +402,12 @@ func admin(args []string, out io.Writer) error {
 		return err
 	}
 	tbl := &store.Table{Client: ac.ddb, Name: cfg.Table}
-	return armBootstrap(ctx, &keystore.AWSKMS{Client: ac.kms}, cfg.KMSKeyID, tbl.Blobs(), tbl.Peer(), *addr, out)
+	kc := &keystore.AWSKMS{Client: ac.kms}
+	records, err := sealedStore(ctx, kc, cfg.KMSKeyID, tbl.Blobs(), tbl.Peer(), tbl, false, false, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		return err
+	}
+	return armBootstrap(ctx, kc, cfg.KMSKeyID, tbl.Blobs(), records, *addr, out)
 }
 
 // armBootstrap computes the email's index key under the service vault's
@@ -483,30 +489,39 @@ func healthcheck(listen string) error {
 	return nil
 }
 
-// sealedPeerStore returns the peer's record store sealed under the record
-// key (internal/sealstore), creating the key on first use. On the start
-// that creates it, or with migrate, records written before sealing are
-// sealed in place first.
-func sealedPeerStore(ctx context.Context, kc keystore.KMS, keyID string, blobs keystore.Blobs, inner peer.Store, migrate bool, log *slog.Logger) (*sealstore.Store, error) {
-	created := false
+// recordKinds is every kind the service vault stores.
+func recordKinds() []string {
+	return slices.Concat(peer.Kinds(), service.Kinds(), approval.Kinds())
+}
+
+// sealedStore returns the record store sealed under the record key
+// (internal/sealstore). create makes the key on first use (the daemon;
+// the admin CLI needs an existing one). With migrate (the operator's
+// SV_RECORD_SEAL_MIGRATE=1, for the deploy that upgrades a deployment from
+// before sealing), records written before sealing are sealed in place
+// first.
+func sealedStore(ctx context.Context, kc keystore.KMS, keyID string, blobs keystore.Blobs, inner peer.Store, pages sealstore.Pager, create, migrate bool, log *slog.Logger) (*sealstore.Store, error) {
 	rk, err := keystore.LoadOrCreate(ctx, kc, keyID, blobs, sealstore.KeyName, func() (*sealstore.RecordKey, error) {
-		created = true
+		if !create {
+			return nil, errors.New("no record key: start the daemon first")
+		}
 		return sealstore.NewRecordKey()
 	})
 	if err != nil {
 		return nil, fmt.Errorf("keystore: %w", err)
 	}
-	st, err := sealstore.New(inner, rk.Key, created || migrate)
+	st, err := sealstore.New(inner, rk.Key, migrate)
 	clear(rk.Key)
 	if err != nil {
 		return nil, err
 	}
-	if st.Legacy {
-		if err := st.Migrate(ctx, peer.Kinds()); err != nil {
+	st.Pages = pages
+	if migrate {
+		if err := st.Migrate(ctx, recordKinds()); err != nil {
 			return nil, fmt.Errorf("seal records: %w", err)
 		}
 		st.Legacy = false
-		log.Info("peer records sealed")
+		log.Warn("records sealed: remove " + sealstore.MigrateEnv)
 	}
 	return st, nil
 }

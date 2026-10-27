@@ -37,7 +37,8 @@ export const DEFAULT_VPC_CIDR = '10.60.0.0/24';
  */
 export const KEY_CHANGE_EVENTS = [
   'CreateGrant', 'RetireGrant', 'RevokeGrant', 'PutKeyPolicy', 'DisableKey', 'EnableKey', 'ScheduleKeyDeletion',
-  'CancelKeyDeletion', 'DisableKeyRotation', 'UpdateKeyDescription', 'DeleteAlias', 'UpdateAlias',
+  'CancelKeyDeletion', 'DisableKeyRotation', 'EnableKeyRotation', 'RotateKeyOnDemand', 'UpdateKeyDescription',
+  'CreateAlias', 'DeleteAlias', 'UpdateAlias', 'TagResource', 'UntagResource', 'ImportKeyMaterial', 'ReplicateKey',
 ];
 
 /**
@@ -127,6 +128,12 @@ export interface ServiceVaultStackProps extends cdk.StackProps {
    */
   readonly alarmTopicArn?: string;
   readonly alarmEmail?: string;
+  /**
+   * The one deploy that upgrades a deployment from before records were
+   * sealed: SV_RECORD_SEAL_MIGRATE=1 seals the existing records in place
+   * at start (README "Records at rest"). Deploy again without it after.
+   */
+  readonly recordSealMigrate?: boolean;
 }
 
 /**
@@ -378,6 +385,7 @@ export class ServiceVaultStack extends cdk.Stack {
         SV_TLS_NAME: `${DISCOVERY_NAME}.${this.namespace.namespaceName}`,
         AWS_REGION: this.region,
         ...approvalEnv,
+        ...(props.recordSealMigrate ? { SV_RECORD_SEAL_MIGRATE: '1' } : {}),
       },
       secrets: {
         SV_API_KEY_HASHES: ecs.Secret.fromSecretsManager(apiKeyHashes),

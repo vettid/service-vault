@@ -115,3 +115,16 @@ func TestKeySize(t *testing.T) {
 		t.Fatal("a short key")
 	}
 }
+
+// Page reads through the pager and opens the records (the audit log).
+func TestPage(t *testing.T) {
+	ctx := context.Background()
+	mem := peer.NewMemStore()
+	s := newStore(t, mem, false)
+	s.Pages = mem
+	_ = s.Apply(ctx, []peer.Change{{Kind: "audit", ID: "a1", Data: []byte(`{"e":1}`)}, {Kind: "audit", ID: "a2", Data: []byte(`{"e":2}`)}})
+	recs, err := s.Page(ctx, "audit", "a1", 10)
+	if err != nil || len(recs) != 1 || string(recs[0].Data) != `{"e":2}` {
+		t.Fatalf("Page: %v %v", recs, err)
+	}
+}

@@ -1,11 +1,15 @@
-// Package sealstore encrypts the peer's records at rest. The peer keeps
-// session keys, handshake secrets and the tokens members issued to the
-// service in its records (internal/peer); stored as they are, anyone who
-// could read the table or a backup of it could read and forge
-// member↔service traffic without the keystore key. Store seals each
-// record with AES-256-GCM under a record key that the keystore holds
-// sealed by the KMS key only the task may use, so the table alone gives
-// nothing away.
+// Package sealstore encrypts the service vault's records at rest. The
+// peer keeps session keys, handshake secrets and the tokens members
+// issued to the service in its records (internal/peer); the service, the
+// approvals and the webhook outboxes keep sign-ins, the admin set and the
+// audit log. Stored as they are, anyone who could read the table or a
+// backup of it could read member↔service traffic, and anyone who could
+// write it could forge any of them (an admin, a connection) without the
+// keystore key. Store seals each record with AES-256-GCM under a record
+// key that the keystore holds sealed by the KMS key only the task may
+// use. A sealed record is bound to its kind and id; it is not bound to a
+// version, so a table writer can still put back an older sealed copy of
+// a record, or delete one.
 package sealstore
 
 import (
@@ -24,10 +28,12 @@ import (
 const KeyName = "record-key"
 
 // Migration: records written before sealing are accepted, and sealed in
-// place, only on the start that creates the record key, or when the
-// operator sets MigrateEnv (a migration that was cut short). Otherwise an
-// unsealed record is refused: a marker in the table could be deleted by
-// whoever can write it, to slip in forged plaintext records.
+// place, only when the operator sets MigrateEnv, for the one deploy that
+// upgrades a deployment from before sealing (it may be repeated: a
+// migration cut short goes on). Otherwise an unsealed record is refused.
+// Nothing in the table turns it on: whoever can write the table must not
+// be able to slip in forged plaintext records, whether by deleting a
+// marker or the record key.
 const MigrateEnv = "SV_RECORD_SEAL_MIGRATE"
 
 // prefix starts every sealed record. Plaintext records are JSON or a
@@ -61,8 +67,14 @@ func NewRecordKey() (*RecordKey, error) {
 // before sealing); without it, such a record is an error.
 type Store struct {
 	Inner  peer.Store
+	Pages  Pager // optional: Page reads through it
 	Legacy bool
 	aead   cipher.AEAD
+}
+
+// Pager is the paged read of an append-only kind (the audit log).
+type Pager interface {
+	Page(ctx context.Context, kind, after string, limit int) ([]peer.Record, error)
 }
 
 // New returns a Store sealing under key (32 bytes).
@@ -165,6 +177,25 @@ func (s *Store) Get(ctx context.Context, kind, id string) ([]byte, bool, error) 
 		return nil, false, err
 	}
 	return pt, true, nil
+}
+
+// Page reads a page of a kind through Pages and opens it.
+func (s *Store) Page(ctx context.Context, kind, after string, limit int) ([]peer.Record, error) {
+	if s.Pages == nil {
+		return nil, errors.New("sealstore: no pager")
+	}
+	recs, err := s.Pages.Page(ctx, kind, after, limit)
+	if err != nil {
+		return nil, err
+	}
+	for i := range recs {
+		pt, _, err := s.open(kind, recs[i].ID, recs[i].Data)
+		if err != nil {
+			return nil, err
+		}
+		recs[i].Data = pt
+	}
+	return recs, nil
 }
 
 // Apply implements peer.Store: every write is sealed; deletes pass.
