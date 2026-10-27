@@ -328,7 +328,9 @@ admin's connection.
   recovered only by `service-vault admin bootstrap` or by lowering m.
 - *Threshold.* m = `SV_ADMIN_THRESHOLD` (default 1, 1-of-n); each
   approval keeps the m it was created with, so m changes by configuration
-  only. m distinct admins (connections) among those asked must approve. A
+  only. m distinct admins (connections) among those asked must approve,
+  and only approvals of admins still in the set count: an admin removed
+  or severed after approving no longer stands behind the action. A
   denial does not veto: the approval is `denied` only when m can no
   longer be reached (`reason: denied`, or `admins_removed` when admins
   left the set) (chosen; not in the spec). m larger than the number of
