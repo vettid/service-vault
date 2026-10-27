@@ -177,8 +177,21 @@ type batch struct {
 
 func (m *Manager) batch(now time.Time) *batch { return &batch{m: m, now: now} }
 
+// marshal encodes v without HTML escaping: an action's payload is kept
+// and served as its canonical bytes, so that hashing them as served gives
+// its action_hash (json.Marshal would turn <, > and & into \u003c...).
+func marshal(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+}
+
 func (b *batch) put(kind, id string, v any, exp time.Time) error {
-	data, err := json.Marshal(v)
+	data, err := marshal(v)
 	if err != nil {
 		return err
 	}
@@ -194,7 +207,7 @@ func (b *batch) audit(e *AuditEntry) error {
 		return err
 	}
 	e.ID, e.At = id, b.now.UTC().Truncate(time.Millisecond)
-	data, err := json.Marshal(e)
+	data, err := marshal(e)
 	if err != nil {
 		return err
 	}
@@ -900,22 +913,41 @@ func (m *Manager) ArmBootstrap(ctx context.Context, emailKey string) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	set, err := m.admins(ctx)
+	// The admin CLI is a process of its own, beside the running daemon:
+	// the write holds only if the admin set is still the empty one read
+	// here (the daemon may bootstrap an admin meanwhile).
+	recs, err := m.Store.Load(ctx, kindAdmins)
 	if err != nil {
 		return err
 	}
-	if len(set) > 0 {
-		return ErrAdminsExist
+	var guard peer.Change
+	switch {
+	case len(recs) == 0:
+		guard = peer.Change{Kind: kindAdmins, ID: adminsID, Data: []byte(`{"admins":[]}`), IfAbsent: true}
+	default:
+		var v struct {
+			Admins []string `json:"admins"`
+		}
+		if err := json.Unmarshal(recs[0].Data, &v); err != nil {
+			return err
+		}
+		if len(v.Admins) > 0 {
+			return ErrAdminsExist
+		}
+		guard = peer.Change{Kind: kindAdmins, ID: adminsID, Data: recs[0].Data, IfVersion: recs[0].Version}
 	}
 	now := m.now()
 	b := m.batch(now)
+	b.changes = append(b.changes, guard)
 	if err := b.put(kindBoot, bootID, &bootState{State: bootArmed, EmailKey: emailKey, At: now.UTC()}, time.Time{}); err != nil {
 		return err
 	}
 	if err := b.audit(&AuditEntry{Type: AuditBootstrapArmed}); err != nil {
 		return err
 	}
-	if err := b.apply(ctx); err != nil {
+	if err := b.apply(ctx); errors.Is(err, peer.ErrConflict) {
+		return ErrAdminsExist // an admin was set meanwhile
+	} else if err != nil {
 		return err
 	}
 	m.log().Info("admin bootstrap armed")

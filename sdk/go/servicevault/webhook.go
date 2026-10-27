@@ -246,6 +246,8 @@ type Receiver struct {
 	Replay ReplayCache
 	// Now is the clock; default time.Now.
 	Now func() time.Time
+
+	inflight sync.Map // event ids being handled by this Receiver
 }
 
 // ParseWebhook verifies r's signature at now with the default tolerance
@@ -291,6 +293,14 @@ func (rc *Receiver) Handler(handle func(ctx context.Context, e Event) error) htt
 		switch {
 		case err == nil:
 		case errors.Is(err, ErrReplay):
+			// A delivery of an event still being handled (the service
+			// vault retried after its timeout) is not done yet: 503, so it
+			// comes again; if the first attempt fails, the event is not
+			// lost.
+			if _, busy := rc.inflight.Load(parseID(r)); busy {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
 			w.WriteHeader(http.StatusOK)
 			return
 		case errors.Is(err, ErrSignature):
@@ -306,6 +316,9 @@ func (rc *Receiver) Handler(handle func(ctx context.Context, e Event) error) htt
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
+		id := ev.EventHeader().ID
+		rc.inflight.Store(id, struct{}{})
+		defer rc.inflight.Delete(id)
 		if err := handle(r.Context(), ev); err != nil {
 			if rc.Replay != nil {
 				_ = rc.Replay.Remove(context.WithoutCancel(r.Context()), ev.EventHeader().ID)
@@ -403,3 +416,7 @@ func decodeEvent(h Header, data json.RawMessage) (Event, error) {
 	}
 	return ev, nil
 }
+
+// parseID is the event id a request names (its header, checked against
+// the body by Parse).
+func parseID(r *http.Request) string { return r.Header.Get(webhook.HeaderEventID) }
