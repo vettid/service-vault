@@ -358,10 +358,6 @@ func (p *Peer) handleMessage(ctx context.Context, m relayclient.Message, now tim
 		return p.handleInit(m.Payload, sender, c, true, m.JTI, now), nil
 	}
 	if env.Mode() == envelope.ModeSealed {
-		if c != nil && !p.rateAllow(c.ID, now) {
-			p.audit("rate_limited", c.ID) // §7.3, for handshakes too
-			return ackAfterFlush, nil
-		}
 		return p.handleSealed(env, m.Payload, sender, c, m.JTI, now), nil
 	}
 	if c != nil && c.kr != nil {
@@ -396,6 +392,12 @@ func connID(c *Connection) string {
 func (p *Peer) handleSealed(env *envelope.Envelope, raw []byte, sender ed25519.PublicKey, c *Connection, jti string, now time.Time) disposition {
 	rk := env.RecipientKid()
 	if rk.Equal(p.cfg.Keys.KEM.Public().Kid()) {
+		// A new hs.init from a known connection counts against its rate
+		// (§7.3); an hs.resp to our own rekey (below) never does.
+		if c != nil && !p.rateAllow(c.ID, now) {
+			p.audit("rate_limited", c.ID)
+			return ackAfterFlush
+		}
 		return p.handleInit(raw, sender, c, false, jti, now)
 	}
 	for id, og := range p.outgoing {

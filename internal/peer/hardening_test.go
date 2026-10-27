@@ -51,41 +51,41 @@ func TestLateAnswerRefused(t *testing.T) {
 	}
 }
 
-// Repeated reconnects keep one handshake awaiting hs.fin; the tokens
-// minted for the ones replaced are revoked.
-func TestReconnectFloodBounded(t *testing.T) {
+// A copy of an hs.init already answered (the same bytes, an outbox
+// retry) is not answered again, and the handshake completes; reconnects
+// beyond MaxAwaitingPerConn are refused without touching the ones
+// awaiting (no token is revoked: the member may be using one).
+func TestReconnectCopiesAndBound(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
 	cid := f.connect(m, "")
+	m.Reconnect()
+	m.ResendReconnect()
+	f.pump()
+	if c := f.p.conns[cid]; c.kr.Current().ID() != m.KR.Current().ID() {
+		t.Fatal("the reconnect did not complete with its copy around")
+	}
+
 	m.IgnoreStray = true
-	for range 3 {
+	for range MaxAwaitingPerConn + 2 {
 		m.Reconnect()
 		if _, err := f.p.Step(context.Background(), 0); err != nil {
 			t.Fatal(err)
 		}
 	}
-	n, var1 := 0, []string(nil)
+	n := 0
 	for _, aw := range f.p.awaiting {
 		if aw.ConnID == cid {
 			n++
-			var1 = aw.JTIs
 		}
 	}
-	if n != 1 {
+	if n != MaxAwaitingPerConn {
 		t.Fatalf("%d reconnects awaiting hs.fin", n)
 	}
-	denied := 0
 	for jti, tok := range f.p.issued {
-		if tok.ConnID == cid && tok.Denied && f.w.Denied(jti) {
-			denied++
+		if tok.ConnID == cid && (tok.Denied || f.w.Denied(jti)) {
+			t.Fatal("a token was revoked")
 		}
-	}
-	if denied < 4 || len(var1) != 2 {
-		t.Fatalf("tokens of replaced reconnects revoked: %d", denied)
-	}
-	f.pump() // the last one completes
-	if c := f.p.conns[cid]; c.kr.Current().ID() != m.KR.Current().ID() {
-		t.Fatal("the last reconnect did not complete")
 	}
 }
 

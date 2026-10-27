@@ -63,6 +63,9 @@ func (p *Peer) Authenticate(ctx context.Context, connID, ctxt string, ttl time.D
 	}
 	exp := now.Add(ttl).UTC().Truncate(time.Millisecond)
 	if p.sendInnerExp(c, peerwire.TypeConnAuthChallenge, wc.Marshal(), exp, now) == "" {
+		if c.State == StateActive && p.outboxFor(c.ID) >= MaxOutboxPerConn {
+			return "", ErrBusy
+		}
 		return "", ErrNotFound
 	}
 	p.challenges[wc.RequestID] = &challenge{ID: wc.RequestID, ConnID: connID, Nonce: wc.Nonce, Context: ctxt, Exp: exp}

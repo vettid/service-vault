@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
@@ -246,9 +247,10 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 		pi.Discard()
 		return
 	}
-	// One reconnect at a time per connection: a newer hs.init replaces
-	// one still awaiting hs.fin, whose tokens are revoked.
-	p.dropConnAwaiting(c.ID, handshake.PurposeReconnect, now)
+	if !p.admitHandshake(c.ID, handshake.PurposeReconnect, pi.Th1()) {
+		pi.Discard()
+		return
+	}
 	var jtis []string
 	var err error
 	if cfg.Token, cfg.ReconnectToken, jtis, err = p.mintReconnectPair(c.ID, &c.Peer, now); err != nil {
@@ -270,7 +272,8 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 	c.State = StateActive
 	p.markDirty(kindConn, c.ID)
 	id := p.newID(now)
-	p.awaiting[id] = &awaiting{ID: id, ConnID: c.ID, Purpose: handshake.PurposeReconnect, JTIs: jtis, Created: now,
+	th1 := pi.Th1()
+	p.awaiting[id] = &awaiting{ID: id, ConnID: c.ID, Purpose: handshake.PurposeReconnect, Th1: th1[:], Created: now,
 		Expires: now.Add(HandshakeTTL), r: resp}
 	p.markDirty(kindAwait, id)
 	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: env}, now)
@@ -287,6 +290,10 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 	pi, err := handshake.AcceptRekey(raw, in, ep, now)
 	if err != nil {
 		p.audit("rekey_rejected", c.ID)
+		return ackAfterFlush
+	}
+	if !p.admitHandshake(c.ID, handshake.PurposeRekey, pi.Th1()) {
+		pi.Discard()
 		return ackAfterFlush
 	}
 	// Crossing rekeys: the lower th1 wins (§6.5).
@@ -310,11 +317,9 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 		p.audit("rekey_refused", c.ID)
 		return ackAfterFlush
 	}
-	// One rekey at a time per connection: this one replaces an earlier
-	// one still awaiting hs.fin.
-	p.dropConnAwaiting(c.ID, handshake.PurposeRekey, now)
 	id := p.newID(now)
-	p.awaiting[id] = &awaiting{ID: id, ConnID: c.ID, Purpose: handshake.PurposeRekey, Created: now,
+	th1 := pi.Th1()
+	p.awaiting[id] = &awaiting{ID: id, ConnID: c.ID, Purpose: handshake.PurposeRekey, Th1: th1[:], Created: now,
 		Expires: now.Add(HandshakeTTL), r: resp}
 	p.markDirty(kindAwait, id)
 	p.markDirty(kindConn, c.ID) // the epoch's receive count moved
@@ -407,22 +412,38 @@ func (p *Peer) dropAwaiting(id string, now time.Time) {
 		p.denyConnTokens(aw.ConnID, now)
 		p.endInvite(aw.InviteID, InviteExpired, now)
 	}
-	for _, j := range aw.JTIs {
-		p.denyJTI(j, now)
-	}
 	aw.r.Abort()
 	delete(p.awaiting, id)
 	p.markDirty(kindAwait, id)
 }
 
-// dropConnAwaiting drops the connection's handshakes of a purpose that
-// still await hs.fin (their reconnect tokens revoked).
-func (p *Peer) dropConnAwaiting(connID string, purpose handshake.Purpose, now time.Time) {
-	for id, aw := range p.awaiting {
-		if aw.ConnID == connID && aw.New == nil && aw.Purpose == purpose {
-			p.dropAwaiting(id, now)
+// MaxAwaitingPerConn bounds the handshakes of one purpose (rekey,
+// reconnect) awaiting hs.fin for one connection (chosen; not in the
+// spec): a member vault cannot pile them up, while a legitimate retry
+// still has room.
+const MaxAwaitingPerConn = 2
+
+// admitHandshake reports whether a connection's hs.init of a purpose is
+// to be answered: not a copy of one already answered (the same th1; an
+// outbox retry re-deposits the same bytes), and within the bound. The
+// handshakes already awaiting are left alone: the member may be using
+// the tokens of one of them.
+func (p *Peer) admitHandshake(connID string, purpose handshake.Purpose, th1 [32]byte) bool {
+	n := 0
+	for _, aw := range p.awaiting {
+		if aw.ConnID != connID || aw.New != nil || aw.Purpose != purpose {
+			continue
 		}
+		if bytes.Equal(aw.Th1, th1[:]) {
+			return false // answered already; its hs.resp is on its way
+		}
+		n++
 	}
+	if n >= MaxAwaitingPerConn {
+		p.audit("handshakes_awaiting", connID)
+		return false
+	}
+	return true
 }
 
 // startRekey initiates a rekey of a connection's session when its epoch

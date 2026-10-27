@@ -759,3 +759,10 @@ func (m *Member) AcceptOnToken(link, otherLink string) {
 		m.t.Fatalf("deposit: %v", err)
 	}
 }
+
+// ResendReconnect deposits the pending reconnect's hs.init again, the
+// same bytes, as an outbox retry after a lost relay answer does.
+func (m *Member) ResendReconnect() {
+	m.t.Helper()
+	m.DepositTo(m.SvcRecon, m.recon.Envelope())
+}

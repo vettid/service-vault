@@ -165,9 +165,9 @@ type awaiting struct {
 	Purpose  handshake.Purpose `json:"purpose"`
 	InviteID string            `json:"invite_id,omitempty"`
 	Held     HeldToken         `json:"held"` // the peer's token from hs.init
-	// JTIs are the tokens minted for a reconnect's hs.resp: revoked if
-	// the handshake is dropped before hs.fin.
-	JTIs    []string                 `json:"jtis,omitempty"`
+	// Th1 identifies the hs.init answered, so that a copy of it (an
+	// outbox retry re-deposits the same bytes) is not answered twice.
+	Th1     []byte                   `json:"th1,omitempty"`
 	Resp    handshake.ResponderState `json:"resp"`
 	Created time.Time                `json:"created"`
 	Expires time.Time                `json:"expires"`

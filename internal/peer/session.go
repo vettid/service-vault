@@ -278,6 +278,10 @@ func (p *Peer) removeConnection(c *Connection, dir string, now time.Time) {
 // ErrNotFound is an unknown or inactive connection or invitation.
 var ErrNotFound = errors.New("peer: not found")
 
+// ErrBusy is a connection whose member mailbox is not taking deposits:
+// MaxOutboxPerConn of them are waiting.
+var ErrBusy = errors.New("peer: connection busy")
+
 // Remove ends a connection from the service's side (§7.4): the member's
 // vault gets connection.removed, best effort.
 func (p *Peer) Remove(ctx context.Context, connID string) error {

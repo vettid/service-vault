@@ -184,7 +184,9 @@ func (p *Peer) deposit(ctx context.Context, e *outboxEntry, now time.Time) (fini
 		}
 		return true, err
 	case codeQuotaExceeded:
-		if c != nil && e.Token == "" && re.Quota == relayclient.QuotaToken {
+		// §8.6: a quota_exceeded without its quota member (an older relay)
+		// is taken for the token's.
+		if c != nil && e.Token == "" && (re.Quota == relayclient.QuotaToken || re.Quota == "") {
 			// §8.6: the standing token's quota is spent; a fresh token
 			// cures it. Other quotas are the member mailbox's: retry later.
 			p.refreshHeld(c, now, true)
