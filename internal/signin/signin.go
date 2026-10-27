@@ -13,9 +13,11 @@ import (
 )
 
 // ChallengeTTL is the life of a sign-in challenge: the inner exp of
-// connection.authenticate.challenge, which caps the member vault's own
-// 10-minute bound (§10.4).
-const ChallengeTTL = 2 * time.Minute
+// connection.authenticate.challenge, within the member vault's own
+// 10-minute bound (§10.4). Five minutes (owner decision 2026-10-27): on
+// staging two minutes was too short to find the request on the phone and
+// enter the credential password.
+const ChallengeTTL = 5 * time.Minute
 
 // MaxContext is the bound on a challenge's context (§10.4).
 const MaxContext = 256

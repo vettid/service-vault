@@ -25,6 +25,20 @@ export const DEFAULT_RELAY_URL = 'https://relay.vettid.org';
 export const DEFAULT_SERVICE_NAME = 'VettID Member Service';
 export const DEFAULT_VPC_CIDR = '10.60.0.0/24';
 
+/**
+ * What the account may do with the keystore key: administer it, never
+ * encrypt or decrypt with it. PutKeyPolicy stays, so the policy can be
+ * corrected without AWS support.
+ */
+export const KEY_ADMIN_ACTIONS = [
+  'kms:Create*', 'kms:Describe*', 'kms:Enable*', 'kms:List*', 'kms:Put*', 'kms:Update*',
+  'kms:Revoke*', 'kms:Disable*', 'kms:Get*', 'kms:Delete*', 'kms:TagResource', 'kms:UntagResource',
+  'kms:ScheduleKeyDeletion', 'kms:CancelKeyDeletion', 'kms:RotateKeyOnDemand',
+];
+
+/** The widest IPv4 prefix allowed for apiClientCidr. */
+export const MIN_API_CIDR_PREFIX = 16;
+
 /** An image reference pinned by digest, with no tag: <repository>@sha256:<64 hex>. */
 const DIGEST_IMAGE = /^([a-z0-9.-]+(?::[0-9]+)?\/[a-z0-9._\/-]+)@(sha256:[0-9a-f]{64})$/;
 /** A private ECR repository URI: <account>.dkr.ecr.<region>.amazonaws.com/<name>. */
@@ -43,7 +57,7 @@ export interface ServiceVaultStackProps extends cdk.StackProps {
   readonly serviceName?: string;
   /** Security group of the API's client (the member API task); allowed on API_PORT. */
   readonly apiClientSecurityGroupId?: string;
-  /** Or a CIDR allowed on API_PORT (never 0.0.0.0/0 or ::/0). */
+  /** Or an IPv4 CIDR allowed on API_PORT, /16 or narrower (MIN_API_CIDR_PREFIX). */
   readonly apiClientCidr?: string;
   /** The VPC's CIDR (two /26 public subnets are carved from it). */
   readonly vpcCidr?: string;
@@ -51,7 +65,8 @@ export interface ServiceVaultStackProps extends cdk.StackProps {
    * The first admin's email (SV_ADMIN_BOOTSTRAP_EMAIL): the connection bound
    * to it (from an invitation with a verified email) becomes the first
    * admin, once; the bootstrap is one-shot and recorded in the table
-   * (README "Admin approvals").
+   * (README "Admin approvals"). Plain text in the task definition, kept in
+   * its revisions after a redeploy without it.
    */
   readonly adminBootstrapEmail?: string;
   /** How many distinct admins must approve (SV_ADMIN_THRESHOLD; default 1). */
@@ -100,8 +115,14 @@ export class ServiceVaultStack extends cdk.Stack {
     if (!/^https:\/\//.test(relayUrl)) {
       throw new Error(`relayUrl must be an https:// URL (got "${relayUrl}")`);
     }
-    if (props.apiClientCidr !== undefined && /\/0$/.test(props.apiClientCidr)) {
-      throw new Error('apiClientCidr must not be open to the internet');
+    if (props.apiClientCidr !== undefined) {
+      const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/.exec(props.apiClientCidr);
+      if (!m || m.slice(1, 5).some((o) => Number(o) > 255) || Number(m[5]) > 32) {
+        throw new Error(`apiClientCidr must be an IPv4 CIDR such as 203.0.113.7/32 (got "${props.apiClientCidr}")`);
+      }
+      if (Number(m[5]) < MIN_API_CIDR_PREFIX) {
+        throw new Error(`apiClientCidr must not be open to the internet: a prefix of /${MIN_API_CIDR_PREFIX} or longer (got "${props.apiClientCidr}")`);
+      }
     }
     if (props.adminThreshold !== undefined && !(Number.isInteger(props.adminThreshold) && props.adminThreshold >= 1 && props.adminThreshold <= 64)) {
       throw new Error(`adminThreshold must be an integer from 1 to 64 (got ${props.adminThreshold})`);
@@ -168,12 +189,25 @@ export class ServiceVaultStack extends cdk.Stack {
     });
 
     // The keystore's envelope key: GenerateDataKey wraps each stored
-    // private key's data key, Decrypt unwraps it.
+    // private key's data key, Decrypt unwraps it. Its policy replaces the
+    // default (the account root with kms:*, which lets any principal the
+    // account grants kms:Decrypt on * unwrap the keystore): the account
+    // administers the key, and only the task role (below) uses it.
     this.key = new kms.Key(this, 'KeystoreKey', {
       alias: `alias/${prefix}-keystore`,
       description: 'VettID service vault: keystore envelope encryption',
       enableKeyRotation: true,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
+      policy: new iam.PolicyDocument({
+        statements: [
+          new iam.PolicyStatement({
+            sid: 'Administer',
+            principals: [new iam.AccountRootPrincipal()],
+            actions: KEY_ADMIN_ACTIONS,
+            resources: ['*'],
+          }),
+        ],
+      }),
     });
 
     // Values are never in code: generated here, replaced by the operator
@@ -229,6 +263,14 @@ export class ServiceVaultStack extends cdk.Stack {
         sid: 'KeystoreKey',
         actions: ['kms:GenerateDataKey', 'kms:Decrypt'],
         resources: [this.key.keyArn],
+      }),
+    );
+    this.key.addToResourcePolicy(
+      new iam.PolicyStatement({
+        sid: 'TaskUse',
+        principals: [new iam.ArnPrincipal(taskDef.taskRole.roleArn)],
+        actions: ['kms:GenerateDataKey', 'kms:Decrypt'],
+        resources: ['*'],
       }),
     );
     taskDef.taskRole.addToPrincipalPolicy(
@@ -293,8 +335,14 @@ export class ServiceVaultStack extends cdk.Stack {
     // One Spot task. ECS does not fall back from FARGATE_SPOT to FARGATE
     // on its own, so the strategy is Spot only: a reclaimed task is
     // replaced by a new Spot task (its state is all in DynamoDB). Deploys
-    // stop the old task before starting the new one (min 0 / max 100), so
-    // there is never more than one task holding the relay mailboxes.
+    // stop the old task before starting the new one (min 0 / max 100).
+    // That is best effort: a task that is stopping (SIGTERM, up to
+    // stopTimeout) can overlap its replacement, as can a Spot
+    // reclamation. The daemon tolerates it: SIGTERM stops its loops at
+    // once; the peer's writes are conditional on the version it read, so
+    // a second writer's change makes a flush fail and that peer exit
+    // rather than overwrite (ECS then starts it again from the table);
+    // relay messages are deduplicated by id; webhooks are at least once.
     this.service = new ecs.FargateService(this, 'Service', {
       serviceName: prefix,
       cluster,

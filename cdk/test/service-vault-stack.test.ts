@@ -68,7 +68,14 @@ describe('network', () => {
 
   test('an open CIDR for the API is refused', () => {
     expect(() => synth({ apiClientCidr: '0.0.0.0/0' })).toThrow(/internet/);
-    expect(() => synth({ apiClientCidr: '::/0' })).toThrow(/internet/);
+    expect(() => synth({ apiClientCidr: '0.0.0.0/1' })).toThrow(/internet/);
+    expect(() => synth({ apiClientCidr: '10.0.0.0/15' })).toThrow(/internet/);
+    expect(() => synth({ apiClientCidr: '::/0' })).toThrow(/IPv4/);
+    expect(() => synth({ apiClientCidr: '203.0.113.7' })).toThrow(/IPv4/);
+    expect(() => synth({ apiClientCidr: '300.0.113.7/32' })).toThrow(/IPv4/);
+    expect(() => synth({ apiClientCidr: '203.0.113.7/33' })).toThrow(/IPv4/);
+    expect(() => synth({ apiClientCidr: '10.0.0.0/16' })).not.toThrow();
+    expect(() => synth({ apiClientCidr: '203.0.113.7/32' })).not.toThrow();
   });
 
   test('no load balancer; API discovered through a Cloud Map private DNS namespace', () => {
@@ -196,6 +203,22 @@ describe('data', () => {
     });
     const key = Object.values<any>(t.findResources('AWS::KMS::Key'))[0].Properties;
     expect(key.KeySpec ?? 'SYMMETRIC_DEFAULT').toBe('SYMMETRIC_DEFAULT');
+  });
+
+  test('key policy: the account administers the key, only the task role uses it', () => {
+    const key = Object.values<any>(t.findResources('AWS::KMS::Key'))[0].Properties;
+    const roleId = Object.keys(t.findResources('AWS::IAM::Role')).find((id) => id.startsWith('TaskTaskRole'));
+    const stmts = key.KeyPolicy.Statement;
+    expect(stmts.map((s: any) => s.Sid).sort()).toEqual(['Administer', 'TaskUse']);
+    for (const s of stmts) expect(s.Effect).toBe('Allow');
+    const admin = stmts.find((s: any) => s.Sid === 'Administer');
+    for (const a of asList(admin.Action)) {
+      expect(a).not.toMatch(/^kms:(\*|Decrypt|Encrypt|GenerateDataKey|ReEncrypt|Sign|Verify|GenerateMac|DeriveSharedSecret)/);
+    }
+    expect(asList(admin.Action)).toContain('kms:Put*'); // PutKeyPolicy: the policy stays correctable
+    const use = stmts.find((s: any) => s.Sid === 'TaskUse');
+    expect(asList(use.Action).sort()).toEqual(['kms:Decrypt', 'kms:GenerateDataKey']);
+    expect(use.Principal).toEqual({ AWS: { 'Fn::GetAtt': [roleId, 'Arn'] } });
   });
 
   test('task role: only kms:GenerateDataKey and kms:Decrypt, on the keystore key', () => {

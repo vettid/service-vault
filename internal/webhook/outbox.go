@@ -131,7 +131,8 @@ func (o *Outbox) Flush(ctx context.Context) error {
 		switch {
 		case err == nil:
 		case errors.Is(err, ErrRejected):
-			o.log().Error("webhook rejected", "event_id", e.ID, "type", e.Type)
+			// The application's own answer (README "Delivery"), not a fault here.
+			o.log().Warn("webhook rejected", "event_id", e.ID, "type", e.Type)
 		case ctx.Err() == nil && o.now().Sub(e.CreatedAt) >= o.maxAge():
 			o.log().Error("webhook dropped: undeliverable", "event_id", e.ID, "type", e.Type, "err", errCode(ctx, err))
 		default:
