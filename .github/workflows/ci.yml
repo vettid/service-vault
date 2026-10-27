@@ -152,6 +152,7 @@ jobs:
           -c image=ghcr.io/vettid/service-vault@sha256:0000000000000000000000000000000000000000000000000000000000000000
           -c webhookUrl=https://member.example.org/webhooks/service-vault
           -c apiClientSecurityGroupId=sg-00000000000000000
+          -c alarmTopicArn=arn:aws:sns:us-east-1:000000000000:alerts
           > /dev/null
 
   publish:

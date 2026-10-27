@@ -134,7 +134,7 @@ func (o *Outbox) Flush(ctx context.Context) error {
 			// The application's own answer (README "Delivery"), not a fault here.
 			o.log().Warn("webhook rejected", "event_id", e.ID, "type", e.Type)
 		case ctx.Err() == nil && o.now().Sub(e.CreatedAt) >= o.maxAge():
-			o.log().Error("webhook dropped: undeliverable", "event_id", e.ID, "type", e.Type, "err", errCode(ctx, err))
+			o.log().Error("webhook dropped: undeliverable", "alarm", "webhook_dropped", "event_id", e.ID, "type", e.Type, "err", errCode(ctx, err))
 		default:
 			o.log().Warn("webhook delivery", "event_id", e.ID, "type", e.Type, "err", errCode(ctx, err))
 			return err

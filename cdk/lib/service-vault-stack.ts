@@ -1,4 +1,6 @@
 import * as cdk from 'aws-cdk-lib';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as cwactions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
@@ -8,6 +10,8 @@ import * as kms from 'aws-cdk-lib/aws-kms';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as servicediscovery from 'aws-cdk-lib/aws-servicediscovery';
+import * as sns from 'aws-cdk-lib/aws-sns';
+import * as subs from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 
@@ -56,6 +60,14 @@ export const CLIENT_PARAMS = [
   'webhook-secret-arn',
 ] as const;
 
+/** Log lines the daemon marks for an alarm (`"alarm": <name>`). */
+export const ALARMS = {
+  /** A member's identity key got two successors; the connection is suspended (internal/peer/rotation.go). */
+  rotate_conflict: 'A member identity rotation conflict suspended a connection (two vaults rotating, or a replayed copy)',
+  /** A webhook was given up after the outbox's MaxAge (internal/webhook/outbox.go): the application missed an event. */
+  webhook_dropped: 'A webhook was dropped as undeliverable after 24 h: the application missed an event',
+} as const;
+
 /** The widest IPv4 prefix allowed for apiClientCidr. */
 export const MIN_API_CIDR_PREFIX = 16;
 
@@ -93,6 +105,15 @@ export interface ServiceVaultStackProps extends cdk.StackProps {
   readonly adminThreshold?: number;
   /** How long an approval stays open, a Go duration such as `24h` (SV_APPROVAL_TTL). */
   readonly approvalTtl?: string;
+  /**
+   * Where the alarms go; exactly one is required, so that an alarm always
+   * reaches a person: an existing SNS topic (staging: vettid.org's vault
+   * alerts topic, /vettid-org/staging/vault/alerts-topic-arn), or an
+   * address for a topic of this stack's own (confirm the subscription
+   * from the email AWS sends).
+   */
+  readonly alarmTopicArn?: string;
+  readonly alarmEmail?: string;
 }
 
 /**
@@ -149,6 +170,15 @@ export class ServiceVaultStack extends cdk.Stack {
     }
     if (props.approvalTtl !== undefined && !/^([0-9]+(h|m|s))+$/.test(props.approvalTtl)) {
       throw new Error(`approvalTtl must be a duration such as 24h (got "${props.approvalTtl}")`);
+    }
+    if (!props.alarmTopicArn === !props.alarmEmail) {
+      throw new Error('set exactly one of alarmTopicArn and alarmEmail: the alarms must reach a person');
+    }
+    if (props.alarmTopicArn && !/^arn:aws[a-z-]*:sns:[a-z0-9-]+:[0-9]{12}:[A-Za-z0-9_-]+$/.test(props.alarmTopicArn)) {
+      throw new Error(`alarmTopicArn must be an SNS topic ARN (got "${props.alarmTopicArn}")`);
+    }
+    if (props.alarmEmail && !/^[^@\s]+@[a-z0-9.-]+\.[a-z]+$/.test(props.alarmEmail)) {
+      throw new Error(`alarmEmail must be an address (got "${props.alarmEmail}")`);
     }
     const approvalEnv: Record<string, string> = {};
     if (props.adminBootstrapEmail) approvalEnv.SV_ADMIN_BOOTSTRAP_EMAIL = props.adminBootstrapEmail;
@@ -383,6 +413,47 @@ export class ServiceVaultStack extends cdk.Stack {
         dnsTtl: cdk.Duration.seconds(10),
       },
     });
+
+    // ---- Alarms ---------------------------------------------------------------
+    let topic: sns.ITopic;
+    if (props.alarmTopicArn) {
+      topic = sns.Topic.fromTopicArn(this, 'AlarmTopic', props.alarmTopicArn);
+    } else {
+      const own = new sns.Topic(this, 'AlarmTopic', { displayName: `VettID service vault alarms (${envName})` });
+      own.addSubscription(new subs.EmailSubscription(props.alarmEmail!));
+      topic = own;
+    }
+    const notify = (alarm: cloudwatch.Alarm) => alarm.addAlarmAction(new cwactions.SnsAction(topic));
+    for (const [name, description] of Object.entries(ALARMS)) {
+      const metric = new logs.MetricFilter(this, `Alarm-${name}`, {
+        logGroup,
+        filterPattern: logs.FilterPattern.stringValue('$.alarm', '=', name),
+        metricNamespace: `VettID/ServiceVault/${envName}`,
+        metricName: name,
+        metricValue: '1',
+      }).metric({ statistic: 'Sum', period: cdk.Duration.minutes(5) });
+      notify(new cloudwatch.Alarm(this, `Alarm-${name}-alarm`, {
+        alarmName: `${prefix}-${name}`,
+        alarmDescription: description,
+        metric,
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }));
+    }
+    // Down: ECS reports the service's CPU every minute while a task runs
+    // (without Container Insights too); no data for 10 minutes means no
+    // task (a Spot reclamation is replaced in a minute or two).
+    notify(new cloudwatch.Alarm(this, 'Alarm-down', {
+      alarmName: `${prefix}-down`,
+      alarmDescription: 'No service vault task has run for 10 minutes: sign-ins, connects and approvals fail',
+      metric: this.service.metricCpuUtilization({ statistic: 'SampleCount', period: cdk.Duration.minutes(5) }),
+      threshold: 1,
+      evaluationPeriods: 2,
+      comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+    }));
 
     // ---- Exports (the member-service stack reads the SSM parameters below) --
     const out = (id: string, value: string, description: string) =>
