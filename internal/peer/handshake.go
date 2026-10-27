@@ -195,21 +195,37 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 	}
 	var eid [suite.EpochIDSize]byte
 	copy(eid[:], c.LastEpochID)
-	record := c.Peer.Relay.PK
-	if c.relayKeyIs(sender, now) {
-		record = sender
-	}
-	cfg := handshake.ResponderConfig{
-		Identity: p.cfg.Keys.IK, Policy: handshake.PolicyVaultToVault, PinnedSuite: c.Suite,
-		CollectSender: sender, RecordRelayKey: record, KnownInitiatorIK: c.Peer.IK,
-		ExpectedCtx: handshake.EpochCtx(eid), Now: now,
-	}
 	body := pi.Init()
+	// A valid link that gives a key a second successor suspends the
+	// connection (§3.4), whatever else the hs.init carries: such a chain
+	// could never be accepted, and the conflict must not go unnoticed.
 	for _, r := range body.Rotations {
 		if r.Verify() == nil && p.rotationConflict(c, r, now) {
 			pi.Discard()
 			return
 		}
+	}
+	// The member's vault sends every rotation since its last epoch: links
+	// the service already followed (identity.rotate arrived, the rekey did
+	// not) come first, and the chain is then checked from the first one's
+	// old key, provided those links lead to the stored key.
+	start, fresh := c.Peer.IK, body.Rotations
+	known := 0
+	for known < len(body.Rotations) && p.knownSuccessor(c, body.Rotations[known]) {
+		known++
+	}
+	if known > 0 {
+		if !suite.EqualPublic(body.Rotations[known-1].NewIK, c.Peer.IK) {
+			p.audit("reconnect_rotation_behind", c.ID) // would roll the identity back
+			pi.Discard()
+			return
+		}
+		start, fresh = body.Rotations[0].OldIK, body.Rotations[known:]
+	}
+	cfg := handshake.ResponderConfig{
+		Identity: p.cfg.Keys.IK, Policy: handshake.PolicyVaultToVault, PinnedSuite: c.Suite,
+		CollectSender: sender, RecordRelayKey: c.Peer.Relay.PK, KnownInitiatorIK: start,
+		ExpectedCtx: handshake.EpochCtx(eid), Now: now,
 	}
 	st, err1 := p.heldToken(body.Token, &c.Peer)
 	rt, err2 := p.heldToken(body.ReconnectToken, &c.Peer)
@@ -227,18 +243,12 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 		pi.Discard()
 		return
 	}
-	resp, env, err := pi.Respond(cfg) // checks the chain from the stored ik
+	resp, env, err := pi.Respond(cfg) // checks the sender, the ctx and the chain
 	if err != nil {
 		p.audit("reconnect_refused", c.ID)
 		return
 	}
-	if len(body.Rotations) > 0 {
-		var fresh []*handshake.Rotation
-		for _, r := range body.Rotations {
-			if !p.knownSuccessor(c, r) {
-				fresh = append(fresh, r)
-			}
-		}
+	if len(fresh) > 0 {
 		p.followRotation(c, body.From.IK, body.From.KEM, fresh)
 	}
 	c.Standing, c.Reconnect = st, rt

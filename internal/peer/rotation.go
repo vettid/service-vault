@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vettid/vettid-relay/relayauth"
+
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
@@ -31,11 +33,14 @@ const (
 // cannot; a new invitation replaces the connection at activation.
 const StateSuspended = "suspended"
 
-// PrevRelayGrace is how long the member's previous relay key is still
+// PrevRelayGrace bounds how long the member's previous relay key is still
 // recognized as the connection's after a relay.address.update: deposits
 // made before the rotation, and resends of the update itself (§3.4 (b)),
-// arrive with it. It is the longest a standing token we issued for the
-// old key can last (peerwire.StandingMax).
+// arrive with it. The grace ends earlier, at the first message from the
+// new key: deposits to one mailbox stay in order (§8.3), so nothing from
+// before the rotation is still to come; the tokens issued to the old key
+// are then revoked. A second rotation within the grace replaces the
+// previous key (the first one's late deposits are then dropped).
 const PrevRelayGrace = 30 * 24 * time.Hour
 
 // identityRotate follows one link of the member's rotation chain (§3.4):
@@ -83,8 +88,21 @@ func (p *Peer) followRotation(c *Connection, ik ed25519.PublicKey, kem *suite.Pu
 		// still in use; the chain a peer may send is at most this long.
 		c.Chain = c.Chain[len(c.Chain)-handshake.MaxRotations:]
 	}
+	p.dropConnOutgoing(c)
 	p.markDirty(kindConn, c.ID)
 	p.log().Info("member identity rotated", "connection_id", c.ID)
+}
+
+// dropConnOutgoing abandons a rekey the service started on a connection:
+// it named the member's previous keys, so its hs.resp can no longer be
+// accepted. The member's own rekey under the new keys follows (§3.4), or
+// the service starts another.
+func (p *Peer) dropConnOutgoing(c *Connection) {
+	for id, og := range p.outgoing {
+		if og.ConnID == c.ID {
+			p.dropOutgoing(id)
+		}
+	}
 }
 
 // knownSuccessor reports whether r is a link already accepted.
@@ -123,9 +141,12 @@ func (p *Peer) suspend(c *Connection, now time.Time) {
 	}
 	c.State = StateSuspended
 	p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == c.ID })
-	for id, og := range p.outgoing {
-		if og.ConnID == c.ID {
-			p.dropOutgoing(id)
+	p.dropConnOutgoing(c)
+	for id, aw := range p.awaiting {
+		if aw.ConnID == c.ID {
+			aw.r.Abort()
+			delete(p.awaiting, id)
+			p.markDirty(kindAwait, id)
 		}
 	}
 	p.markDirty(kindConn, c.ID)
@@ -137,7 +158,12 @@ func (p *Peer) suspend(c *Connection, now time.Time) {
 // answers with fresh tokens for the new key (relay.token.issued), which
 // is the member's signal that the service has the new address. The
 // previous key stays recognized for PrevRelayGrace.
-func (p *Peer) relayAddressUpdate(c *Connection, body []byte, now time.Time) {
+//
+// Only the current key may move the connection: from the previous key,
+// in its grace, a resend of the update already applied is ignored and
+// anything else is refused, so an exposed old key can neither move the
+// connection nor roll it back.
+func (p *Peer) relayAddressUpdate(c *Connection, sender ed25519.PublicKey, body []byte, now time.Time) {
 	var b struct {
 		Relay struct {
 			URL     string `json:"url"`
@@ -170,6 +196,10 @@ func (p *Peer) relayAddressUpdate(c *Connection, body []byte, now time.Time) {
 	if suite.EqualPublic(pk, c.Peer.Relay.PK) {
 		return // a resend of the update we have (§3.4 (b))
 	}
+	if !suite.EqualPublic(sender, c.Peer.Relay.PK) {
+		p.audit("address_update_from_old_key", c.ID)
+		return
+	}
 	if o := p.connByRelayKey(pk, now); o != nil && o != c {
 		p.audit("address_update_key_in_use", c.ID)
 		return
@@ -187,6 +217,9 @@ func (p *Peer) relayAddressUpdate(c *Connection, body []byte, now time.Time) {
 			p.audit("bad_address_update", c.ID)
 			return
 		}
+	}
+	if len(c.PrevRelayPK) > 0 {
+		p.endRelayGrace(c, now) // a second rotation: the first key's tokens go
 	}
 	c.PrevRelayPK, c.PrevRelayUntil = c.Peer.Relay.PK, now.Add(PrevRelayGrace)
 	c.Peer.Relay = np.Relay
@@ -206,9 +239,37 @@ func (p *Peer) relayAddressUpdate(c *Connection, body []byte, now time.Time) {
 	p.log().Info("member relay address updated", "connection_id", c.ID)
 	// Tokens we issued for the old key stop at the relay's grace; issue
 	// fresh ones for the new key, which also acknowledges the update.
+	p.dropConnOutgoing(c)
 	p.issueTo(c, tokStanding, now)
 	p.issueTo(c, tokReconnect, now)
 	p.retryConn(c.ID)
+}
+
+// endRelayGrace forgets the member's previous relay key and revokes the
+// tokens issued to it (the member vault denylists the old sub the same
+// way).
+func (p *Peer) endRelayGrace(c *Connection, now time.Time) {
+	if len(c.PrevRelayPK) == 0 {
+		return
+	}
+	sub := relayauth.EncodeKey(c.PrevRelayPK)
+	for _, t := range p.issued {
+		if t.ConnID == c.ID && t.Sub == sub && !t.Denied {
+			t.Denied = true
+			p.markDirty(kindToken, t.JTI)
+			p.queueRevoke(t.JTI, now)
+		}
+	}
+	c.PrevRelayPK, c.PrevRelayUntil = nil, time.Time{}
+	p.markDirty(kindConn, c.ID)
+}
+
+// noteSender ends the previous key's grace at the first message from the
+// current key, and when it runs out.
+func (p *Peer) noteSender(c *Connection, sender ed25519.PublicKey, now time.Time) {
+	if len(c.PrevRelayPK) > 0 && (suite.EqualPublic(sender, c.Peer.Relay.PK) || !now.Before(c.PrevRelayUntil)) {
+		p.endRelayGrace(c, now)
+	}
 }
 
 // relayKeyIs reports whether pk is the connection's relay key, or its

@@ -677,3 +677,40 @@ func (m *Member) Reconnect() {
 	m.recon = ini
 	m.DepositTo(m.SvcRecon, ini.Envelope())
 }
+
+// SvcMailbox is the service's mailbox.
+func (m *Member) SvcMailbox() string { return m.svc.Relay.Mailbox }
+
+// SendAddressUpdate sends relay.address.update for a new relay key of
+// seed (relayURL "" for the test relay), without switching to it.
+func (m *Member) SendAddressUpdate(w *World, seed byte, relayURL string) {
+	m.t.Helper()
+	rk := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed}, 32))
+	v := w.View(rk)
+	if _, err := v.Register(context.Background()); err != nil {
+		m.t.Fatal(err)
+	}
+	tok, err := v.MintToken(relayauth.EncodeKey(m.svc.Relay.PK), RelayURL, relayclient.TokenOptions{TTL: peerwire.StandingMax})
+	if err != nil {
+		m.t.Fatal(err)
+	}
+	m.sendAddress(rk.Public().(ed25519.PublicKey), relayURL, tok)
+}
+
+// SendAddressUpdateTo sends relay.address.update naming a key the Member
+// does not hold (its token is not valid for it).
+func (m *Member) SendAddressUpdateTo(_ *World, pk ed25519.PublicKey, relayURL string) {
+	m.t.Helper()
+	m.sendAddress(pk, relayURL, "not-a-token")
+}
+
+func (m *Member) sendAddress(pk ed25519.PublicKey, relayURL, tok string) {
+	if relayURL == "" {
+		relayURL = RelayURL
+	}
+	body, _ := json.Marshal(map[string]any{
+		"relay": map[string]string{"url": relayURL, "mailbox": relayauth.MailboxID(pk), "pk": base64.StdEncoding.EncodeToString(pk)},
+		"token": tok,
+	})
+	m.Send("relay.address.update", body)
+}

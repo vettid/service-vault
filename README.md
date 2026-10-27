@@ -261,13 +261,17 @@ the move:
 - *Relay key.* `relay.address.update` moves the connection to the new
   mailbox, with the tokens for it. The service answers with fresh tokens
   for the new key, which is the member vault's signal that the service
-  has the address. The previous key is still recognized for 30 days, for
-  messages already in flight and for resends of the update.
+  has the address. The previous key is still recognized, for messages
+  already in flight and for resends of the update, until the first
+  message from the new key (or 30 days). The tokens issued to it are then
+  revoked. Only the current key can move the connection.
 - *Identity and KEM keys.* `identity.rotate`, signed by the old and the
   new key, is followed when it starts at the stored key. The member
-  vault's rekey under the new key is then answered. A member that rotated
-  while the session was down reconnects with the chain in its `hs.init`
-  (§6.6), and the service follows that the same way. If two different
+  vault's rekey under the new key is then answered, and a rekey the
+  service had started under the old keys is dropped. A member that
+  rotated while the session was down reconnects with the chain in its
+  `hs.init` (§6.6), and the service follows that the same way. Links it
+  already followed may come first. If two different
   successors of one key arrive ("one successor per key"), the connection
   is suspended: nothing is sent or accepted, an ERROR with
   `alarm: rotate_conflict` is logged, and the member's next connection
