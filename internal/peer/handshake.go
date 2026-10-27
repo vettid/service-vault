@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
@@ -38,7 +39,9 @@ func infoFromPrincipal(pr handshake.Principal) *peerInfo {
 // KEM key (§6.1): first contact on an invitation's open token, or a
 // reconnect (§6.6). It applies the member vault's checks for a
 // connection inviter (§6.3, §6.4, §10.4).
-func (p *Peer) handleInit(raw []byte, sender ed25519.PublicKey, c *Connection, onReconnectToken bool, now time.Time) disposition {
+// jti is the collect jti: a first contact must come on its invitation's
+// own open token.
+func (p *Peer) handleInit(raw []byte, sender ed25519.PublicKey, c *Connection, onReconnectToken bool, jti string, now time.Time) disposition {
 	pi, err := handshake.OpenInit(raw, p.lookupKEM, now)
 	if err != nil {
 		p.audit("hs_init_rejected", connID(c))
@@ -91,7 +94,9 @@ func (p *Peer) handleInit(raw []byte, sender ed25519.PublicKey, c *Connection, o
 		return ackAfterFlush
 	}
 	inv := p.invites[body.Ctx]
-	if inv == nil || inv.Used || inv.Withdrew || !now.Before(inv.Exp) {
+	if inv == nil || inv.Used || inv.Withdrew || !now.Before(inv.Exp) || jti == "" || jti != inv.OpenJTI {
+		// The open token deposited with must be the invitation's own: an
+		// invitation id with another invitation's token does not redeem it.
 		p.audit("invite_invalid", "")
 		pi.Discard()
 		return ackAfterFlush // single use; expired, used or revoked invites are rejected (§6.4)
@@ -193,6 +198,14 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 		pi.Discard()
 		return
 	}
+	if !suite.EqualPublic(sender, c.Peer.Relay.PK) {
+		// Only the relay key on record may reconnect (§6.6); the previous
+		// one's grace after a relay.address.update is for messages, and
+		// must not let it suspend the connection below.
+		p.audit("reconnect_sender", c.ID)
+		pi.Discard()
+		return
+	}
 	var eid [suite.EpochIDSize]byte
 	copy(eid[:], c.LastEpochID)
 	body := pi.Init()
@@ -234,18 +247,22 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 		pi.Discard()
 		return
 	}
-	var err error
-	if cfg.Token, err = p.mintStanding(c.ID, &c.Peer, now); err != nil {
+	if !p.admitHandshake(c.ID, handshake.PurposeReconnect, pi.Th1()) {
 		pi.Discard()
 		return
 	}
-	if cfg.ReconnectToken, err = p.mintReconnect(c.ID, &c.Peer, now); err != nil {
+	var jtis []string
+	var err error
+	if cfg.Token, cfg.ReconnectToken, jtis, err = p.mintReconnectPair(c.ID, &c.Peer, now); err != nil {
 		pi.Discard()
 		return
 	}
 	resp, env, err := pi.Respond(cfg) // checks the sender, the ctx and the chain
 	if err != nil {
 		p.audit("reconnect_refused", c.ID)
+		for _, j := range jtis {
+			p.denyJTI(j, now)
+		}
 		return
 	}
 	if len(fresh) > 0 {
@@ -255,7 +272,8 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 	c.State = StateActive
 	p.markDirty(kindConn, c.ID)
 	id := p.newID(now)
-	p.awaiting[id] = &awaiting{ID: id, ConnID: c.ID, Purpose: handshake.PurposeReconnect, Created: now,
+	th1 := pi.Th1()
+	p.awaiting[id] = &awaiting{ID: id, ConnID: c.ID, Purpose: handshake.PurposeReconnect, Th1: th1[:], Created: now,
 		Expires: now.Add(HandshakeTTL), r: resp}
 	p.markDirty(kindAwait, id)
 	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: env}, now)
@@ -272,6 +290,10 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 	pi, err := handshake.AcceptRekey(raw, in, ep, now)
 	if err != nil {
 		p.audit("rekey_rejected", c.ID)
+		return ackAfterFlush
+	}
+	if !p.admitHandshake(c.ID, handshake.PurposeRekey, pi.Th1()) {
+		pi.Discard()
 		return ackAfterFlush
 	}
 	// Crossing rekeys: the lower th1 wins (§6.5).
@@ -296,7 +318,8 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 		return ackAfterFlush
 	}
 	id := p.newID(now)
-	p.awaiting[id] = &awaiting{ID: id, ConnID: c.ID, Purpose: handshake.PurposeRekey, Created: now,
+	th1 := pi.Th1()
+	p.awaiting[id] = &awaiting{ID: id, ConnID: c.ID, Purpose: handshake.PurposeRekey, Th1: th1[:], Created: now,
 		Expires: now.Add(HandshakeTTL), r: resp}
 	p.markDirty(kindAwait, id)
 	p.markDirty(kindConn, c.ID) // the epoch's receive count moved
@@ -392,6 +415,35 @@ func (p *Peer) dropAwaiting(id string, now time.Time) {
 	aw.r.Abort()
 	delete(p.awaiting, id)
 	p.markDirty(kindAwait, id)
+}
+
+// MaxAwaitingPerConn bounds the handshakes of one purpose (rekey,
+// reconnect) awaiting hs.fin for one connection (chosen; not in the
+// spec): a member vault cannot pile them up, while a legitimate retry
+// still has room.
+const MaxAwaitingPerConn = 2
+
+// admitHandshake reports whether a connection's hs.init of a purpose is
+// to be answered: not a copy of one already answered (the same th1; an
+// outbox retry re-deposits the same bytes), and within the bound. The
+// handshakes already awaiting are left alone: the member may be using
+// the tokens of one of them.
+func (p *Peer) admitHandshake(connID string, purpose handshake.Purpose, th1 [32]byte) bool {
+	n := 0
+	for _, aw := range p.awaiting {
+		if aw.ConnID != connID || aw.New != nil || aw.Purpose != purpose {
+			continue
+		}
+		if bytes.Equal(aw.Th1, th1[:]) {
+			return false // answered already; its hs.resp is on its way
+		}
+		n++
+	}
+	if n >= MaxAwaitingPerConn {
+		p.audit("handshakes_awaiting", connID)
+		return false
+	}
+	return true
 }
 
 // startRekey initiates a rekey of a connection's session when its epoch

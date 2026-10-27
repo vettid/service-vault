@@ -63,6 +63,9 @@ func (p *Peer) Authenticate(ctx context.Context, connID, ctxt string, ttl time.D
 	}
 	exp := now.Add(ttl).UTC().Truncate(time.Millisecond)
 	if p.sendInnerExp(c, peerwire.TypeConnAuthChallenge, wc.Marshal(), exp, now) == "" {
+		if c.State == StateActive && p.outboxFor(c.ID) >= MaxOutboxPerConn {
+			return "", ErrBusy
+		}
 		return "", ErrNotFound
 	}
 	p.challenges[wc.RequestID] = &challenge{ID: wc.RequestID, ConnID: connID, Nonce: wc.Nonce, Context: ctxt, Exp: exp}
@@ -120,6 +123,12 @@ func (p *Peer) connAuthResponse(c *Connection, body []byte, now time.Time) {
 	ch := p.challenges[r.RequestID]
 	if ch == nil || ch.ConnID != c.ID {
 		return // §8.1: matches no pending request
+	}
+	if !now.Before(ch.Exp) {
+		// Past its exp the challenge is no longer pending, though the
+		// housekeeping that expires it may not have run yet.
+		p.audit("auth_response_late", c.ID)
+		return
 	}
 	delete(p.challenges, ch.ID)
 	p.markDirty(kindAuth, ch.ID)

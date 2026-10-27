@@ -132,6 +132,12 @@ func (p *Peer) sendInner(c *Connection, in *envelope.Inner, now time.Time) strin
 	if c.kr == nil || c.kr.Current() == nil || c.State != StateActive {
 		return ""
 	}
+	if p.outboxFor(c.ID) >= MaxOutboxPerConn {
+		// The member's mailbox has not taken our deposits for a while: what
+		// would pile up is dropped, not kept without bound.
+		p.audit("outbox_full", c.ID)
+		return ""
+	}
 	raw, err := c.kr.Current().Seal(in)
 	if err != nil {
 		return ""
@@ -139,6 +145,21 @@ func (p *Peer) sendInner(c *Connection, in *envelope.Inner, now time.Time) strin
 	p.markDirty(kindConn, c.ID) // the epoch's send count moved
 	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: raw}, now)
 	return in.ID
+}
+
+// MaxOutboxPerConn bounds the deposits waiting for one connection
+// (chosen; not in the spec): a member vault that stops taking them while
+// it keeps sending cannot grow the outbox without bound.
+const MaxOutboxPerConn = 256
+
+func (p *Peer) outboxFor(connID string) int {
+	n := 0
+	for _, e := range p.outbox {
+		if e.ConnID == connID && e.Op == opDeposit {
+			n++
+		}
+	}
+	return n
 }
 
 // respond deposits a response and caches it for 24 h (§8.1, §8.2).
@@ -256,6 +277,10 @@ func (p *Peer) removeConnection(c *Connection, dir string, now time.Time) {
 
 // ErrNotFound is an unknown or inactive connection or invitation.
 var ErrNotFound = errors.New("peer: not found")
+
+// ErrBusy is a connection whose member mailbox is not taking deposits:
+// MaxOutboxPerConn of them are waiting.
+var ErrBusy = errors.New("peer: connection busy")
 
 // Remove ends a connection from the service's side (§7.4): the member's
 // vault gets connection.removed, best effort.

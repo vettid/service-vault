@@ -355,10 +355,10 @@ func (p *Peer) handleMessage(ctx context.Context, m relayclient.Message, now tim
 			p.audit("reconnect_token_misuse", c.ID)
 			return ackAfterFlush, nil
 		}
-		return p.handleInit(m.Payload, sender, c, true, now), nil
+		return p.handleInit(m.Payload, sender, c, true, m.JTI, now), nil
 	}
 	if env.Mode() == envelope.ModeSealed {
-		return p.handleSealed(env, m.Payload, sender, c, now), nil
+		return p.handleSealed(env, m.Payload, sender, c, m.JTI, now), nil
 	}
 	if c != nil && c.kr != nil {
 		in, ep, err := c.kr.Open(env, now)
@@ -389,10 +389,16 @@ func connID(c *Connection) string {
 	return c.ID
 }
 
-func (p *Peer) handleSealed(env *envelope.Envelope, raw []byte, sender ed25519.PublicKey, c *Connection, now time.Time) disposition {
+func (p *Peer) handleSealed(env *envelope.Envelope, raw []byte, sender ed25519.PublicKey, c *Connection, jti string, now time.Time) disposition {
 	rk := env.RecipientKid()
 	if rk.Equal(p.cfg.Keys.KEM.Public().Kid()) {
-		return p.handleInit(raw, sender, c, false, now)
+		// A new hs.init from a known connection counts against its rate
+		// (§7.3); an hs.resp to our own rekey (below) never does.
+		if c != nil && !p.rateAllow(c.ID, now) {
+			p.audit("rate_limited", c.ID)
+			return ackAfterFlush
+		}
+		return p.handleInit(raw, sender, c, false, jti, now)
 	}
 	for id, og := range p.outgoing {
 		if kidEqual(og.EphKid, rk) {

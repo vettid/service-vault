@@ -159,15 +159,18 @@ type InviteRecord struct {
 
 // awaiting is a handshake we answered with hs.resp, awaiting hs.fin.
 type awaiting struct {
-	ID       string                   `json:"id"`
-	ConnID   string                   `json:"conn_id"` // the connection it is for (new or existing)
-	New      *peerInfo                `json:"new,omitempty"`
-	Purpose  handshake.Purpose        `json:"purpose"`
-	InviteID string                   `json:"invite_id,omitempty"`
-	Held     HeldToken                `json:"held"` // the peer's token from hs.init
-	Resp     handshake.ResponderState `json:"resp"`
-	Created  time.Time                `json:"created"`
-	Expires  time.Time                `json:"expires"`
+	ID       string            `json:"id"`
+	ConnID   string            `json:"conn_id"` // the connection it is for (new or existing)
+	New      *peerInfo         `json:"new,omitempty"`
+	Purpose  handshake.Purpose `json:"purpose"`
+	InviteID string            `json:"invite_id,omitempty"`
+	Held     HeldToken         `json:"held"` // the peer's token from hs.init
+	// Th1 identifies the hs.init answered, so that a copy of it (an
+	// outbox retry re-deposits the same bytes) is not answered twice.
+	Th1     []byte                   `json:"th1,omitempty"`
+	Resp    handshake.ResponderState `json:"resp"`
+	Created time.Time                `json:"created"`
+	Expires time.Time                `json:"expires"`
 
 	r *handshake.Responder
 }
@@ -268,6 +271,15 @@ func (p *Peer) markDirty(kind, id string) { p.dirty[key{kind, id}] = struct{}{} 
 
 // mark adds a write-once record (a dedupe marker, a cached response).
 func (p *Peer) mark(kind, id string, data []byte, exp time.Time) {
+	for i := range p.extra {
+		if p.extra[i].Kind == kind && p.extra[i].ID == id {
+			// One change per item: a message redelivered before a flush
+			// must not put its marker in twice (a transaction refuses two
+			// operations on one item).
+			p.extra[i] = Change{Kind: kind, ID: id, Data: data, Expires: exp, IfAbsent: true}
+			return
+		}
+	}
 	p.extra = append(p.extra, Change{Kind: kind, ID: id, Data: data, Expires: exp, IfAbsent: true})
 }
 

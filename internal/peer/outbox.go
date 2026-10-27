@@ -15,6 +15,7 @@ const (
 	codeTokenUsed      = "token_used"
 	codeMailboxUnknown = "mailbox_unknown"
 	codeClaimUnknown   = "claim_unknown"
+	codeQuotaExceeded  = "quota_exceeded"
 )
 
 // outboxMaxBackoff caps the outbox retry backoff (§8.6: 0.25 s × 2ⁿ,
@@ -182,6 +183,19 @@ func (p *Peer) deposit(ctx context.Context, e *outboxEntry, now time.Time) (fini
 			p.dropOutbox(func(o *outboxEntry) bool { return o != e && o.ConnID == c.ID })
 		}
 		return true, err
+	case codeQuotaExceeded:
+		// §8.6: a quota_exceeded without its quota member (an older relay)
+		// is taken for the token's.
+		if c != nil && e.Token == "" && (re.Quota == relayclient.QuotaToken || re.Quota == "") {
+			// §8.6: the standing token's quota is spent; a fresh token
+			// cures it. Other quotas are the member mailbox's: retry later.
+			p.refreshHeld(c, now, true)
+			e.NotBefore = now.Add(time.Hour)
+			e.AwaitToken = true
+			e.Attempts++
+			return false, err
+		}
+		return false, err
 	case codeTokenUsed:
 		p.audit("open_token_used", e.ConnID)
 		return true, err
