@@ -1,6 +1,6 @@
 import * as cdk from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
-import { API_PORT, ServiceVaultStack, ServiceVaultStackProps, TASK_CPU, TASK_MEMORY_MIB } from '../lib/service-vault-stack';
+import { API_PORT, CLIENT_PARAMS, ServiceVaultStack, ssmPrefix, ServiceVaultStackProps, TASK_CPU, TASK_MEMORY_MIB } from '../lib/service-vault-stack';
 
 const DIGEST = 'sha256:' + 'a'.repeat(64);
 const CLIENT_SG = 'sg-0123456789abcdef0';
@@ -236,6 +236,15 @@ describe('data', () => {
     expect(ssmStatements).toHaveLength(1);
     expect(asList(ssmStatements[0].Action)).toEqual(['ssm:PutParameter']);
     expect(JSON.stringify(ssmStatements[0].Resource)).toContain(paramId);
+  });
+
+  test('the API client\'s values are published in SSM under the env prefix', () => {
+    const params = Object.values<any>(t.findResources('AWS::SSM::Parameter')).map((p) => p.Properties);
+    const byName = Object.fromEntries(params.map((p) => [p.Name, p.Value]));
+    for (const name of [...CLIENT_PARAMS, 'tls-pin']) expect(Object.keys(byName)).toContain(`${ssmPrefix('test')}/${name}`);
+    expect(JSON.stringify(byName[`${ssmPrefix('test')}/api-url`])).toContain('https://');
+    expect(JSON.stringify(byName[`${ssmPrefix('test')}/webhook-secret-arn`])).toContain('WebhookSecret');
+    expect(JSON.stringify(byName[`${ssmPrefix('test')}/security-group-id`])).toContain('TaskSg');
   });
 
   test('API URL is https', () => {

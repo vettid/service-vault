@@ -102,12 +102,21 @@ served over TLS 1.3 with a self-signed certificate whose key is pinned:
 the daemon keeps its TLS key with its other secrets and writes the key's
 pin (`sha256/…` of the SubjectPublicKeyInfo) to an SSM parameter at
 start, and the application's client (`sdk/go/pinned`) accepts only that
-key. No certificate authority is involved. The stack
-exports `ServiceVault-<envName>-{VpcId, PublicSubnetIds, SecurityGroupId,
-NamespaceId, NamespaceArn, NamespaceName, ApiUrl, WebhookSecretArn,
-TlsPinParameterName, TlsPinParameterArn}` for
-the member-service stack, which can add its own ingress rule to the
-exported security group instead of passing `apiClientSecurityGroupId`.
+key. No certificate authority is involved.
+
+The stack publishes what the application's stack needs as SSM parameters
+under `/vettid/service-vault/<envName>/`: `vpc-id`,
+`public-subnet-ids` (comma-separated), `security-group-id`,
+`namespace-id`, `namespace-arn`, `namespace-name`, `api-url`,
+`webhook-secret-arn` and the TLS pin's `tls-pin`. An application stack
+reads them at deploy time. Unlike `Fn::ImportValue`, that never stops
+this stack from changing a value later. The application's stack can add
+its own ingress rule to the security group instead of passing
+`apiClientSecurityGroupId`. The same values are also CloudFormation
+exports, `ServiceVault-<envName>-{VpcId, PublicSubnetIds,
+SecurityGroupId, NamespaceId, NamespaceArn, NamespaceName, ApiUrl,
+WebhookSecretArn, TlsPinParameterName, TlsPinParameterArn}`. Importing
+those locks them, so prefer the parameters.
 
 **Container configuration.**
 
