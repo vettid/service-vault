@@ -640,14 +640,22 @@ func (m *Manager) Answer(ctx context.Context, e *peer.Event) (bool, error) {
 	return true, nil
 }
 
-// evaluate settles a pending approval if m approvals are in (approved)
-// or can no longer be (denied, with reason). It returns the challenges
+// evaluate settles a pending approval if m approvals of current admins
+// are in (approved) or can no longer be (denied, with reason). It returns the challenges
 // still outstanding at a settlement, to be cancelled once it is written.
 func (m *Manager) evaluate(ctx context.Context, b *batch, r *record, set []string, reason string) ([]Challenge, error) {
 	if r.Status != StatusPending {
 		return nil, nil
 	}
-	if len(r.Approvals) >= r.Threshold {
+	// Only approvals of admins still in the set count: an admin removed
+	// (or severed) since approving no longer stands behind the action.
+	counted := 0
+	for _, a := range r.Approvals {
+		if slices.Contains(set, a.ConnectionID) {
+			counted++
+		}
+	}
+	if counted >= r.Threshold {
 		return m.settle(ctx, b, r, StatusApproved, "", set)
 	}
 	open := 0
@@ -656,7 +664,7 @@ func (m *Manager) evaluate(ctx context.Context, b *batch, r *record, set []strin
 			open++
 		}
 	}
-	if len(r.Approvals)+open < r.Threshold {
+	if counted+open < r.Threshold {
 		return m.settle(ctx, b, r, StatusDenied, reason, set)
 	}
 	return nil, nil
