@@ -166,6 +166,8 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # binfmt, BuildKit, the Dockerfile frontend and the golang base image
       # from VettID's mirror of the upstream digests (vettid.org
       # .github/mirror), not Docker Hub; upstream references in the comments.

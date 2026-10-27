@@ -71,7 +71,7 @@ npx cdk deploy \
 | `envName` | no (`prod`) | Part of every name and export: stack `ServiceVault-<envName>`. |
 | `relayUrl` | no (`https://relay.vettid.org`) | The relay. |
 | `serviceName` | no (`VettID Member Service`) | The name members see. |
-| `apiClientSecurityGroupId` / `apiClientCidr` | no | Who may reach the API port. Neither: nobody until a rule is added. `apiClientCidr` is IPv4, /16 or narrower (an operator is /32). |
+| `apiClientSecurityGroupId` / `apiClientCidr` | no | Who may reach the API port. Neither: nobody until a rule is added. `apiClientCidr` is a private (RFC 1918) IPv4 range, /16 or narrower: the task has a public IP, so a public range would expose the API port. Reach the API as an operator from inside the VPC. |
 | `vpcCidr` | no (`10.60.0.0/24`) | The VPC (two /26 public subnets). |
 | `adminBootstrapEmail` | no | `SV_ADMIN_BOOTSTRAP_EMAIL` (see "Admin approvals"). It is plain text in the task definition and stays in that definition's revisions after a redeploy without it: use an address you don't mind being kept there (a staging test member), or arm the bootstrap with `service-vault admin bootstrap` instead |
 | `adminThreshold` | no (1) | `SV_ADMIN_THRESHOLD` |
@@ -121,7 +121,8 @@ still authenticated with an API key on every `/v1` route, and it is
 served over TLS 1.3 with a self-signed certificate whose key is pinned:
 the daemon keeps its TLS key with its other secrets and writes the key's
 pin (`sha256/…` of the SubjectPublicKeyInfo) to an SSM parameter at
-start, and the application's client (`sdk/go/pinned`) accepts only that
+start and every hour after, in case a stack update puts back the
+parameter's initial `unset`, and the application's client (`sdk/go/pinned`) accepts only that
 key. No certificate authority is involved.
 
 The stack publishes what the application's stack needs as SSM parameters

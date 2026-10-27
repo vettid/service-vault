@@ -68,3 +68,18 @@ func TestDeliverShortSecret(t *testing.T) {
 		t.Fatalf("err %v", err)
 	}
 }
+
+// The default sender follows no redirect: a 3xx is the answer.
+func TestDeliverNoRedirect(t *testing.T) {
+	var hit atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hit.Add(1) }))
+	defer target.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+	e, _ := NewEvent("signin.approved", "c1", map[string]string{}, time.Now())
+	if err := (&Dispatcher{URL: srv.URL, Secret: secret}).Deliver(context.Background(), e); err == nil || hit.Load() != 0 {
+		t.Fatalf("redirect followed: %v, %d", err, hit.Load())
+	}
+}

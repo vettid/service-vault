@@ -6,3 +6,7 @@ docs
 integration
 *.md
 !go.sum
+.env
+.env.*
+*.pem
+*.key

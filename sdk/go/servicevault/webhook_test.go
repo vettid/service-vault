@@ -265,3 +265,39 @@ func TestMemoryReplayCache(t *testing.T) {
 		}
 	}
 }
+
+// A delivery of an event still being handled answers 503 (it is not done
+// yet), so that if the first attempt fails the event comes again.
+func TestReceiverInFlight(t *testing.T) {
+	secret := []byte(randomHex(t, 32))
+	now := time.Date(2026, 10, 27, 12, 0, 5, 0, time.UTC)
+	rc := &servicevault.Receiver{Secret: secret, Replay: &servicevault.MemoryReplayCache{}, Now: func() time.Time { return now }}
+	release := make(chan struct{})
+	started := make(chan struct{})
+	h := rc.Handler(func(context.Context, servicevault.Event) error {
+		close(started)
+		<-release
+		return nil
+	})
+	first := make(chan int)
+	go func() {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, signed(t, secret, "01JEVT1", approvedBody, now))
+		first <- w.Code
+	}()
+	<-started
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, signed(t, secret, "01JEVT1", approvedBody, now.Add(time.Second)))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("in flight: %d", w.Code)
+	}
+	close(release)
+	if c := <-first; c != http.StatusNoContent {
+		t.Fatalf("first: %d", c)
+	}
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, signed(t, secret, "01JEVT1", approvedBody, now.Add(2*time.Second)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("after: %d", w.Code)
+	}
+}
