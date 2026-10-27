@@ -152,6 +152,19 @@ be able to slip in a forged plaintext record. If that first start was cut
 short, run one start with `SV_RECORD_SEAL_MIGRATE=1` to finish the
 migration, then remove it.
 
+**Upgrading a deployment from before sealing is one-way.** An image
+from before sealing can't read sealed records, so after the first sealed
+start the circuit breaker's rollback to that image won't start either.
+For that one deploy:
+1. Take an on-demand backup first:
+   `aws dynamodb create-backup --table-name vettid-service-vault-<env> --backup-name pre-seal`.
+2. If the new image fails after sealing, don't rely on the rollback.
+   Deploy a fixed image, or restore the backup to the table and deploy
+   the old image.
+
+From then on every image reads sealed records. A deployment made after
+sealing never had plaintext records.
+
 **Container configuration.**
 
 | Variable | Source | Meaning |
