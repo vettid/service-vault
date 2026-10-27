@@ -254,6 +254,32 @@ both bind.
   The sign-in is still approved; the application decides what to do
   with it (for example ask the member to confirm, or alert).
 
+**When a member moves phones** (VAULT-MESSAGING §3.4, 0.68.0). A
+transfer, a recovery or a `credential.rotate` rotates the member vault's
+keys, and the service follows each rotation, so the connection survives
+the move:
+- *Relay key.* `relay.address.update` moves the connection to the new
+  mailbox, with the tokens for it. The service answers with fresh tokens
+  for the new key, which is the member vault's signal that the service
+  has the address. The previous key is still recognized, for messages
+  already in flight and for resends of the update, until the first
+  message from the new key (or 30 days). The tokens issued to it are then
+  revoked. Only the current key can move the connection.
+- *Identity and KEM keys.* `identity.rotate`, signed by the old and the
+  new key, is followed when it starts at the stored key. The member
+  vault's rekey under the new key is then answered, and a rekey the
+  service had started under the old keys is dropped. A member that
+  rotated while the session was down reconnects with the chain in its
+  `hs.init` (§6.6), and the service follows that the same way. Links it
+  already followed may come first. If two different
+  successors of one key arrive ("one successor per key"), the connection
+  is suspended: nothing is sent or accepted, an ERROR with
+  `alarm: rotate_conflict` is logged, and the member's next connection
+  from a new invitation replaces it. A service can't do the out-of-band
+  check that resolves a conflict for a person.
+- *Credential key.* `connection.authenticate.rotated` moves the pinned
+  key along its chain.
+
 **Admin approvals** (MEMBER-SERVICE-PLAN §4.5, §5.2). Governance actions
 need the approval of m admins, signed on their phones. Until contracts
 land (Phase 3, `admin-v1`), an approval is a

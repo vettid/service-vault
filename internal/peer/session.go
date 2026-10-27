@@ -17,9 +17,14 @@ import (
 // dispatch handles a decrypted session-mode message from an active
 // connection (§8.2, §8.3, §8.4, §7.3).
 func (p *Peer) dispatch(ctx context.Context, c *Connection, in *envelope.Inner, ep *handshake.Epoch, raw []byte, sender ed25519.PublicKey, now time.Time) (disposition, error) {
-	p.markDirty(kindConn, c.ID) // the epoch's receive count moved
-	if err := handshake.CheckSender(sender, c.Peer.Relay.PK); err != nil {
+	p.markDirty(kindConn, c.ID)     // the epoch's receive count moved
+	if !c.relayKeyIs(sender, now) { // §6.3, or the key before a relay.address.update
 		p.audit("sender_mismatch", c.ID)
+		return ackAfterFlush, nil
+	}
+	p.noteSender(c, sender, now)
+	if c.State == StateSuspended {
+		p.audit("connection_suspended", c.ID) // §3.4: nothing is accepted
 		return ackAfterFlush, nil
 	}
 	if in.Type == handshake.TypeInit {
@@ -78,6 +83,10 @@ func (p *Peer) dispatch(ctx context.Context, c *Connection, in *envelope.Inner, 
 		p.connAuthResponse(c, in.Body, now)
 	case peerwire.TypeConnAuthRotated:
 		p.connAuthRotated(c, in.Body)
+	case TypeIdentityRotate:
+		p.identityRotate(c, in.Body, now)
+	case TypeRelayAddressUpdate:
+		p.relayAddressUpdate(c, sender, in.Body, now)
 	case peerwire.TypeConnAuthChallenge:
 		// The service has no member credential to sign with (§10.4); a
 		// challenge to it is never answered (chosen; not in the spec).
@@ -298,6 +307,11 @@ func (p *Peer) housekeeping(now time.Time) {
 	}
 	p.expireRequests(now)
 	p.expireChallenges(now)
+	for id, og := range p.outgoing {
+		if now.Sub(og.Created) >= HandshakeTTL {
+			p.dropOutgoing(id) // an hs.resp that never came (or can no longer be accepted)
+		}
+	}
 	for _, c := range p.conns {
 		if c.State != StateActive {
 			continue

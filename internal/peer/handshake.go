@@ -71,9 +71,9 @@ func (p *Peer) handleInit(raw []byte, sender ed25519.PublicKey, c *Connection, o
 		pi.Discard()
 		return ackAfterFlush
 	}
-	if c != nil && c.State != StateStale {
-		// A stale connection may be made afresh through a new invitation;
-		// the new record replaces it at activation (§7.4).
+	if c != nil && c.State != StateStale && c.State != StateSuspended {
+		// A stale or suspended connection may be made afresh through a new
+		// invitation; the new record replaces it at activation (§7.4).
 		p.audit("hs_init_from_known_peer", c.ID)
 		pi.Discard()
 		return ackAfterFlush
@@ -112,11 +112,11 @@ func (p *Peer) handleInit(raw []byte, sender ed25519.PublicKey, c *Connection, o
 	return ackAfterFlush
 }
 
-// knownIdentity returns the connection, not stale, whose identity key is
-// ik (§6.4 "The inviter's drop").
+// knownIdentity returns the connection, not stale or suspended, whose
+// identity key is ik (§6.4 "The inviter's drop").
 func (p *Peer) knownIdentity(ik []byte) *Connection {
 	for _, c := range p.conns {
-		if c.State != StateStale && suite.EqualPublic(c.Peer.IK, ik) {
+		if c.State != StateStale && c.State != StateSuspended && suite.EqualPublic(c.Peer.IK, ik) {
 			return c
 		}
 	}
@@ -184,27 +184,48 @@ func (p *Peer) respondFirst(pi *handshake.PendingInit, inv *InviteRecord, sender
 
 // respondReconnect answers a reconnect hs.init (§6.6): no SAS or
 // approval; the sender must be the relay key on record, from.ik the
-// stored ik, and ctx the last epoch's id. The service has no identity
-// rotations of its own, and follows none of the peer's (an hs.init with
-// rotations is refused by Respond against the stored key unless it
-// resolves; the record then keeps the stored key).
+// stored ik or reached from it by the hs.init's rotation chain (the
+// member rotated while the session was down, §3.4), and ctx the last
+// epoch's id. The service has no rotations of its own.
 func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender ed25519.PublicKey, now time.Time) {
-	if len(c.LastEpochID) == 0 {
+	if len(c.LastEpochID) == 0 || c.State == StateSuspended {
+		p.audit("reconnect_refused", c.ID)
 		pi.Discard()
 		return
 	}
 	var eid [suite.EpochIDSize]byte
 	copy(eid[:], c.LastEpochID)
+	body := pi.Init()
+	// A valid link that gives a key a second successor suspends the
+	// connection (§3.4), whatever else the hs.init carries: such a chain
+	// could never be accepted, and the conflict must not go unnoticed.
+	for _, r := range body.Rotations {
+		if r.Verify() == nil && p.rotationConflict(c, r, now) {
+			pi.Discard()
+			return
+		}
+	}
+	// The member's vault sends every rotation since its last epoch: links
+	// the service already followed (identity.rotate arrived, the rekey did
+	// not) come first, and the chain is then checked from the first one's
+	// old key, provided those links lead to the stored key.
+	start, fresh := c.Peer.IK, body.Rotations
+	known := 0
+	for known < len(body.Rotations) && p.knownSuccessor(c, body.Rotations[known]) {
+		known++
+	}
+	if known > 0 {
+		if !suite.EqualPublic(body.Rotations[known-1].NewIK, c.Peer.IK) {
+			p.audit("reconnect_rotation_behind", c.ID) // would roll the identity back
+			pi.Discard()
+			return
+		}
+		start, fresh = body.Rotations[0].OldIK, body.Rotations[known:]
+	}
 	cfg := handshake.ResponderConfig{
 		Identity: p.cfg.Keys.IK, Policy: handshake.PolicyVaultToVault, PinnedSuite: c.Suite,
-		CollectSender: sender, RecordRelayKey: c.Peer.Relay.PK, KnownInitiatorIK: c.Peer.IK,
+		CollectSender: sender, RecordRelayKey: c.Peer.Relay.PK, KnownInitiatorIK: start,
 		ExpectedCtx: handshake.EpochCtx(eid), Now: now,
-	}
-	body := pi.Init()
-	if len(body.Rotations) > 0 {
-		p.audit("reconnect_rotation_unsupported", c.ID)
-		pi.Discard()
-		return
 	}
 	st, err1 := p.heldToken(body.Token, &c.Peer)
 	rt, err2 := p.heldToken(body.ReconnectToken, &c.Peer)
@@ -222,10 +243,13 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 		pi.Discard()
 		return
 	}
-	resp, env, err := pi.Respond(cfg)
+	resp, env, err := pi.Respond(cfg) // checks the sender, the ctx and the chain
 	if err != nil {
 		p.audit("reconnect_refused", c.ID)
 		return
+	}
+	if len(fresh) > 0 {
+		p.followRotation(c, body.From.IK, body.From.KEM, fresh)
 	}
 	c.Standing, c.Reconnect = st, rt
 	c.State = StateActive
