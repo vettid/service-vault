@@ -15,7 +15,7 @@ import (
 
 func (f *fixture) withApprovals(threshold int, bootKey string) *approval.Manager {
 	st := f.svc.Store.(*peer.MemStore)
-	m := &approval.Manager{Peer: f.p, Store: st, Pager: st, Webhooks: f.hk, ServiceName: f.svc.ServiceName,
+	m := &approval.Manager{Peer: f.p, Store: st, Pager: st, Hooks: f.hk.outbox(st, approval.HookKind), ServiceName: f.svc.ServiceName,
 		Threshold: threshold, BootstrapKey: bootKey, BoundConnection: f.svc.BoundConnection, Now: f.clk.Now, Log: f.svc.Log}
 	f.svc.Approvals = m
 	return m

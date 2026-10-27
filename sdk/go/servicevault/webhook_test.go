@@ -49,7 +49,7 @@ func TestEventsFromService(t *testing.T) {
 	srv := httptest.NewServer(rc.Handler(got.handle))
 	defer srv.Close()
 
-	f := newFixture(t, &iwebhook.Dispatcher{URL: srv.URL, Secret: secret, MaxAttempts: 1})
+	f := newFixture(t, &iwebhook.Dispatcher{URL: srv.URL, Secret: secret})
 	c := f.client(t)
 	at := time.Now().UTC().Truncate(time.Second)
 	n := 0

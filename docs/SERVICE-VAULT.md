@@ -36,7 +36,7 @@ service vault reaches members only through their vaults over the relay.
 | `internal/ballot` | Certification, ballot box, publication (Phase 5) |
 | `internal/keystore` | KMS envelope; Ed25519, suite-2 KEM, RSA for blind signing |
 | `internal/store` | DynamoDB: connections, pending challenges, audit |
-| `internal/webhook` | HMAC over `timestamp.body`, retries |
+| `internal/webhook` | HMAC over `timestamp.body`; the outbox: in order, retried with backoff, dropped at 24 h |
 | `internal/api` | Private HTTPS API, API keys |
 
 ## 4. Deployment

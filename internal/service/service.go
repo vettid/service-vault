@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"hash/fnv"
 	"log/slog"
 	"sync"
@@ -28,6 +29,9 @@ const (
 	kindSignIn    = "signin"     // a sign-in
 	kindSignInReq = "signin_req" // challenge request id -> sign-in id
 	kindSignInCur = "signin_cur" // email index key -> its latest sign-in id
+	// HookKind is the kind of the service's webhook Outbox: an event
+	// waiting to be delivered, by peer event id.
+	HookKind = "hook"
 )
 
 // signInRetention keeps a finished sign-in readable (chosen; not in the
@@ -43,18 +47,15 @@ type Peer interface {
 	CancelChallenge(ctx context.Context, requestID string) (bool, error)
 }
 
-// Webhooks delivers webhook events (webhook.Dispatcher).
-type Webhooks interface {
-	Deliver(ctx context.Context, e *webhook.Event) error
-}
-
 // Service implements peer.Events; Invites and SignIns return its
 // api.Invites and api.SignIns.
 type Service struct {
 	Peer        Peer
 	Store       peer.Store
 	ServiceName string // in the sign-in challenge's context
-	Webhooks    Webhooks
+	// Hooks queues the webhooks (Kind HookKind); its own Run delivers
+	// them. nil sends none.
+	Hooks *webhook.Outbox
 	// Limiter applies the per-email and per-source sign-in limits
 	// (MEMBER-SERVICE-PLAN §4.2); nil applies none.
 	Limiter *signin.Limiter
@@ -338,9 +339,9 @@ func (s *Service) bindEmail(ctx context.Context, emailKey, connID string) (bool,
 }
 
 // Deliver implements peer.Events: the email binding follows the
-// connection, sign-ins get their outcome, and the application gets a
-// signed webhook. A webhook the endpoint rejects (4xx) is dropped after
-// logging; one it could not take is retried by the peer.
+// connection, sign-ins get their outcome, and a signed webhook is queued
+// for the application. Delivery is Hooks' (webhook.Outbox): an endpoint
+// that is slow or down never holds up the events behind this one.
 func (s *Service) Deliver(ctx context.Context, e *peer.Event) error {
 	switch e.Type {
 	case peer.EventConnectionAdded:
@@ -448,7 +449,7 @@ func (s *Service) finishSignIn(ctx context.Context, e *peer.Event) (string, erro
 }
 
 func (s *Service) webhook(ctx context.Context, e *peer.Event, data any) error {
-	if s.Webhooks == nil {
+	if s.Hooks == nil {
 		return nil
 	}
 	w := &webhook.Event{ID: e.ID, Type: e.Type, ConnectionID: e.ConnectionID, CreatedAt: e.At.UTC().Truncate(time.Second)}
@@ -459,10 +460,8 @@ func (s *Service) webhook(ctx context.Context, e *peer.Event, data any) error {
 		}
 		w.Data = b
 	}
-	err := s.Webhooks.Deliver(ctx, w)
-	if errors.Is(err, webhook.ErrRejected) {
-		s.log().Error("webhook rejected", "event_id", e.ID, "type", e.Type)
-		return nil
-	}
-	return err
+	// The peer's order: its event ids are ULIDs, random within a
+	// millisecond, and Seq restarts when its queue is empty at a start.
+	key := fmt.Sprintf("%013d.%016x.%s", e.At.UnixMilli(), e.Seq, e.ID)
+	return s.Hooks.Add(ctx, key, w)
 }

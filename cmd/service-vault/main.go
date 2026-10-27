@@ -265,17 +265,19 @@ func serve(args []string) error {
 		}
 		rc.HTTP = hc
 	}
+	sender := &webhook.Dispatcher{URL: cfg.WebhookURL, Secret: cfg.WebhookSecret}
 	svc := &service.Service{Store: tbl.Peer(), ServiceName: cfg.ServiceName, Log: log,
-		Webhooks: &webhook.Dispatcher{URL: cfg.WebhookURL, Secret: cfg.WebhookSecret},
-		Limiter:  &signin.Limiter{Counters: tbl.Counters(), Email: cfg.EmailLimits, Source: cfg.SourceLimits}}
+		Hooks:   &webhook.Outbox{Store: tbl.Peer(), Kind: service.HookKind, Sender: sender, Log: log},
+		Limiter: &signin.Limiter{Counters: tbl.Counters(), Email: cfg.EmailLimits, Source: cfg.SourceLimits}}
 	bootKey := ""
 	if cfg.AdminBootstrapEmail != "" {
 		if bootKey, err = email.Key(cfg.AdminBootstrapEmail); err != nil {
 			return errors.New("SV_ADMIN_BOOTSTRAP_EMAIL: not an email address")
 		}
 	}
-	approvals := &approval.Manager{Store: tbl.Peer(), Pager: tbl, Webhooks: svc.Webhooks, ServiceName: cfg.ServiceName,
-		Threshold: cfg.AdminThreshold, TTL: cfg.ApprovalTTL, BootstrapKey: bootKey, BoundConnection: svc.BoundConnection, Log: log}
+	approvals := &approval.Manager{Store: tbl.Peer(), Pager: tbl, ServiceName: cfg.ServiceName,
+		Threshold: cfg.AdminThreshold, TTL: cfg.ApprovalTTL, BootstrapKey: bootKey, BoundConnection: svc.BoundConnection, Log: log,
+		Hooks: &webhook.Outbox{Store: tbl.Peer(), Kind: approval.HookKind, Sender: sender, Log: log}}
 	if err := approvals.Start(ctx); err != nil {
 		return fmt.Errorf("approvals: %w", err)
 	}
@@ -302,6 +304,8 @@ func serve(args []string) error {
 	peerErr := make(chan error, 1)
 	go func() { peerErr <- p.Run(ctx) }()
 	go approvals.Run(ctx)
+	go svc.Hooks.Run(ctx)
+	go approvals.Hooks.Run(ctx)
 	srvErr := make(chan error, 1)
 	go func() { srvErr <- srv.ListenAndServeTLS("", "") }()
 	log.Info("serving", "version", version, "listen", cfg.Listen, "mailbox", keys.Mailbox())

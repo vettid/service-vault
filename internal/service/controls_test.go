@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -390,5 +391,33 @@ func TestOverSourceLimitDoesNotSupersede(t *testing.T) {
 	}
 	if s := f.status(again); s.Status != "pending" {
 		t.Fatalf("%+v", s)
+	}
+}
+
+// An endpoint that is down holds up only the webhooks: the sign-in
+// started after a webhook could not be delivered still gets its outcome,
+// and the webhooks follow, in order, once the endpoint is back.
+func TestWebhookEndpointDown(t *testing.T) {
+	f := newFixture(t)
+	f.connect(f.m, "email-key")
+	f.hk.down = errors.New("down")
+	id1 := f.start("email-key", "", "11")
+	f.pump()
+	f.sign(f.m, f.m.Challenges[0], f.m.Cred)
+	if s := f.status(id1); s.Status != "approved" {
+		t.Fatalf("first %+v", s)
+	}
+	id2 := f.start("email-key", "", "22")
+	f.pump()
+	f.sign(f.m, f.m.Challenges[1], f.m.Cred)
+	if s := f.status(id2); s.Status != "approved" {
+		t.Fatalf("second while the endpoint is down %+v", s)
+	}
+	f.hk.mu.Lock()
+	f.hk.down = nil
+	f.hk.mu.Unlock()
+	ap := f.hk.of(peer.EventSignInApproved)
+	if len(ap) != 2 || !strings.Contains(string(ap[0].Data), id1) || !strings.Contains(string(ap[1].Data), id2) {
+		t.Fatalf("webhooks %+v", ap)
 	}
 }

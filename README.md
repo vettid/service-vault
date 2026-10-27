@@ -173,6 +173,18 @@ the member's account name as their vault presents it. Admin approvals add
 `admin_set.changed` `{admins, added?, removed?, reason, approval_id?}`
 (its `connection_id` is the connection added or removed).
 
+**Delivery.** Webhooks wait in the store and go out from their own loop,
+in the order they were made (connection and sign-in events in one queue,
+approval events in another). An endpoint that is slow or down delays only
+the webhooks behind it, never connections, sign-ins or approvals. An
+event is done when the endpoint answers 2xx; a 4xx other than 408 and 429
+drops it (logged as `webhook rejected`); anything else is tried again
+with backoff (1 s, doubling, at most 5 min) until the event is 24 hours
+old, when it is dropped (logged as `webhook dropped: undeliverable`) so
+the events behind it go out. A dropped event's outcome is still in the
+API (`GET` of the invite, sign-in or approval). Answer 2xx, or 4xx to
+drop an event you cannot use, rather than failing the same event again.
+
 **Email binding.** The email entered for an invitation is bound to the
 connection it becomes (MEMBER-SERVICE-PLAN §4.1), as an HMAC under the
 pepper, and sign-in looks the member up by it — **only if the application

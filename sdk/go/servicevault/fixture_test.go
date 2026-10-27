@@ -20,6 +20,7 @@ import (
 	"github.com/vettid/service-vault/internal/peer"
 	"github.com/vettid/service-vault/internal/service"
 	"github.com/vettid/service-vault/internal/tlsid"
+	iwebhook "github.com/vettid/service-vault/internal/webhook"
 	"github.com/vettid/service-vault/sdk/go/servicevault"
 )
 
@@ -77,7 +78,10 @@ type fixture struct {
 	key      string // the API key
 }
 
-func newFixture(t *testing.T, hooks service.Webhooks) *fixture {
+// newFixture serves the API over a service and approvals whose webhooks
+// go to hooks (nil: none); deliver flushes the service's, tick the
+// approvals'.
+func newFixture(t *testing.T, hooks iwebhook.Sender) *fixture {
 	t.Helper()
 	idx, err := connect.NewEmailIndex([]byte(randomHex(t, 32)))
 	if err != nil {
@@ -89,9 +93,13 @@ func newFixture(t *testing.T, hooks service.Webhooks) *fixture {
 	}
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 	fp, st := &fakePeer{}, peer.NewMemStore()
-	svc := &service.Service{Peer: fp, Store: st, ServiceName: "VettID Member Service", Webhooks: hooks, Log: quiet}
-	svc.Approvals = &approval.Manager{Peer: fp, Store: st, Pager: st, Webhooks: hooks, ServiceName: svc.ServiceName,
+	svc := &service.Service{Peer: fp, Store: st, ServiceName: "VettID Member Service", Log: quiet}
+	svc.Approvals = &approval.Manager{Peer: fp, Store: st, Pager: st, ServiceName: svc.ServiceName,
 		Threshold: 1, BootstrapKey: ek, BoundConnection: svc.BoundConnection, Log: quiet}
+	if hooks != nil {
+		svc.Hooks = &iwebhook.Outbox{Store: st, Kind: service.HookKind, Sender: hooks, Log: quiet}
+		svc.Approvals.Hooks = &iwebhook.Outbox{Store: st, Kind: approval.HookKind, Sender: hooks, Log: quiet}
+	}
 	f := &fixture{p: fp, svc: svc, apv: svc.Approvals, emailKey: ek, key: randomHex(t, 24)}
 	s := &api.Server{Keys: [][32]byte{api.HashKey(f.key)}, Email: idx, Invites: svc.Invites(), SignIns: svc.SignIns(),
 		Approvals: svc.Approvals, LookupFloor: 10 * time.Millisecond, Log: quiet}
@@ -119,6 +127,19 @@ func (f *fixture) deliver(t *testing.T, e peer.Event) {
 	if err := f.svc.Deliver(context.Background(), &e); err != nil {
 		t.Fatalf("%s: %v", e.Type, err)
 	}
+	if f.svc.Hooks != nil {
+		if err := f.svc.Hooks.Flush(context.Background()); err != nil {
+			t.Fatalf("%s: webhook: %v", e.Type, err)
+		}
+	}
+}
+
+// tick runs the approvals' tick and delivers their webhooks.
+func (f *fixture) tick(ctx context.Context) error {
+	if err := f.apv.Tick(ctx); err != nil || f.apv.Hooks == nil {
+		return err
+	}
+	return f.apv.Hooks.Flush(ctx)
 }
 
 func tlsServer(t *testing.T, h http.Handler) (*httptest.Server, string) {
