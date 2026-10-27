@@ -36,6 +36,26 @@ export const KEY_ADMIN_ACTIONS = [
   'kms:ScheduleKeyDeletion', 'kms:CancelKeyDeletion', 'kms:RotateKeyOnDemand',
 ];
 
+/**
+ * Where the stack publishes what its API client's stack needs, in SSM
+ * Parameter Store: `<ssmPrefix(env)>/<name>`. A client reads them at
+ * deploy time, which (unlike Fn::ImportValue) never locks this stack's
+ * values. The TLS pin is `<ssmPrefix(env)>/tls-pin`.
+ */
+export const ssmPrefix = (envName: string) => `/vettid/service-vault/${envName}`;
+
+/** The parameters published for the API client (besides tls-pin). */
+export const CLIENT_PARAMS = [
+  'vpc-id',
+  'public-subnet-ids',
+  'security-group-id',
+  'namespace-id',
+  'namespace-arn',
+  'namespace-name',
+  'api-url',
+  'webhook-secret-arn',
+] as const;
+
 /** The widest IPv4 prefix allowed for apiClientCidr. */
 export const MIN_API_CIDR_PREFIX = 16;
 
@@ -238,7 +258,7 @@ export class ServiceVaultStack extends cdk.Stack {
     // application's client reads it and accepts only that key. "unset" until
     // the first start.
     const tlsPin = new ssm.StringParameter(this, 'TlsPin', {
-      parameterName: `/vettid/service-vault/${envName}/tls-pin`,
+      parameterName: `${ssmPrefix(envName)}/tls-pin`,
       description: 'SHA-256 SPKI pin of the service vault private API key (SV_TLS_PIN_PARAM)',
       stringValue: 'unset',
       tier: ssm.ParameterTier.STANDARD,
@@ -364,7 +384,7 @@ export class ServiceVaultStack extends cdk.Stack {
       },
     });
 
-    // ---- Exports for the member-service stack ---------------------------
+    // ---- Exports (the member-service stack reads the SSM parameters below) --
     const out = (id: string, value: string, description: string) =>
       new cdk.CfnOutput(this, id, { value, description, exportName: `${exportPrefix}-${id}` });
     out('VpcId', this.vpc.vpcId, 'VPC the API client runs in');
@@ -377,5 +397,28 @@ export class ServiceVaultStack extends cdk.Stack {
     out('TlsPinParameterName', tlsPin.parameterName, 'SSM parameter holding the private API key pin');
     out('TlsPinParameterArn', tlsPin.parameterArn, 'SSM parameter holding the private API key pin (grant ssm:GetParameter to the client)');
     out('WebhookSecretArn', webhookSecret.secretArn, 'Webhook signing secret (the application verifies with it)');
+
+    // ---- The same, in SSM for the client's stack ---------------------------
+    // The exports above stay for whoever uses them; a client stack should
+    // read these instead, so that this stack can change a value later.
+    const apiUrl = `https://${DISCOVERY_NAME}.${this.namespace.namespaceName}:${API_PORT}`;
+    const params: Record<(typeof CLIENT_PARAMS)[number], [string, string]> = {
+      'vpc-id': [this.vpc.vpcId, 'VPC the API client runs in'],
+      'public-subnet-ids': [cdk.Fn.join(',', this.vpc.publicSubnets.map((s) => s.subnetId)), 'Public subnets for the API client task (comma-separated)'],
+      'security-group-id': [this.securityGroup.securityGroupId, 'Service vault task security group (the client adds ingress on the API port)'],
+      'namespace-id': [this.namespace.namespaceId, 'Cloud Map private DNS namespace id'],
+      'namespace-arn': [this.namespace.namespaceArn, 'Cloud Map private DNS namespace ARN'],
+      'namespace-name': [this.namespace.namespaceName, 'Cloud Map private DNS namespace name'],
+      'api-url': [apiUrl, 'Private API base URL (TLS 1.3, key pinned)'],
+      'webhook-secret-arn': [webhookSecret.secretArn, 'Webhook signing secret (the application verifies with it)'],
+    };
+    for (const [name, [value, description]] of Object.entries(params)) {
+      new ssm.StringParameter(this, `Param-${name}`, {
+        parameterName: `${ssmPrefix(envName)}/${name}`,
+        stringValue: value,
+        description: `VettID service vault (${envName}): ${description}`,
+        tier: ssm.ParameterTier.STANDARD,
+      });
+    }
   }
 }
