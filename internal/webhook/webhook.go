@@ -1,6 +1,7 @@
 // Package webhook delivers the service vault's events to the application:
-// a signed POST per event (sdk/go/webhook), retried with backoff until the
-// application answers 2xx or the attempts run out.
+// a signed POST per event (sdk/go/webhook). Events wait in an Outbox in
+// the store and are delivered from its own loop, retried with backoff
+// until the application answers 2xx or rejects them.
 package webhook
 
 import (
@@ -42,70 +43,48 @@ func NewEvent(typ, connectionID string, data any, now time.Time) (*Event, error)
 	return e, nil
 }
 
-// Dispatcher posts events to one endpoint.
+// Dispatcher posts events to one endpoint, one attempt per Deliver; the
+// Outbox retries.
 type Dispatcher struct {
-	URL         string
-	Secret      []byte // at least webhook.MinSecretLen bytes
-	Client      *http.Client
-	MaxAttempts int           // default 8
-	Backoff     time.Duration // first retry delay, doubled each time; default 1 s, capped at 5 min
-	Now         func() time.Time
+	URL    string
+	Secret []byte // at least webhook.MinSecretLen bytes
+	Client *http.Client
+	Now    func() time.Time
 }
 
 // ErrRejected is returned when the endpoint answers 4xx (other than 408
 // and 429): the event is not retried.
 var ErrRejected = errors.New("webhook: rejected by endpoint")
 
-// Deliver posts e, retrying network errors, 408, 429 and 5xx. The body and
-// event id stay the same across attempts; each attempt is signed afresh.
+// StatusError is an answer worth retrying: 408, 429 or 5xx.
+type StatusError struct{ Code int }
+
+func (e *StatusError) Error() string { return fmt.Sprintf("webhook: status %d", e.Code) }
+
+// Deliver posts e once. The body and event id are the same on every
+// attempt; each is signed afresh. It returns nil on 2xx, ErrRejected
+// (wrapped) on a 4xx other than 408 and 429, and another error when the
+// event should be tried again.
 func (d *Dispatcher) Deliver(ctx context.Context, e *Event) error {
 	body, err := json.Marshal(e)
 	if err != nil {
 		return err
 	}
-	attempts, delay := d.MaxAttempts, d.Backoff
-	if attempts <= 0 {
-		attempts = 8
+	now := time.Now
+	if d.Now != nil {
+		now = d.Now
 	}
-	if delay <= 0 {
-		delay = time.Second
-	}
-	now := d.Now
-	if now == nil {
-		now = time.Now
-	}
-	var last error
-	for i := 0; i < attempts; i++ {
-		if i > 0 {
-			t := time.NewTimer(delay)
-			select {
-			case <-ctx.Done():
-				t.Stop()
-				return ctx.Err()
-			case <-t.C:
-			}
-			delay = min(2*delay, 5*time.Minute)
-		}
-		retry, err := d.post(ctx, e.ID, body, now())
-		if err == nil {
-			return nil
-		}
-		if !retry {
-			return err
-		}
-		last = err
-	}
-	return fmt.Errorf("webhook: %d attempts: %w", attempts, last)
+	return d.post(ctx, e.ID, body, now())
 }
 
-func (d *Dispatcher) post(ctx context.Context, id string, body []byte, now time.Time) (retry bool, err error) {
+func (d *Dispatcher) post(ctx context.Context, id string, body []byte, now time.Time) error {
 	sig, err := webhook.Sign(d.Secret, now, id, body)
 	if err != nil {
-		return false, err
+		return err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.URL, bytes.NewReader(body))
 	if err != nil {
-		return false, err
+		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(webhook.HeaderEventID, id)
@@ -116,16 +95,16 @@ func (d *Dispatcher) post(ctx context.Context, id string, body []byte, now time.
 	}
 	resp, err := c.Do(req)
 	if err != nil {
-		return ctx.Err() == nil, err
+		return err
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 	resp.Body.Close()
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
-		return false, nil
+		return nil
 	case resp.StatusCode == http.StatusRequestTimeout, resp.StatusCode == http.StatusTooManyRequests, resp.StatusCode >= 500:
-		return true, fmt.Errorf("webhook: status %d", resp.StatusCode)
+		return &StatusError{Code: resp.StatusCode}
 	default:
-		return false, fmt.Errorf("%w: status %d", ErrRejected, resp.StatusCode)
+		return fmt.Errorf("%w: status %d", ErrRejected, resp.StatusCode)
 	}
 }

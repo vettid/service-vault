@@ -72,10 +72,13 @@ func (p *fakePeer) last(conn string) sent {
 	return sent{}
 }
 
+// hooks is the webhook endpoint; of delivers what the outbox holds
+// first.
 type hooks struct {
 	mu     sync.Mutex
 	evs    []*webhook.Event
 	failed error
+	out    *webhook.Outbox
 }
 
 func (h *hooks) Deliver(_ context.Context, e *webhook.Event) error {
@@ -89,6 +92,9 @@ func (h *hooks) Deliver(_ context.Context, e *webhook.Event) error {
 }
 
 func (h *hooks) of(typ string) []map[string]any {
+	if h.out != nil {
+		_ = h.out.Flush(context.Background())
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	var out []map[string]any
@@ -136,7 +142,8 @@ func newFixture(t *testing.T, threshold int, admins ...string) *fixture {
 	}
 	logs := &bytes.Buffer{}
 	f := &fixture{t: t, p: p, st: st, hk: &hooks{}, clk: clk, logs: logs}
-	f.m = &Manager{Peer: p, Store: st, Pager: st, Webhooks: f.hk, ServiceName: "VettID Member Service",
+	f.hk.out = &webhook.Outbox{Store: st, Kind: HookKind, Sender: f.hk}
+	f.m = &Manager{Peer: p, Store: st, Pager: st, Hooks: f.hk.out, ServiceName: "VettID Member Service",
 		Threshold: threshold, Now: clk.Now, Log: slog.New(slog.NewTextHandler(logs, nil))}
 	if len(admins) > 0 {
 		b := f.m.batch(clk.Now())
@@ -800,19 +807,21 @@ func TestChallengeContext(t *testing.T) {
 	}
 }
 
-// Webhooks wait in the store until delivered; a failed delivery is tried
-// at the next tick, in order.
+// Webhooks wait in the store until delivered, in order; an endpoint that
+// is down holds up neither the tick nor the approval.
 func TestWebhookRetry(t *testing.T) {
 	f := newFixture(t, 1, "c1")
 	f.hk.failed = errors.New("down")
 	c := f.create(ActionVoteOpen, "Open", `{}`)
 	f.answer("c1", "approve")
-	if err := f.m.Tick(context.Background()); err == nil {
+	f.tick()
+	if s := f.status(c.ID); s.Status != StatusApproved {
+		t.Fatalf("status %q while the endpoint is down", s.Status)
+	}
+	if err := f.hk.out.Flush(context.Background()); err == nil {
 		t.Fatal("no error")
 	}
 	f.hk.failed = nil
-	f.tick()
-	f.tick()
 	if ap := f.hk.of(EventApproved); len(ap) != 1 || ap[0]["approval_id"] != c.ID {
 		t.Fatalf("%+v", ap)
 	}

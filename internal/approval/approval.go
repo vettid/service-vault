@@ -23,9 +23,11 @@ const (
 	kindOpen     = "apv_open"   // approval id -> "" while it is pending
 	kindReq      = "apv_req"    // challenge request id -> approval id
 	kindSeen     = "apv_seen"   // peer event id -> "": an answer already handled
-	kindHook     = "apv_hook"   // a webhook event waiting to be delivered
 	kindAdmins   = "admin_set"  // "admins" -> the admin set
 	kindBoot     = "admin_boot" // "state" -> the bootstrap state (bootState)
+	// HookKind is the kind of the approvals' webhook Outbox: an event
+	// waiting to be delivered.
+	HookKind = "apv_hook"
 	// KindAudit is the append-only audit log: one record per entry, by
 	// increasing id, written once (IfAbsent), never updated or deleted.
 	KindAudit = "audit"
@@ -43,11 +45,6 @@ type Peer interface {
 	CancelChallenge(ctx context.Context, requestID string) (bool, error)
 }
 
-// Webhooks delivers webhook events (webhook.Dispatcher).
-type Webhooks interface {
-	Deliver(ctx context.Context, e *webhook.Event) error
-}
-
 // Pager reads an append-only kind in id order (store.Table, peer.MemStore).
 type Pager interface {
 	Page(ctx context.Context, kind, after string, limit int) ([]peer.Record, error)
@@ -56,10 +53,12 @@ type Pager interface {
 // Manager runs approvals. It assumes it is the only writer of its
 // records (one task runs the service vault) and serializes its work.
 type Manager struct {
-	Peer     Peer
-	Store    peer.Store
-	Pager    Pager
-	Webhooks Webhooks
+	Peer  Peer
+	Store peer.Store
+	Pager Pager
+	// Hooks queues the approvals' webhooks (Kind HookKind); its own Run
+	// delivers them. nil sends none.
+	Hooks *webhook.Outbox
 	// ServiceName is named in the challenge's context.
 	ServiceName string
 	// Threshold is m: how many distinct admins must approve
@@ -81,11 +80,10 @@ type Manager struct {
 	Now             func() time.Time
 	Log             *slog.Logger
 
-	mu      sync.Mutex
-	flushMu sync.Mutex
-	lastID  string
-	kick    chan struct{}
-	once    sync.Once
+	mu     sync.Mutex
+	lastID string
+	kick   chan struct{}
+	once   sync.Once
 }
 
 // record is a stored approval.
@@ -174,6 +172,7 @@ type batch struct {
 	m       *Manager
 	now     time.Time
 	changes []peer.Change
+	hooks   bool // changes queue a webhook
 }
 
 func (m *Manager) batch(now time.Time) *batch { return &batch{m: m, now: now} }
@@ -204,6 +203,9 @@ func (b *batch) audit(e *AuditEntry) error {
 }
 
 func (b *batch) hook(typ, connID string, data any) error {
+	if b.m.Hooks == nil {
+		return nil
+	}
 	id, err := b.m.nextID(b.now)
 	if err != nil {
 		return err
@@ -212,10 +214,24 @@ func (b *batch) hook(typ, connID string, data any) error {
 	if e.Data, err = json.Marshal(data); err != nil {
 		return err
 	}
-	return b.put(kindHook, id, e, time.Time{})
+	c, err := b.m.Hooks.Change(id, e) // ids increase (nextID)
+	if err != nil {
+		return err
+	}
+	b.changes = append(b.changes, c)
+	b.hooks = true
+	return nil
 }
 
-func (b *batch) apply(ctx context.Context) error { return b.m.Store.Apply(ctx, b.changes) }
+func (b *batch) apply(ctx context.Context) error {
+	if err := b.m.Store.Apply(ctx, b.changes); err != nil {
+		return err
+	}
+	if b.hooks {
+		b.m.Hooks.Wake()
+	}
+	return nil
+}
 
 func (m *Manager) admins(ctx context.Context) ([]string, error) {
 	data, ok, err := m.Store.Get(ctx, kindAdmins, adminsID)
@@ -958,13 +974,8 @@ func (m *Manager) Start(ctx context.Context) error {
 
 // Tick does the periodic work: bootstrap from an already bound, active
 // connection while the set is empty and a bootstrap applies; expire or settle the open
-// approvals; deliver the waiting webhooks.
+// approvals. The webhooks are delivered by Hooks.Run.
 func (m *Manager) Tick(ctx context.Context) error {
-	err := m.tickState(ctx)
-	return errors.Join(err, m.Flush(ctx))
-}
-
-func (m *Manager) tickState(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	key, err := m.bootstrapKey(ctx)
@@ -989,38 +1000,6 @@ func (m *Manager) tickState(ctx context.Context) error {
 		}
 	}
 	return m.reevaluate(ctx)
-}
-
-// Flush delivers the waiting webhooks in order; one the endpoint rejects
-// is dropped after logging, and delivery stops at the first that could
-// not be delivered (it is tried again at the next tick).
-func (m *Manager) Flush(ctx context.Context) error {
-	if m.Webhooks == nil {
-		return nil
-	}
-	m.flushMu.Lock()
-	defer m.flushMu.Unlock()
-	recs, err := m.Store.Load(ctx, kindHook)
-	if err != nil {
-		return err
-	}
-	for _, rec := range recs {
-		e := &webhook.Event{}
-		if err := json.Unmarshal(rec.Data, e); err != nil {
-			return err
-		}
-		err := m.Webhooks.Deliver(ctx, e)
-		if errors.Is(err, webhook.ErrRejected) {
-			m.log().Error("webhook rejected", "event_id", e.ID, "type", e.Type)
-		} else if err != nil {
-			m.log().Warn("webhook delivery", "event_id", e.ID, "type", e.Type, "err", "error")
-			return err
-		}
-		if err := m.Store.Apply(ctx, []peer.Change{{Kind: kindHook, ID: rec.ID}}); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // TickInterval is how often Run ticks.

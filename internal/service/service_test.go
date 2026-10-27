@@ -19,19 +19,35 @@ import (
 	"github.com/vettid/vettid-vault/vms/peerwire"
 )
 
+// hooks is the webhook endpoint; of delivers what the outboxes hold
+// first.
 type hooks struct {
-	mu  sync.Mutex
-	evs []*webhook.Event
+	mu   sync.Mutex
+	evs  []*webhook.Event
+	outs []*webhook.Outbox
+	down error // Deliver fails with it
+}
+
+func (h *hooks) outbox(st peer.Store, kind string) *webhook.Outbox {
+	o := &webhook.Outbox{Store: st, Kind: kind, Sender: h}
+	h.outs = append(h.outs, o)
+	return o
 }
 
 func (h *hooks) Deliver(_ context.Context, e *webhook.Event) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.down != nil {
+		return h.down
+	}
 	h.evs = append(h.evs, e)
 	return nil
 }
 
 func (h *hooks) of(typ string) []*webhook.Event {
+	for _, o := range h.outs {
+		_ = o.Flush(context.Background())
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	var out []*webhook.Event
@@ -87,7 +103,7 @@ func newFixture(t *testing.T) *fixture {
 	hk := &hooks{}
 	logs := &syncBuffer{}
 	log := slog.New(slog.NewTextHandler(logs, nil))
-	svc := &Service{Store: st, ServiceName: "VettID Member Service", Webhooks: hk, Now: clk.Now, Log: log}
+	svc := &Service{Store: st, ServiceName: "VettID Member Service", Hooks: hk.outbox(st, HookKind), Now: clk.Now, Log: log}
 	p, err := peer.New(peer.Config{Keys: keys, Relay: w.View(keys.Relay), RelayURL: peertest.RelayURL, Store: st, Events: svc,
 		Now: clk.Now, Log: log, Profile: peer.Profile{FirstName: "VettID", LastName: "Member Service"}})
 	if err != nil {

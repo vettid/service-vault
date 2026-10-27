@@ -23,7 +23,7 @@ func TestApprovalsAgainstAPI(t *testing.T) {
 	rc := &servicevault.Receiver{Secret: secret, Replay: &servicevault.MemoryReplayCache{}}
 	srv := httptest.NewServer(rc.Handler(got.handle))
 	defer srv.Close()
-	f := newFixture(t, &iwebhook.Dispatcher{URL: srv.URL, Secret: secret, MaxAttempts: 1})
+	f := newFixture(t, &iwebhook.Dispatcher{URL: srv.URL, Secret: secret})
 	c := f.client(t)
 	ctx := context.Background()
 
@@ -32,7 +32,7 @@ func TestApprovalsAgainstAPI(t *testing.T) {
 		t.Fatalf("no admins: %v", err)
 	}
 	f.deliver(t, peer.Event{ID: "01JEVENTA", Type: peer.EventConnectionAdded, ConnectionID: "c1", Tag: f.emailKey})
-	if err := f.apv.Tick(ctx); err != nil {
+	if err := f.tick(ctx); err != nil {
 		t.Fatal(err)
 	}
 	a, err := c.Admins(ctx)
@@ -64,7 +64,7 @@ func TestApprovalsAgainstAPI(t *testing.T) {
 	// The admin approves: the fake peer numbered the challenge req1.
 	f.deliver(t, peer.Event{ID: "01JEVENTB", Type: peer.EventSignInApproved, ConnectionID: "c1", RequestID: "req1",
 		Context: "ctx", Key: make([]byte, 32), Signature: make([]byte, 64), SignedAt: time.Now()})
-	if err := f.apv.Tick(ctx); err != nil {
+	if err := f.tick(ctx); err != nil {
 		t.Fatal(err)
 	}
 	ap, err = c.Approval(ctx, cr.ID)
@@ -114,7 +114,7 @@ func TestApprovalsAgainstAPI(t *testing.T) {
 	}
 	f.deliver(t, peer.Event{ID: "01JEVENTC", Type: peer.EventConnectionRemoved, ConnectionID: "c1", Direction: "in",
 		Tag: f.emailKey})
-	if err := f.apv.Tick(ctx); err != nil {
+	if err := f.tick(ctx); err != nil {
 		t.Fatal(err)
 	}
 	var changed *servicevault.AdminSetChanged

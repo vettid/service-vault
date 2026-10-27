@@ -93,9 +93,18 @@ func TestCountersOnDynamoDB(t *testing.T) {
 	}
 }
 
+// hookList is the webhook endpoint; all delivers what the outboxes hold
+// first.
 type hookList struct {
-	mu  sync.Mutex
-	evs []*webhook.Event
+	mu   sync.Mutex
+	evs  []*webhook.Event
+	outs []*webhook.Outbox
+}
+
+func (h *hookList) outbox(st peer.Store, kind string) *webhook.Outbox {
+	o := &webhook.Outbox{Store: st, Kind: kind, Sender: h}
+	h.outs = append(h.outs, o)
+	return o
 }
 
 func (h *hookList) Deliver(_ context.Context, e *webhook.Event) error {
@@ -113,7 +122,7 @@ func TestEmailBindingOnDynamoDB(t *testing.T) {
 	defer cancel()
 	tbl := newTable(t, ctx)
 	hk := &hookList{}
-	svc := &service.Service{Store: tbl.Peer(), Webhooks: hk}
+	svc := &service.Service{Store: tbl.Peer(), Hooks: hk.outbox(tbl.Peer(), service.HookKind)}
 	const n = 12
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
@@ -128,7 +137,7 @@ func TestEmailBindingOnDynamoDB(t *testing.T) {
 	}
 	wg.Wait()
 	bound := ""
-	for _, e := range hk.evs {
+	for _, e := range hk.all() {
 		var d map[string]any
 		_ = json.Unmarshal(e.Data, &d)
 		if d["email_bound"] == true {

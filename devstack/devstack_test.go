@@ -259,7 +259,8 @@ func TestConnectAndSignInAgainstDevStack(t *testing.T) {
 	rc.HTTP = s.relayClient(t)
 	st := peer.NewMemStore()
 	hk := &hooks{}
-	svc := &service.Service{Store: st, ServiceName: "VettID Member Service", Webhooks: hk, Log: log}
+	svc := &service.Service{Store: st, ServiceName: "VettID Member Service", Log: log,
+		Hooks: &webhook.Outbox{Store: st, Kind: service.HookKind, Sender: hk, Log: log}}
 	p, err := peer.New(peer.Config{Keys: keys, Relay: rc, RelayURL: relayOrigin, Store: st, Events: svc, Log: log,
 		Profile: peer.Profile{FirstName: "VettID", LastName: "Member Service"}, PollWait: 2 * time.Second})
 	if err != nil {
@@ -271,10 +272,13 @@ func TestConnectAndSignInAgainstDevStack(t *testing.T) {
 		t.Fatal(err)
 	}
 	bootKey, _ := email.Key("member@example.org")
-	approvals := &approval.Manager{Peer: p, Store: st, Pager: st, Webhooks: hk, ServiceName: svc.ServiceName, Threshold: 1,
-		BootstrapKey: bootKey, BoundConnection: svc.BoundConnection, Log: log}
+	approvals := &approval.Manager{Peer: p, Store: st, Pager: st, ServiceName: svc.ServiceName, Threshold: 1,
+		BootstrapKey: bootKey, BoundConnection: svc.BoundConnection, Log: log,
+		Hooks: &webhook.Outbox{Store: st, Kind: approval.HookKind, Sender: hk, Log: log}}
 	svc.Approvals = approvals
 	go approvals.Run(ctx)
+	go svc.Hooks.Run(ctx)
+	go approvals.Hooks.Run(ctx)
 	runDone := make(chan error, 1)
 	go func() { runDone <- p.Run(ctx) }()
 	defer func() {

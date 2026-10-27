@@ -50,9 +50,10 @@ func TestApprovalsOnDynamoDB(t *testing.T) {
 	tbl := newTable(t, ctx)
 	p := &approvalPeer{}
 	hooks := &hookList{}
+	out := hooks.outbox(tbl.Peer(), approval.HookKind)
 	bound := map[string]string{"boot-key": "c1"}
 	newManager := func() *approval.Manager {
-		return &approval.Manager{Peer: p, Store: tbl.Peer(), Pager: tbl, Webhooks: hooks, ServiceName: "VettID Member Service",
+		return &approval.Manager{Peer: p, Store: tbl.Peer(), Pager: tbl, Hooks: out, ServiceName: "VettID Member Service",
 			Threshold: 2, BootstrapKey: "boot-key", BoundConnection: func(_ context.Context, k string) (string, bool, error) {
 				c, ok := bound[k]
 				return c, ok, nil
@@ -158,6 +159,9 @@ func TestApprovalsOnDynamoDB(t *testing.T) {
 }
 
 func (h *hookList) all() []*webhook.Event {
+	for _, o := range h.outs {
+		_ = o.Flush(context.Background())
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return append([]*webhook.Event(nil), h.evs...)
