@@ -29,17 +29,24 @@ func (p *Peer) capTTL(ttl time.Duration) time.Duration {
 // mint issues a deposit token for the peer np of connection connID and
 // records it by jti at once, so that deposits on it are classified (§6.6).
 func (p *Peer) mint(connID string, np *peerInfo, kind string, ttl time.Duration, quota *relayauth.Quota, now time.Time) (string, error) {
+	tok, _, err := p.mintJTI(connID, np, kind, ttl, quota, now)
+	return tok, err
+}
+
+// mintJTI is mint, also returning the token's jti (to revoke it if the
+// handshake it was minted for fails).
+func (p *Peer) mintJTI(connID string, np *peerInfo, kind string, ttl time.Duration, quota *relayauth.Quota, now time.Time) (string, string, error) {
 	jti := p.newID(now)
 	tok, err := p.cfg.Relay.MintToken(relayauth.EncodeKey(np.Relay.PK), p.cfg.RelayURL,
 		relayclient.TokenOptions{TTL: ttl, JTI: jti, Quota: quota})
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	// relayclient backdates iat by 60 s (RELAY-PROTOCOL §5.2); exp = iat + ttl.
 	exp := now.UTC().Truncate(time.Second).Add(-peerwire.TokenBackdate).Add(ttl)
 	p.issued[jti] = &IssuedToken{JTI: jti, Kind: kind, Sub: relayauth.EncodeKey(np.Relay.PK), ConnID: connID, Exp: exp}
 	p.markDirty(kindToken, jti)
-	return tok, nil
+	return tok, jti, nil
 }
 
 // mintRequest issues a request token (§7.1): ≤ 16 days, 8 messages / 64 KiB.
@@ -52,6 +59,24 @@ func (p *Peer) mintRequest(connID string, np *peerInfo, now time.Time) (string, 
 func (p *Peer) mintStanding(connID string, np *peerInfo, now time.Time) (string, error) {
 	return p.mint(connID, np, tokStanding, p.capTTL(peerwire.StandingMax),
 		&relayauth.Quota{Msgs: i64(peerwire.PeerQuotaMsgs), Bytes: i64(peerwire.PeerQuotaBytes)}, now)
+}
+
+// mintReconnectPair issues the standing and reconnect tokens of a
+// reconnect's hs.resp, with their jtis.
+func (p *Peer) mintReconnectPair(connID string, np *peerInfo, now time.Time) (st, rt string, jtis []string, err error) {
+	st, j1, err := p.mintJTI(connID, np, tokStanding, p.capTTL(peerwire.StandingMax),
+		&relayauth.Quota{Msgs: i64(peerwire.PeerQuotaMsgs), Bytes: i64(peerwire.PeerQuotaBytes)}, now)
+	if err != nil {
+		return "", "", nil, err
+	}
+	ttl := handshake.ReconnectTokenLifetime(time.Duration(p.limits.MaxTokenLifetimeSeconds) * time.Second)
+	rt, j2, err := p.mintJTI(connID, np, tokReconnect, ttl,
+		&relayauth.Quota{Msgs: i64(handshake.ReconnectTokenQuotaMsgs), Bytes: i64(handshake.ReconnectTokenQuotaBytes)}, now)
+	if err != nil {
+		p.denyJTI(j1, now)
+		return "", "", nil, err
+	}
+	return st, rt, []string{j1, j2}, nil
 }
 
 // mintReconnect issues a reconnect token (§6.6): ≤ 365 days and the relay

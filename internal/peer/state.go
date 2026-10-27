@@ -159,15 +159,18 @@ type InviteRecord struct {
 
 // awaiting is a handshake we answered with hs.resp, awaiting hs.fin.
 type awaiting struct {
-	ID       string                   `json:"id"`
-	ConnID   string                   `json:"conn_id"` // the connection it is for (new or existing)
-	New      *peerInfo                `json:"new,omitempty"`
-	Purpose  handshake.Purpose        `json:"purpose"`
-	InviteID string                   `json:"invite_id,omitempty"`
-	Held     HeldToken                `json:"held"` // the peer's token from hs.init
-	Resp     handshake.ResponderState `json:"resp"`
-	Created  time.Time                `json:"created"`
-	Expires  time.Time                `json:"expires"`
+	ID       string            `json:"id"`
+	ConnID   string            `json:"conn_id"` // the connection it is for (new or existing)
+	New      *peerInfo         `json:"new,omitempty"`
+	Purpose  handshake.Purpose `json:"purpose"`
+	InviteID string            `json:"invite_id,omitempty"`
+	Held     HeldToken         `json:"held"` // the peer's token from hs.init
+	// JTIs are the tokens minted for a reconnect's hs.resp: revoked if
+	// the handshake is dropped before hs.fin.
+	JTIs    []string                 `json:"jtis,omitempty"`
+	Resp    handshake.ResponderState `json:"resp"`
+	Created time.Time                `json:"created"`
+	Expires time.Time                `json:"expires"`
 
 	r *handshake.Responder
 }

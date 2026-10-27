@@ -197,6 +197,14 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 		pi.Discard()
 		return
 	}
+	if !suite.EqualPublic(sender, c.Peer.Relay.PK) {
+		// Only the relay key on record may reconnect (§6.6); the previous
+		// one's grace after a relay.address.update is for messages, and
+		// must not let it suspend the connection below.
+		p.audit("reconnect_sender", c.ID)
+		pi.Discard()
+		return
+	}
 	var eid [suite.EpochIDSize]byte
 	copy(eid[:], c.LastEpochID)
 	body := pi.Init()
@@ -238,18 +246,21 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 		pi.Discard()
 		return
 	}
+	// One reconnect at a time per connection: a newer hs.init replaces
+	// one still awaiting hs.fin, whose tokens are revoked.
+	p.dropConnAwaiting(c.ID, handshake.PurposeReconnect, now)
+	var jtis []string
 	var err error
-	if cfg.Token, err = p.mintStanding(c.ID, &c.Peer, now); err != nil {
-		pi.Discard()
-		return
-	}
-	if cfg.ReconnectToken, err = p.mintReconnect(c.ID, &c.Peer, now); err != nil {
+	if cfg.Token, cfg.ReconnectToken, jtis, err = p.mintReconnectPair(c.ID, &c.Peer, now); err != nil {
 		pi.Discard()
 		return
 	}
 	resp, env, err := pi.Respond(cfg) // checks the sender, the ctx and the chain
 	if err != nil {
 		p.audit("reconnect_refused", c.ID)
+		for _, j := range jtis {
+			p.denyJTI(j, now)
+		}
 		return
 	}
 	if len(fresh) > 0 {
@@ -259,7 +270,7 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 	c.State = StateActive
 	p.markDirty(kindConn, c.ID)
 	id := p.newID(now)
-	p.awaiting[id] = &awaiting{ID: id, ConnID: c.ID, Purpose: handshake.PurposeReconnect, Created: now,
+	p.awaiting[id] = &awaiting{ID: id, ConnID: c.ID, Purpose: handshake.PurposeReconnect, JTIs: jtis, Created: now,
 		Expires: now.Add(HandshakeTTL), r: resp}
 	p.markDirty(kindAwait, id)
 	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: env}, now)
@@ -299,6 +310,9 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 		p.audit("rekey_refused", c.ID)
 		return ackAfterFlush
 	}
+	// One rekey at a time per connection: this one replaces an earlier
+	// one still awaiting hs.fin.
+	p.dropConnAwaiting(c.ID, handshake.PurposeRekey, now)
 	id := p.newID(now)
 	p.awaiting[id] = &awaiting{ID: id, ConnID: c.ID, Purpose: handshake.PurposeRekey, Created: now,
 		Expires: now.Add(HandshakeTTL), r: resp}
@@ -393,9 +407,22 @@ func (p *Peer) dropAwaiting(id string, now time.Time) {
 		p.denyConnTokens(aw.ConnID, now)
 		p.endInvite(aw.InviteID, InviteExpired, now)
 	}
+	for _, j := range aw.JTIs {
+		p.denyJTI(j, now)
+	}
 	aw.r.Abort()
 	delete(p.awaiting, id)
 	p.markDirty(kindAwait, id)
+}
+
+// dropConnAwaiting drops the connection's handshakes of a purpose that
+// still await hs.fin (their reconnect tokens revoked).
+func (p *Peer) dropConnAwaiting(connID string, purpose handshake.Purpose, now time.Time) {
+	for id, aw := range p.awaiting {
+		if aw.ConnID == connID && aw.New == nil && aw.Purpose == purpose {
+			p.dropAwaiting(id, now)
+		}
+	}
 }
 
 // startRekey initiates a rekey of a connection's session when its epoch

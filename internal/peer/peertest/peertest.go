@@ -285,6 +285,10 @@ type Member struct {
 	// (for a reconnect, §6.6).
 	Rotations []*handshake.Rotation
 
+	// IgnoreStray drops a sealed message no handshake of ours matches
+	// (an hs.resp to a reconnect we replaced), as a vault does.
+	IgnoreStray bool
+
 	Got        []*envelope.Inner // messages received in the session
 	Challenges []*peerwire.ConnAuthChallenge
 }
@@ -418,7 +422,9 @@ func (m *Member) handle(msg relayclient.Message) bool {
 			m.DepositTo(m.SvcStand, res.Fin)
 			m.KR.Activate(res.Epoch, now)
 		default:
-			m.t.Fatal("Member: unexpected sealed message")
+			if !m.IgnoreStray {
+				m.t.Fatal("Member: unexpected sealed message")
+			}
 		}
 		return true
 	}
@@ -713,4 +719,43 @@ func (m *Member) sendAddress(pk ed25519.PublicKey, relayURL, tok string) {
 		"token": tok,
 	})
 	m.Send("relay.address.update", body)
+}
+
+// AcceptOnToken follows link (its invitation id, its service) but
+// deposits the hs.init with another invitation's open token, as someone
+// holding one invitation would try with another's id.
+func (m *Member) AcceptOnToken(link, otherLink string) {
+	m.t.Helper()
+	open := func(l string) *invite.Bundle {
+		q, err := invite.ParseLink(l)
+		if err != nil {
+			m.t.Fatal(err)
+		}
+		blob, err := m.R.GetClaim(q.ClaimID)
+		if err != nil {
+			m.t.Fatal(err)
+		}
+		b, err := invite.OpenBundle(blob, q, m.clk.Now())
+		if err != nil {
+			m.t.Fatal(err)
+		}
+		return b
+	}
+	b, other := open(link), open(otherLink)
+	m.svc = b.Vault
+	prof, _ := json.Marshal(map[string]string{"first_name": m.FirstName, "last_name": m.LastName})
+	ini, err := handshake.NewInitiator(handshake.InitiatorConfig{
+		Purpose: handshake.PurposeConnection, Ctx: b.InviteID,
+		Identity: m.IK, StaticKEM: m.kem.Public(), Relay: m.Addr,
+		ResponderIK: b.Vault.IK, ResponderEK: b.Vault.KEM, ResponderRelayKey: b.Vault.Relay.PK,
+		Policy: handshake.PolicyVaultToVault, Now: m.clk.Now(), Profile: prof,
+		Token: m.Mint(peerwire.RequestTokenConnection),
+	})
+	if err != nil {
+		m.t.Fatal(err)
+	}
+	m.ini = ini
+	if _, err := m.R.Deposit(context.Background(), b.Vault.Relay.Mailbox, other.Token, ini.Envelope()); err != nil {
+		m.t.Fatalf("deposit: %v", err)
+	}
 }
