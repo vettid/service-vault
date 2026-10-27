@@ -76,6 +76,7 @@ npx cdk deploy \
 | `adminBootstrapEmail` | no | `SV_ADMIN_BOOTSTRAP_EMAIL` (see "Admin approvals"). It is plain text in the task definition and stays in that definition's revisions after a redeploy without it: use an address you don't mind being kept there (a staging test member), or arm the bootstrap with `service-vault admin bootstrap` instead |
 | `adminThreshold` | no (1) | `SV_ADMIN_THRESHOLD` |
 | `approvalTtl` | no (`24h`) | `SV_APPROVAL_TTL` |
+| `recordSealMigrate` | no | `true` only for the deploy that upgrades a deployment from before sealing (see "Records at rest") |
 | `alarmTopicArn` or `alarmEmail` | one of them | Where the alarms go (below). Either an SNS topic that reaches a person, or an address for a topic of the stack's own; confirm that subscription from the email AWS sends. For staging, use vettid.org's vault alerts topic, which emails the admin address: `aws ssm get-parameter --name /vettid-org/staging/vault/alerts-topic-arn` |
 
 **Alarms.** They always notify someone: synth fails without a
@@ -84,6 +85,13 @@ destination.
   connection is suspended (see "When a member moves phones").
 - `webhook_dropped`: a webhook was given up after 24 hours, so the
   application missed an event.
+- `key_change`: the keystore KMS key was changed (a grant, its
+  policy, an alias, tags, rotation, disabled, or scheduled for
+  deletion). CloudTrail's KMS management events reach EventBridge from
+  the account's or the organization's trail; without a trail logging
+  management events in the region the alarm never fires. They are kept a
+  year in a log group of their own. A deploy that changes the key's
+  policy fires it too, as expected.
 - `down`: no task has run for 10 minutes. It watches the ECS service's
   CPU samples, which ECS reports without Container Insights. A
   reclaimed Spot task is replaced well within that time.
@@ -129,6 +137,42 @@ exports, `ServiceVault-<envName>-{VpcId, PublicSubnetIds,
 SecurityGroupId, NamespaceId, NamespaceArn, NamespaceName, ApiUrl,
 WebhookSecretArn, TlsPinParameterName, TlsPinParameterArn}`. Importing
 those locks them, so prefer the parameters.
+
+**Records at rest.** Every record the service vault keeps in DynamoDB is
+sealed with AES-256-GCM before it is written (`internal/sealstore`):
+- the peer's: connections with their session keys, handshakes in
+  flight, the tokens members issued, the outbox, the dedupe markers and
+  cached responses;
+- sign-ins, the email index, approvals, the admin set and the bootstrap
+  state;
+- both webhook outboxes and the audit log.
+
+The associated data is the record's kind and id, so a record can't be
+moved to another place. The record key is kept in the keystore, sealed by
+the KMS key that only the task role may use. So the table, or a backup of
+it, gives away no traffic, and a table writer can't forge an admin or a
+connection. One thing a table writer can still do: put back an older
+sealed copy of a record, or delete one. The KMS key policy lets the
+account administer the key but not grant itself its use: there is no
+`CreateGrant`.
+
+An unsealed record is refused and fails the start. Only the operator
+turns on accepting them, for the one deploy that upgrades a deployment
+from before sealing. Nothing in the table can turn it on, whether by
+deleting a marker or the record key, so nobody can slip in forged
+plaintext records.
+1. Take an on-demand backup:
+   `aws dynamodb create-backup --table-name vettid-service-vault-<env> --backup-name pre-seal`.
+2. Deploy with `-c recordSealMigrate=true` (`SV_RECORD_SEAL_MIGRATE=1`).
+   The start seals every record in place and logs `records sealed`. If
+   it is cut short, the next start goes on.
+3. Deploy again without it.
+
+This upgrade is one-way. An image from before sealing can't read sealed
+records, so the circuit breaker's rollback to it won't start. If the new
+image fails after sealing, deploy a fixed image, or restore the backup
+and deploy the old image. A new deployment starts sealed: its first start
+creates the record key and needs no migration.
 
 **Container configuration.**
 

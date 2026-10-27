@@ -1,0 +1,2 @@
+# A test fixture in a sealed-store test (a base64 placeholder, not a key).
+237cc36039c0c5cc0ea6d1addb140bde88baea77:internal/sealstore/sealstore_test.go:generic-api-key:29

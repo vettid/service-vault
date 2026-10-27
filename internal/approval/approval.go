@@ -1039,3 +1039,10 @@ func (m *Manager) Run(ctx context.Context) {
 		}
 	}
 }
+
+// Kinds lists every record kind the approvals store (the audit log and
+// their webhook outbox included), for a migration that must touch them
+// all.
+func Kinds() []string {
+	return []string{kindApproval, kindOpen, kindReq, kindSeen, kindAdmins, kindBoot, KindAudit, HookKind}
+}
