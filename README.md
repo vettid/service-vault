@@ -86,6 +86,9 @@ destination.
   connection is suspended (see "When a member moves phones").
 - `webhook_dropped`: a webhook was given up after 24 hours, so the
   application missed an event.
+- `reconnect_failed`: after a table restore, a connection's reconnect
+  could not start or complete, so that member must connect again (see
+  "Restoring the table").
 - `admins_short`: an admin's connection was removed (severed, or
   replaced by a new connection) and fewer admins than m remain, so no
   approval can pass (see "Recovering admins" under "Admin approvals").
@@ -266,7 +269,11 @@ member's vault still keeps in its history, carries fresh tokens, and
 follows any identity rotation the member made since; it logs
 `restored: reconnects started` and `reconnected` per connection. A
 reconnect completes when the member's vault next collects, usually
-within minutes. Each side keeps a year of epoch ids for this (per the
+within minutes; until then nothing is sent on that connection (its
+sign-ins fail), and a restart sends it again (at most 3 times, as the
+member's reconnect token allows 4 messages). One that can't start or
+complete raises `reconnect_failed`. A reconnect the service answered is
+not answered again (a replay). Each side keeps a year of epoch ids for this (per the
 pending §6.6 change for restores; member vaults need the release that
 has it, until then the reconnect is refused and the member connects
 again from a new invitation, which replaces the old connection, and

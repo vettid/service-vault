@@ -139,13 +139,100 @@ func TestEpochHistoryPruned(t *testing.T) {
 	if len(c.Epochs) != MaxEpochs || c.Epochs[0].ID[0] != 10 {
 		t.Fatalf("%d epochs, first %d", len(c.Epochs), c.Epochs[0].ID[0])
 	}
-	c.recordEpoch(make([]byte, 16), now.Add(EpochHistory+time.Duration(MaxEpochs)*time.Hour))
+	last := now.Add(EpochHistory + time.Duration(MaxEpochs)*time.Hour)
+	c.recordEpoch(make([]byte, 16), last)
 	if c.Epochs[0].At.Before(now.Add(time.Duration(MaxEpochs) * time.Hour)) {
 		t.Fatalf("an epoch older than a year kept: %v", c.Epochs[0].At)
 	}
 	var id [suite.EpochIDSize]byte
 	copy(id[:], c.Epochs[3].ID)
-	if !c.knownEpoch(handshake.EpochCtx(id)) || c.knownEpoch(handshake.EpochCtx([suite.EpochIDSize]byte{0xff, 0xff})) {
+	if !c.knownEpoch(handshake.EpochCtx(id), last) || c.knownEpoch(handshake.EpochCtx([suite.EpochIDSize]byte{0xff, 0xff}), last) {
 		t.Fatal("knownEpoch")
+	}
+	// Without a newer activation, an entry ages out all the same.
+	if c.knownEpoch(handshake.EpochCtx(id), last.Add(EpochHistory)) {
+		t.Fatal("knownEpoch accepted an epoch older than a year")
+	}
+}
+
+// A restart while the reconnect awaits its hs.resp: the stored initiator
+// lacks the chain we followed, so the start sends the reconnect again,
+// and the member's answer (beginning with the link we followed) is taken.
+func TestReconnectResumedAfterRestart(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	r := m.RotateIdentity(40, true) // the link waits for the next epoch
+	m.SendRotation(r)               // identity.rotate arrives
+	f.pump()
+	if len(f.p.conns[cid].Chain) != 1 {
+		t.Fatal("identity.rotate not followed")
+	}
+	b := f.backup() // before the rekey under the new key
+	m.StartRekey()
+	f.pump()
+	f.restore(b, true)
+	f.start() // a deploy before the member answers
+	if c := f.p.conns[cid]; !c.Reconnecting || c.ReconnectTries != 2 {
+		t.Fatalf("reconnecting %v, tries %d", c.Reconnecting, c.ReconnectTries)
+	}
+	m.IgnoreRevoked = true // its answer to the replaced hs.init is refused
+	f.pump()
+	c := f.p.conns[cid]
+	if c.Reconnecting || c.kr.Current().ID() != m.KR.Current().ID() {
+		t.Fatal("no common session after the resumed reconnect")
+	}
+	if !f.signIn(m, cid) {
+		t.Fatal("sign-in after the reconnect")
+	}
+}
+
+// While the reconnect is open nothing is sealed in the restored session,
+// and a member's reconnect hs.init answered once is not answered again.
+func TestReconnectWindowAndReplay(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	b := f.backup()
+	m.StartRekey()
+	f.pump()
+	f.restore(b, true)
+	if _, err := f.p.Authenticate(context.Background(), cid, "Sign in", time.Minute); err == nil {
+		t.Fatal("a challenge sealed in the restored session")
+	}
+	f.pump()
+	if f.p.conns[cid].Reconnecting {
+		t.Fatal("reconnect not completed")
+	}
+
+	m.Reconnect()
+	f.pump()
+	before := f.p.conns[cid].kr.Current().ID()
+	if before != m.KR.Current().ID() {
+		t.Fatal("member reconnect")
+	}
+	m.ResendReconnect() // the same hs.init again, as a relay replaying it
+	f.pump()
+	if f.p.conns[cid].kr.Current().ID() != before || len(f.p.awaiting) != 0 {
+		t.Fatal("a replayed reconnect hs.init was answered")
+	}
+}
+
+// A reconnect that cannot start (the member's reconnect token expired)
+// leaves the connection as it was, not reconnecting.
+func TestReconnectNotPossible(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	b := f.backup()
+	f.clk.Advance(366 * 24 * time.Hour)
+	f.restore(b, true)
+	if c := f.p.conns[cid]; c.Reconnecting || c.ReconnectTries != 0 {
+		t.Fatal("a reconnect on an expired token")
+	}
+	for _, og := range f.p.outgoing {
+		if og.ini.Purpose() == handshake.PurposeReconnect {
+			t.Fatal("a reconnect on an expired token")
+		}
 	}
 }

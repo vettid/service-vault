@@ -209,7 +209,7 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 		return
 	}
 	body := pi.Init()
-	if !c.knownEpoch(body.Ctx) {
+	if !c.knownEpoch(body.Ctx, now) {
 		p.audit("reconnect_refused", c.ID)
 		pi.Discard()
 		return
@@ -270,6 +270,7 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 		}
 		return
 	}
+	p.mark(kindInner, reconnectKey(pi.Th1()), []byte{1}, now.Add(DedupeRetention))
 	if len(fresh) > 0 {
 		p.followRotation(c, body.From.IK, body.From.KEM, fresh)
 	}
@@ -523,11 +524,15 @@ func (p *Peer) handleResp(id string, raw []byte, sender ed25519.PublicKey, now t
 
 func (p *Peer) dropOutgoing(id string) {
 	if og := p.outgoing[id]; og != nil {
+		reconnect := og.ini != nil && og.ini.Purpose() == handshake.PurposeReconnect
 		if og.ini != nil {
 			og.ini.Abort()
 		}
 		for _, j := range og.Issued {
 			p.denyJTI(j, p.now())
+		}
+		if c := p.conns[og.ConnID]; reconnect && c != nil && c.Reconnecting {
+			p.reconnectFailed(c)
 		}
 	}
 	delete(p.outgoing, id)

@@ -291,6 +291,10 @@ type Member struct {
 	// Reconnects counts the service's reconnects answered.
 	Reconnects int
 	retired    []*suite.PrivateKey // static KEM keys before a rotation (§6.6 "Retired keys")
+	lastRecon  []byte              // the last reconnect hs.init sent
+	// IgnoreRevoked lets a deposit fail (an answer on a token the service
+	// revoked when it replaced the handshake), as a vault's outbox does.
+	IgnoreRevoked bool
 
 	// IgnoreStray drops a sealed message no handshake of ours matches
 	// (an hs.resp to a reconnect we replaced), as a vault does.
@@ -372,7 +376,7 @@ func (m *Member) Accept(link string, profile string) {
 
 func (m *Member) DepositTo(tok string, payload []byte) {
 	m.t.Helper()
-	if _, err := m.R.Deposit(context.Background(), m.svc.Relay.Mailbox, tok, payload); err != nil {
+	if _, err := m.R.Deposit(context.Background(), m.svc.Relay.Mailbox, tok, payload); err != nil && !m.IgnoreRevoked {
 		m.t.Fatalf("Member deposit: %v", err)
 	}
 }
@@ -740,7 +744,7 @@ func (m *Member) ReconnectNaming(id [suite.EpochIDSize]byte) {
 	if err != nil {
 		m.t.Fatal(err)
 	}
-	m.recon = ini
+	m.recon, m.lastRecon = ini, ini.Envelope()
 	m.DepositTo(m.SvcRecon, ini.Envelope())
 }
 
@@ -820,9 +824,9 @@ func (m *Member) AcceptOnToken(link, otherLink string) {
 	}
 }
 
-// ResendReconnect deposits the pending reconnect's hs.init again, the
-// same bytes, as an outbox retry after a lost relay answer does.
+// ResendReconnect deposits the last reconnect's hs.init again, the same
+// bytes, as an outbox retry after a lost relay answer (or a replay) does.
 func (m *Member) ResendReconnect() {
 	m.t.Helper()
-	m.DepositTo(m.SvcRecon, m.recon.Envelope())
+	m.DepositTo(m.SvcRecon, m.lastRecon)
 }

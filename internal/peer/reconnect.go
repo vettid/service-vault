@@ -2,6 +2,7 @@ package peer
 
 import (
 	"crypto/subtle"
+	"encoding/hex"
 	"time"
 
 	"github.com/vettid/vettid-vault/vms/handshake"
@@ -43,8 +44,8 @@ func (c *Connection) recordEpoch(id []byte, now time.Time) {
 }
 
 // knownEpoch reports whether ctx names the connection's last epoch or
-// one in its history.
-func (c *Connection) knownEpoch(ctx string) bool {
+// one in its history not older than EpochHistory.
+func (c *Connection) knownEpoch(ctx string, now time.Time) bool {
 	match := func(id []byte) bool {
 		var eid [suite.EpochIDSize]byte
 		if len(id) != len(eid) {
@@ -57,12 +58,21 @@ func (c *Connection) knownEpoch(ctx string) bool {
 		return true
 	}
 	for _, e := range c.Epochs {
-		if match(e.ID) {
+		if now.Sub(e.At) <= EpochHistory && match(e.ID) {
 			return true
 		}
 	}
 	return false
 }
+
+// reconnectKey is the dedupe key (kindInner) of a reconnect hs.init we
+// answered, by its th1: a replay is refused for DedupeRetention, past
+// which hs.init is stale anyway.
+func reconnectKey(th1 [32]byte) string { return "reconnect|" + hex.EncodeToString(th1[:]) }
+
+// MaxReconnectTries bounds the reconnects started for one restore: each
+// spends one of the 4 messages of the member's reconnect token (§6.6).
+const MaxReconnectTries = 3
 
 // reconnectAll starts a reconnect on every active or stale connection
 // and returns how many started.
@@ -71,9 +81,45 @@ func (p *Peer) reconnectAll(now time.Time) int {
 	for _, c := range p.conns {
 		if p.startReconnect(c, now) {
 			n++
+		} else if c.State == StateActive || c.State == StateStale {
+			p.log().Error("reconnect failed: the member must connect again", "alarm", "reconnect_failed", "connection_id", c.ID)
 		}
 	}
 	return n
+}
+
+// resumeReconnects runs at a start without a restore: a reconnect still
+// awaiting its hs.resp is started again when its stored initiator lost
+// the member's followed chain (it would refuse an answer beginning with
+// links we follow), or when it has no initiator at all.
+func (p *Peer) resumeReconnects(now time.Time) {
+	for _, c := range p.conns {
+		if !c.Reconnecting {
+			continue
+		}
+		pending := false
+		for _, og := range p.outgoing {
+			pending = pending || og.ConnID == c.ID && og.ini != nil && og.ini.Purpose() == handshake.PurposeReconnect
+		}
+		if pending && len(c.Chain) == 0 {
+			continue
+		}
+		if !p.startReconnect(c, now) {
+			p.reconnectFailed(c)
+		}
+	}
+}
+
+// reconnectFailed ends a reconnect that cannot complete: its alarm tells
+// the operator the member must connect again (README "Restoring the
+// table").
+func (p *Peer) reconnectFailed(c *Connection) {
+	if !c.Reconnecting {
+		return
+	}
+	c.Reconnecting, c.ReconnectTries = false, 0
+	p.markDirty(kindConn, c.ID)
+	p.log().Error("reconnect failed: the member must connect again", "alarm", "reconnect_failed", "connection_id", c.ID)
 }
 
 // startReconnect sends a reconnect hs.init to the member's mailbox on the
@@ -83,14 +129,15 @@ func (p *Peer) reconnectAll(now time.Time) int {
 // member may no longer hold.
 func (p *Peer) startReconnect(c *Connection, now time.Time) bool {
 	if c.State != StateActive && c.State != StateStale || len(c.LastEpochID) == 0 ||
-		c.Reconnect.Token == "" || !now.Before(c.Reconnect.Exp) {
-		p.log().Warn("reconnect not possible", "connection_id", c.ID, "state", c.State)
+		c.Reconnect.Token == "" || !now.Before(c.Reconnect.Exp) || c.ReconnectTries >= MaxReconnectTries {
+		p.log().Warn("reconnect not possible", "connection_id", c.ID, "state", c.State, "tries", c.ReconnectTries)
 		return false
 	}
 	kem, err := suite.ParsePublicKey(c.Peer.KEM)
 	if err != nil {
 		return false
 	}
+	c.Reconnecting = false // a reconnect replaced is not a failure
 	p.dropConnOutgoing(c)
 	st, rt, jtis, err := p.mintReconnectPair(c.ID, &c.Peer, now)
 	if err != nil {
@@ -122,6 +169,9 @@ func (p *Peer) startReconnect(c *Connection, now time.Time) bool {
 	kid, th1 := ini.EphKid(), ini.Th1()
 	p.outgoing[id] = &outgoing{ID: id, ConnID: c.ID, EphKid: kid[:], Th1: th1[:], Init: s, Created: now, Issued: jtis, ini: ini}
 	p.markDirty(kindOutgoing, id)
+	c.Reconnecting = true
+	c.ReconnectTries++
+	p.markDirty(kindConn, c.ID)
 	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Token: c.Reconnect.Token, Payload: ini.Envelope()}, now)
 	p.log().Info("reconnect started", "connection_id", c.ID)
 	return true
@@ -140,6 +190,7 @@ func (p *Peer) finishReconnect(c *Connection, og *outgoing, res *handshake.Resul
 		for _, j := range og.Issued {
 			p.denyJTI(j, now)
 		}
+		p.reconnectFailed(c)
 		return ackAfterFlush
 	}
 	if fresh := res.Resp.Rotations[handshake.KnownPrefix(chainOf(c), res.Resp.Rotations):]; len(fresh) > 0 {
@@ -147,10 +198,10 @@ func (p *Peer) finishReconnect(c *Connection, og *outgoing, res *handshake.Resul
 	}
 	c.Standing, c.Reconnect = st, rt
 	c.State = StateActive
+	c.Reconnecting, c.ReconnectTries = false, 0
 	p.markDirty(kindConn, c.ID)
 	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: res.Fin}, now)
-	p.installEpoch(c, res.Epoch, now)
-	p.retryConn(c.ID)
+	p.installEpoch(c, res.Epoch, now) // and retries the connection's outbox
 	p.log().Info("reconnected", "connection_id", c.ID)
 	return ackAfterFlush
 }

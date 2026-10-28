@@ -166,6 +166,8 @@ func (p *Peer) Start(ctx context.Context) error {
 			if err := p.reconnectAfterRestore(ctx); err != nil {
 				return err
 			}
+		} else {
+			p.resumeReconnects(p.now())
 		}
 	}
 	p.housekeeping(p.now())
@@ -372,6 +374,18 @@ func (p *Peer) handleMessage(ctx context.Context, m relayclient.Message, now tim
 	// awaiting approval and connection.approved / declined.
 	if t := p.issued[m.JTI]; m.JTI != "" && t != nil && t.Kind == tokRequest {
 		return p.handleOnRequestToken(env, m.Payload, sender, c, now), nil
+	}
+	// A reconnect hs.init answered before is not answered again (it may
+	// name an earlier epoch, so the epoch moving on no longer ends it).
+	if env.Mode() == envelope.ModeSealed && env.RecipientKid().Equal(p.cfg.Keys.KEM.Public().Kid()) {
+		_, seen, err := p.cfg.Store.Get(ctx, kindInner, reconnectKey(handshake.Th1(m.Payload)))
+		if err != nil {
+			return 0, err
+		}
+		if seen {
+			p.audit("reconnect_replay", connID(c))
+			return ackAfterFlush, nil
+		}
 	}
 	// §6.6: a connection's deposit on its reconnect token (or without a
 	// jti) may only be a sealed hs.init with purpose reconnect.
