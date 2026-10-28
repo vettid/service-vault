@@ -222,6 +222,12 @@ func TestRotationConflictSuspends(t *testing.T) {
 	if c := f.p.conns[cid]; c.State != StateSuspended {
 		t.Fatalf("state %s", c.State)
 	}
+	// The application learns it once.
+	m.SendRotation(other)
+	f.pump()
+	if evs := f.ev.of(EventConnectionSuspended); len(evs) != 1 || evs[0].ConnectionID != cid || evs[0].Reason != SuspendRotationConflict {
+		t.Fatalf("connection.suspended %+v", evs)
+	}
 	if _, err := f.p.Authenticate(context.Background(), cid, "Sign in", time.Minute); err == nil {
 		t.Fatal("a challenge to a suspended connection")
 	}
@@ -240,6 +246,9 @@ func TestRotationConflictSuspends(t *testing.T) {
 	}
 	if !f.signIn(m2, cid2) {
 		t.Fatal("sign-in on the new connection")
+	}
+	if evs := f.ev.of(EventConnectionRemoved); len(evs) != 1 || evs[0].ConnectionID != cid {
+		t.Fatalf("connection.removed for the suspended connection %+v", evs)
 	}
 }
 
@@ -306,6 +315,9 @@ func TestReconnectConflictSuspends(t *testing.T) {
 	f.pump()
 	if c := f.p.conns[cid]; c.State != StateSuspended {
 		t.Fatalf("state %s", c.State)
+	}
+	if len(f.ev.of(EventConnectionSuspended)) != 1 {
+		t.Fatal("no connection.suspended")
 	}
 }
 

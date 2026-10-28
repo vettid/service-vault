@@ -33,6 +33,10 @@ const (
 // cannot; a new invitation replaces the connection at activation.
 const StateSuspended = "suspended"
 
+// SuspendRotationConflict is connection.suspended's reason for a
+// rotation conflict, the only one so far.
+const SuspendRotationConflict = "rotation_conflict"
+
 // PrevRelayGrace bounds how long the member's previous relay key is still
 // recognized as the connection's after a relay.address.update: deposits
 // made before the rotation, and resends of the update itself (§3.4 (b)),
@@ -151,6 +155,7 @@ func (p *Peer) suspend(c *Connection, now time.Time) {
 		}
 	}
 	p.markDirty(kindConn, c.ID)
+	p.emit(&Event{Type: EventConnectionSuspended, ConnectionID: c.ID, Tag: c.Tag, Reason: SuspendRotationConflict}, now)
 	p.log().Error("member identity rotation conflict: connection suspended", "alarm", "rotate_conflict", "connection_id", c.ID)
 }
 

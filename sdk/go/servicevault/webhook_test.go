@@ -114,6 +114,10 @@ func TestEventsFromService(t *testing.T) {
 		Direction: "in"}).(*servicevault.ConnectionRemoved); !ok || ev.Direction != servicevault.DirectionIn {
 		t.Fatalf("removed %#v", ev)
 	}
+	if ev, ok := deliver(peer.Event{Type: peer.EventConnectionSuspended, ConnectionID: "c1", Tag: f.emailKey,
+		Reason: peer.SuspendRotationConflict}).(*servicevault.ConnectionSuspended); !ok || ev.Reason != servicevault.SuspendRotationConflict || ev.ConnectionID != "c1" {
+		t.Fatalf("connection.suspended %+v", ev)
+	}
 }
 
 // signed makes a signed webhook request.

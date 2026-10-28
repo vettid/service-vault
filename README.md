@@ -331,7 +331,8 @@ billed.
 **Webhooks** (signed as `sdk/go/webhook` verifies): `connection.pending`
 `{invite_id, sas, name}`, `connection.added` `{invite_id, name, email_bound}`,
 `connection.declined` / `connection.expired` `{invite_id}`,
-`connection.removed` `{direction: in|out}`, `signin.approved`
+`connection.removed` `{direction: in|out}`, `connection.suspended`
+`{reason: rotation_conflict}`, `signin.approved`
 `{signin_id, key_changed}`, `signin.denied` `{signin_id, reason}`,
 `signin.expired` `{signin_id}`, each with its `connection_id`. `name` is
 the member's account name as their vault presents it. Admin approvals add
@@ -432,9 +433,12 @@ the move:
   `hs.init` (§6.6), and the service follows that the same way. Links it
   already followed may come first. If two different
   successors of one key arrive ("one successor per key"), the connection
-  is suspended: nothing is sent or accepted, an ERROR with
-  `alarm: rotate_conflict` is logged, and the member's next connection
-  from a new invitation replaces it. A service can't do the out-of-band
+  is suspended: nothing is sent or accepted, its sign-ins and
+  approvals can't be answered, an ERROR with `alarm: rotate_conflict` is
+  logged, and the application gets `connection.suspended` (chosen; not
+  in the spec). The member's next connection from a new invitation
+  replaces it: `connection.removed` for the suspended one, then
+  `connection.added`, and the email binding moves to the new one. A service can't do the out-of-band
   check that resolves a conflict for a person.
 - *Credential key.* `connection.authenticate.rotated` moves the pinned
   key along its chain.
