@@ -3,6 +3,7 @@ package store
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
@@ -35,6 +36,33 @@ func TestCheckRestored(t *testing.T) {
 		err := checkRestored(c.from, to)
 		if c.want == "" && err != nil || c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)) {
 			t.Errorf("%s: %v, want %q", c.name, err, c.want)
+		}
+	}
+}
+
+// A second restore to a point between an earlier restore's point and
+// when that restore was done is refused; the same point, an older one or
+// a later one is not, nor one past RestoreWindow.
+func TestCheckRestoreWindow(t *testing.T) {
+	day := 24 * time.Hour
+	b1 := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC) // the first restore's backup
+	at := b1.Add(5 * day)                              // when it was restored
+	past := []Restore{{Point: b1, At: at}}
+	now := at.Add(day)
+	for _, c := range []struct {
+		name  string
+		point time.Time
+		now   time.Time
+		ok    bool
+	}{
+		{"same backup", b1, now, true},
+		{"older backup", b1.Add(-day), now, true},
+		{"newer, before the restore", b1.Add(2 * day), now, false},
+		{"after the restore", at.Add(time.Hour), now, true},
+		{"newer, window over", b1.Add(2 * day), at.Add(RestoreWindow), true},
+	} {
+		if err := checkRestoreWindow(past, c.point, c.now); (err == nil) != c.ok {
+			t.Errorf("%s: %v", c.name, err)
 		}
 	}
 }

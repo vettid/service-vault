@@ -322,7 +322,14 @@ cluster and the service share the name):
    leaves a restore marker in `T` for the next start (above). If it is
    cut short, run it again. `-other-keys` is only for a `T` the
    daemon started on after the original table was lost: its new keys are
-   replaced by the backup's.
+   replaced by the backup's. It also refuses a backup newer than an
+   earlier restore's (in the last 35 days) but older than when that
+   restore was done: members' vaults took the epochs of that span for
+   replaced ones, and would read a backup from it as a second copy of
+   the service and suspend every connection (VAULT-MESSAGING §6.6 "Fork
+   detection"). To retry a restore, use the same backup or an older one;
+   `-newer-point` overrides, knowing every member must then connect
+   again.
 4. If the image changes too, deploy it now. Start the service:
    `aws ecs update-service --cluster T --service T --desired-count 1`.
 5. Check `/health`, the TLS pin, the `reconnected` lines and a member's
