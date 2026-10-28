@@ -308,3 +308,26 @@ func TestReconnectConflictSuspends(t *testing.T) {
 		t.Fatalf("state %s", c.State)
 	}
 }
+
+// A link counts as already followed only with the same old_ik, new_ik
+// and new_kem (VAULT-MESSAGING 0.69.1 §6.6).
+func TestKnownSuccessorMatchesKEM(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	old := m.IK
+	r := m.RotateIdentity(40, false)
+	f.pump()
+	c := f.p.conns[cid]
+	if !f.p.knownSuccessor(c, r) {
+		t.Fatal("the followed link")
+	}
+	otherKEM, _ := suite.NewPrivateKey(bytes.Repeat([]byte{99}, 32))
+	r2, err := handshake.NewRotation(old, m.IK, otherKEM.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.p.knownSuccessor(c, r2) {
+		t.Fatal("a link with another new_kem counted as followed")
+	}
+}
