@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -16,30 +17,37 @@ import (
 // maxBatchWrite bounds one BatchWriteItem call (DynamoDB's limit).
 const maxBatchWrite = 25
 
-// HasRecords reports whether t holds any record (pk "rec#…"), expired or
-// not. The start uses it to refuse making new keys over existing records.
-func (t *Table) HasRecords(ctx context.Context) (bool, error) {
+// AnyRecord returns the stored data of one record of t (pk "rec#…") that
+// has not expired, if there is one. The start uses it to refuse making
+// new keys over existing records, and to read which version of the
+// record key they are under.
+func (t *Table) AnyRecord(ctx context.Context) ([]byte, bool, error) {
 	in := &dynamodb.ScanInput{
 		TableName:                aws.String(t.Name),
 		ConsistentRead:           aws.Bool(true),
-		ProjectionExpression:     aws.String("#pk"),
-		FilterExpression:         aws.String("begins_with(#pk, :rec)"),
-		ExpressionAttributeNames: map[string]string{"#pk": attrPK},
+		ProjectionExpression:     aws.String("#d"),
+		FilterExpression:         aws.String("begins_with(#pk, :rec) AND (attribute_not_exists(#ttl) OR #ttl > :now)"),
+		ExpressionAttributeNames: map[string]string{"#pk": attrPK, "#d": attrData, "#ttl": attrTTL},
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":rec": &types.AttributeValueMemberS{Value: "rec#"},
+			":now": &types.AttributeValueMemberN{Value: strconv.FormatInt(time.Now().Unix(), 10)},
 		},
 	}
 	p := dynamodb.NewScanPaginator(t.Client, in)
 	for p.HasMorePages() {
 		out, err := p.NextPage(ctx)
 		if err != nil {
-			return false, err
+			return nil, false, err
 		}
-		if len(out.Items) > 0 {
-			return true, nil
+		for _, item := range out.Items {
+			d, _ := item[attrData].(*types.AttributeValueMemberB)
+			if d == nil {
+				return nil, true, nil
+			}
+			return d.Value, true, nil
 		}
 	}
-	return false, nil
+	return nil, false, nil
 }
 
 // CopyFrom makes t hold exactly the items of the table src: every item of

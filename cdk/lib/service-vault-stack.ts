@@ -141,9 +141,9 @@ export interface ServiceVaultStackProps extends cdk.StackProps {
    */
   readonly recordSealMigrate?: boolean;
   /**
-   * The record key's current version (default 1). Raising it rotates the
-   * key at the next start (README "Rotating the record key"); it is never
-   * lowered.
+   * The lowest record key version to use (default 1). One above the
+   * table's rotates the key at the next start (README "Rotating the record
+   * key"); later deploys may leave it out.
    */
   readonly recordKeyVersion?: number;
 }

@@ -30,8 +30,15 @@ func TestCopyFromOnDynamoDB(t *testing.T) {
 	if _, _, err := dst.CopyFrom(ctx, src.Name); err == nil {
 		t.Fatal("copied from a table without secrets")
 	}
-	if has, err := src.HasRecords(ctx); err != nil || has {
-		t.Fatalf("HasRecords on an empty table: %v %v", has, err)
+	if _, has, err := src.AnyRecord(ctx); err != nil || has {
+		t.Fatalf("AnyRecord on an empty table: %v %v", has, err)
+	}
+	// An expired record doesn't count.
+	if err := dst.Peer().Apply(ctx, []peer.Change{{Kind: "signin", ID: "gone", Data: []byte("x"), Expires: time.Now().Add(-time.Hour)}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, has, err := dst.AnyRecord(ctx); err != nil || has {
+		t.Fatalf("AnyRecord with only an expired record: %v %v", has, err)
 	}
 
 	// More records than one batch, a blob and a non-record item.
@@ -46,8 +53,8 @@ func TestCopyFromOnDynamoDB(t *testing.T) {
 		t.Fatal(err)
 	}
 	put(t, ctx, src.Client, src.Name, "ctr#x", "-")
-	if has, err := src.HasRecords(ctx); err != nil || !has {
-		t.Fatalf("HasRecords: %v %v", has, err)
+	if d, has, err := src.AnyRecord(ctx); err != nil || !has || string(d) != "old" {
+		t.Fatalf("AnyRecord: %q %v %v", d, has, err)
 	}
 
 	// The stack's table moved on: changed records, a new one, a new blob.
@@ -64,8 +71,8 @@ func TestCopyFromOnDynamoDB(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if written != 62 || deleted != 2 {
-		t.Fatalf("written %d deleted %d, want 62 and 2", written, deleted)
+	if written != 62 || deleted != 3 {
+		t.Fatalf("written %d deleted %d, want 62 and 3", written, deleted)
 	}
 	want, got := items(t, ctx, src.Client, src.Name), items(t, ctx, dst.Client, dst.Name)
 	if !maps.Equal(want, got) {

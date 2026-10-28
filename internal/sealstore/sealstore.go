@@ -63,6 +63,18 @@ var (
 	prefixV = []byte("vsr2")
 )
 
+// VersionOf is the version of the record key a stored record is sealed
+// under (0: not sealed).
+func VersionOf(data []byte) uint32 {
+	switch {
+	case bytes.HasPrefix(data, prefix):
+		return 1
+	case bytes.HasPrefix(data, prefixV) && len(data) >= len(prefixV)+4:
+		return binary.BigEndian.Uint32(data[len(prefixV):])
+	}
+	return 0
+}
+
 // ErrPlaintext is a record that is not sealed, read after the migration.
 var ErrPlaintext = errors.New("sealstore: record is not sealed")
 
