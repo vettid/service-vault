@@ -162,6 +162,9 @@ func (p *Peer) deposit(ctx context.Context, e *outboxEntry, now time.Time) (fini
 		return finished, err
 	}
 	if c := p.conns[e.ConnID]; c != nil && c.Reconnecting && e.Token == c.Reconnect.Token {
+		// Our hs.init, refused for good: dropping it ends the reconnect
+		// (dropOutgoing: reconnect_failed, the connection stale), as the
+		// reconnect token is spent and a new try on it cannot succeed.
 		p.dropConnOutgoing(c)
 	}
 	// The hs.resp to a member's reconnect, on the token its hs.init
