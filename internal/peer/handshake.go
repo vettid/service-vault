@@ -270,10 +270,11 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 	}
 	p.mark(kindInner, reconnectKey(pi.Th1()), []byte{1}, now.Add(DedupeRetention+envelope.MaxClockSkewFuture))
 	if c.Reconnecting {
-		// Crossing reconnects: the member's names our last epoch, so it
-		// holds that session; ours is abandoned (it never sends hs.fin),
-		// and both sides end on the member's. The reconnect stays open
-		// until its hs.fin (chosen; not in the spec).
+		// Crossing reconnects (§6.6, 0.72.1): ours yields to the member's,
+		// which names our last epoch. Ours is abandoned (no hs.fin; a
+		// later hs.resp to it is dropped; an hs.init not yet deposited
+		// is not), and the reconnect stays open until the member's
+		// hs.fin, or YieldWait.
 		for id, og := range p.outgoing {
 			if og.ConnID == c.ID && og.ini != nil && og.ini.Purpose() == handshake.PurposeReconnect {
 				og.ini.Abort()
@@ -284,6 +285,7 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 				p.markDirty(kindOutgoing, id)
 			}
 		}
+		p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == c.ID && e.Token != "" && e.Token == c.Reconnect.Token })
 	}
 	pend := &pendingReconnect{Standing: st, Reconnect: rt, Issued: jtis}
 	if len(fresh) > 0 {
@@ -294,8 +296,12 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 	}
 	id := p.newID(now)
 	th1 := pi.Th1()
+	exp := now.Add(HandshakeTTL)
+	if c.Reconnecting {
+		exp = now.Add(YieldWait)
+	}
 	p.awaiting[id] = &awaiting{ID: id, ConnID: c.ID, Purpose: handshake.PurposeReconnect, Th1: th1[:], Created: now,
-		Expires: now.Add(HandshakeTTL), Reconnect: pend, r: resp}
+		Expires: exp, Reconnect: pend, r: resp}
 	p.markDirty(kindAwait, id)
 	// On the standing token the hs.init brought: ours may have expired.
 	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Token: st.Token, Payload: env}, now)
@@ -487,6 +493,10 @@ func (p *Peer) dropAwaiting(id string, now time.Time) {
 	aw.r.Abort()
 	delete(p.awaiting, id)
 	p.markDirty(kindAwait, id)
+	if c := p.conns[aw.ConnID]; aw.Reconnect != nil && c != nil && c.Reconnecting && c.State != StateSuspended {
+		// We yielded to it, and its hs.fin did not come: a new try.
+		p.retryReconnect(c, now)
+	}
 }
 
 // MaxAwaitingPerConn bounds the handshakes of one purpose (rekey,
@@ -564,6 +574,14 @@ func (p *Peer) handleResp(id string, raw []byte, sender ed25519.PublicKey, now t
 	if err != nil {
 		if _, xerr := og.ini.Export(); errors.Is(xerr, handshake.ErrDone) {
 			p.audit("hs_resp_aborted", og.ConnID)
+			if c := p.conns[og.ConnID]; og.restored && c != nil && c.Reconnecting && len(c.Chain) > 0 {
+				// A reconnect resumed from the store lost the member's
+				// chain we follow (the stored initiator state lacks it), so
+				// an answer starting with those links fails: a new try.
+				p.dropOutgoingQuiet(id)
+				p.retryReconnect(c, now)
+				return ackAfterFlush
+			}
 			p.dropOutgoing(id)
 		} else {
 			p.audit("hs_resp_dropped", og.ConnID)
@@ -585,6 +603,18 @@ func (p *Peer) handleResp(id string, raw []byte, sender ed25519.PublicKey, now t
 	p.installEpoch(c, res.Epoch, now)
 	p.log().Info("rekeyed", "connection_id", c.ID)
 	return ackAfterFlush
+}
+
+// dropOutgoingQuiet drops an outgoing handshake without ending its
+// reconnect.
+func (p *Peer) dropOutgoingQuiet(id string) {
+	if og := p.outgoing[id]; og != nil {
+		if c := p.conns[og.ConnID]; c != nil && c.Reconnecting {
+			c.Reconnecting = false
+			defer func() { c.Reconnecting = true }()
+		}
+	}
+	p.dropOutgoing(id)
 }
 
 func (p *Peer) dropOutgoing(id string) {

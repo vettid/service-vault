@@ -273,12 +273,15 @@ follows any identity rotation the member made since; it logs
 `restored: reconnects started` and `reconnected` per connection. A
 reconnect completes when the member's vault next collects, usually
 within minutes; until then nothing is sent on that connection (its
-sign-ins fail), and a restart sends a new one (at most 3 per restore,
-as the member's reconnect token allows 4 messages). One that can't
+sign-ins fail). A restart keeps it open as it was, resending an
+unconfirmed deposit with the same bytes; a new one goes out only if that
+state was lost, at most 3 per restore (the member's reconnect token
+allows 4 messages). If the member's vault starts its own reconnect
+meanwhile, the service's yields to it. One that can't
 start, or isn't completed within 7 days, fails: the connection becomes
 stale, `reconnect_failed` alarms, and the member connects again from a
 new invitation, which replaces the old connection (admins then also
-need "Recovering admins"). This is VAULT-MESSAGING 0.72.0 §6.6 "After a
+need "Recovering admins"). This is VAULT-MESSAGING 0.72.1 §6.6 "After a
 restore": the member's vault accepts the older epoch on a service
 connection for 35 days after it was superseded, so a backup older than
 that fails too; member vaults need the release that has it, and until
@@ -316,7 +319,7 @@ cluster and the service share the name):
    fails), that both hold the same keys (another deployment's table
    fails), and that no task has written its heartbeat to `T` in the last
    2 minutes (the daemon writes one every 30 seconds, deletes it when
-   it stops, and stops itself after 5 minutes of failed writes; the
+   it stops, and stops itself after 90 seconds of failed writes; the
    heartbeat is read again before the deletes). Then it writes every item of `T-restore` into `T`, deletes
    the items `T` has that `T-restore` lacks, prints the counts, and
    leaves a restore marker in `T` for the next start (above). If it is
@@ -343,6 +346,12 @@ restore requires), `DescribeTable` on both tables, `GetItem` and `Scan`
 on `T-restore`, `GetItem`, `Scan` and `BatchWriteItem` on `T`,
 `DeleteTable` on `T-restore`, and `ecs:UpdateService` and
 `ecs:DescribeServices` on the service.
+
+Rolling the image back past the reconnect after a restore (to
+`53a8c41` or older) is safe only when no member's reconnect awaits its
+`hs.fin`: an older image would install the epoch without the tokens and
+rotation links the reconnect brought. Check the logs for
+`reconnected` / `epoch installed` lines settling every reconnect first.
 
 The KMS key must be the one the backup was made under: the stack's key,
 which is retained and never deleted with the stack.
