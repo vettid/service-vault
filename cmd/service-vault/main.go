@@ -418,9 +418,9 @@ func serve(args []string) error {
 }
 
 // maxHeartbeatFails is how many heartbeat writes in a row may fail
-// (HeartbeatInterval apart: 5 minutes) before the daemon stops; the
-// restore treats a heartbeat older than store.HeartbeatStale as stopped.
-const maxHeartbeatFails = 10
+// (HeartbeatInterval apart: 90 seconds) before the daemon stops, within
+// store.HeartbeatStale, after which the restore takes it for stopped.
+const maxHeartbeatFails = 3
 
 // awsClients are the AWS clients the daemon uses.
 type awsClients struct {

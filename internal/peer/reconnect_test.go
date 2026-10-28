@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"bytes"
 	"context"
 	"maps"
 	"testing"
@@ -147,9 +148,9 @@ func TestMemberReconnectDeferredToFin(t *testing.T) {
 	}
 }
 
-// A restart while the reconnect awaits its hs.resp: the start sends a new
-// hs.init (the stored bytes would be refused as a replay), and the
-// member's answer (beginning with the link we followed) is taken.
+// A restart while the reconnect awaits its hs.resp, with a member link we
+// followed: the stored initiator lacks that chain, so the member's answer
+// (beginning with the link) fails, and a new try is taken.
 func TestReconnectResumedAfterRestart(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
@@ -164,8 +165,8 @@ func TestReconnectResumedAfterRestart(t *testing.T) {
 	m.StartRekey()
 	f.pump()
 	f.restore(b, true)
-	f.start() // a deploy before the member answers
-	if c := f.p.conns[cid]; !c.Reconnecting || c.ReconnectTries != 2 {
+	f.start() // a deploy before the member answers: the stored hs.init stays
+	if c := f.p.conns[cid]; !c.Reconnecting || c.ReconnectTries != 1 {
 		t.Fatalf("reconnecting %v, tries %d", c.Reconnecting, c.ReconnectTries)
 	}
 	m.IgnoreRevoked = true // its answer to the replaced hs.init is refused
@@ -316,5 +317,81 @@ func TestReconnectCrossing(t *testing.T) {
 	}
 	if !f.signIn(m, cid) {
 		t.Fatal("sign-in after the crossing reconnects")
+	}
+}
+
+// A restart keeps the open reconnect (§6.6, 0.72.1): no new hs.init, no
+// try used, and the member's answer to the stored one completes it.
+func TestReconnectRestartKeepsHsInit(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	b := f.backup()
+	m.StartRekey()
+	f.pump()
+	f.restore(b, true)
+	var th1 []byte
+	for _, og := range f.p.outgoing {
+		th1 = og.Th1
+	}
+	f.start()
+	if len(f.p.outgoing) != 1 || f.p.conns[cid].ReconnectTries != 1 {
+		t.Fatalf("%d outgoing, tries %d", len(f.p.outgoing), f.p.conns[cid].ReconnectTries)
+	}
+	for _, og := range f.p.outgoing {
+		if !bytes.Equal(og.Th1, th1) {
+			t.Fatal("a new hs.init at the restart")
+		}
+	}
+	f.pump()
+	if c := f.p.conns[cid]; c.Reconnecting || m.Reconnects != 1 || !f.signIn(m, cid) {
+		t.Fatalf("reconnecting %v, member answered %d", c.Reconnecting, m.Reconnects)
+	}
+}
+
+// Having yielded to a member's reconnect, a restart starts nothing; the
+// member's hs.fin settles it.
+func TestReconnectRestartWhileYielded(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	b := f.backup()
+	f.restore(b, true) // no rekey since: the member's own reconnect names our epoch
+	m.Reconnect()
+	m.IgnoreStray, m.IgnoreRevoked = true, true
+	if _, err := f.p.Step(context.Background(), 0); err != nil { // answers the member's, yields
+		t.Fatal(err)
+	}
+	f.start()
+	if len(f.p.outgoing) != 0 || f.p.conns[cid].ReconnectTries != 1 {
+		t.Fatalf("%d outgoing, tries %d after a restart while yielded", len(f.p.outgoing), f.p.conns[cid].ReconnectTries)
+	}
+	f.pump()
+	if c := f.p.conns[cid]; c.Reconnecting || !f.signIn(m, cid) {
+		t.Fatal("the member's reconnect did not settle it")
+	}
+}
+
+// A member's reconnect we yielded to whose hs.fin does not come in
+// YieldWait: a new try of ours.
+func TestReconnectYieldExpires(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	b := f.backup()
+	f.restore(b, true)
+	m.Reconnect()
+	m.IgnoreStray, m.IgnoreRevoked = true, true
+	if _, err := f.p.Step(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	f.clk.Advance(YieldWait + time.Minute)
+	f.tick()
+	if c := f.p.conns[cid]; !c.Reconnecting || c.ReconnectTries != 2 || len(f.p.outgoing) != 1 || len(f.p.awaiting) != 0 {
+		t.Fatalf("reconnecting %v, tries %d, %d outgoing, %d awaiting", c.Reconnecting, c.ReconnectTries, len(f.p.outgoing), len(f.p.awaiting))
+	}
+	f.pump()
+	if c := f.p.conns[cid]; c.Reconnecting || c.State != StateActive || !f.signIn(m, cid) {
+		t.Fatal("the new try did not complete")
 	}
 }

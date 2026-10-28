@@ -57,15 +57,40 @@ func (p *Peer) reconnectAll(now time.Time) int {
 	return n
 }
 
-// resumeReconnects runs at a start without a restore: a reconnect still
-// open sends a new hs.init (a new th1; the stored bytes would be refused
-// as a replay), within MaxReconnectTries.
+// YieldWait is how long a reconnect that yielded to a member's waits for
+// that one's hs.fin, which the member sends at once on our hs.resp; then
+// a new try starts (chosen; not in the spec).
+const YieldWait = time.Hour
+
+// resumeReconnects runs at a start without a restore (§6.6, 0.72.1): a
+// reconnect still open keeps its stored initiator, and an hs.init whose
+// deposit was not confirmed is deposited again from the stored outbox,
+// with the same bytes; no try is used. Nor does one that yielded to a
+// member's and awaits its hs.fin start anything. A new hs.init (one try)
+// goes out only when the stored state was lost.
 func (p *Peer) resumeReconnects(now time.Time) {
 	for _, c := range p.conns {
-		if c.Reconnecting && !p.startReconnect(c, now) {
-			c.Reconnecting = true // startReconnect cleared it
-			p.reconnectFailed(c)
+		if !c.Reconnecting {
+			continue
 		}
+		open := false
+		for _, og := range p.outgoing {
+			open = open || og.ConnID == c.ID && og.ini != nil && og.ini.Purpose() == handshake.PurposeReconnect
+		}
+		for _, aw := range p.awaiting {
+			open = open || aw.ConnID == c.ID && aw.Reconnect != nil
+		}
+		if !open {
+			p.retryReconnect(c, now)
+		}
+	}
+}
+
+// retryReconnect starts a new try of an open reconnect, or ends it.
+func (p *Peer) retryReconnect(c *Connection, now time.Time) {
+	if !p.startReconnect(c, now) {
+		c.Reconnecting = true // startReconnect cleared it
+		p.reconnectFailed(c)
 	}
 }
 
