@@ -3,10 +3,15 @@ package peer
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"maps"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/vettid/service-vault/internal/peer/peertest"
+	"github.com/vettid/vettid-relay/relayclient"
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
@@ -372,6 +377,40 @@ func TestReconnectRestartWhileYielded(t *testing.T) {
 	}
 }
 
+// The member answers our reconnect before ours yields to its own (its
+// hs.init is ahead of its hs.resp in our mailbox): the hs.resp to the
+// abandoned hs.init is acked and audited, not left for redelivery, and
+// the member's reconnect settles it.
+func TestReconnectLateRespAcked(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	b := f.backup()
+	f.restore(b, true) // our hs.init goes out
+	m.IgnoreStray, m.IgnoreRevoked = true, true
+	m.Reconnect() // the member's, first in our mailbox
+	m.Step()      // then its hs.resp to ours
+	f.step()
+	f.lateRespAcked()
+	f.pump()
+	if c := f.p.conns[cid]; c.Reconnecting || c.State != StateActive || !f.signIn(m, cid) {
+		t.Fatal("the member's reconnect did not settle it")
+	}
+}
+
+// lateRespAcked checks that the member's hs.resp to our abandoned hs.init
+// was audited and acked: nothing is left in the service's mailbox.
+func (f *fixture) lateRespAcked() {
+	f.t.Helper()
+	if !strings.Contains(f.logs.String(), "reason=unknown_kid") {
+		f.t.Fatal("the late hs.resp was not audited")
+	}
+	f.clk.Advance(time.Hour) // past any lease
+	if msgs, err := f.sv.Collect(context.Background(), 0, 32); err != nil || len(msgs) != 0 {
+		f.t.Fatalf("%d messages left unacked (%v)", len(msgs), err)
+	}
+}
+
 // A member's reconnect we yielded to whose hs.fin does not come in
 // YieldWait: a new try of ours.
 func TestReconnectYieldExpires(t *testing.T) {
@@ -393,5 +432,208 @@ func TestReconnectYieldExpires(t *testing.T) {
 	f.pump()
 	if c := f.p.conns[cid]; c.Reconnecting || c.State != StateActive || !f.signIn(m, cid) {
 		t.Fatal("the new try did not complete")
+	}
+}
+
+// step runs the service once (collect, handle, drain), without the members.
+func (f *fixture) step() {
+	f.t.Helper()
+	if _, err := f.p.Step(context.Background(), 0); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// yielded restores b (marked), lets the member's reconnect in and has the
+// service answer it, yielding its own; deposits to the member's mailbox
+// fail with hold while set. It returns the connection.
+func (f *fixture) yielded(m *peertest.Member, cid string, b *MemStore) *Connection {
+	f.t.Helper()
+	f.restore(b, true)
+	m.IgnoreStray, m.IgnoreRevoked = true, true
+	m.Reconnect()
+	f.step()
+	c := f.p.conns[cid]
+	if !c.Reconnecting || len(f.p.outgoing) != 0 || len(f.p.awaiting) != 1 {
+		f.t.Fatalf("not yielded: reconnecting %v, %d outgoing, %d awaiting", c.Reconnecting, len(f.p.outgoing), len(f.p.awaiting))
+	}
+	return c
+}
+
+// respEntry is the outbox entry of the hs.resp to a member's reconnect:
+// a deposit on a token of the member's other than the reconnect token.
+func (f *fixture) respEntry(c *Connection) *outboxEntry {
+	for _, e := range f.p.outbox {
+		if e.ConnID == c.ID && e.Op == opDeposit && e.Token != "" && e.Token != c.Reconnect.Token {
+			return e
+		}
+	}
+	return nil
+}
+
+var errUnavailable = &relayclient.Error{Status: 503, Code: "unavailable"}
+
+// Two reconnects of the member while ours yields: when the first one's
+// hs.fin has not come in YieldWait, the second's is still awaited, so no
+// new try goes out (§6.6, 0.72.1); the second settles it.
+func TestReconnectYieldWaitsForTheOther(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	b := f.backup()
+	f.yielded(m, cid, b)
+	f.clk.Advance(30 * time.Minute)
+	m.Reconnect()
+	f.step()
+	if len(f.p.awaiting) != 2 {
+		t.Fatalf("%d awaiting", len(f.p.awaiting))
+	}
+	f.clk.Advance(YieldWait - 30*time.Minute + time.Minute) // the first expires
+	f.tick()
+	c := f.p.conns[cid]
+	if !c.Reconnecting || len(f.p.outgoing) != 0 || len(f.p.awaiting) != 1 || c.ReconnectTries != 1 {
+		t.Fatalf("reconnecting %v, %d outgoing, %d awaiting, tries %d", c.Reconnecting, len(f.p.outgoing), len(f.p.awaiting), c.ReconnectTries)
+	}
+	f.pump()
+	if c = f.p.conns[cid]; c.Reconnecting || c.State != StateActive || !f.signIn(m, cid) {
+		t.Fatal("the member's second reconnect did not settle it")
+	}
+}
+
+// A member's reconnect from before the backup, awaiting its hs.fin, that
+// expires while our reconnect is in flight: ours is left as it is (no new
+// hs.init, no try used).
+func TestReconnectMemberAwaitingExpiresWhileOursInFlight(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	m.Reconnect()
+	f.step() // answered: awaiting its hs.fin, which never comes
+	f.clk.Advance(HandshakeTTL - time.Hour)
+	b := f.backup()
+	f.restore(b, true)
+	var th1 []byte
+	for _, og := range f.p.outgoing {
+		th1 = og.Th1
+	}
+	if len(f.p.outgoing) != 1 || len(f.p.awaiting) != 1 {
+		t.Fatalf("%d outgoing, %d awaiting", len(f.p.outgoing), len(f.p.awaiting))
+	}
+	f.clk.Advance(2 * time.Hour) // the member's expires; ours is an hour old
+	f.tick()
+	c := f.p.conns[cid]
+	if len(f.p.awaiting) != 0 || len(f.p.outgoing) != 1 || c.ReconnectTries != 1 || !c.Reconnecting {
+		t.Fatalf("%d awaiting, %d outgoing, tries %d, reconnecting %v", len(f.p.awaiting), len(f.p.outgoing), c.ReconnectTries, c.Reconnecting)
+	}
+	for _, og := range f.p.outgoing {
+		if !bytes.Equal(og.Th1, th1) {
+			t.Fatal("our hs.init in flight was replaced")
+		}
+	}
+}
+
+// A yield that expires before its hs.resp was deposited: the hs.resp,
+// answering a handshake that is over, is not sent.
+func TestReconnectYieldExpiresDropsItsResp(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	b := f.backup()
+	mb := ""
+	f.failDeposit = func(mailbox, _ string) error {
+		if mailbox == mb {
+			return errUnavailable
+		}
+		return nil
+	}
+	mb = f.p.conns[cid].Peer.Relay.Mailbox
+	c := f.yielded(m, cid, b)
+	resp := f.respEntry(c)
+	if resp == nil {
+		t.Fatal("no hs.resp waiting")
+	}
+	f.clk.Advance(YieldWait + time.Minute)
+	f.tick()
+	if f.respEntry(f.p.conns[cid]) != nil && f.respEntry(f.p.conns[cid]).Token == resp.Token {
+		t.Fatal("the hs.resp of the expired handshake is still queued")
+	}
+	if c = f.p.conns[cid]; c.ReconnectTries != 2 || len(f.p.outgoing) != 1 {
+		t.Fatalf("tries %d, %d outgoing", c.ReconnectTries, len(f.p.outgoing))
+	}
+	f.failDeposit = nil
+	f.clk.Advance(time.Hour) // past the backoff of the held deposits
+	f.pump()
+	if c = f.p.conns[cid]; c.Reconnecting || !f.signIn(m, cid) {
+		t.Fatal("the new try did not complete")
+	}
+}
+
+// A deposit that ends a handshake during a drain (the hs.resp of a
+// member's reconnect we yielded to, refused for good) starts a new try,
+// which changes the outbox: every other entry is still sent exactly once.
+func TestOutboxChangedDuringDrain(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	b := f.backup()
+	mb, refuse := "", false
+	f.failDeposit = func(mailbox, token string) error {
+		switch {
+		case mailbox != mb:
+			return nil
+		case refuse && token != f.p.conns[cid].Reconnect.Token:
+			return &relayclient.Error{Status: 401, Code: codeTokenRevoked}
+		case !refuse:
+			return errUnavailable
+		}
+		return nil
+	}
+	mb = f.p.conns[cid].Peer.Relay.Mailbox
+	c := f.yielded(m, cid, b)
+	if f.respEntry(c) == nil {
+		t.Fatal("no hs.resp waiting")
+	}
+	// Behind it: session messages (dropped by the new try) and an entry
+	// the try leaves alone.
+	now := f.clk.Now()
+	for i := range 6 {
+		f.p.queueDeposit(&outboxEntry{ConnID: cid, Mailbox: mb, Payload: []byte{byte(i)}}, now)
+	}
+	f.p.queueRevoke("jti-x", now)
+	refuse = true
+	f.clk.Advance(time.Hour) // past the hs.resp's backoff
+	// Room to grow in place, as a long-running outbox has: a change made
+	// during the drain then lands in the array the drain is reading.
+	f.p.outbox = slices.Grow(f.p.outbox, 16)
+	f.step()
+	if n := f.revokes["jti-x"]; n != 1 {
+		t.Fatalf("the entry behind was sent %d times", n)
+	}
+	if c = f.p.conns[cid]; c.ReconnectTries != 2 || len(f.p.outgoing) != 1 || len(f.p.awaiting) != 0 {
+		t.Fatalf("tries %d, %d outgoing, %d awaiting", c.ReconnectTries, len(f.p.outgoing), len(f.p.awaiting))
+	}
+}
+
+// A member's reconnect whose stored record no longer applies at its
+// hs.fin (unreadable rotation links): with nothing else of the reconnect
+// open, a new try goes out instead of the reconnect staying open.
+func TestReconnectRecordBadRetries(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	b := f.backup()
+	f.yielded(m, cid, b)
+	for _, aw := range f.p.awaiting {
+		aw.Reconnect.Links = []json.RawMessage{json.RawMessage(`"x"`)}
+	}
+	f.pump()
+	if !strings.Contains(f.logs.String(), "reason=reconnect_record_bad") {
+		t.Fatal("no reconnect_record_bad")
+	}
+	// The restore's try, then the one after the bad record.
+	if n := strings.Count(f.logs.String(), `msg="reconnect started"`); n != 2 {
+		t.Fatalf("%d reconnects started", n)
+	}
+	if c := f.p.conns[cid]; c.Reconnecting || c.State != StateActive || !f.signIn(m, cid) {
+		t.Fatalf("reconnecting %v, state %s", c.Reconnecting, c.State)
 	}
 }

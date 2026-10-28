@@ -271,10 +271,10 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 	p.mark(kindInner, reconnectKey(pi.Th1()), []byte{1}, now.Add(DedupeRetention+envelope.MaxClockSkewFuture))
 	if c.Reconnecting {
 		// Crossing reconnects (§6.6, 0.72.1): ours yields to the member's,
-		// which names our last epoch. Ours is abandoned (no hs.fin; a
-		// later hs.resp to it is dropped; an hs.init not yet deposited
-		// is not), and the reconnect stays open until the member's
-		// hs.fin, or YieldWait.
+		// which names our last epoch. Ours is abandoned: no hs.fin goes
+		// out for it, a later hs.resp to it is acked and dropped, and its
+		// hs.init is dropped from the outbox if not yet deposited. The
+		// reconnect stays open until the member's hs.fin, or YieldWait.
 		for id, og := range p.outgoing {
 			if og.ConnID == c.ID && og.ini != nil && og.ini.Purpose() == handshake.PurposeReconnect {
 				og.ini.Abort()
@@ -450,6 +450,7 @@ func (p *Peer) handleFin(id string, raw []byte, sender ed25519.PublicKey, now ti
 			for _, j := range aw.Reconnect.Issued {
 				p.denyJTI(j, now)
 			}
+			p.reconnectIfIdle(c, now)
 			return ackAfterFlush
 		}
 	}
@@ -489,13 +490,19 @@ func (p *Peer) dropAwaiting(id string, now time.Time) {
 		for _, j := range aw.Reconnect.Issued {
 			p.denyJTI(j, now)
 		}
+		// Its hs.resp, if not yet deposited, answers a handshake that is
+		// over: it is not sent.
+		p.dropOutbox(func(e *outboxEntry) bool {
+			return e.ConnID == aw.ConnID && e.Op == opDeposit && e.Token != "" && e.Token == aw.Reconnect.Standing.Token
+		})
 	}
 	aw.r.Abort()
 	delete(p.awaiting, id)
 	p.markDirty(kindAwait, id)
-	if c := p.conns[aw.ConnID]; aw.Reconnect != nil && c != nil && c.Reconnecting && c.State != StateSuspended {
-		// We yielded to it, and its hs.fin did not come: a new try.
-		p.retryReconnect(c, now)
+	if c := p.conns[aw.ConnID]; aw.Reconnect != nil && c != nil {
+		// Its hs.fin did not come. If we had yielded to it, and nothing
+		// else of the reconnect is open, a new try.
+		p.reconnectIfIdle(c, now)
 	}
 }
 

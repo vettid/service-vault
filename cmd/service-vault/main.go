@@ -354,8 +354,8 @@ func serve(args []string) error {
 	}
 	// The heartbeat tells the restore that the service is running
 	// (README "Restoring the table").
-	// A task that can't write it for maxHeartbeatFails in a row stops,
-	// so that a restore never runs beside it unnoticed.
+	// A task that can't write it for heartbeatStopAfter stops, so that a
+	// restore never runs beside it unnoticed.
 	if err := tbl.Heartbeat(ctx, time.Now()); err != nil {
 		return fmt.Errorf("heartbeat: %w", err)
 	}
@@ -363,24 +363,8 @@ func serve(args []string) error {
 	go func() {
 		t := time.NewTicker(store.HeartbeatInterval)
 		defer t.Stop()
-		fails := 0
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				err := tbl.Heartbeat(ctx, time.Now())
-				if err == nil {
-					fails = 0
-					continue
-				}
-				if fails++; fails < maxHeartbeatFails {
-					log.Warn("heartbeat", "err", err.Error(), "fails", fails)
-					continue
-				}
-				hbErr <- fmt.Errorf("heartbeat: %d writes failed: %w", fails, err)
-				return
-			}
+		if err := heartbeat(ctx, tbl.Heartbeat, time.Now(), t.C, log); err != nil {
+			hbErr <- err
 		}
 	}()
 	peerErr := make(chan error, 1)
@@ -417,10 +401,49 @@ func serve(args []string) error {
 	return runErr
 }
 
-// maxHeartbeatFails is how many heartbeat writes in a row may fail
-// (HeartbeatInterval apart: 90 seconds) before the daemon stops, within
-// store.HeartbeatStale, after which the restore takes it for stopped.
-const maxHeartbeatFails = 3
+// The heartbeat's limits. A restore takes the service for stopped once
+// its last heartbeat is store.HeartbeatStale (2 minutes) old, so the
+// daemon must have stopped by then. It stops once heartbeatStopAfter has
+// passed since its last good write; each write gives up after
+// heartbeatWriteTimeout. At worst the stop starts at about 70 seconds
+// (a tick at 60 seconds plus a write timing out) and shutdown takes 20
+// more, well inside the 2 minutes, whatever DynamoDB does.
+const (
+	heartbeatStopAfter    = store.HeartbeatStale / 2
+	heartbeatWriteTimeout = 10 * time.Second
+)
+
+// heartbeat writes the heartbeat at every tick until ctx ends, starting
+// from a good write at start. It returns an error, for the daemon to
+// stop, at the first failed write heartbeatStopAfter or more after the
+// last good one (times are the ticks').
+func heartbeat(ctx context.Context, write func(context.Context, time.Time) error, start time.Time, tick <-chan time.Time, log *slog.Logger) error {
+	lastOK := start
+	for {
+		var at time.Time
+		select {
+		case <-ctx.Done():
+			return nil
+		case at = <-tick:
+		}
+		wctx, cancel := context.WithTimeout(ctx, heartbeatWriteTimeout)
+		err := write(wctx, at)
+		cancel()
+		if err == nil {
+			lastOK = at
+			continue
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+		since := at.Sub(lastOK)
+		if since < heartbeatStopAfter {
+			log.Warn("heartbeat", "err", err.Error(), "since_ok", since.Round(time.Second).String())
+			continue
+		}
+		return fmt.Errorf("heartbeat: no write succeeded for %s: %w", since.Round(time.Second), err)
+	}
+}
 
 // awsClients are the AWS clients the daemon uses.
 type awsClients struct {

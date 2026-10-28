@@ -70,19 +70,35 @@ const YieldWait = time.Hour
 // goes out only when the stored state was lost.
 func (p *Peer) resumeReconnects(now time.Time) {
 	for _, c := range p.conns {
-		if !c.Reconnecting {
-			continue
+		if c.Reconnecting {
+			p.reconnectIfIdle(c, now)
 		}
-		open := false
-		for _, og := range p.outgoing {
-			open = open || og.ConnID == c.ID && og.ini != nil && og.ini.Purpose() == handshake.PurposeReconnect
+	}
+}
+
+// reconnectOpen reports whether any part of a connection's reconnect is
+// still open: our hs.init awaiting its hs.resp, or a member's reconnect
+// awaiting its hs.fin.
+func (p *Peer) reconnectOpen(c *Connection) bool {
+	for _, og := range p.outgoing {
+		if og.ConnID == c.ID && og.ini != nil && og.ini.Purpose() == handshake.PurposeReconnect {
+			return true
 		}
-		for _, aw := range p.awaiting {
-			open = open || aw.ConnID == c.ID && aw.Reconnect != nil
+	}
+	for _, aw := range p.awaiting {
+		if aw.ConnID == c.ID && aw.Reconnect != nil {
+			return true
 		}
-		if !open {
-			p.retryReconnect(c, now)
-		}
+	}
+	return false
+}
+
+// reconnectIfIdle starts a new try of an open reconnect when nothing of
+// it is open any more (§6.6, 0.72.1: never while a member's hs.fin is
+// awaited, and never over our own hs.init in flight).
+func (p *Peer) reconnectIfIdle(c *Connection, now time.Time) {
+	if c.Reconnecting && c.State != StateSuspended && !p.reconnectOpen(c) {
+		p.retryReconnect(c, now)
 	}
 }
 

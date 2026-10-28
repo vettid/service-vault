@@ -1,9 +1,9 @@
 package peer
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
-	"io"
 	"log/slog"
 	"sync"
 	"testing"
@@ -11,6 +11,7 @@ import (
 
 	"github.com/vettid/service-vault/internal/peer/peertest"
 
+	"github.com/vettid/vettid-relay/relayclient"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/peerwire"
@@ -52,13 +53,59 @@ type fixture struct {
 	ms    []*peertest.Member
 	// afterRestore, when set, is the next start's Config.AfterRestore.
 	afterRestore func(context.Context) error
+	// failDeposit, when set, decides a deposit's relay error (nil: the
+	// deposit goes through); revokes counts the revocations by value.
+	failDeposit func(mailbox, token string) error
+	revokes     map[string]int
+	logs        lockedBuffer
+}
+
+// lockedBuffer collects the service's log lines.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// testRelay is the service's view of the relay, with the fixture's
+// deposit failures and revocation count.
+type testRelay struct {
+	*peertest.View
+	f *fixture
+}
+
+func (r testRelay) Deposit(ctx context.Context, mailboxID, token string, payload []byte) (string, error) {
+	if r.f.failDeposit != nil {
+		if err := r.f.failDeposit(mailboxID, token); err != nil {
+			return "", err
+		}
+	}
+	return r.View.Deposit(ctx, mailboxID, token, payload)
+}
+
+func (r testRelay) Revoke(ctx context.Context, es ...relayclient.Revocation) error {
+	for _, e := range es {
+		r.f.revokes[e.Value]++
+	}
+	return r.View.Revoke(ctx, es...)
 }
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
 	clk := peertest.NewClock(time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC))
 	w := peertest.NewWorld(clk)
-	f := &fixture{t: t, clk: clk, w: w, keys: testKeys(t), store: NewMemStore(), ev: &sink{}}
+	f := &fixture{t: t, clk: clk, w: w, keys: testKeys(t), store: NewMemStore(), ev: &sink{}, revokes: map[string]int{}}
 	f.store.Now = clk.Now
 	f.sv = w.View(f.keys.Relay)
 	f.start()
@@ -68,7 +115,7 @@ func newFixture(t *testing.T) *fixture {
 // start (re)creates the peer from the store, as a restart does.
 func (f *fixture) start() {
 	f.t.Helper()
-	p, err := New(Config{Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Keys: f.keys, Relay: f.sv, RelayURL: peertest.RelayURL, Store: f.store, Events: f.ev, Now: f.clk.Now,
+	p, err := New(Config{Log: slog.New(slog.NewTextHandler(&f.logs, nil)), Keys: f.keys, Relay: testRelay{f.sv, f}, RelayURL: peertest.RelayURL, Store: f.store, Events: f.ev, Now: f.clk.Now,
 		Profile: Profile{FirstName: "VettID", LastName: "Member Service"}, AfterRestore: f.afterRestore})
 	if err != nil {
 		f.t.Fatal(err)

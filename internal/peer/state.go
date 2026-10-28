@@ -276,6 +276,8 @@ type outboxEntry struct {
 	Attempts   int       `json:"attempts,omitempty"`
 	AwaitToken bool      `json:"await_token,omitempty"`
 	BestEffort bool      `json:"best_effort,omitempty"`
+
+	dropped bool // removed by dropOutbox: a drain in progress skips it
 }
 
 // challenge is a connection.authenticate.challenge we sent (§10.4).

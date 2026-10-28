@@ -3,6 +3,7 @@ package peer
 import (
 	"context"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/vettid/vettid-relay/relayclient"
@@ -57,6 +58,7 @@ func (p *Peer) dropOutbox(drop func(*outboxEntry) bool) {
 	kept := p.outbox[:0]
 	for _, e := range p.outbox {
 		if drop(e) {
+			e.dropped = true
 			p.markDirty(kindOutbox, e.ID)
 			continue
 		}
@@ -87,9 +89,15 @@ func (p *Peer) drainOutbox(ctx context.Context) {
 	blocked := map[string]bool{}
 	awaiting := map[string]bool{}
 	done := map[*outboxEntry]bool{}
-	for _, e := range p.outbox {
+	// A deposit can change the outbox (a failed one ends a handshake,
+	// which may start a reconnect): the drain runs over a copy, skips what
+	// was removed meanwhile, and leaves what was added to the next one.
+	for _, e := range slices.Clone(p.outbox) {
 		if ctx.Err() != nil {
 			break
+		}
+		if e.dropped {
+			continue
 		}
 		if e.Op == opDeposit && (blocked[e.Mailbox] || awaiting[e.Mailbox] && e.Token == "") {
 			continue

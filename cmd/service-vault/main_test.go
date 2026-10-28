@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vettid/service-vault/internal/store"
 	"github.com/vettid/service-vault/internal/tlsid"
 )
 
@@ -103,5 +107,67 @@ func TestHealthcheck(t *testing.T) {
 	srv.Close()
 	if err := healthcheck(":" + port); err == nil {
 		t.Fatal("closed server passed")
+	}
+}
+
+// The daemon stops once no heartbeat write has succeeded for
+// heartbeatStopAfter, counting from the last good one, and each write has
+// heartbeatWriteTimeout to finish.
+func TestHeartbeatStopsInTime(t *testing.T) {
+	start := time.Unix(1_000_000, 0)
+	tick := make(chan time.Time)
+	fail := errors.New("throttled")
+	results := []error{nil, fail, nil, fail, fail, fail, fail}
+	var writes int
+	write := func(ctx context.Context, _ time.Time) error {
+		dl, ok := ctx.Deadline()
+		if !ok || time.Until(dl) > heartbeatWriteTimeout {
+			t.Errorf("write %d: deadline %v, %v", writes, dl, ok)
+		}
+		err := results[writes]
+		writes++
+		return err
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- heartbeat(context.Background(), write, start, tick, slog.New(slog.DiscardHandler))
+	}()
+	// Ticks 30 s apart: ok at 30 s, a failure at 60 s, ok at 90 s, then
+	// failures. The stop comes at the first failure heartbeatStopAfter
+	// (60 s) after the last good write: at 150 s.
+	var last time.Time
+	for i := 1; ; i++ {
+		at := start.Add(time.Duration(i) * store.HeartbeatInterval)
+		select {
+		case tick <- at:
+			last = at
+			continue
+		case err := <-done:
+			if err == nil || !errors.Is(err, fail) {
+				t.Fatalf("err %v", err)
+			}
+			got := last.Sub(start)
+			if got != 150*time.Second {
+				t.Fatalf("stopped at %v, want 150s", got)
+			}
+			if since := got - 90*time.Second; since >= store.HeartbeatStale {
+				t.Fatalf("stopped %v after the last good write", since)
+			}
+			return
+		}
+	}
+}
+
+func TestHeartbeatEndsWithContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	tick := make(chan time.Time)
+	done := make(chan error, 1)
+	go func() {
+		done <- heartbeat(ctx, func(context.Context, time.Time) error { return nil }, time.Now(), tick, slog.New(slog.DiscardHandler))
+	}()
+	tick <- time.Now()
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
