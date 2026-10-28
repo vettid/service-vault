@@ -25,7 +25,7 @@ func TestPeerOnSealedStore(t *testing.T) {
 	}
 	mem := peer.NewMemStore()
 	mem.Now = clk.Now
-	st, err := sealstore.New(mem, bytes.Repeat([]byte{9}, 32), false)
+	st, err := sealstore.New(mem, map[uint32][]byte{1: bytes.Repeat([]byte{9}, 32)}, 1, false)
 	if err != nil {
 		t.Fatal(err)
 	}

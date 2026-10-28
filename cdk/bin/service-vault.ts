@@ -6,7 +6,7 @@ import { ServiceVaultStack } from '../lib/service-vault-stack';
 //   envName (default prod), image (required, by digest), webhookUrl
 //   (required), relayUrl, serviceName, apiClientSecurityGroupId,
 //   apiClientCidr, vpcCidr, adminBootstrapEmail, adminThreshold,
-//   approvalTtl, recordSealMigrate, and one of alarmTopicArn and
+//   approvalTtl, recordSealMigrate, recordKeyVersion, and one of alarmTopicArn and
 //   alarmEmail (required). See
 //   README "Deployment".
 const app = new cdk.App();
@@ -37,6 +37,7 @@ const stack = new ServiceVaultStack(app, `ServiceVault-${envName}`, {
   alarmTopicArn: ctx('alarmTopicArn'),
   alarmEmail: ctx('alarmEmail'),
   recordSealMigrate: ctx('recordSealMigrate') === 'true',
+  recordKeyVersion: ctx('recordKeyVersion') === undefined ? undefined : Number(ctx('recordKeyVersion')),
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
   description: `VettID service vault (${envName})`,
 });

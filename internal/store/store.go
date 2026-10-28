@@ -75,6 +75,14 @@ func (b blobs) Create(ctx context.Context, name string, data []byte) error {
 	return err
 }
 
+func (b blobs) Delete(ctx context.Context, name string) error {
+	_, err := b.t.Client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+		TableName: aws.String(b.t.Name),
+		Key:       key("blob#"+name, skOne),
+	})
+	return err
+}
+
 // CreateTable creates the table with on-demand capacity (for tests and
 // local runs; deployed tables come from CDK) and waits until it is active.
 func (t *Table) CreateTable(ctx context.Context) error {

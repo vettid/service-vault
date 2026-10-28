@@ -112,6 +112,9 @@ type Config struct {
 	AdminBootstrapEmail string        // SV_ADMIN_BOOTSTRAP_EMAIL, normalized; "" for none
 	AdminThreshold      int           // SV_ADMIN_THRESHOLD (m), default 1
 	ApprovalTTL         time.Duration // SV_APPROVAL_TTL, default 24h
+	// RecordKeyVersion is the record key's current version
+	// (SV_RECORD_KEY_VERSION, default 1; README "Rotating the record key").
+	RecordKeyVersion uint32
 }
 
 // Bounds of the approval settings (chosen; not in the spec).
@@ -175,6 +178,14 @@ func configFromEnv(getenv func(string) string) (*Config, error) {
 		if c.ApprovalTTL, err = time.ParseDuration(v); err != nil || c.ApprovalTTL < minApprovalTTL || c.ApprovalTTL > maxApprovalTTL {
 			return nil, fmt.Errorf("SV_APPROVAL_TTL: a duration from %v to %v", minApprovalTTL, maxApprovalTTL)
 		}
+	}
+	c.RecordKeyVersion = 1
+	if v := strings.TrimSpace(getenv("SV_RECORD_KEY_VERSION")); v != "" {
+		n, err := strconv.ParseUint(v, 10, 32)
+		if err != nil || n < 1 || n > sealstore.MaxVersion {
+			return nil, fmt.Errorf("SV_RECORD_KEY_VERSION: an integer from 1 to %d", sealstore.MaxVersion)
+		}
+		c.RecordKeyVersion = uint32(n)
 	}
 	if _, err := approval.ChallengeContext(c.ServiceName, "x", strings.Repeat("0", 64)); err != nil {
 		return nil, errors.New("SV_SERVICE_NAME: too long for an approval challenge's context")
@@ -249,7 +260,7 @@ func serve(args []string) error {
 	if err != nil {
 		return fmt.Errorf("keystore: %w", err)
 	}
-	records, err := sealedStore(ctx, &keystore.AWSKMS{Client: ac.kms}, cfg.KMSKeyID, tbl.Blobs(), tbl.Peer(), tbl, tbl.HasRecords, os.Getenv(sealstore.MigrateEnv) == "1", log)
+	records, err := sealedStore(ctx, &keystore.AWSKMS{Client: ac.kms}, cfg.KMSKeyID, tbl.Blobs(), tbl.Peer(), tbl, tbl.HasRecords, cfg.RecordKeyVersion, os.Getenv(sealstore.MigrateEnv) == "1", log)
 	if err != nil {
 		return err
 	}
@@ -463,7 +474,7 @@ func admin(args []string, out io.Writer) error {
 	}
 	tbl := &store.Table{Client: ac.ddb, Name: cfg.Table}
 	kc := &keystore.AWSKMS{Client: ac.kms}
-	records, err := sealedStore(ctx, kc, cfg.KMSKeyID, tbl.Blobs(), tbl.Peer(), tbl, nil, false, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	records, err := sealedStore(ctx, kc, cfg.KMSKeyID, tbl.Blobs(), tbl.Peer(), tbl, nil, cfg.RecordKeyVersion, false, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		return err
 	}
@@ -580,22 +591,52 @@ func newSecretsIfFresh(ctx context.Context, blobs keystore.Blobs, hasRecords fun
 	}
 }
 
-// sealedStore returns the record store sealed under the record key
-// (internal/sealstore). hasRecords lets the daemon make the key on first
-// use, only while the table has no records (nil: never; the admin CLI
-// needs an existing key). With migrate (the operator's
-// SV_RECORD_SEAL_MIGRATE=1, for the deploy that upgrades a deployment from
-// before sealing), the key is made over existing records and the records
-// written before sealing are sealed in place first.
-func sealedStore(ctx context.Context, kc keystore.KMS, keyID string, blobs keystore.Blobs, inner peer.Store, pages sealstore.Pager, hasRecords func(context.Context) (bool, error), migrate bool, log *slog.Logger) (*sealstore.Store, error) {
-	rk, err := keystore.LoadOrCreate(ctx, kc, keyID, blobs, sealstore.KeyName, func() (*sealstore.RecordKey, error) {
+// errNoKey: a version of the record key that is not in the keystore.
+var errNoKey = errors.New("no such record key")
+
+// sealedStore returns the record store sealed under version version of
+// the record key (internal/sealstore). hasRecords lets the daemon make
+// that version when it is missing (nil: never; the admin CLI needs an
+// existing key):
+//   - when an older version exists: a rotation (README "Rotating the
+//     record key"). The start reseals every record under the new version,
+//     then deletes the older ones from the keystore;
+//   - with migrate (the operator's SV_RECORD_SEAL_MIGRATE=1, for the
+//     deploy that upgrades a deployment from before sealing): the start
+//     seals the records written before sealing in place;
+//   - otherwise only while the table has no records (a new deployment).
+//
+// A start cut short goes on: the next one reseals what is left.
+func sealedStore(ctx context.Context, kc keystore.KMS, keyID string, blobs keystore.Blobs, inner peer.Store, pages sealstore.Pager, hasRecords func(context.Context) (bool, error), version uint32, migrate bool, log *slog.Logger) (*sealstore.Store, error) {
+	keys := map[uint32][]byte{}
+	defer func() {
+		for _, k := range keys {
+			clear(k)
+		}
+	}()
+	var older []uint32
+	for v := uint32(1); v < version; v++ {
+		rk, err := keystore.LoadOrCreate(ctx, kc, keyID, blobs, sealstore.KeyNameOf(v), func() (*sealstore.RecordKey, error) { return nil, errNoKey })
+		if errors.Is(err, errNoKey) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("keystore: %w", err)
+		}
+		keys[v] = rk.Key
+		older = append(older, v)
+	}
+	rk, err := keystore.LoadOrCreate(ctx, kc, keyID, blobs, sealstore.KeyNameOf(version), func() (*sealstore.RecordKey, error) {
 		if hasRecords == nil {
 			return nil, errors.New("no record key: start the daemon first")
 		}
-		if !migrate {
+		if !migrate && len(older) == 0 {
 			if has, err := hasRecords(ctx); err != nil || has {
 				if err == nil {
 					err = errKeysLost
+					if _, gerr := blobs.Get(ctx, sealstore.KeyNameOf(version+1)); gerr == nil {
+						err = errors.New("SV_RECORD_KEY_VERSION is lower than the table's record key: raise it back")
+					}
 				}
 				return nil, err
 			}
@@ -605,18 +646,29 @@ func sealedStore(ctx context.Context, kc keystore.KMS, keyID string, blobs keyst
 	if err != nil {
 		return nil, fmt.Errorf("keystore: %w", err)
 	}
-	st, err := sealstore.New(inner, rk.Key, migrate)
-	clear(rk.Key)
+	keys[version] = rk.Key
+	st, err := sealstore.New(inner, keys, version, migrate)
 	if err != nil {
 		return nil, err
 	}
 	st.Pages = pages
+	if hasRecords == nil || (!migrate && len(older) == 0) {
+		return st, nil
+	}
+	if err := st.Reseal(ctx, recordKinds()); err != nil {
+		return nil, fmt.Errorf("seal records: %w", err)
+	}
+	st.Legacy = false
 	if migrate {
-		if err := st.Migrate(ctx, recordKinds()); err != nil {
-			return nil, fmt.Errorf("seal records: %w", err)
-		}
-		st.Legacy = false
 		log.Warn("records sealed: remove " + sealstore.MigrateEnv)
+	}
+	for _, v := range older {
+		if err := blobs.Delete(ctx, sealstore.KeyNameOf(v)); err != nil {
+			return nil, fmt.Errorf("keystore: retire record key %d: %w", v, err)
+		}
+	}
+	if len(older) > 0 {
+		log.Warn("record key rotated", "version", version, "retired", len(older))
 	}
 	return st, nil
 }

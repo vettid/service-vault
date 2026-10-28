@@ -56,6 +56,13 @@ func (b *memBlobs) Create(_ context.Context, name string, data []byte) error {
 	return nil
 }
 
+func (b *memBlobs) Delete(_ context.Context, name string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.m, name)
+	return nil
+}
+
 func TestAdminUsage(t *testing.T) {
 	for _, args := range [][]string{nil, {"other"}, {"bootstrap"}, {"bootstrap", "-email", "nope"},
 		{"bootstrap", "-email", "a@example.org", "extra"}} {

@@ -13,8 +13,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
+	"github.com/vettid/service-vault/internal/keystore"
 	"github.com/vettid/service-vault/internal/peer"
-	"github.com/vettid/service-vault/internal/sealstore"
 )
 
 // The restore path: after CopyFrom the stack's table holds exactly the
@@ -28,7 +28,7 @@ func TestCopyFromOnDynamoDB(t *testing.T) {
 		t.Fatal("copied a table to itself")
 	}
 	if _, _, err := dst.CopyFrom(ctx, src.Name); err == nil {
-		t.Fatal("copied from a table without a record key")
+		t.Fatal("copied from a table without secrets")
 	}
 	if has, err := src.HasRecords(ctx); err != nil || has {
 		t.Fatalf("HasRecords on an empty table: %v %v", has, err)
@@ -42,7 +42,7 @@ func TestCopyFromOnDynamoDB(t *testing.T) {
 	if err := src.Peer().Apply(ctx, old); err != nil {
 		t.Fatal(err)
 	}
-	if err := src.Blobs().Create(ctx, sealstore.KeyName, []byte("key")); err != nil {
+	if err := src.Blobs().Create(ctx, keystore.SecretsName, []byte("secrets")); err != nil {
 		t.Fatal(err)
 	}
 	put(t, ctx, src.Client, src.Name, "ctr#x", "-")
@@ -55,7 +55,7 @@ func TestCopyFromOnDynamoDB(t *testing.T) {
 	if err := dst.Peer().Apply(ctx, newer); err != nil {
 		t.Fatal(err)
 	}
-	if err := dst.Blobs().Create(ctx, sealstore.KeyName, []byte("other")); err != nil {
+	if err := dst.Blobs().Create(ctx, keystore.SecretsName, []byte("other")); err != nil {
 		t.Fatal(err)
 	}
 	put(t, ctx, dst.Client, dst.Name, "ctr#y", "-")

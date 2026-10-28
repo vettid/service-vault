@@ -86,4 +86,14 @@ func TestKeystoreOnKMSAndDynamoDB(t *testing.T) {
 	if err := tbl.Blobs().Create(ctx, keystore.SecretsName, []byte("x")); err != keystore.ErrExists {
 		t.Fatalf("second create: %v", err)
 	}
+
+	// Delete removes a record; a missing one is not an error.
+	for range 2 {
+		if err := tbl.Blobs().Delete(ctx, keystore.SecretsName); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+	}
+	if _, err := tbl.Blobs().Get(ctx, keystore.SecretsName); err != keystore.ErrNotFound {
+		t.Fatalf("after Delete: %v", err)
+	}
 }

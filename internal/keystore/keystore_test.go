@@ -90,6 +90,13 @@ func (b *memBlobs) Create(_ context.Context, name string, data []byte) error {
 	return nil
 }
 
+func (b *memBlobs) Delete(_ context.Context, name string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.m, name)
+	return nil
+}
+
 func TestSealOpen(t *testing.T) {
 	ctx := context.Background()
 	k := newFakeKMS("k1", "k2")

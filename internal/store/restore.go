@@ -10,7 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
-	"github.com/vettid/service-vault/internal/sealstore"
+	"github.com/vettid/service-vault/internal/keystore"
 )
 
 // maxBatchWrite bounds one BatchWriteItem call (DynamoDB's limit).
@@ -47,14 +47,14 @@ func (t *Table) HasRecords(ctx context.Context) (bool, error) {
 // is the restore path (README "Restoring the table"): DynamoDB restores a
 // backup into a new table, and its items are copied back into the
 // stack's table. The service must be stopped while it runs. src must be a
-// service vault table with a record key.
+// service vault table (one with its secrets).
 func (t *Table) CopyFrom(ctx context.Context, src string) (written, deleted int, err error) {
 	if src == t.Name {
 		return 0, 0, errors.New("store: copy from a table to itself")
 	}
 	from := &Table{Client: t.Client, Name: src}
-	if _, err := from.Blobs().Get(ctx, sealstore.KeyName); err != nil {
-		return 0, 0, fmt.Errorf("store: %s has no record key: %w", src, err)
+	if _, err := from.Blobs().Get(ctx, keystore.SecretsName); err != nil {
+		return 0, 0, fmt.Errorf("store: %s is not a service vault table: %w", src, err)
 	}
 	keep := map[string]bool{}
 	var batch []types.WriteRequest
