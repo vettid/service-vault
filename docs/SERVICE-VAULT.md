@@ -68,14 +68,22 @@ never answers challenges and never rotates its identity.
 - **Sessions** use the vault-to-vault policy (24 h or 10,000 messages,
   §6.5). The peer answers the member vault's rekeys and starts its own
   when its epoch reaches the limit; crossing rekeys are settled by `th1`.
-  It answers reconnects (§6.6) without identity rotations, naming any
-  epoch of the connection activated in the last year (each connection
-  keeps those ids, at most 512), and starts them only after a restore:
+  It answers a member's reconnect (§6.6) without identity rotations,
+  only when `ctx` names its last epoch, refuses a `th1` it answered
+  before (marks kept 16 days + 5 minutes), and changes nothing (tokens,
+  chain, active or stale) until `sig_I` verifies at `hs.fin`. It starts
+  reconnects only after a restore (§6.6 "After a restore", 0.72.0):
   `table restore` leaves a marker (`run#restored`), and the next start
   reconnects every active or stale connection on the reconnect token it
-  holds, before any rekey, then deletes the marker. The member's answer
-  carries its rotations since the epoch named, which the service follows
-  (per the pending §6.6 change for restores).
+  holds, naming its last epoch, before any rekey, then deletes the
+  marker. The member's vault accepts that older epoch from its history
+  and answers with its rotations since it, which the service follows.
+  While a reconnect is open nothing is sent on the connection; a restart
+  sends a new `hs.init`, at most 3 per restore (the counters restart with
+  each restore); after 7 days it fails and the connection is stale. A
+  member's own reconnect arriving meanwhile (its `ctx` matching ours)
+  replaces ours, which is abandoned (chosen; not in the spec). The
+  service never rotates its identity.
 - **Tokens** (§7.1, §7.2): standing and reconnect tokens are re-minted
   below 10 and 60 days and sent as `relay.token.issued`;
   `relay.token.refresh` is answered with the hourly / daily `too_soon`

@@ -150,7 +150,7 @@ func (p *Peer) remintIssued(now time.Time) {
 }
 
 func (p *Peer) issueTo(c *Connection, kind string, now time.Time) {
-	if p.outboxFor(c.ID) >= MaxOutboxPerConn {
+	if c.Reconnecting || p.outboxFor(c.ID) >= MaxOutboxPerConn {
 		return // not deliverable now: mint it when it can be sent
 	}
 	var tok string

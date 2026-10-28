@@ -292,6 +292,7 @@ type Member struct {
 	Reconnects int
 	retired    []*suite.PrivateKey // static KEM keys before a rotation (§6.6 "Retired keys")
 	lastRecon  []byte              // the last reconnect hs.init sent
+	pendTokens [2]string           // a reconnect's tokens, taken at its hs.fin
 	// IgnoreRevoked lets a deposit fail (an answer on a token the service
 	// revoked when it replaced the handshake), as a vault's outbox does.
 	IgnoreRevoked bool
@@ -475,6 +476,9 @@ func (m *Member) handle(msg relayclient.Message) bool {
 			fr, err := m.awaitFin.HandleFin(msg.Payload, sender, now)
 			if err == nil {
 				m.awaitFin = nil
+				if m.pendTokens[0] != "" {
+					m.SvcStand, m.SvcRecon, m.pendTokens = m.pendTokens[0], m.pendTokens[1], [2]string{}
+				}
 				m.activate(fr.Epoch, now)
 				return true
 			}
@@ -644,10 +648,11 @@ func (m *Member) answerReconnect(raw []byte, sender ed25519.PublicKey) {
 	if err != nil {
 		m.t.Fatalf("Member: respond reconnect: %v", err)
 	}
-	m.SvcStand, m.SvcRecon = body.Token, body.ReconnectToken
+	// Nothing changes before hs.fin (§6.6, 0.72.0): the tokens wait.
+	m.pendTokens = [2]string{body.Token, body.ReconnectToken}
 	m.awaitFin = resp
 	m.Reconnects++
-	m.DepositTo(m.SvcStand, env)
+	m.DepositTo(body.Token, env)
 }
 
 // received returns the session messages of a type the Member received.

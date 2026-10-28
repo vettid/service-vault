@@ -149,9 +149,7 @@ func (p *Peer) suspend(c *Connection, now time.Time) {
 	p.dropConnOutgoing(c)
 	for id, aw := range p.awaiting {
 		if aw.ConnID == c.ID {
-			aw.r.Abort()
-			delete(p.awaiting, id)
-			p.markDirty(kindAwait, id)
+			p.dropAwaiting(id, now) // and revokes a pending reconnect's tokens
 		}
 	}
 	p.markDirty(kindConn, c.ID)

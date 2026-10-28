@@ -234,7 +234,7 @@ func (p *Peer) handleResponse(c *Connection, in *envelope.Inner, now time.Time) 
 // token issued to the member is denylisted by jti; the held tokens,
 // session keys and outbox entries are deleted.
 func (p *Peer) removeConnection(c *Connection, dir string, now time.Time) {
-	if dir == "out" && c.kr != nil && c.kr.Current() != nil && c.Standing.Token != "" && c.State == StateActive {
+	if dir == "out" && c.kr != nil && c.kr.Current() != nil && c.Standing.Token != "" && c.State == StateActive && !c.Reconnecting {
 		in := &envelope.Inner{ID: p.newID(now), Type: peerwire.TypeConnectionRemoved, TS: now, Body: peerwire.ConnectionRemovedBody()}
 		if raw, err := c.kr.Current().Seal(in); err == nil {
 			p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == c.ID })
@@ -336,12 +336,14 @@ func (p *Peer) housekeeping(now time.Time) {
 	for id, og := range p.outgoing {
 		if now.Sub(og.Created) >= HandshakeTTL {
 			p.dropOutgoing(id) // an hs.resp that never came (or can no longer be accepted)
-		} else if c := p.conns[og.ConnID]; c != nil && c.Reconnecting && !c.ReconnectSlow && now.Sub(og.Created) >= ReconnectSlowAfter {
-			p.reconnectSlow(c)
 		}
 	}
 	for _, c := range p.conns {
-		if c.State != StateActive || c.Reconnecting {
+		if c.Reconnecting {
+			p.checkReconnect(c, now)
+			continue
+		}
+		if c.State != StateActive {
 			continue
 		}
 		if c.kr != nil && c.kr.Current() != nil && c.kr.Current().NeedsRekey(now) {

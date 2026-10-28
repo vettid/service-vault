@@ -1,7 +1,6 @@
 package peer
 
 import (
-	"crypto/subtle"
 	"encoding/hex"
 	"time"
 
@@ -9,65 +8,19 @@ import (
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
-// Reconnecting after a restore (VAULT-MESSAGING §6.6, per the pending
-// change for restores). A restored table puts the service's sessions back
-// to older epochs than the members' vaults hold, so its messages and
-// theirs no longer open. Each side keeps the ids of the epochs it
-// activated in the last EpochHistory and accepts a reconnect naming any
-// of them; the restored side starts the reconnects, naming its last
-// epoch, which the member's vault still has in its history.
-
-// EpochHistory is how long an activated epoch's id is kept: the reconnect
-// token's longest lifetime (§6.6).
-const EpochHistory = 365 * 24 * time.Hour
-
-// MaxEpochs bounds a connection's history (a rekey a day keeps about
-// 365).
-const MaxEpochs = 512
-
-// EpochRef is an activated epoch: its id and when it became current.
-type EpochRef struct {
-	ID []byte    `json:"id"`
-	At time.Time `json:"at"`
-}
-
-// recordEpoch adds an activated epoch to the history and drops what is
-// older than EpochHistory or beyond MaxEpochs.
-func (c *Connection) recordEpoch(id []byte, now time.Time) {
-	c.Epochs = append(c.Epochs, EpochRef{ID: append([]byte(nil), id...), At: now.UTC()})
-	drop := 0
-	for drop < len(c.Epochs) && now.Sub(c.Epochs[drop].At) > EpochHistory {
-		drop++
-	}
-	drop = max(drop, len(c.Epochs)-MaxEpochs)
-	c.Epochs = c.Epochs[drop:]
-}
-
-// knownEpoch reports whether ctx names the connection's last epoch or
-// one in its history not older than EpochHistory.
-func (c *Connection) knownEpoch(ctx string, now time.Time) bool {
-	match := func(id []byte) bool {
-		var eid [suite.EpochIDSize]byte
-		if len(id) != len(eid) {
-			return false
-		}
-		copy(eid[:], id)
-		return subtle.ConstantTimeCompare([]byte(handshake.EpochCtx(eid)), []byte(ctx)) == 1
-	}
-	if match(c.LastEpochID) {
-		return true
-	}
-	for _, e := range c.Epochs {
-		if now.Sub(e.At) <= EpochHistory && match(e.ID) {
-			return true
-		}
-	}
-	return false
-}
+// Reconnecting after a restore (VAULT-MESSAGING §6.6 "After a restore",
+// 0.72.0). A restored table puts the service's sessions back to older
+// epochs than the members' vaults hold, so its messages and theirs no
+// longer open. At the first start after the restore (the marker) the
+// service reconnects every active or stale connection, naming its last
+// epoch; a member's vault accepts that older epoch from its history of a
+// service connection's epochs. The service itself keeps no history: when
+// a member reconnects, ctx must name its last epoch (handshake.go). It
+// never rotates its identity, so its rotations are always empty.
 
 // reconnectKey is the dedupe key (kindInner) of a reconnect hs.init we
-// answered, by its th1: a replay is refused for DedupeRetention, past
-// which (and the clock skew hs.init may have ahead) it is stale anyway.
+// answered, by its th1: a replay is refused for the durable ts window of
+// §8.4 (DedupeRetention, plus the clock skew hs.init may have ahead).
 func reconnectKey(th1 [32]byte) string { return "reconnect|" + hex.EncodeToString(th1[:]) }
 
 // MaxReconnectTries bounds the reconnects started for one restore, over
@@ -75,66 +28,74 @@ func reconnectKey(th1 [32]byte) string { return "reconnect|" + hex.EncodeToStrin
 // the member's reconnect token (§6.6).
 const MaxReconnectTries = 3
 
+// ReconnectTimeout ends a reconnect not completed in time (§6.6: 7 days,
+// the idle lock's): the connection becomes stale and needs a new
+// invitation.
+const ReconnectTimeout = 7 * 24 * time.Hour
+
 // ReconnectSlowAfter is when an unanswered reconnect raises
-// reconnect_slow. It stays open until HandshakeTTL all the same: a
-// member's vault that is locked (an idle lock, failed checks) answers
-// when it is unlocked, and giving up sooner would only make the member
-// connect again, while nothing sent in the restored session could be
-// opened anyway (chosen; not in the spec).
+// reconnect_slow, once: the member's vault may be locked, and answers
+// when it is unlocked (chosen; not in the spec).
 const ReconnectSlowAfter = 24 * time.Hour
 
 // reconnectAll starts a reconnect on every active or stale connection
-// and returns how many started.
+// and returns how many started. One that cannot start (no usable
+// reconnect token) fails at once.
 func (p *Peer) reconnectAll(now time.Time) int {
 	n := 0
 	for _, c := range p.conns {
+		// Per restore: counters that came back with the backup (taken
+		// while an earlier reconnect was open) start again.
+		c.Reconnecting, c.ReconnectTries, c.ReconnectSlow, c.ReconnectSince = false, 0, false, time.Time{}
 		if p.startReconnect(c, now) {
 			n++
 		} else if c.State == StateActive || c.State == StateStale {
-			p.log().Error("reconnect failed: the member must connect again", "alarm", "reconnect_failed", "connection_id", c.ID)
+			c.Reconnecting = true // so that reconnectFailed ends it
+			p.reconnectFailed(c)
 		}
 	}
 	return n
 }
 
 // resumeReconnects runs at a start without a restore: a reconnect still
-// awaiting its hs.resp is started again when its stored initiator lost
-// the member's followed chain (it would refuse an answer beginning with
-// links we follow), or when it has no initiator at all.
+// open sends a new hs.init (a new th1; the stored bytes would be refused
+// as a replay), within MaxReconnectTries.
 func (p *Peer) resumeReconnects(now time.Time) {
 	for _, c := range p.conns {
-		if !c.Reconnecting {
-			continue
-		}
-		pending := false
-		for _, og := range p.outgoing {
-			pending = pending || og.ConnID == c.ID && og.ini != nil && og.ini.Purpose() == handshake.PurposeReconnect
-		}
-		if pending && len(c.Chain) == 0 {
-			continue
-		}
-		if !p.startReconnect(c, now) {
+		if c.Reconnecting && !p.startReconnect(c, now) {
+			c.Reconnecting = true // startReconnect cleared it
 			p.reconnectFailed(c)
 		}
 	}
 }
 
-// reconnectSlow raises reconnect_slow once for a reconnect unanswered
-// after ReconnectSlowAfter.
-func (p *Peer) reconnectSlow(c *Connection) {
-	c.ReconnectSlow = true
-	p.markDirty(kindConn, c.ID)
-	p.log().Error("reconnect unanswered for a day: the member's vault may be locked", "alarm", "reconnect_slow", "connection_id", c.ID)
+// checkReconnect raises reconnect_slow after a day and ends the reconnect
+// after ReconnectTimeout (housekeeping).
+func (p *Peer) checkReconnect(c *Connection, now time.Time) {
+	switch age := now.Sub(c.ReconnectSince); {
+	case age >= ReconnectTimeout:
+		p.dropConnOutgoing(c)
+		p.reconnectFailed(c)
+	case age >= ReconnectSlowAfter && !c.ReconnectSlow:
+		c.ReconnectSlow = true
+		p.markDirty(kindConn, c.ID)
+		p.log().Error("reconnect unanswered for a day: the member's vault may be locked", "alarm", "reconnect_slow", "connection_id", c.ID)
+	}
 }
 
-// reconnectFailed ends a reconnect that cannot complete: its alarm tells
-// the operator the member must connect again (README "Restoring the
-// table").
+// reconnectFailed ends a reconnect that cannot complete: the connection
+// becomes stale (§6.6), and the alarm tells the operator the member must
+// connect again from a new invitation (README "Restoring the table").
 func (p *Peer) reconnectFailed(c *Connection) {
 	if !c.Reconnecting {
 		return
 	}
-	c.Reconnecting, c.ReconnectTries, c.ReconnectSlow = false, 0, false
+	c.Reconnecting, c.ReconnectTries, c.ReconnectSlow, c.ReconnectSince = false, 0, false, time.Time{}
+	p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == c.ID && e.Token != "" && e.Token == c.Reconnect.Token })
+	if c.State == StateActive {
+		c.State = StateStale
+		p.audit("peer_stale", c.ID)
+	}
 	p.markDirty(kindConn, c.ID)
 	p.log().Error("reconnect failed: the member must connect again", "alarm", "reconnect_failed", "connection_id", c.ID)
 }
@@ -156,6 +117,13 @@ func (p *Peer) startReconnect(c *Connection, now time.Time) bool {
 	}
 	c.Reconnecting = false // a reconnect replaced is not a failure
 	p.dropConnOutgoing(c)
+	// What waits in the outbox is not sent: an earlier hs.init is replaced
+	// (§6.6), and the rest is sealed in a session the member may no
+	// longer hold (deposits on the standing token, and the hs.resp of a
+	// member's reconnect, on its own, stay).
+	p.dropOutbox(func(e *outboxEntry) bool {
+		return e.ConnID == c.ID && e.Op == opDeposit && (e.Token == "" || e.Token == c.Reconnect.Token)
+	})
 	st, rt, jtis, err := p.mintReconnectPair(c.ID, &c.Peer, now)
 	if err != nil {
 		p.log().Warn("reconnect: mint tokens", "connection_id", c.ID, "err", errCode(err))
@@ -186,6 +154,9 @@ func (p *Peer) startReconnect(c *Connection, now time.Time) bool {
 	kid, th1 := ini.EphKid(), ini.Th1()
 	p.outgoing[id] = &outgoing{ID: id, ConnID: c.ID, EphKid: kid[:], Th1: th1[:], Init: s, Created: now, Issued: jtis, ini: ini}
 	p.markDirty(kindOutgoing, id)
+	if c.ReconnectTries == 0 {
+		c.ReconnectSince = now
+	}
 	c.Reconnecting = true
 	c.ReconnectTries++
 	p.markDirty(kindConn, c.ID)
@@ -215,7 +186,7 @@ func (p *Peer) finishReconnect(c *Connection, og *outgoing, res *handshake.Resul
 	}
 	c.Standing, c.Reconnect = st, rt
 	c.State = StateActive
-	c.Reconnecting, c.ReconnectTries, c.ReconnectSlow = false, 0, false
+	c.Reconnecting, c.ReconnectTries, c.ReconnectSlow, c.ReconnectSince = false, 0, false, time.Time{}
 	p.markDirty(kindConn, c.ID)
 	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: res.Fin}, now)
 	p.installEpoch(c, res.Epoch, now) // and retries the connection's outbox

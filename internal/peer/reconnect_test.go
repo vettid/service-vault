@@ -100,64 +100,56 @@ func TestReconnectAfterRestoreFollowsRotation(t *testing.T) {
 	}
 }
 
-// The service accepts a member's reconnect naming an earlier epoch of the
-// connection, and refuses one naming no epoch of it.
-func TestReconnectNamesEarlierEpoch(t *testing.T) {
+// A service vault answering a member keeps the exact ctx (§6.6, 0.72.0):
+// a reconnect naming an earlier epoch of the connection is refused, one
+// naming the last is taken.
+func TestMemberReconnectNamesLastEpochOnly(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
 	cid := f.connect(m, "")
 	first := m.KR.Current().ID()
 	m.StartRekey()
 	f.pump()
-	if n := len(f.p.conns[cid].Epochs); n != 2 {
-		t.Fatalf("%d epochs in the history", n)
-	}
 	before := f.p.conns[cid].kr.Current().ID()
-	var unknown [suite.EpochIDSize]byte
-	m.ReconnectNaming(unknown)
-	f.pump()
-	if f.p.conns[cid].kr.Current().ID() != before {
-		t.Fatal("a reconnect naming no epoch of the connection was answered")
-	}
+	m.IgnoreStray = true
 	m.ReconnectNaming(first)
 	f.pump()
+	if f.p.conns[cid].kr.Current().ID() != before {
+		t.Fatal("a reconnect naming an earlier epoch was answered")
+	}
+	m.Reconnect()
+	f.pump()
 	if got := f.p.conns[cid].kr.Current().ID(); got == before || got != m.KR.Current().ID() {
-		t.Fatal("reconnect naming the first epoch refused")
+		t.Fatal("reconnect naming the last epoch refused")
 	}
 	if !f.signIn(m, cid) {
 		t.Fatal("sign-in after the reconnect")
 	}
 }
 
-// The history keeps a year of epochs, at most MaxEpochs.
-func TestEpochHistoryPruned(t *testing.T) {
-	c := &Connection{}
-	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	for i := range MaxEpochs + 10 {
-		c.recordEpoch([]byte{byte(i), byte(i >> 8), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, now.Add(time.Duration(i)*time.Hour))
+// A member's reconnect changes nothing before its hs.fin: answering it
+// leaves the held tokens and the state as they were (§6.6, 0.72.0).
+func TestMemberReconnectDeferredToFin(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	held := f.p.conns[cid].Standing
+	m.Reconnect()
+	if _, err := f.p.Step(context.Background(), 0); err != nil { // the hs.init, answered
+		t.Fatal(err)
 	}
-	if len(c.Epochs) != MaxEpochs || c.Epochs[0].ID[0] != 10 {
-		t.Fatalf("%d epochs, first %d", len(c.Epochs), c.Epochs[0].ID[0])
+	if c := f.p.conns[cid]; c.Standing != held || len(f.p.awaiting) != 1 {
+		t.Fatal("the hs.init changed the connection before hs.fin")
 	}
-	last := now.Add(EpochHistory + time.Duration(MaxEpochs)*time.Hour)
-	c.recordEpoch(make([]byte, 16), last)
-	if c.Epochs[0].At.Before(now.Add(time.Duration(MaxEpochs) * time.Hour)) {
-		t.Fatalf("an epoch older than a year kept: %v", c.Epochs[0].At)
-	}
-	var id [suite.EpochIDSize]byte
-	copy(id[:], c.Epochs[3].ID)
-	if !c.knownEpoch(handshake.EpochCtx(id), last) || c.knownEpoch(handshake.EpochCtx([suite.EpochIDSize]byte{0xff, 0xff}), last) {
-		t.Fatal("knownEpoch")
-	}
-	// Without a newer activation, an entry ages out all the same.
-	if c.knownEpoch(handshake.EpochCtx(id), last.Add(EpochHistory)) {
-		t.Fatal("knownEpoch accepted an epoch older than a year")
+	f.pump()
+	if c := f.p.conns[cid]; c.Standing == held || len(f.p.awaiting) != 0 {
+		t.Fatal("hs.fin did not apply the reconnect")
 	}
 }
 
-// A restart while the reconnect awaits its hs.resp: the stored initiator
-// lacks the chain we followed, so the start sends the reconnect again,
-// and the member's answer (beginning with the link we followed) is taken.
+// A restart while the reconnect awaits its hs.resp: the start sends a new
+// hs.init (the stored bytes would be refused as a replay), and the
+// member's answer (beginning with the link we followed) is taken.
 func TestReconnectResumedAfterRestart(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
@@ -219,7 +211,7 @@ func TestReconnectWindowAndReplay(t *testing.T) {
 }
 
 // A reconnect that cannot start (the member's reconnect token expired)
-// leaves the connection as it was, not reconnecting.
+// fails at once: the connection is stale and needs a new invitation.
 func TestReconnectNotPossible(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
@@ -227,8 +219,8 @@ func TestReconnectNotPossible(t *testing.T) {
 	b := f.backup()
 	f.clk.Advance(366 * 24 * time.Hour)
 	f.restore(b, true)
-	if c := f.p.conns[cid]; c.Reconnecting || c.ReconnectTries != 0 {
-		t.Fatal("a reconnect on an expired token")
+	if c := f.p.conns[cid]; c.Reconnecting || c.ReconnectTries != 0 || c.State != StateStale {
+		t.Fatalf("a reconnect on an expired token: reconnecting %v, state %s", c.Reconnecting, c.State)
 	}
 	for _, og := range f.p.outgoing {
 		if og.ini.Purpose() == handshake.PurposeReconnect {
@@ -256,5 +248,73 @@ func TestReconnectSlow(t *testing.T) {
 	f.pump() // the member's vault is unlocked
 	if c := f.p.conns[cid]; c.Reconnecting || c.ReconnectSlow || !f.signIn(m, cid) {
 		t.Fatal("the late answer was not taken")
+	}
+}
+
+// A reconnect not completed in 7 days fails: the connection is stale, and
+// the member's late answer is not taken.
+func TestReconnectTimeout(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	b := f.backup()
+	m.StartRekey()
+	f.pump()
+	f.restore(b, true)
+	f.clk.Advance(ReconnectTimeout + time.Minute)
+	f.tick()
+	c := f.p.conns[cid]
+	if c.Reconnecting || c.State != StateStale || len(f.p.outgoing) != 0 {
+		t.Fatalf("reconnecting %v, state %s, %d outgoing", c.Reconnecting, c.State, len(f.p.outgoing))
+	}
+	m.IgnoreRevoked, m.IgnoreStray = true, true
+	f.pump()
+	if f.p.conns[cid].State != StateStale {
+		t.Fatal("a reconnect taken after its timeout")
+	}
+	if _, err := f.p.Authenticate(context.Background(), cid, "Sign in", time.Minute); err == nil {
+		t.Fatal("a challenge on a stale connection")
+	}
+}
+
+// Counters that come back with the backup (taken while an earlier
+// reconnect was open) start again for the new restore.
+func TestReconnectCountersPerRestore(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	c := f.p.conns[cid]
+	c.Reconnecting, c.ReconnectTries, c.ReconnectSince = true, MaxReconnectTries, f.clk.Now().Add(-30*24*time.Hour)
+	f.p.markDirty(kindConn, cid)
+	if err := f.p.flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	b := f.backup()
+	f.restore(b, true)
+	if c := f.p.conns[cid]; !c.Reconnecting || c.ReconnectTries != 1 || c.State != StateActive {
+		t.Fatalf("reconnecting %v, tries %d, state %s", c.Reconnecting, c.ReconnectTries, c.State)
+	}
+	f.pump()
+	if !f.signIn(m, cid) {
+		t.Fatal("sign-in after the reconnect")
+	}
+}
+
+// The member's own reconnect, completed while ours is open, settles it.
+func TestReconnectCrossing(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	b := f.backup()
+	f.restore(b, true) // nothing changed since the backup: the epochs match
+	m.IgnoreStray, m.IgnoreRevoked = true, true
+	m.Reconnect()
+	f.pump()
+	c := f.p.conns[cid]
+	if c.Reconnecting || c.State != StateActive || c.kr.Current().ID() != m.KR.Current().ID() || len(f.p.outgoing) != 0 {
+		t.Fatalf("reconnecting %v, state %s", c.Reconnecting, c.State)
+	}
+	if !f.signIn(m, cid) {
+		t.Fatal("sign-in after the crossing reconnects")
 	}
 }
