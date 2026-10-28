@@ -105,11 +105,12 @@ func (p *Peer) dropConnOutgoing(c *Connection) {
 	}
 }
 
-// knownSuccessor reports whether r is a link already accepted.
+// knownSuccessor reports whether r is a link already accepted: the same
+// old_ik, new_ik and new_kem (VAULT-MESSAGING 0.69.1 §6.6).
 func (p *Peer) knownSuccessor(c *Connection, r *handshake.Rotation) bool {
 	for _, raw := range c.Chain {
 		prev, err := handshake.ParseRotation(raw)
-		if err == nil && suite.EqualPublic(prev.OldIK, r.OldIK) && suite.EqualPublic(prev.NewIK, r.NewIK) {
+		if err == nil && suite.EqualPublic(prev.OldIK, r.OldIK) && suite.EqualPublic(prev.NewIK, r.NewIK) && prev.NewKEM.Equal(r.NewKEM) {
 			return true
 		}
 	}

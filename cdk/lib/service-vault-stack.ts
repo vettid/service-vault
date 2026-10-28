@@ -77,7 +77,7 @@ export const CLIENT_PARAMS = [
 /** Log lines the daemon marks for an alarm (`"alarm": <name>`). */
 export const ALARMS = {
   /** A member's identity key got two successors; the connection is suspended (internal/peer/rotation.go). */
-  rotate_conflict: 'A member identity rotation conflict suspended a connection (two vaults rotating, or a replayed copy)',
+  rotate_conflict: 'A member identity rotation conflict suspended a connection (two vaults rotating, or a replayed copy; a member can also cause it on purpose, so it may be noise)',
   /** A webhook was given up after the outbox's MaxAge (internal/webhook/outbox.go): the application missed an event. */
   webhook_dropped: 'A webhook was dropped as undeliverable after 24 h: the application missed an event',
 } as const;
