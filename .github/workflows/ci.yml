@@ -164,6 +164,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -203,5 +205,13 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
             ghcr.io/${{ github.repository }}:main
+      # Signed SLSA build provenance for the pushed digest (GitHub
+      # artifact attestations, Sigstore), stored with the image in GHCR.
+      # A deployment checks it first (README, "Verifying an image").
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
       - name: digest
         run: echo "Published ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}" | tee -a "$GITHUB_STEP_SUMMARY"
