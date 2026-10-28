@@ -145,8 +145,10 @@ MEMBER-SERVICE-PLAN §4.5 and §5.2; the operator's view is in the README,
   bootstrap for E in that record, only while the set is empty, and
   audits it without the email. Changing the set is an approval
   (`admin_set.add`, `admin_set.remove`) applied by the service vault; a
-  removed connection leaves the set; the set never becomes empty by
-  approval.
+  removed connection leaves the set, also one a new connection replaces
+  (it comes back only by approval or bootstrap), and a removal that
+  leaves fewer than m logs ERROR `alarm: admins_short`; the set never
+  becomes empty by approval.
 - **Creating an approval.** The action, summary and payload are checked;
   the payload is put in RFC 8785 canonical form and
   `action_hash = SHA-256(JCS({action, payload, summary}))`. m (the

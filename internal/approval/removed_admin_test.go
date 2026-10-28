@@ -2,6 +2,7 @@ package approval
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -37,5 +38,23 @@ func TestRemovedAdminApprovalDeniesWhenUnreachable(t *testing.T) {
 	}
 	if s := f.status(c.ID); s.Status != StatusDenied {
 		t.Fatalf("status %s: c2 alone cannot make m = 2", s.Status)
+	}
+}
+
+// A removal that leaves fewer admins than m raises admins_short; one that
+// leaves enough does not.
+func TestRemovedAdminBelowThresholdAlarms(t *testing.T) {
+	f := newFixture(t, 2, "c1", "c2", "c3")
+	if err := f.m.ConnectionRemoved(context.Background(), "c1"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(f.logs.String(), "admins_short") {
+		t.Fatalf("alarm with two admins left for m = 2:\n%s", f.logs)
+	}
+	if err := f.m.ConnectionRemoved(context.Background(), "c2"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(f.logs.String(), "alarm=admins_short") {
+		t.Fatalf("no alarm with one admin left for m = 2:\n%s", f.logs)
 	}
 }

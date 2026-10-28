@@ -973,6 +973,13 @@ func (m *Manager) ConnectionRemoved(ctx context.Context, connID string) error {
 		return err
 	}
 	m.log().Info("admin removed with its connection", "connection_id", connID, "admins", len(next))
+	if th := m.threshold(); len(next) < th {
+		// No approval can pass until the operator mends it: a lower m,
+		// or a bootstrap once the set is empty (README "Recovering
+		// admins").
+		m.log().Error("admin set below the threshold: approvals cannot pass", "alarm", "admins_short",
+			"admins", len(next), "threshold", th)
+	}
 	m.wake()
 	return m.reevaluate(ctx)
 }
