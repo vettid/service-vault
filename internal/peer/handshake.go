@@ -269,6 +269,22 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 		return
 	}
 	p.mark(kindInner, reconnectKey(pi.Th1()), []byte{1}, now.Add(DedupeRetention+envelope.MaxClockSkewFuture))
+	if c.Reconnecting {
+		// Crossing reconnects: the member's names our last epoch, so it
+		// holds that session; ours is abandoned (it never sends hs.fin),
+		// and both sides end on the member's. The reconnect stays open
+		// until its hs.fin (chosen; not in the spec).
+		for id, og := range p.outgoing {
+			if og.ConnID == c.ID && og.ini != nil && og.ini.Purpose() == handshake.PurposeReconnect {
+				og.ini.Abort()
+				for _, j := range og.Issued {
+					p.denyJTI(j, now)
+				}
+				delete(p.outgoing, id)
+				p.markDirty(kindOutgoing, id)
+			}
+		}
+	}
 	pend := &pendingReconnect{Standing: st, Reconnect: rt, Issued: jtis}
 	if len(fresh) > 0 {
 		pend.IK, pend.KEM = body.From.IK, body.From.KEM.Bytes()
@@ -286,25 +302,35 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 }
 
 // applyReconnect applies a member's reconnect once its hs.fin verified.
-func (p *Peer) applyReconnect(c *Connection, pend *pendingReconnect) {
+// A reconnect of ours still open is settled by it: the session is
+// common again.
+func (p *Peer) applyReconnect(c *Connection, pend *pendingReconnect) error {
+	var links []*handshake.Rotation
+	var kem *suite.PublicKey
 	if len(pend.Links) > 0 {
-		var links []*handshake.Rotation
 		for _, raw := range pend.Links {
 			r, err := handshake.ParseRotation(raw)
 			if err != nil {
-				return
+				return err
 			}
 			links = append(links, r)
 		}
-		kem, err := suite.ParsePublicKey(pend.KEM)
-		if err != nil {
-			return
+		var err error
+		if kem, err = suite.ParsePublicKey(pend.KEM); err != nil {
+			return err
 		}
+	}
+	if c.Reconnecting {
+		c.Reconnecting, c.ReconnectTries, c.ReconnectSlow, c.ReconnectSince = false, 0, false, time.Time{}
+		p.dropConnOutgoing(c)
+	}
+	if len(links) > 0 {
 		p.followRotation(c, pend.IK, kem, links)
 	}
 	c.Standing, c.Reconnect = pend.Standing, pend.Reconnect
 	c.State = StateActive
 	p.markDirty(kindConn, c.ID)
+	return nil
 }
 
 // handleRekeyInit handles a rekey hs.init that arrived in session mode
@@ -312,6 +338,10 @@ func (p *Peer) applyReconnect(c *Connection, pend *pendingReconnect) {
 func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.Epoch, raw []byte, sender ed25519.PublicKey, now time.Time) disposition {
 	if c.kr == nil || c.kr.Current() != ep {
 		p.audit("rekey_not_current_epoch", c.ID)
+		return ackAfterFlush
+	}
+	if c.Reconnecting {
+		p.audit("rekey_while_reconnecting", c.ID) // the reconnect settles the session
 		return ackAfterFlush
 	}
 	pi, err := handshake.AcceptRekey(raw, in, ep, now)
@@ -408,11 +438,14 @@ func (p *Peer) handleFin(id string, raw []byte, sender ed25519.PublicKey, now ti
 		return ackAfterFlush
 	}
 	if aw.Reconnect != nil {
-		if c.State == StateSuspended {
+		if err := p.applyReconnect(c, aw.Reconnect); err != nil {
+			p.audit("reconnect_record_bad", c.ID)
 			fr.Epoch.Destroy()
+			for _, j := range aw.Reconnect.Issued {
+				p.denyJTI(j, now)
+			}
 			return ackAfterFlush
 		}
-		p.applyReconnect(c, aw.Reconnect)
 	}
 	p.installEpoch(c, fr.Epoch, now)
 	p.log().Info("epoch installed", "connection_id", c.ID, "purpose", string(aw.Purpose))

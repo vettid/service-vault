@@ -234,7 +234,7 @@ func (p *Peer) handleResponse(c *Connection, in *envelope.Inner, now time.Time) 
 // token issued to the member is denylisted by jti; the held tokens,
 // session keys and outbox entries are deleted.
 func (p *Peer) removeConnection(c *Connection, dir string, now time.Time) {
-	if dir == "out" && c.kr != nil && c.kr.Current() != nil && c.Standing.Token != "" && c.State == StateActive {
+	if dir == "out" && c.kr != nil && c.kr.Current() != nil && c.Standing.Token != "" && c.State == StateActive && !c.Reconnecting {
 		in := &envelope.Inner{ID: p.newID(now), Type: peerwire.TypeConnectionRemoved, TS: now, Body: peerwire.ConnectionRemovedBody()}
 		if raw, err := c.kr.Current().Seal(in); err == nil {
 			p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == c.ID })

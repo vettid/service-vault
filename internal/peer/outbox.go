@@ -94,6 +94,9 @@ func (p *Peer) drainOutbox(ctx context.Context) {
 		if e.Op == opDeposit && (blocked[e.Mailbox] || awaiting[e.Mailbox] && e.Token == "") {
 			continue
 		}
+		if c := p.conns[e.ConnID]; e.Op == opDeposit && e.Token == "" && c != nil && c.Reconnecting {
+			continue // nothing in the session while a reconnect is open (§6.6)
+		}
 		if !e.NotAfter.IsZero() && !now.Before(e.NotAfter) {
 			done[e] = true
 			continue
@@ -147,8 +150,18 @@ func (p *Peer) drainOutbox(ctx context.Context) {
 // hs.init the relay refuses for good ends the reconnect (reconnect.go).
 func (p *Peer) deposit(ctx context.Context, e *outboxEntry, now time.Time) (finished bool, err error) {
 	finished, err = p.depositOnce(ctx, e, now)
-	if c := p.conns[e.ConnID]; finished && err != nil && c != nil && c.Reconnecting && e.Token != "" && e.Token == c.Reconnect.Token {
+	if !finished || err == nil || e.Token == "" {
+		return finished, err
+	}
+	if c := p.conns[e.ConnID]; c != nil && c.Reconnecting && e.Token == c.Reconnect.Token {
 		p.dropConnOutgoing(c)
+	}
+	// The hs.resp to a member's reconnect, on the token its hs.init
+	// brought: that reconnect cannot complete.
+	for id, aw := range p.awaiting {
+		if aw.ConnID == e.ConnID && aw.Reconnect != nil && aw.Reconnect.Standing.Token == e.Token {
+			p.dropAwaiting(id, now)
+		}
 	}
 	return finished, err
 }

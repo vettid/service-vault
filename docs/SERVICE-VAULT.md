@@ -79,8 +79,11 @@ never answers challenges and never rotates its identity.
   marker. The member's vault accepts that older epoch from its history
   and answers with its rotations since it, which the service follows.
   While a reconnect is open nothing is sent on the connection; a restart
-  sends a new `hs.init`, at most 3 per restore; after 7 days it fails and
-  the connection is stale. The service never rotates its identity.
+  sends a new `hs.init`, at most 3 per restore (the counters restart with
+  each restore); after 7 days it fails and the connection is stale. A
+  member's own reconnect arriving meanwhile (its `ctx` matching ours)
+  replaces ours, which is abandoned (chosen; not in the spec). The
+  service never rotates its identity.
 - **Tokens** (§7.1, §7.2): standing and reconnect tokens are re-minted
   below 10 and 60 days and sent as `relay.token.issued`;
   `relay.token.refresh` is answered with the hourly / daily `too_soon`

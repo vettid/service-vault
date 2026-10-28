@@ -276,3 +276,45 @@ func TestReconnectTimeout(t *testing.T) {
 		t.Fatal("a challenge on a stale connection")
 	}
 }
+
+// Counters that come back with the backup (taken while an earlier
+// reconnect was open) start again for the new restore.
+func TestReconnectCountersPerRestore(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	c := f.p.conns[cid]
+	c.Reconnecting, c.ReconnectTries, c.ReconnectSince = true, MaxReconnectTries, f.clk.Now().Add(-30*24*time.Hour)
+	f.p.markDirty(kindConn, cid)
+	if err := f.p.flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	b := f.backup()
+	f.restore(b, true)
+	if c := f.p.conns[cid]; !c.Reconnecting || c.ReconnectTries != 1 || c.State != StateActive {
+		t.Fatalf("reconnecting %v, tries %d, state %s", c.Reconnecting, c.ReconnectTries, c.State)
+	}
+	f.pump()
+	if !f.signIn(m, cid) {
+		t.Fatal("sign-in after the reconnect")
+	}
+}
+
+// The member's own reconnect, completed while ours is open, settles it.
+func TestReconnectCrossing(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	b := f.backup()
+	f.restore(b, true) // nothing changed since the backup: the epochs match
+	m.IgnoreStray, m.IgnoreRevoked = true, true
+	m.Reconnect()
+	f.pump()
+	c := f.p.conns[cid]
+	if c.Reconnecting || c.State != StateActive || c.kr.Current().ID() != m.KR.Current().ID() || len(f.p.outgoing) != 0 {
+		t.Fatalf("reconnecting %v, state %s", c.Reconnecting, c.State)
+	}
+	if !f.signIn(m, cid) {
+		t.Fatal("sign-in after the crossing reconnects")
+	}
+}

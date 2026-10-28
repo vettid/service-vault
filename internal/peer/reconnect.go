@@ -44,6 +44,9 @@ const ReconnectSlowAfter = 24 * time.Hour
 func (p *Peer) reconnectAll(now time.Time) int {
 	n := 0
 	for _, c := range p.conns {
+		// Per restore: counters that came back with the backup (taken
+		// while an earlier reconnect was open) start again.
+		c.Reconnecting, c.ReconnectTries, c.ReconnectSlow, c.ReconnectSince = false, 0, false, time.Time{}
 		if p.startReconnect(c, now) {
 			n++
 		} else if c.State == StateActive || c.State == StateStale {
@@ -60,6 +63,7 @@ func (p *Peer) reconnectAll(now time.Time) int {
 func (p *Peer) resumeReconnects(now time.Time) {
 	for _, c := range p.conns {
 		if c.Reconnecting && !p.startReconnect(c, now) {
+			c.Reconnecting = true // startReconnect cleared it
 			p.reconnectFailed(c)
 		}
 	}
@@ -87,6 +91,7 @@ func (p *Peer) reconnectFailed(c *Connection) {
 		return
 	}
 	c.Reconnecting, c.ReconnectTries, c.ReconnectSlow, c.ReconnectSince = false, 0, false, time.Time{}
+	p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == c.ID && e.Token != "" && e.Token == c.Reconnect.Token })
 	if c.State == StateActive {
 		c.State = StateStale
 		p.audit("peer_stale", c.ID)
@@ -112,9 +117,13 @@ func (p *Peer) startReconnect(c *Connection, now time.Time) bool {
 	}
 	c.Reconnecting = false // a reconnect replaced is not a failure
 	p.dropConnOutgoing(c)
-	// An earlier hs.init still waiting in the outbox is not sent: it is
-	// replaced (§6.6).
-	p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == c.ID && e.Token != "" && e.Token == c.Reconnect.Token })
+	// What waits in the outbox is not sent: an earlier hs.init is replaced
+	// (§6.6), and the rest is sealed in a session the member may no
+	// longer hold (deposits on the standing token, and the hs.resp of a
+	// member's reconnect, on its own, stay).
+	p.dropOutbox(func(e *outboxEntry) bool {
+		return e.ConnID == c.ID && e.Op == opDeposit && (e.Token == "" || e.Token == c.Reconnect.Token)
+	})
 	st, rt, jtis, err := p.mintReconnectPair(c.ID, &c.Peer, now)
 	if err != nil {
 		p.log().Warn("reconnect: mint tokens", "connection_id", c.ID, "err", errCode(err))
