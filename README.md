@@ -245,10 +245,26 @@ version); otherwise rotate as above.
 **Restoring the table.** A last resort: it puts the service vault back
 as it was at the backup, and loses everything since:
 - connections made since, and members' key and relay changes since
-  (VAULT-MESSAGING §3.4). The members' vaults have moved on, so some
-  connections stop working until they reconnect (§6.6) or connect again;
+  (VAULT-MESSAGING §3.4);
+- sessions rekeyed since (§6.5: every active connection rekeys at least
+  daily), and tokens refreshed since (§7.2);
 - sign-ins, approvals, admin changes and audit entries since;
-- webhooks not yet delivered.
+- webhooks not yet delivered. Webhooks delivered between the backup and
+  the restore are in the restored outbox again and are **sent again**:
+  the application must ignore ids it has seen (as for any retry).
+
+*What members see.* While the service is stopped (about 5 minutes on
+staging, most of it DynamoDB's restore), sign-ins and connections fail,
+and the member site shows its "didn't complete" step. After it, a
+connection whose state didn't change since the backup works as before
+(a restore minutes back, past a sign-in, did on staging). One that
+rekeyed, refreshed its tokens or changed keys or relay address since the
+backup stops working: sign-in requests don't reach the phone, nothing
+is leaked, and a reconnect (§6.6) can't mend it yet, because a reconnect
+must name both sides' last epoch. The member connects again from a new
+invitation, which replaces the old connection. So a restore more than a
+day back means every active member connects again; admins then also
+need "Recovering admins".
 
 Before an upgrade that can't be rolled back, take an on-demand backup
 right before it, so the loss is minutes. Point-in-time recovery is on,
@@ -260,21 +276,45 @@ environment and `T` = `vettid-service-vault-<env>` (the table, the ECS
 cluster and the service share the name):
 1. Stop the service:
    `aws ecs update-service --cluster T --service T --desired-count 0`,
-   then `aws ecs wait services-stable --cluster T --services T`.
-2. Restore into a new table, `T-restore`:
+   then `aws ecs wait services-stable --cluster T --services T`, and
+   check that `aws ecs describe-services --cluster T --services T`
+   shows `runningCount` 0. Until step 4, don't run `cdk deploy`: it sets
+   the desired count back to 1. The `-down` alarm notifies after 10
+   minutes stopped; that is expected.
+2. Restore into a new table, `T-restore`, from a backup:
    `aws dynamodb restore-table-from-backup --target-table-name T-restore --backup-arn <arn>`
-   (`aws dynamodb list-backups --table-name T` lists them), or
-   `aws dynamodb restore-table-to-point-in-time --source-table-name T --target-table-name T-restore --restore-date-time <time>`.
-   Then `aws dynamodb wait table-exists --table-name T-restore`.
+   (`aws dynamodb list-backups --table-name T` lists them), or to a
+   point in time:
+   `aws dynamodb restore-table-to-point-in-time --source-table-name T --target-table-name T-restore --restore-date-time <time>`
+   (`aws dynamodb describe-continuous-backups --table-name T` shows the
+   earliest). Then `aws dynamodb wait table-exists --table-name T-restore`;
+   a restore can outlast the wait, so run it again until the table is
+   `ACTIVE`.
 3. Copy it back:
    `service-vault table restore -from T-restore -to T`, built from this
-   repository with the operator's AWS credentials. It writes every item
-   of `T-restore` into `T`, deletes the items `T` has that `T-restore`
-   lacks, and prints the counts. If it is cut short, run it again.
+   repository with the operator's AWS credentials. It first checks that
+   `T-restore` is a finished restore of `T` (a swapped `-from` and `-to`
+   fails), that both hold the same keys (another deployment's table
+   fails), and that no task has written its heartbeat to `T` in the last
+   2 minutes (the daemon writes one every 30 seconds and deletes it when
+   it stops). Then it writes every item of `T-restore` into `T`, deletes
+   the items `T` has that `T-restore` lacks, and prints the counts. If it
+   is cut short, run it again. `-other-keys` is only for a `T` the
+   daemon started on after the original table was lost: its new keys are
+   replaced by the backup's.
 4. If the image changes too, deploy it now. Start the service:
    `aws ecs update-service --cluster T --service T --desired-count 1`.
 5. Check `/health`, the TLS pin and a member's sign-in. Then delete
    `T-restore`.
+
+The operator needs: `dynamodb:CreateBackup`, `ListBackups`,
+`DescribeContinuousBackups`, `RestoreTableFromBackup` or
+`RestoreTableToPointInTime` (with `PutItem`, `UpdateItem`, `DeleteItem`,
+`GetItem`, `Query`, `Scan` and `BatchWriteItem` on `T-restore`, which a
+restore requires), `DescribeTable` on both tables, `GetItem` and `Scan`
+on `T-restore`, `GetItem`, `Scan` and `BatchWriteItem` on `T`,
+`DeleteTable` on `T-restore`, and `ecs:UpdateService` and
+`ecs:DescribeServices` on the service.
 
 The KMS key must be the one the backup was made under: the stack's key,
 which is retained and never deleted with the stack.

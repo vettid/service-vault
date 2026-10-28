@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 
 	"github.com/vettid/service-vault/internal/keystore"
 	"github.com/vettid/service-vault/internal/peer"
+	"github.com/vettid/service-vault/internal/store"
 )
 
 // The restore path: after CopyFrom the stack's table holds exactly the
@@ -121,4 +123,67 @@ func items(t *testing.T, ctx context.Context, c *dynamodb.Client, table string) 
 		}
 	}
 	return m
+}
+
+// The restore's checks: a plain table is not a restore (a swapped -from
+// and -to); a target with other keys or a recent heartbeat is refused;
+// the heartbeat is neither copied nor deleted.
+func TestRestoreChecksOnDynamoDB(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	src, dst := newTable(t, ctx), newTable(t, ctx)
+	now := time.Now()
+
+	if err := dst.CheckRestore(ctx, src.Name, false, now); err == nil || !strings.Contains(err.Error(), "was not restored") {
+		t.Fatalf("CheckRestore from a plain table: %v", err)
+	}
+	if err := dst.CheckTarget(ctx, src.Name, false, now); err == nil {
+		t.Fatal("CheckTarget from a table without keys")
+	}
+	if err := src.Blobs().Create(ctx, keystore.SecretsName, []byte("secrets")); err != nil {
+		t.Fatal(err)
+	}
+	if err := dst.CheckTarget(ctx, src.Name, false, now); err != nil {
+		t.Fatalf("CheckTarget into a table without keys: %v", err)
+	}
+	if err := dst.Blobs().Create(ctx, keystore.SecretsName, []byte("other")); err != nil {
+		t.Fatal(err)
+	}
+	if err := dst.CheckTarget(ctx, src.Name, false, now); err == nil || !strings.Contains(err.Error(), "other keys") {
+		t.Fatalf("CheckTarget into a table with other keys: %v", err)
+	}
+	if err := dst.CheckTarget(ctx, src.Name, true, now); err != nil {
+		t.Fatalf("CheckTarget with -other-keys: %v", err)
+	}
+
+	if _, ok, err := dst.LastHeartbeat(ctx); err != nil || ok {
+		t.Fatalf("LastHeartbeat without one: %v %v", ok, err)
+	}
+	if err := dst.Heartbeat(ctx, now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if at, ok, err := dst.LastHeartbeat(ctx); err != nil || !ok || at.Unix() != now.Add(-time.Minute).Unix() {
+		t.Fatalf("LastHeartbeat: %v %v %v", at, ok, err)
+	}
+	if err := dst.CheckTarget(ctx, src.Name, true, now); err == nil || !strings.Contains(err.Error(), "running") {
+		t.Fatalf("CheckTarget with a heartbeat a minute old: %v", err)
+	}
+	if err := dst.CheckTarget(ctx, src.Name, true, now.Add(store.HeartbeatStale)); err != nil {
+		t.Fatalf("CheckTarget with a stale heartbeat: %v", err)
+	}
+	if err := src.Heartbeat(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := dst.CopyFrom(ctx, src.Name); err != nil {
+		t.Fatal(err)
+	}
+	if at, ok, err := dst.LastHeartbeat(ctx); err != nil || !ok || at.Unix() != now.Add(-time.Minute).Unix() {
+		t.Fatalf("the copy touched the target's heartbeat: %v %v %v", at, ok, err)
+	}
+	if err := dst.ClearHeartbeat(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := dst.LastHeartbeat(ctx); err != nil || ok {
+		t.Fatalf("LastHeartbeat after ClearHeartbeat: %v %v", ok, err)
+	}
 }

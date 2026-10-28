@@ -8,7 +8,7 @@
 //	service-vault healthcheck  probe GET /health on the local API; exit 0 or 1
 //	service-vault admin bootstrap -email E
 //	                           arm a new one-shot admin bootstrap (the same environment as serve)
-//	service-vault table restore -from RESTORED -to TABLE
+//	service-vault table restore -from RESTORED -to TABLE [-other-keys]
 //	                           copy a restored backup back into the stack's table (README "Restoring the table")
 //	service-vault version
 package main
@@ -61,7 +61,7 @@ var version = "dev"
 
 func main() {
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "usage: service-vault serve [flags] | healthcheck | admin bootstrap -email E | table restore -from RESTORED -to TABLE | version\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "usage: service-vault serve [flags] | healthcheck | admin bootstrap -email E | table restore -from RESTORED -to TABLE [-other-keys] | version\n")
 	}
 	flag.Parse()
 	switch flag.Arg(0) {
@@ -346,6 +346,25 @@ func serve(args []string) error {
 		IdleTimeout:       2 * time.Minute,
 		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 	}
+	// The heartbeat tells the restore that the service is running
+	// (README "Restoring the table").
+	if err := tbl.Heartbeat(ctx, time.Now()); err != nil {
+		return fmt.Errorf("heartbeat: %w", err)
+	}
+	go func() {
+		t := time.NewTicker(store.HeartbeatInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if err := tbl.Heartbeat(ctx, time.Now()); err != nil {
+					log.Warn("heartbeat", "err", err.Error())
+				}
+			}
+		}
+	}()
 	peerErr := make(chan error, 1)
 	go func() { peerErr <- p.Run(ctx) }()
 	go approvals.Run(ctx)
@@ -371,6 +390,9 @@ func serve(args []string) error {
 		if err := <-peerErr; err != nil && !errors.Is(err, context.Canceled) {
 			runErr = fmt.Errorf("peer: %w", err)
 		}
+	}
+	if err := tbl.ClearHeartbeat(sctx); err != nil {
+		log.Warn("clear heartbeat", "err", err.Error())
 	}
 	log.Info("stopped")
 	return runErr
@@ -406,15 +428,18 @@ func newAWSClients(ctx context.Context, endpoint string) (*awsClients, error) {
 // operator's restore path (README "Restoring the table"). DynamoDB
 // restores a backup into a new table; this makes the stack's table hold
 // exactly that table's items. It runs from the operator's machine with
-// their AWS credentials, while the service is stopped.
+// their AWS credentials, while the service is stopped; it checks first
+// that RESTORED is a finished restore of TABLE with the same keys and
+// that no task has written a heartbeat lately.
 func table(args []string, out io.Writer) error {
-	const usage = "usage: service-vault table restore -from RESTORED -to TABLE"
+	const usage = "usage: service-vault table restore -from RESTORED -to TABLE [-other-keys]"
 	if len(args) == 0 || args[0] != "restore" {
 		return errors.New(usage)
 	}
 	fs := flag.NewFlagSet("table restore", flag.ContinueOnError)
 	from := fs.String("from", "", "the table DynamoDB restored the backup into")
 	to := fs.String("to", "", "the stack's table (vettid-service-vault-<env>); its items are replaced")
+	otherKeys := fs.Bool("other-keys", false, "TABLE holds keys other than RESTORED's (the daemon started on it after the table was lost): replace them")
 	awsEndpoint := fs.String("dev-aws-endpoint", "", "local development only: send DynamoDB calls to this URL (LocalStack)")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -428,8 +453,12 @@ func table(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	dst := &store.Table{Client: ac.ddb, Name: *to}
+	if err := dst.CheckRestore(ctx, *from, *otherKeys, time.Now()); err != nil {
+		return err
+	}
 	start := time.Now()
-	written, deleted, err := (&store.Table{Client: ac.ddb, Name: *to}).CopyFrom(ctx, *from)
+	written, deleted, err := dst.CopyFrom(ctx, *from)
 	fmt.Fprintf(out, "%d items written, %d deleted, in %s\n", written, deleted, time.Since(start).Round(time.Second))
 	return err
 }
