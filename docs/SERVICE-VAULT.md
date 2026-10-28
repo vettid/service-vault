@@ -86,9 +86,9 @@ never answers challenges and never rotates its identity.
   (0.72.1): a member's reconnect arriving meanwhile (its `ctx` matching
   ours) is answered and ours yields (no `hs.fin`; its tokens revoked);
   if the member's `hs.fin` doesn't come within an hour (chosen; not in
-  the spec), a new try starts. A stored initiator lacks the member's
-  followed chain, so an answer that starts with those links fails and a
-  new try is taken. The service never rotates its identity.
+  the spec), a new try starts. The stored initiator keeps the member's
+  followed chain (vettid-vault #159), so the member's answer may start
+  with links already followed. The service never rotates its identity.
 - **Tokens** (§7.1, §7.2): standing and reconnect tokens are re-minted
   below 10 and 60 days and sent as `relay.token.issued`;
   `relay.token.refresh` is answered with the hourly / daily `too_soon`

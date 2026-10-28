@@ -232,8 +232,7 @@ type outgoing struct {
 	// revoked if it is abandoned.
 	Issued []string `json:"issued,omitempty"`
 
-	ini      *handshake.Initiator
-	restored bool // loaded from the store (its initiator lacks the known chain)
+	ini *handshake.Initiator
 }
 
 // Token kinds we issue (§7.1).
@@ -520,7 +519,7 @@ func (p *Peer) load(ctx context.Context) error {
 			if err != nil {
 				return "", err
 			}
-			og.ini, og.restored = ini, true
+			og.ini = ini
 			p.outgoing[og.ID] = og
 			return og.ID, nil
 		}},

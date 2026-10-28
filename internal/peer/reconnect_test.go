@@ -149,8 +149,8 @@ func TestMemberReconnectDeferredToFin(t *testing.T) {
 }
 
 // A restart while the reconnect awaits its hs.resp, with a member link we
-// followed: the stored initiator lacks that chain, so the member's answer
-// (beginning with the link) fails, and a new try is taken.
+// followed: the stored initiator keeps that chain, so the member's answer
+// (beginning with the link) is taken, with no new try.
 func TestReconnectResumedAfterRestart(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
@@ -172,8 +172,8 @@ func TestReconnectResumedAfterRestart(t *testing.T) {
 	m.IgnoreRevoked = true // its answer to the replaced hs.init is refused
 	f.pump()
 	c := f.p.conns[cid]
-	if c.Reconnecting || c.kr.Current().ID() != m.KR.Current().ID() {
-		t.Fatal("no common session after the resumed reconnect")
+	if c.Reconnecting || c.kr.Current().ID() != m.KR.Current().ID() || m.Reconnects != 1 {
+		t.Fatalf("resumed reconnect: reconnecting %v, member answered %d", c.Reconnecting, m.Reconnects)
 	}
 	if !f.signIn(m, cid) {
 		t.Fatal("sign-in after the reconnect")
