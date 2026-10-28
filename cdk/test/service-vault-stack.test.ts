@@ -1,6 +1,6 @@
 import * as cdk from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
-import { ALARMS, API_PORT, CLIENT_PARAMS, ServiceVaultStack, ssmPrefix, ServiceVaultStackProps, TASK_CPU, TASK_MEMORY_MIB } from '../lib/service-vault-stack';
+import { ALARMS, API_PORT, CLIENT_PARAMS, ERROR_THRESHOLD, EXPECTED_STOP_CODES, ServiceVaultStack, ssmPrefix, ServiceVaultStackProps, TASK_CPU, TASK_MEMORY_MIB } from '../lib/service-vault-stack';
 
 const DIGEST = 'sha256:' + 'a'.repeat(64);
 const CLIENT_SG = 'sg-0123456789abcdef0';
@@ -286,7 +286,7 @@ describe('alarms', () => {
       TreatMissingData: 'breaching',
     });
     const alarms = Object.values<any>(t.findResources('AWS::CloudWatch::Alarm'));
-    expect(alarms).toHaveLength(Object.keys(ALARMS).length + 2);
+    expect(alarms).toHaveLength(Object.keys(ALARMS).length + 5); // + key_change, errors, task_stopped, deploy_failed, down
     for (const a of alarms) expect(a.Properties.AlarmActions).toEqual([base.alarmTopicArn]);
   });
 
@@ -312,11 +312,35 @@ describe('alarms', () => {
   });
 
   test('key_change: CloudTrail KMS events for the keystore key reach a log group and alarm', () => {
-    const rule = Object.values<any>(t.findResources('AWS::Events::Rule'))[0].Properties;
+    const rule = Object.values<any>(t.findResources('AWS::Events::Rule')).find((r: any) => r.Properties.EventPattern.source[0] === 'aws.kms').Properties;
     expect(rule.EventPattern.source).toEqual(['aws.kms']);
     for (const e of ['CreateGrant', 'PutKeyPolicy', 'ScheduleKeyDeletion', 'DisableKey']) expect(rule.EventPattern.detail.eventName).toContain(e);
     expect(JSON.stringify(rule.EventPattern.detail.resources)).toContain('KeystoreKey');
     t.hasResourceProperties('AWS::CloudWatch::Alarm', { AlarmName: 'vettid-service-vault-test-key_change' });
+  });
+
+  test('task_stopped and deploy_failed: one rule sends the cluster\'s ECS events to a log group', () => {
+    const rules = Object.values<any>(t.findResources('AWS::Events::Rule')).filter((r: any) => r.Properties.EventPattern.source[0] === 'aws.ecs');
+    expect(rules).toHaveLength(1);
+    const p = rules[0].Properties.EventPattern;
+    expect(p['detail-type']).toEqual(['ECS Task State Change', 'ECS Deployment State Change']);
+    const res = JSON.stringify(p.resources);
+    expect(res).toContain(':task/vettid-service-vault-test/');
+    expect(res).toContain(':service/vettid-service-vault-test/');
+    const filters = Object.values<any>(t.findResources('AWS::Logs::MetricFilter')).map((f: any) => f.Properties);
+    const stopped = filters.find((f: any) => f.MetricTransformations[0].MetricName === 'task_stopped').FilterPattern;
+    expect(stopped).toContain('$.detail.lastStatus = "STOPPED"');
+    for (const c of EXPECTED_STOP_CODES) expect(stopped).toContain(`$.detail.stopCode != "${c}"`);
+    expect(stopped).toContain('$.detail.stoppedReason = "Task failed*"');
+    expect(filters.find((f: any) => f.MetricTransformations[0].MetricName === 'deploy_failed').FilterPattern).toContain('SERVICE_DEPLOYMENT_FAILED');
+    for (const n of ['task_stopped', 'deploy_failed']) t.hasResourceProperties('AWS::CloudWatch::Alarm', { AlarmName: `vettid-service-vault-test-${n}`, Threshold: 1 });
+  });
+
+  test('errors: ERROR lines without an alarm of their own, over 15 minutes', () => {
+    const f = Object.values<any>(t.findResources('AWS::Logs::MetricFilter')).map((x: any) => x.Properties)
+      .find((x: any) => x.MetricTransformations[0].MetricName === 'errors');
+    expect(f.FilterPattern).toBe('{ ($.level = "ERROR") && ($.alarm NOT EXISTS) }');
+    t.hasResourceProperties('AWS::CloudWatch::Alarm', { AlarmName: 'vettid-service-vault-test-errors', Threshold: ERROR_THRESHOLD, Period: 900 });
   });
 
   test('with an address instead, a topic of its own with that subscription', () => {

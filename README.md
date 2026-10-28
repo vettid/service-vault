@@ -96,6 +96,23 @@ destination.
 - `down`: no task has run for 10 minutes. It watches the ECS service's
   CPU samples, which ECS reports without Container Insights. A
   reclaimed Spot task is replaced well within that time.
+- `task_stopped`: a task stopped on its own: it exited, failed its
+  health check or failed to start. A crash loop keeps it raised, while
+  `down` may stay quiet because short-lived tasks still report CPU.
+  Stops by a deploy, a scale-in, a Spot reclamation or an operator
+  (stop codes `ServiceSchedulerInitiated`, `SpotInterruption`,
+  `UserInitiated`) don't raise it, except a failed health check.
+- `deploy_failed`: the circuit breaker failed a deployment and rolled it
+  back.
+- `errors`: 5 or more ERROR lines in 15 minutes that no alarm above
+  covers (DynamoDB, KMS or the relay failing).
+
+ECS's own events for this cluster (task state changes and the service's
+deployments) go to a log group of their own, kept a month, for
+`task_stopped` and `deploy_failed`. Each EventBridge rule that writes to
+a log group adds an account-wide CloudWatch Logs resource policy
+(10 per region): this stack has two, the key changes' and the ECS
+events'.
 
 **What it creates.** A VPC with public subnets in two AZs, no NAT gateway,
 the free DynamoDB gateway endpoint and no interface endpoints. An ECS

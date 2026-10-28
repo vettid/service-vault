@@ -82,6 +82,16 @@ export const ALARMS = {
   webhook_dropped: 'A webhook was dropped as undeliverable after 24 h: the application missed an event',
 } as const;
 
+/**
+ * ECS stop codes of the service's own doing (a deploy, a scale-in, a
+ * Spot reclamation, an operator's stop): any other stop, or one for a
+ * failed health check, raises task_stopped.
+ */
+export const EXPECTED_STOP_CODES = ['ServiceSchedulerInitiated', 'SpotInterruption', 'UserInitiated'];
+
+/** ERROR lines (not marked for an alarm of their own) in 15 minutes that raise errors. */
+export const ERROR_THRESHOLD = 5;
+
 /** The widest IPv4 prefix allowed for apiClientCidr. */
 export const MIN_API_CIDR_PREFIX = 16;
 
@@ -526,6 +536,77 @@ export class ServiceVaultStack extends cdk.Stack {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }));
+
+    // Errors: ERROR lines that no alarm above covers (internal failures:
+    // DynamoDB, KMS, the relay).
+    const errors = new logs.MetricFilter(this, 'Alarm-errors', {
+      logGroup,
+      filterPattern: logs.FilterPattern.all(logs.FilterPattern.stringValue('$.level', '=', 'ERROR'), logs.FilterPattern.notExists('$.alarm')),
+      metricNamespace: `VettID/ServiceVault/${envName}`,
+      metricName: 'errors',
+      metricValue: '1',
+    }).metric({ statistic: 'Sum', period: cdk.Duration.minutes(15) });
+    notify(new cloudwatch.Alarm(this, 'Alarm-errors-alarm', {
+      alarmName: `${prefix}-errors`,
+      alarmDescription: `The service vault logged ${ERROR_THRESHOLD} or more errors in 15 minutes (DynamoDB, KMS or the relay failing)`,
+      metric: errors,
+      threshold: ERROR_THRESHOLD,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    }));
+
+    // ECS events of this cluster (its tasks' state changes, its service's
+    // deployments) go to a log group of their own; one rule, so one
+    // account-wide CloudWatch Logs resource policy. A task that stops on
+    // its own (crashed, failed its health check, failed to start) raises
+    // task_stopped, which a crash loop keeps raised while the down alarm
+    // still sees CPU samples; a deployment the circuit breaker failed
+    // raises deploy_failed.
+    const ecsEvents = new logs.LogGroup(this, 'EcsEvents', {
+      retention: logs.RetentionDays.ONE_MONTH,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+    new events.Rule(this, 'EcsEventsRule', {
+      description: 'Task state changes and deployments of the service vault cluster (task_stopped, deploy_failed alarms)',
+      eventPattern: {
+        source: ['aws.ecs'],
+        detailType: ['ECS Task State Change', 'ECS Deployment State Change'],
+        resources: events.Match.anyOf(
+          events.Match.prefix(this.formatArn({ service: 'ecs', resource: 'task', resourceName: `${prefix}/` })),
+          events.Match.prefix(this.formatArn({ service: 'ecs', resource: 'service', resourceName: `${prefix}/` })),
+        ),
+      },
+      targets: [new eventTargets.CloudWatchLogGroup(ecsEvents)],
+    });
+    const ecsAlarm = (name: string, description: string, filterPattern: logs.IFilterPattern) => {
+      const metric = new logs.MetricFilter(this, `Alarm-${name}`, {
+        logGroup: ecsEvents,
+        filterPattern,
+        metricNamespace: `VettID/ServiceVault/${envName}`,
+        metricName: name,
+        metricValue: '1',
+      }).metric({ statistic: 'Sum', period: cdk.Duration.minutes(5) });
+      notify(new cloudwatch.Alarm(this, `Alarm-${name}-alarm`, {
+        alarmName: `${prefix}-${name}`,
+        alarmDescription: description,
+        metric,
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }));
+    };
+    ecsAlarm('task_stopped', 'A service vault task stopped on its own: it crashed, failed its health check or failed to start (repeated: a crash loop)',
+      logs.FilterPattern.all(
+        logs.FilterPattern.stringValue('$.detail.lastStatus', '=', 'STOPPED'),
+        logs.FilterPattern.any(
+          logs.FilterPattern.all(...EXPECTED_STOP_CODES.map((c) => logs.FilterPattern.stringValue('$.detail.stopCode', '!=', c))),
+          logs.FilterPattern.stringValue('$.detail.stoppedReason', '=', 'Task failed*'),
+        ),
+      ));
+    ecsAlarm('deploy_failed', 'A service vault deployment failed and the circuit breaker rolled it back',
+      logs.FilterPattern.stringValue('$.detail.eventName', '=', 'SERVICE_DEPLOYMENT_FAILED'));
 
     // Down: ECS reports the service's CPU every minute while a task runs
     // (without Container Insights too); no data for 10 minutes means no
