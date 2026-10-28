@@ -171,9 +171,53 @@ plaintext records.
 
 This upgrade is one-way. An image from before sealing can't read sealed
 records, so the circuit breaker's rollback to it won't start. If the new
-image fails after sealing, deploy a fixed image, or restore the backup
-and deploy the old image. A new deployment starts sealed: its first start
-creates the record key and needs no migration.
+image fails after sealing, deploy a fixed image. Going back to the old
+image means restoring the step 1 backup ("Restoring the table") and
+deploying the old image on it. A new deployment starts sealed: its first
+start creates the record key and needs no migration.
+
+The keys are never made again over existing records. If the record key
+or the secrets are missing from a table that holds records, the start
+fails ("the table holds records but no keys"). A new record key would
+leave every record unreadable, and new secrets would replace the
+service's identity, so the way back is restoring the table.
+
+**Restoring the table.** A last resort: it puts the service vault back
+as it was at the backup, and loses everything since:
+- connections made since, and members' key and relay changes since
+  (VAULT-MESSAGING §3.4). The members' vaults have moved on, so some
+  connections stop working until they reconnect (§6.6) or connect again;
+- sign-ins, approvals, admin changes and audit entries since;
+- webhooks not yet delivered.
+
+Before an upgrade that can't be rolled back, take an on-demand backup
+right before it, so the loss is minutes. Point-in-time recovery is on,
+so a restore can also pick a time within the last 35 days.
+
+DynamoDB restores into a new table, and the stack owns its own table, so
+the restored items are copied back into it. With `<env>` the
+environment and `T` = `vettid-service-vault-<env>` (the table, the ECS
+cluster and the service share the name):
+1. Stop the service:
+   `aws ecs update-service --cluster T --service T --desired-count 0`,
+   then `aws ecs wait services-stable --cluster T --services T`.
+2. Restore into a new table, `T-restore`:
+   `aws dynamodb restore-table-from-backup --target-table-name T-restore --backup-arn <arn>`
+   (`aws dynamodb list-backups --table-name T` lists them), or
+   `aws dynamodb restore-table-to-point-in-time --source-table-name T --target-table-name T-restore --restore-date-time <time>`.
+   Then `aws dynamodb wait table-exists --table-name T-restore`.
+3. Copy it back:
+   `service-vault table restore -from T-restore -to T`, built from this
+   repository with the operator's AWS credentials. It writes every item
+   of `T-restore` into `T`, deletes the items `T` has that `T-restore`
+   lacks, and prints the counts. If it is cut short, run it again.
+4. If the image changes too, deploy it now. Start the service:
+   `aws ecs update-service --cluster T --service T --desired-count 1`.
+5. Check `/health`, the TLS pin and a member's sign-in. Then delete
+   `T-restore`.
+
+The KMS key must be the one the backup was made under: the stack's key,
+which is retained and never deleted with the stack.
 
 **Container configuration.**
 

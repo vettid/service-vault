@@ -142,7 +142,7 @@ func newFixture(t *testing.T, threshold int, admins ...string) *fixture {
 	}
 	logs := &bytes.Buffer{}
 	f := &fixture{t: t, p: p, st: st, hk: &hooks{}, clk: clk, logs: logs}
-	f.hk.out = &webhook.Outbox{Store: st, Kind: HookKind, Sender: f.hk}
+	f.hk.out = &webhook.Outbox{Store: st, Kind: HookKind, Sender: f.hk, Now: clk.Now}
 	f.m = &Manager{Peer: p, Store: st, Pager: st, Hooks: f.hk.out, ServiceName: "VettID Member Service",
 		Threshold: threshold, Now: clk.Now, Log: slog.New(slog.NewTextHandler(logs, nil))}
 	if len(admins) > 0 {

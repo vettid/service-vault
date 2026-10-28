@@ -8,6 +8,8 @@
 //	service-vault healthcheck  probe GET /health on the local API; exit 0 or 1
 //	service-vault admin bootstrap -email E
 //	                           arm a new one-shot admin bootstrap (the same environment as serve)
+//	service-vault table restore -from RESTORED -to TABLE
+//	                           copy a restored backup back into the stack's table (README "Restoring the table")
 //	service-vault version
 package main
 
@@ -59,7 +61,7 @@ var version = "dev"
 
 func main() {
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "usage: service-vault serve [flags] | healthcheck | admin bootstrap -email E | version\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "usage: service-vault serve [flags] | healthcheck | admin bootstrap -email E | table restore -from RESTORED -to TABLE | version\n")
 	}
 	flag.Parse()
 	switch flag.Arg(0) {
@@ -73,6 +75,11 @@ func main() {
 	case "admin":
 		if err := admin(flag.Args()[1:], os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "admin:", err)
+			os.Exit(1)
+		}
+	case "table":
+		if err := table(flag.Args()[1:], os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "table:", err)
 			os.Exit(1)
 		}
 	case "healthcheck":
@@ -238,11 +245,11 @@ func serve(args []string) error {
 	sc := ac.ssm
 	tbl := &store.Table{Client: ac.ddb, Name: cfg.Table}
 
-	secrets, err := keystore.LoadOrCreate(ctx, &keystore.AWSKMS{Client: ac.kms}, cfg.KMSKeyID, tbl.Blobs(), keystore.SecretsName, keystore.NewSecrets)
+	secrets, err := keystore.LoadOrCreate(ctx, &keystore.AWSKMS{Client: ac.kms}, cfg.KMSKeyID, tbl.Blobs(), keystore.SecretsName, newSecretsIfFresh(ctx, tbl.Blobs(), tbl.HasRecords))
 	if err != nil {
 		return fmt.Errorf("keystore: %w", err)
 	}
-	records, err := sealedStore(ctx, &keystore.AWSKMS{Client: ac.kms}, cfg.KMSKeyID, tbl.Blobs(), tbl.Peer(), tbl, true, os.Getenv(sealstore.MigrateEnv) == "1", log)
+	records, err := sealedStore(ctx, &keystore.AWSKMS{Client: ac.kms}, cfg.KMSKeyID, tbl.Blobs(), tbl.Peer(), tbl, tbl.HasRecords, os.Getenv(sealstore.MigrateEnv) == "1", log)
 	if err != nil {
 		return err
 	}
@@ -384,6 +391,38 @@ func newAWSClients(ctx context.Context, endpoint string) (*awsClients, error) {
 	}, nil
 }
 
+// table runs `service-vault table restore -from RESTORED -to TABLE`, the
+// operator's restore path (README "Restoring the table"). DynamoDB
+// restores a backup into a new table; this makes the stack's table hold
+// exactly that table's items. It runs from the operator's machine with
+// their AWS credentials, while the service is stopped.
+func table(args []string, out io.Writer) error {
+	const usage = "usage: service-vault table restore -from RESTORED -to TABLE"
+	if len(args) == 0 || args[0] != "restore" {
+		return errors.New(usage)
+	}
+	fs := flag.NewFlagSet("table restore", flag.ContinueOnError)
+	from := fs.String("from", "", "the table DynamoDB restored the backup into")
+	to := fs.String("to", "", "the stack's table (vettid-service-vault-<env>); its items are replaced")
+	awsEndpoint := fs.String("dev-aws-endpoint", "", "local development only: send DynamoDB calls to this URL (LocalStack)")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 || *from == "" || *to == "" {
+		return errors.New(usage)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	ac, err := newAWSClients(ctx, *awsEndpoint)
+	if err != nil {
+		return err
+	}
+	start := time.Now()
+	written, deleted, err := (&store.Table{Client: ac.ddb, Name: *to}).CopyFrom(ctx, *from)
+	fmt.Fprintf(out, "%d items written, %d deleted, in %s\n", written, deleted, time.Since(start).Round(time.Second))
+	return err
+}
+
 // errNoSecrets: the admin command found no keystore; it never makes one.
 var errNoSecrets = errors.New("the service vault has no keys yet: run serve first")
 
@@ -424,7 +463,7 @@ func admin(args []string, out io.Writer) error {
 	}
 	tbl := &store.Table{Client: ac.ddb, Name: cfg.Table}
 	kc := &keystore.AWSKMS{Client: ac.kms}
-	records, err := sealedStore(ctx, kc, cfg.KMSKeyID, tbl.Blobs(), tbl.Peer(), tbl, false, false, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	records, err := sealedStore(ctx, kc, cfg.KMSKeyID, tbl.Blobs(), tbl.Peer(), tbl, nil, false, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		return err
 	}
@@ -515,16 +554,51 @@ func recordKinds() []string {
 	return slices.Concat(peer.Kinds(), service.Kinds(), approval.Kinds())
 }
 
+// errKeysLost: a key is missing from a table that holds records. A new
+// one would leave the records unreadable (the record key) or the
+// service's identity replaced (the secrets), so the start stops for the
+// operator (README "Restoring the table").
+var errKeysLost = errors.New("the table holds records but no keys: restore the table from a backup")
+
+// newSecretsIfFresh makes the service vault's secrets only for a new
+// deployment: a table with no records and no record key.
+func newSecretsIfFresh(ctx context.Context, blobs keystore.Blobs, hasRecords func(context.Context) (bool, error)) func() (*keystore.Secrets, error) {
+	return func() (*keystore.Secrets, error) {
+		if _, err := blobs.Get(ctx, sealstore.KeyName); !errors.Is(err, keystore.ErrNotFound) {
+			if err == nil {
+				err = errKeysLost
+			}
+			return nil, err
+		}
+		if has, err := hasRecords(ctx); err != nil || has {
+			if err == nil {
+				err = errKeysLost
+			}
+			return nil, err
+		}
+		return keystore.NewSecrets()
+	}
+}
+
 // sealedStore returns the record store sealed under the record key
-// (internal/sealstore). create makes the key on first use (the daemon;
-// the admin CLI needs an existing one). With migrate (the operator's
+// (internal/sealstore). hasRecords lets the daemon make the key on first
+// use, only while the table has no records (nil: never; the admin CLI
+// needs an existing key). With migrate (the operator's
 // SV_RECORD_SEAL_MIGRATE=1, for the deploy that upgrades a deployment from
-// before sealing), records written before sealing are sealed in place
-// first.
-func sealedStore(ctx context.Context, kc keystore.KMS, keyID string, blobs keystore.Blobs, inner peer.Store, pages sealstore.Pager, create, migrate bool, log *slog.Logger) (*sealstore.Store, error) {
+// before sealing), the key is made over existing records and the records
+// written before sealing are sealed in place first.
+func sealedStore(ctx context.Context, kc keystore.KMS, keyID string, blobs keystore.Blobs, inner peer.Store, pages sealstore.Pager, hasRecords func(context.Context) (bool, error), migrate bool, log *slog.Logger) (*sealstore.Store, error) {
 	rk, err := keystore.LoadOrCreate(ctx, kc, keyID, blobs, sealstore.KeyName, func() (*sealstore.RecordKey, error) {
-		if !create {
+		if hasRecords == nil {
 			return nil, errors.New("no record key: start the daemon first")
+		}
+		if !migrate {
+			if has, err := hasRecords(ctx); err != nil || has {
+				if err == nil {
+					err = errKeysLost
+				}
+				return nil, err
+			}
 		}
 		return sealstore.NewRecordKey()
 	})
