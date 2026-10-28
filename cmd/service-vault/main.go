@@ -8,7 +8,7 @@
 //	service-vault healthcheck  probe GET /health on the local API; exit 0 or 1
 //	service-vault admin bootstrap -email E
 //	                           arm a new one-shot admin bootstrap (the same environment as serve)
-//	service-vault table restore -from RESTORED -to TABLE [-other-keys]
+//	service-vault table restore -from RESTORED -to TABLE [-other-keys] [-newer-point]
 //	                           copy a restored backup back into the stack's table (README "Restoring the table")
 //	service-vault version
 package main
@@ -61,7 +61,7 @@ var version = "dev"
 
 func main() {
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "usage: service-vault serve [flags] | healthcheck | admin bootstrap -email E | table restore -from RESTORED -to TABLE [-other-keys] | version\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "usage: service-vault serve [flags] | healthcheck | admin bootstrap -email E | table restore -from RESTORED -to TABLE [-other-keys] [-newer-point] | version\n")
 	}
 	flag.Parse()
 	switch flag.Arg(0) {
@@ -456,13 +456,14 @@ func newAWSClients(ctx context.Context, endpoint string) (*awsClients, error) {
 // that RESTORED is a finished restore of TABLE with the same keys and
 // that no task has written a heartbeat lately.
 func table(args []string, out io.Writer) error {
-	const usage = "usage: service-vault table restore -from RESTORED -to TABLE [-other-keys]"
+	const usage = "usage: service-vault table restore -from RESTORED -to TABLE [-other-keys] [-newer-point]"
 	if len(args) == 0 || args[0] != "restore" {
 		return errors.New(usage)
 	}
 	fs := flag.NewFlagSet("table restore", flag.ContinueOnError)
 	from := fs.String("from", "", "the table DynamoDB restored the backup into")
 	to := fs.String("to", "", "the stack's table (vettid-service-vault-<env>); its items are replaced")
+	newerPoint := fs.Bool("newer-point", false, "restore although RESTORED's point in time lies between an earlier restore's and when it was done: members' vaults will suspend every connection (README \"Restoring the table\")")
 	otherKeys := fs.Bool("other-keys", false, "TABLE holds keys other than RESTORED's (the daemon started on it after the table was lost): replace them")
 	awsEndpoint := fs.String("dev-aws-endpoint", "", "local development only: send DynamoDB calls to this URL (LocalStack)")
 	if err := fs.Parse(args[1:]); err != nil {
@@ -478,7 +479,8 @@ func table(args []string, out io.Writer) error {
 		return err
 	}
 	dst := &store.Table{Client: ac.ddb, Name: *to}
-	if err := dst.CheckRestore(ctx, *from, *otherKeys, time.Now()); err != nil {
+	point, err := dst.CheckRestore(ctx, *from, *otherKeys, *newerPoint, time.Now())
+	if err != nil {
 		return err
 	}
 	start := time.Now()
@@ -492,6 +494,9 @@ func table(args []string, out io.Writer) error {
 	}
 	// The next start reconnects every connection (README "Restoring the
 	// table").
+	if err := dst.RecordRestore(ctx, point, time.Now()); err != nil {
+		return err
+	}
 	return dst.MarkRestored(ctx, time.Now())
 }
 

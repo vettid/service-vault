@@ -140,7 +140,7 @@ func TestRestoreChecksOnDynamoDB(t *testing.T) {
 	src, dst := newTable(t, ctx), newTable(t, ctx)
 	now := time.Now()
 
-	if err := dst.CheckRestore(ctx, src.Name, false, now); err == nil || !strings.Contains(err.Error(), "was not restored") {
+	if _, err := dst.CheckRestore(ctx, src.Name, false, false, now); err == nil || !strings.Contains(err.Error(), "was not restored") {
 		t.Fatalf("CheckRestore from a plain table: %v", err)
 	}
 	if err := dst.CheckTarget(ctx, src.Name, false, now); err == nil {
@@ -185,6 +185,20 @@ func TestRestoreChecksOnDynamoDB(t *testing.T) {
 	}
 	if at, ok, err := dst.LastHeartbeat(ctx); err != nil || !ok || at.Unix() != now.Add(-time.Minute).Unix() {
 		t.Fatalf("the copy touched the target's heartbeat: %v %v %v", at, ok, err)
+	}
+	// The restores done, remembered for RestoreWindow.
+	if rs, err := dst.Restores(ctx); err != nil || len(rs) != 0 {
+		t.Fatalf("Restores before any: %v %v", rs, err)
+	}
+	point := now.Add(-48 * time.Hour)
+	if err := dst.RecordRestore(ctx, point, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := dst.RecordRestore(ctx, point, now.Add(store.RestoreWindow)); err != nil {
+		t.Fatal(err)
+	}
+	if rs, err := dst.Restores(ctx); err != nil || len(rs) != 1 || !rs[0].At.Equal(now.Add(store.RestoreWindow).UTC()) {
+		t.Fatalf("Restores: %v %v", rs, err)
 	}
 	// The restore marker: set after the copy, read and cleared at the start.
 	if ok, err := dst.Restored(ctx); err != nil || ok {
