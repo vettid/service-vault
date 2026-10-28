@@ -336,12 +336,14 @@ func (p *Peer) housekeeping(now time.Time) {
 	for id, og := range p.outgoing {
 		if now.Sub(og.Created) >= HandshakeTTL {
 			p.dropOutgoing(id) // an hs.resp that never came (or can no longer be accepted)
-		} else if c := p.conns[og.ConnID]; c != nil && c.Reconnecting && !c.ReconnectSlow && now.Sub(og.Created) >= ReconnectSlowAfter {
-			p.reconnectSlow(c)
 		}
 	}
 	for _, c := range p.conns {
-		if c.State != StateActive || c.Reconnecting {
+		if c.Reconnecting {
+			p.checkReconnect(c, now)
+			continue
+		}
+		if c.State != StateActive {
 			continue
 		}
 		if c.kr != nil && c.kr.Current() != nil && c.kr.Current().NeedsRekey(now) {

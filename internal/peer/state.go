@@ -89,17 +89,16 @@ type Connection struct {
 
 	Keyring     handshake.KeyringState `json:"keyring"`
 	LastEpochID []byte                 `json:"last_epoch_id,omitempty"`
-	// Epochs are the epochs activated in the last EpochHistory, oldest
-	// first: a reconnect may name any of them (reconnect.go).
-	Epochs []EpochRef `json:"epochs,omitempty"`
 	// Reconnecting is set while a reconnect we started awaits its hs.resp:
 	// the session is the restored one, which the member may no longer
 	// hold, so nothing is sent in it. ReconnectTries counts the attempts
 	// (each spends one of the member's reconnect token's 4 messages).
 	Reconnecting   bool `json:"reconnecting,omitempty"`
 	ReconnectTries int  `json:"reconnect_tries,omitempty"`
+	// ReconnectSince is when the restore's first reconnect started;
 	// ReconnectSlow is set once the reconnect_slow alarm was raised.
-	ReconnectSlow bool `json:"reconnect_slow,omitempty"`
+	ReconnectSince time.Time `json:"reconnect_since,omitzero"`
+	ReconnectSlow  bool      `json:"reconnect_slow,omitempty"`
 
 	Created   time.Time `json:"created"`
 	Activated time.Time `json:"activated"`
@@ -182,8 +181,24 @@ type awaiting struct {
 	Resp    handshake.ResponderState `json:"resp"`
 	Created time.Time                `json:"created"`
 	Expires time.Time                `json:"expires"`
+	// A member's reconnect changes nothing until sig_I verifies at hs.fin
+	// (VAULT-MESSAGING §6.6, 0.72.0): what it brings waits here.
+	Reconnect *pendingReconnect `json:"reconnect,omitempty"`
 
 	r *handshake.Responder
+}
+
+// pendingReconnect is what a member's reconnect hs.init carried, applied
+// at its hs.fin: the tokens it issued us, the rotation links we had not
+// followed (with the key and KEM they lead to), and the jtis of the
+// tokens our hs.resp carried (revoked if it never completes).
+type pendingReconnect struct {
+	Standing  HeldToken         `json:"standing"`
+	Reconnect HeldToken         `json:"reconnect"`
+	IK        ed25519.PublicKey `json:"ik,omitempty"`
+	KEM       []byte            `json:"kem,omitempty"`
+	Links     []json.RawMessage `json:"links,omitempty"`
+	Issued    []string          `json:"issued,omitempty"`
 }
 
 // request is a first-contact connection after hs.fin, before activation

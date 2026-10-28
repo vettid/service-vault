@@ -90,7 +90,7 @@ destination.
   could not start or complete, so that member must connect again (see
   "Restoring the table").
 - `reconnect_slow`: such a reconnect is unanswered after a day. It
-  stays open for 16 days, since a locked member vault answers when it is
+  stays open for 7 days, since a locked member vault answers when it is
   unlocked.
 - `admins_short`: an admin's connection was removed (severed, or
   replaced by a new connection) and fewer admins than m remain, so no
@@ -273,14 +273,16 @@ follows any identity rotation the member made since; it logs
 `restored: reconnects started` and `reconnected` per connection. A
 reconnect completes when the member's vault next collects, usually
 within minutes; until then nothing is sent on that connection (its
-sign-ins fail), and a restart sends it again (at most 3 times, as the
-member's reconnect token allows 4 messages). One that can't start or
-complete raises `reconnect_failed`. A reconnect the service answered is
-not answered again (a replay). Each side keeps a year of epoch ids for this (per the
-pending §6.6 change for restores; member vaults need the release that
-has it, until then the reconnect is refused and the member connects
-again from a new invitation, which replaces the old connection, and
-admins need "Recovering admins"). A member who changed relay address
+sign-ins fail), and a restart sends a new one (at most 3 per restore,
+as the member's reconnect token allows 4 messages). One that can't
+start, or isn't completed within 7 days, fails: the connection becomes
+stale, `reconnect_failed` alarms, and the member connects again from a
+new invitation, which replaces the old connection (admins then also
+need "Recovering admins"). This is VAULT-MESSAGING 0.72.0 §6.6 "After a
+restore": the member's vault accepts the older epoch on a service
+connection for 35 days after it was superseded, so a backup older than
+that fails too; member vaults need the release that has it, and until
+then every such reconnect fails. A member who changed relay address
 since the backup, past its grace period, connects again in any case.
 
 Before an upgrade that can't be rolled back, take an on-demand backup
