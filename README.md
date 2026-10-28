@@ -52,7 +52,8 @@ the audit log) and removes the connection.
 The container image is built from the [Dockerfile](Dockerfile) (static
 binary on `scratch`, CA bundle only, non-root, amd64 and arm64:
 `make image`). [`cdk/`](cdk) is an AWS CDK app that runs it as
-MEMBER-SERVICE-PLAN §9 describes. Nothing is deployed from CI.
+MEMBER-SERVICE-PLAN §9 describes. Nothing is deployed from CI. Check the digest's provenance first
+([Verifying an image](#verifying-an-image)).
 
 ```sh
 cd cdk && npm ci && npm test
@@ -626,6 +627,23 @@ admin's connection.
 `-dev-aws-endpoint URL` (KMS, DynamoDB and SSM at LocalStack) and
 `-dev-relay-ca FILE` (also trust a dev relay's CA); `admin bootstrap`
 takes `-dev-aws-endpoint` too.
+
+### Verifying an image
+
+CI's `publish` job signs build provenance for each image it pushes
+(SLSA v1, GitHub artifact attestations on Sigstore's public instance),
+stored next to the image in GHCR. Check it before a digest goes into a
+deployment:
+
+```sh
+make verify-image IMAGE=ghcr.io/vettid/service-vault@sha256:<digest>
+```
+
+It runs `gh attestation verify` (GitHub CLI) and passes
+only for an image built by this repository's `ci.yml` from `main` on a
+GitHub-hosted runner. The output names the source commit; it should be
+the one being deployed. Images published before provenance was added
+have none and fail the check.
 
 ## Go SDK
 

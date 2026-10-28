@@ -3,7 +3,7 @@ BIN     ?= bin
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -buildid= -X main.version=$(VERSION)
 
-.PHONY: all build svctl test race lint vet staticcheck fmt scan tidy clean integration image cdk-test devstack-up devstack-test
+.PHONY: all build svctl test race lint vet staticcheck fmt scan tidy clean integration image cdk-test devstack-up devstack-test verify-image
 
 all: lint test build
 
@@ -72,3 +72,12 @@ devstack-up:
 
 devstack-test:
 	$(GO) test -count=1 -tags devstack -timeout 30m -v ./devstack/
+
+# Check an image's signed build provenance before deploying it (README,
+# "Verifying an image"): built by this repository's CI from main on a
+# GitHub-hosted runner. IMAGE=ghcr.io/vettid/service-vault@sha256:<digest>
+verify-image:
+	@case "$(IMAGE)" in ghcr.io/vettid/service-vault@sha256:*) ;; *) echo 'IMAGE=ghcr.io/vettid/service-vault@sha256:<digest>' >&2; exit 2;; esac
+	gh attestation verify oci://$(IMAGE) --repo vettid/service-vault \
+	  --signer-workflow vettid/service-vault/.github/workflows/ci.yml \
+	  --source-ref refs/heads/main --deny-self-hosted-runners
