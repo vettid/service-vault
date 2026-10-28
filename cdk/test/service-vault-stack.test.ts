@@ -255,6 +255,14 @@ describe('data', () => {
     expect(JSON.stringify(outputs.ApiUrl.Value)).toContain('https://');
   });
 
+  test('task role: exactly the item calls the daemon makes, on the table itself', () => {
+    const tableId = Object.keys(t.findResources('AWS::DynamoDB::Table'))[0];
+    const ddb = taskRoleStatements().filter((s) => asList(s.Action).some((a: string) => a.startsWith('dynamodb:')));
+    expect(ddb).toHaveLength(1);
+    expect(asList(ddb[0].Action).sort()).toEqual(['dynamodb:DeleteItem', 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:Query', 'dynamodb:Scan', 'dynamodb:UpdateItem']);
+    expect(asList(ddb[0].Resource)).toEqual([{ 'Fn::GetAtt': [tableId, 'Arn'] }]);
+  });
+
   test('task role: DynamoDB only on the table; nothing else', () => {
     const tableId = Object.keys(t.findResources('AWS::DynamoDB::Table'))[0];
     for (const s of taskRoleStatements()) {

@@ -20,6 +20,9 @@ import { Construct } from 'constructs';
 /** The port the daemon's private API listens on (SV_LISTEN). */
 export const API_PORT = 8080;
 
+/** DynamoDB actions of the task role, on the table only. */
+export const TABLE_ACTIONS = ['GetItem', 'PutItem', 'UpdateItem', 'DeleteItem', 'Query', 'Scan'] as const;
+
 /** The Cloud Map service name: the API is at <name>.<namespace>:API_PORT. */
 export const DISCOVERY_NAME = 'service-vault';
 
@@ -368,7 +371,17 @@ export class ServiceVaultStack extends cdk.Stack {
       memoryLimitMiB: TASK_MEMORY_MIB,
       runtimePlatform: { cpuArchitecture: ecs.CpuArchitecture.ARM64, operatingSystemFamily: ecs.OperatingSystemFamily.LINUX },
     });
-    this.table.grantReadWriteData(taskDef.taskRole);
+    // Only the item calls the daemon makes (its transactions are Put and
+    // Delete, checked per item). Batch calls, DescribeTable and streams
+    // belong to the operator's `table restore` (README "Restoring the
+    // table"), which runs with the operator's credentials.
+    taskDef.taskRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'Table',
+        actions: TABLE_ACTIONS.map((a) => `dynamodb:${a}`),
+        resources: [this.table.tableArn],
+      }),
+    );
     taskDef.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: 'KeystoreKey',
