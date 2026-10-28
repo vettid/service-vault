@@ -171,3 +171,23 @@ func TestHeartbeatEndsWithContext(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// The first heartbeat: bounded like the others, and the stop clock starts
+// at the time it carries.
+func TestFirstHeartbeat(t *testing.T) {
+	at := time.Unix(1_000_000, 0)
+	var stamped time.Time
+	start, err := firstHeartbeat(context.Background(), func(ctx context.Context, now time.Time) error {
+		if dl, ok := ctx.Deadline(); !ok || time.Until(dl) > heartbeatWriteTimeout {
+			t.Errorf("deadline %v, %v", dl, ok)
+		}
+		stamped = now
+		return nil
+	}, at)
+	if err != nil || !start.Equal(at) || !stamped.Equal(at) {
+		t.Fatalf("start %v, stamped %v, err %v", start, stamped, err)
+	}
+	if _, err := firstHeartbeat(context.Background(), func(context.Context, time.Time) error { return errors.New("down") }, at); err == nil {
+		t.Fatal("a failed first write")
+	}
+}

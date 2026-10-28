@@ -356,14 +356,15 @@ func serve(args []string) error {
 	// (README "Restoring the table").
 	// A task that can't write it for heartbeatStopAfter stops, so that a
 	// restore never runs beside it unnoticed.
-	if err := tbl.Heartbeat(ctx, time.Now()); err != nil {
-		return fmt.Errorf("heartbeat: %w", err)
+	start, err := firstHeartbeat(ctx, tbl.Heartbeat, time.Now())
+	if err != nil {
+		return err
 	}
 	hbErr := make(chan error, 1)
 	go func() {
 		t := time.NewTicker(store.HeartbeatInterval)
 		defer t.Stop()
-		if err := heartbeat(ctx, tbl.Heartbeat, time.Now(), t.C, log); err != nil {
+		if err := heartbeat(ctx, tbl.Heartbeat, start, t.C, log); err != nil {
 			hbErr <- err
 		}
 	}()
@@ -412,6 +413,18 @@ const (
 	heartbeatStopAfter    = store.HeartbeatStale / 2
 	heartbeatWriteTimeout = 10 * time.Second
 )
+
+// firstHeartbeat writes the first heartbeat, stamped now, under
+// heartbeatWriteTimeout. The stop rule counts from now, the time the item
+// carries, not from when the write returned.
+func firstHeartbeat(ctx context.Context, write func(context.Context, time.Time) error, now time.Time) (time.Time, error) {
+	wctx, cancel := context.WithTimeout(ctx, heartbeatWriteTimeout)
+	defer cancel()
+	if err := write(wctx, now); err != nil {
+		return time.Time{}, fmt.Errorf("heartbeat: %w", err)
+	}
+	return now, nil
+}
 
 // heartbeat writes the heartbeat at every tick until ctx ends, starting
 // from a good write at start. It returns an error, for the daemon to
