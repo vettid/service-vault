@@ -164,8 +164,8 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write
-      attestations: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -205,13 +205,30 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
             ghcr.io/${{ github.repository }}:main
-      # Signed SLSA build provenance for the pushed digest (GitHub
-      # artifact attestations, Sigstore), stored with the image in GHCR.
-      # A deployment checks it first (README, "Verifying an image").
+      - name: digest
+        run: echo "Published ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  attest:
+    # Signed SLSA build provenance for the pushed digest (GitHub artifact
+    # attestations, Sigstore), stored with the image in GHCR. A job of its
+    # own, so that only this step holds the OIDC token. A deployment
+    # checks it first (README, "Verifying an image").
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-26.04
+    needs: [publish]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ghcr.io/${{ github.repository }}
-          subject-digest: ${{ steps.push.outputs.digest }}
+          subject-digest: ${{ needs.publish.outputs.digest }}
           push-to-registry: true
-      - name: digest
-        run: echo "Published ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}" | tee -a "$GITHUB_STEP_SUMMARY"
