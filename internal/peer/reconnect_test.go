@@ -637,3 +637,34 @@ func TestReconnectRecordBadRetries(t *testing.T) {
 		t.Fatalf("reconnecting %v, state %s", c.Reconnecting, c.State)
 	}
 }
+
+// Our reconnect hs.init refused for good by the relay (the reconnect
+// token is spent): the reconnect ends at once, the connection stale with
+// reconnect_failed, instead of holding the session until the 7-day bound.
+func TestReconnectRefusedEnds(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	b := f.backup()
+	f.failDeposit = func(mailbox, token string) error {
+		if c := f.p.conns[cid]; c != nil && token == c.Reconnect.Token {
+			return &relayclient.Error{Status: 401, Code: codeTokenRevoked}
+		}
+		return nil
+	}
+	f.restore(b, true)
+	c := f.p.conns[cid]
+	if n := strings.Count(f.logs.String(), `msg="reconnect started"`); n != 1 {
+		t.Fatalf("%d tries on a spent reconnect token", n)
+	}
+	if c.Reconnecting || c.State != StateStale || len(f.p.outgoing) != 0 {
+		t.Fatalf("reconnecting %v, state %s, %d outgoing", c.Reconnecting, c.State, len(f.p.outgoing))
+	}
+	if !strings.Contains(f.logs.String(), `alarm=reconnect_failed`) {
+		t.Fatal("no reconnect_failed alarm")
+	}
+	f.start() // a restart spends no try on it
+	if c := f.p.conns[cid]; c.Reconnecting || c.ReconnectTries != 0 {
+		t.Fatalf("after a restart: reconnecting %v, tries %d", c.Reconnecting, c.ReconnectTries)
+	}
+}
