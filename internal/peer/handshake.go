@@ -574,14 +574,6 @@ func (p *Peer) handleResp(id string, raw []byte, sender ed25519.PublicKey, now t
 	if err != nil {
 		if _, xerr := og.ini.Export(); errors.Is(xerr, handshake.ErrDone) {
 			p.audit("hs_resp_aborted", og.ConnID)
-			if c := p.conns[og.ConnID]; og.restored && c != nil && c.Reconnecting && len(c.Chain) > 0 {
-				// A reconnect resumed from the store lost the member's
-				// chain we follow (the stored initiator state lacks it), so
-				// an answer starting with those links fails: a new try.
-				p.dropOutgoingQuiet(id)
-				p.retryReconnect(c, now)
-				return ackAfterFlush
-			}
 			p.dropOutgoing(id)
 		} else {
 			p.audit("hs_resp_dropped", og.ConnID)
@@ -603,18 +595,6 @@ func (p *Peer) handleResp(id string, raw []byte, sender ed25519.PublicKey, now t
 	p.installEpoch(c, res.Epoch, now)
 	p.log().Info("rekeyed", "connection_id", c.ID)
 	return ackAfterFlush
-}
-
-// dropOutgoingQuiet drops an outgoing handshake without ending its
-// reconnect.
-func (p *Peer) dropOutgoingQuiet(id string) {
-	if og := p.outgoing[id]; og != nil {
-		if c := p.conns[og.ConnID]; c != nil && c.Reconnecting {
-			c.Reconnecting = false
-			defer func() { c.Reconnecting = true }()
-		}
-	}
-	p.dropOutgoing(id)
 }
 
 func (p *Peer) dropOutgoing(id string) {

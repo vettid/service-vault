@@ -50,8 +50,8 @@ github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec h1:W09IVJc94
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec/go.mod h1:qqbHyh8v60DhA7CoWK5oRCqLrMHRGoxYCSS9EjAz6Eo=
 github.com/vettid/vettid-relay v0.0.0-20261027144202-528df9b0bf76 h1:BsK+ZzjjbokvTqLWzYUSZqYOpUmNzc6LWTbAh8s7MWo=
 github.com/vettid/vettid-relay v0.0.0-20261027144202-528df9b0bf76/go.mod h1:d+zS5Kxndcr/zEndHaDVEZaWeuGWFuE9Mh45k3PiCxg=
-github.com/vettid/vettid-vault v0.0.0-20261027224703-84610b01b923 h1:TRfOaf4E8SR08eVYGL3qyODrAuOmW5oMa9uNPxS2pyg=
-github.com/vettid/vettid-vault v0.0.0-20261027224703-84610b01b923/go.mod h1:/O9fPHzrLzsp1lpgMENRRl2civR+mHRHkEbs1ETO5lo=
+github.com/vettid/vettid-vault v0.0.0-20261028202841-fd1af0a51da3 h1:R3x1ZeyCMq1Btpytcq8H/IR4Zdw+e8fPeIVMSxmV4R0=
+github.com/vettid/vettid-vault v0.0.0-20261028202841-fd1af0a51da3/go.mod h1:/O9fPHzrLzsp1lpgMENRRl2civR+mHRHkEbs1ETO5lo=
 golang.org/x/crypto v0.57.0 h1:3ZVCjf8Ggz7zneR/EHRVx68Ctf+2pmIMP2UFhh9cC6M=
 golang.org/x/crypto v0.57.0/go.mod h1:Fdz0i5U6CoizGwLda9DttjSk6qlZo25zYNtR+ycvuZA=
 golang.org/x/sys v0.48.0 h1:bbX/i/6MgT9BVLM9RT1thmxL04yeTAhbEz4SyadbXoo=
