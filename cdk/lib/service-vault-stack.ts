@@ -140,6 +140,12 @@ export interface ServiceVaultStackProps extends cdk.StackProps {
    * at start (README "Records at rest"). Deploy again without it after.
    */
   readonly recordSealMigrate?: boolean;
+  /**
+   * The lowest record key version to use (default 1). One above the
+   * table's rotates the key at the next start (README "Rotating the record
+   * key"); later deploys may leave it out.
+   */
+  readonly recordKeyVersion?: number;
 }
 
 /**
@@ -177,6 +183,10 @@ export class ServiceVaultStack extends cdk.Stack {
     }
     if (!/^https:\/\//.test(props.webhookUrl)) {
       throw new Error(`webhookUrl must be an https:// URL (got "${props.webhookUrl}")`);
+    }
+    const recordKeyVersion = props.recordKeyVersion ?? 1;
+    if (!Number.isInteger(recordKeyVersion) || recordKeyVersion < 1 || recordKeyVersion > 1 << 20) {
+      throw new Error(`recordKeyVersion must be an integer from 1 to ${1 << 20} (got "${props.recordKeyVersion}")`);
     }
     const relayUrl = props.relayUrl ?? DEFAULT_RELAY_URL;
     if (!/^https:\/\//.test(relayUrl)) {
@@ -406,6 +416,7 @@ export class ServiceVaultStack extends cdk.Stack {
         AWS_REGION: this.region,
         ...approvalEnv,
         ...(props.recordSealMigrate ? { SV_RECORD_SEAL_MIGRATE: '1' } : {}),
+        ...(recordKeyVersion > 1 ? { SV_RECORD_KEY_VERSION: String(recordKeyVersion) } : {}),
       },
       secrets: {
         SV_API_KEY_HASHES: ecs.Secret.fromSecretsManager(apiKeyHashes),

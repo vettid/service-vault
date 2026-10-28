@@ -304,6 +304,13 @@ describe('alarms', () => {
     expect(env(synth({ recordSealMigrate: true })).find((e: any) => e.Name === 'SV_RECORD_SEAL_MIGRATE')?.Value).toBe('1');
   });
 
+  test('recordKeyVersion: SV_RECORD_KEY_VERSION above 1 only; a bad version fails synth', () => {
+    const env = (t2: Template) => Object.values<any>(t2.findResources('AWS::ECS::TaskDefinition'))[0].Properties.ContainerDefinitions[0].Environment;
+    expect(env(t).find((e: any) => e.Name === 'SV_RECORD_KEY_VERSION')).toBeUndefined();
+    expect(env(synth({ recordKeyVersion: 2 })).find((e: any) => e.Name === 'SV_RECORD_KEY_VERSION')?.Value).toBe('2');
+    for (const v of [0, 1.5, NaN]) expect(() => synth({ recordKeyVersion: v })).toThrow(/recordKeyVersion/);
+  });
+
   test('key_change: CloudTrail KMS events for the keystore key reach a log group and alarm', () => {
     const rule = Object.values<any>(t.findResources('AWS::Events::Rule'))[0].Properties;
     expect(rule.EventPattern.source).toEqual(['aws.kms']);

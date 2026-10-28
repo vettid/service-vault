@@ -13,8 +13,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
+	"github.com/vettid/service-vault/internal/keystore"
 	"github.com/vettid/service-vault/internal/peer"
-	"github.com/vettid/service-vault/internal/sealstore"
 )
 
 // The restore path: after CopyFrom the stack's table holds exactly the
@@ -28,10 +28,17 @@ func TestCopyFromOnDynamoDB(t *testing.T) {
 		t.Fatal("copied a table to itself")
 	}
 	if _, _, err := dst.CopyFrom(ctx, src.Name); err == nil {
-		t.Fatal("copied from a table without a record key")
+		t.Fatal("copied from a table without secrets")
 	}
-	if has, err := src.HasRecords(ctx); err != nil || has {
-		t.Fatalf("HasRecords on an empty table: %v %v", has, err)
+	if _, has, err := src.AnyRecord(ctx); err != nil || has {
+		t.Fatalf("AnyRecord on an empty table: %v %v", has, err)
+	}
+	// An expired record doesn't count.
+	if err := dst.Peer().Apply(ctx, []peer.Change{{Kind: "signin", ID: "gone", Data: []byte("x"), Expires: time.Now().Add(-time.Hour)}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, has, err := dst.AnyRecord(ctx); err != nil || has {
+		t.Fatalf("AnyRecord with only an expired record: %v %v", has, err)
 	}
 
 	// More records than one batch, a blob and a non-record item.
@@ -42,12 +49,21 @@ func TestCopyFromOnDynamoDB(t *testing.T) {
 	if err := src.Peer().Apply(ctx, old); err != nil {
 		t.Fatal(err)
 	}
-	if err := src.Blobs().Create(ctx, sealstore.KeyName, []byte("key")); err != nil {
+	if err := src.Blobs().Create(ctx, keystore.SecretsName, []byte("secrets")); err != nil {
 		t.Fatal(err)
 	}
 	put(t, ctx, src.Client, src.Name, "ctr#x", "-")
-	if has, err := src.HasRecords(ctx); err != nil || !has {
-		t.Fatalf("HasRecords: %v %v", has, err)
+	if has, err := src.AnyBlob(ctx, "record-key"); err != nil || has {
+		t.Fatalf("AnyBlob without a record key: %v %v", has, err)
+	}
+	if err := src.Blobs().Create(ctx, "record-key.v2", []byte("k")); err != nil {
+		t.Fatal(err)
+	}
+	if has, err := src.AnyBlob(ctx, "record-key"); err != nil || !has {
+		t.Fatalf("AnyBlob with a later record key: %v %v", has, err)
+	}
+	if d, has, err := src.AnyRecord(ctx); err != nil || !has || string(d) != "old" {
+		t.Fatalf("AnyRecord: %q %v %v", d, has, err)
 	}
 
 	// The stack's table moved on: changed records, a new one, a new blob.
@@ -55,7 +71,7 @@ func TestCopyFromOnDynamoDB(t *testing.T) {
 	if err := dst.Peer().Apply(ctx, newer); err != nil {
 		t.Fatal(err)
 	}
-	if err := dst.Blobs().Create(ctx, sealstore.KeyName, []byte("other")); err != nil {
+	if err := dst.Blobs().Create(ctx, keystore.SecretsName, []byte("other")); err != nil {
 		t.Fatal(err)
 	}
 	put(t, ctx, dst.Client, dst.Name, "ctr#y", "-")
@@ -64,8 +80,8 @@ func TestCopyFromOnDynamoDB(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if written != 62 || deleted != 2 {
-		t.Fatalf("written %d deleted %d, want 62 and 2", written, deleted)
+	if written != 63 || deleted != 3 {
+		t.Fatalf("written %d deleted %d, want 63 and 3", written, deleted)
 	}
 	want, got := items(t, ctx, src.Client, src.Name), items(t, ctx, dst.Client, dst.Name)
 	if !maps.Equal(want, got) {

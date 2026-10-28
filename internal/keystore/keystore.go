@@ -106,6 +106,8 @@ type Blobs interface {
 	// Create stores the record only if none exists under name, else
 	// returns ErrExists.
 	Create(ctx context.Context, name string, data []byte) error
+	// Delete removes the record; a missing one is not an error.
+	Delete(ctx context.Context, name string) error
 }
 
 // Errors from Blobs.

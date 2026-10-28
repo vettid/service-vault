@@ -77,6 +77,7 @@ npx cdk deploy \
 | `adminThreshold` | no (1) | `SV_ADMIN_THRESHOLD` |
 | `approvalTtl` | no (`24h`) | `SV_APPROVAL_TTL` |
 | `recordSealMigrate` | no | `true` only for the deploy that upgrades a deployment from before sealing (see "Records at rest") |
+| `recordKeyVersion` | no (1) | `SV_RECORD_KEY_VERSION`, the lowest record key version to use: set it one above the table's to rotate the record key (see "Rotating the record key"). Leaving it out later is fine |
 | `alarmTopicArn` or `alarmEmail` | one of them | Where the alarms go (below). Either an SNS topic that reaches a person, or an address for a topic of the stack's own; confirm that subscription from the email AWS sends. For staging, use vettid.org's vault alerts topic, which emails the admin address: `aws ssm get-parameter --name /vettid-org/staging/vault/alerts-topic-arn` |
 
 **Alarms.** They always notify someone: synth fails without a
@@ -177,10 +178,49 @@ deploying the old image on it. A new deployment starts sealed: its first
 start creates the record key and needs no migration.
 
 The keys are never made again over existing records. If the record key
-or the secrets are missing from a table that holds records, the start
+(its current version, with no older one to rotate from) or the secrets are missing from a table that holds records, the start
 fails ("the table holds records but no keys"). A new record key would
 leave every record unreadable, and new secrets would replace the
 service's identity, so the way back is restoring the table.
+
+**Rotating the record key.** The record key is versioned: each record
+names the version it is sealed under. Records under version 1 keep the
+layout from before versions, so this image can still be rolled back to
+an older one until the first rotation. To rotate:
+1. Take an on-demand backup (as in "Restoring the table"). The deploy
+   before must not have had `recordSealMigrate`: an image from before
+   versions, rolled back to with the migration on, would take the new
+   records for unsealed ones.
+2. Deploy with `-c recordKeyVersion=<the table's version + 1>`
+   (`SV_RECORD_KEY_VERSION`). The table's version is in the last
+   `record key rotated` log line; it is 1 before the first rotation. The
+   start makes the new version and reseals every record under it, and
+   logs `record key version made` (WARN).
+3. Start the service again, by a deploy or
+   `aws ecs update-service --cluster T --service T --force-new-deployment`.
+   That start reseals anything written under the older versions since
+   (an admin run that started before the rotation), deletes them from
+   the keystore, and logs `record key rotated` (WARN). Don't run
+   `service-vault admin` between steps 2 and 3.
+
+The version in use is always the table's: the highest of the setting,
+the version the table's records are under, and any later version in the
+keystore. So later deploys may leave the setting out, and a task with an
+older setting (the circuit breaker's rollback, an admin run from an
+older task definition) uses the new version and finishes a rotation cut
+short. A setting more than one above the table's is refused, as is a
+missing current version over records ("the table holds records but no
+keys").
+
+The start reads every record before the API listens, so with a large
+audit log it can outlast the health check's grace (30 s, then 3 checks
+30 s apart). The reseal keeps what it has done, so the next start goes
+on from there. Expired records still in the table stay under the old
+version until DynamoDB deletes them; nothing reads them. A backup holds
+the versions of its time: after restoring one from before a rotation,
+the table is back on the older version. If the stack's setting is still
+one above it, the next start rotates again (step 3 then retires the old
+version); otherwise rotate as above.
 
 **Restoring the table.** A last resort: it puts the service vault back
 as it was at the backup, and loses everything since:
@@ -238,6 +278,7 @@ which is retained and never deleted with the stack.
 | `SV_ADMIN_BOOTSTRAP_EMAIL` | env, optional | The connection bound to this email (from an invitation with a verified email) becomes the first admin, once: the bootstrap is one-shot, and the setting is ignored after it (see "Admin approvals") |
 | `SV_ADMIN_THRESHOLD` | env, optional | m: how many distinct admins must approve a governance action (default 1; 1–64) |
 | `SV_APPROVAL_TTL` | env, optional | How long an approval stays open (default `24h`; `10m` to `168h`) |
+| `SV_RECORD_KEY_VERSION` | env, optional | The lowest record key version to use (default 1; see "Rotating the record key") |
 
 Secret values are never in the repository. The stack generates both: the
 webhook secret is usable as is (the application reads it from the
