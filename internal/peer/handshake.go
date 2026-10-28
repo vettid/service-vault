@@ -190,8 +190,10 @@ func (p *Peer) respondFirst(pi *handshake.PendingInit, inv *InviteRecord, sender
 // respondReconnect answers a reconnect hs.init (§6.6): no SAS or
 // approval; the sender must be the relay key on record, from.ik the
 // stored ik or reached from it by the hs.init's rotation chain (the
-// member rotated while the session was down, §3.4), and ctx the last
-// epoch's id. The service has no rotations of its own.
+// member rotated while the session was down, §3.4), and ctx an epoch of
+// the connection's history (reconnect.go: the member's state may be
+// older than ours after a restore). The service has no rotations of its
+// own.
 func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender ed25519.PublicKey, now time.Time) {
 	if len(c.LastEpochID) == 0 || c.State == StateSuspended {
 		p.audit("reconnect_refused", c.ID)
@@ -206,9 +208,12 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 		pi.Discard()
 		return
 	}
-	var eid [suite.EpochIDSize]byte
-	copy(eid[:], c.LastEpochID)
 	body := pi.Init()
+	if !c.knownEpoch(body.Ctx) {
+		p.audit("reconnect_refused", c.ID)
+		pi.Discard()
+		return
+	}
 	// A valid link that gives a key a second successor suspends the
 	// connection (§3.4), whatever else the hs.init carries: such a chain
 	// could never be accepted, and the conflict must not go unnoticed.
@@ -238,7 +243,7 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 	cfg := handshake.ResponderConfig{
 		Identity: p.cfg.Keys.IK, Policy: handshake.PolicyVaultToVault, PinnedSuite: c.Suite,
 		CollectSender: sender, RecordRelayKey: c.Peer.Relay.PK, KnownInitiatorIK: start,
-		ExpectedCtx: handshake.EpochCtx(eid), Now: now,
+		ExpectedCtx: body.Ctx, Now: now,
 	}
 	st, err1 := p.heldToken(body.Token, &c.Peer)
 	rt, err2 := p.heldToken(body.ReconnectToken, &c.Peer)
@@ -394,6 +399,7 @@ func (p *Peer) installEpoch(c *Connection, ep *handshake.Epoch, now time.Time) {
 	c.kr.Activate(ep, now)
 	eid := ep.ID()
 	c.LastEpochID = eid[:]
+	c.recordEpoch(eid[:], now)
 	if ep.Suite() > c.Suite {
 		c.Suite = ep.Suite() // §13.4 pin
 	}
@@ -505,6 +511,9 @@ func (p *Peer) handleResp(id string, raw []byte, sender ed25519.PublicKey, now t
 		res.Epoch.Destroy()
 		return ackAfterFlush
 	}
+	if og.ini.Purpose() == handshake.PurposeReconnect {
+		return p.finishReconnect(c, og, res, now)
+	}
 	// hs.fin goes first; what follows is sealed in the new epoch.
 	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: res.Fin}, now)
 	p.installEpoch(c, res.Epoch, now)
@@ -513,8 +522,13 @@ func (p *Peer) handleResp(id string, raw []byte, sender ed25519.PublicKey, now t
 }
 
 func (p *Peer) dropOutgoing(id string) {
-	if og := p.outgoing[id]; og != nil && og.ini != nil {
-		og.ini.Abort()
+	if og := p.outgoing[id]; og != nil {
+		if og.ini != nil {
+			og.ini.Abort()
+		}
+		for _, j := range og.Issued {
+			p.denyJTI(j, p.now())
+		}
 	}
 	delete(p.outgoing, id)
 	p.markDirty(kindOutgoing, id)

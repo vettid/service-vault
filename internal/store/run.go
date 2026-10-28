@@ -132,3 +132,30 @@ func checkRestored(from, to *types.TableDescription) error {
 	}
 	return nil
 }
+
+// The restore marker: pk "run#restored", written by the restore after the
+// copy. The next start reconnects every connection (peer.Config
+// AfterRestore) and then deletes it.
+const pkRestored = "run#restored"
+
+// MarkRestored records that the table was restored at now.
+func (t *Table) MarkRestored(ctx context.Context, now time.Time) error {
+	item := key(pkRestored, skOne)
+	item[attrAt] = &types.AttributeValueMemberN{Value: strconv.FormatInt(now.Unix(), 10)}
+	_, err := t.Client.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String(t.Name), Item: item})
+	return err
+}
+
+// Restored reports whether the restore marker is present.
+func (t *Table) Restored(ctx context.Context) (bool, error) {
+	out, err := t.Client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(t.Name), Key: key(pkRestored, skOne), ConsistentRead: aws.Bool(true),
+	})
+	return err == nil && out.Item != nil, err
+}
+
+// ClearRestored deletes the restore marker.
+func (t *Table) ClearRestored(ctx context.Context) error {
+	_, err := t.Client.DeleteItem(ctx, &dynamodb.DeleteItemInput{TableName: aws.String(t.Name), Key: key(pkRestored, skOne)})
+	return err
+}

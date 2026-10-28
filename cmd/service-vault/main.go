@@ -327,8 +327,14 @@ func serve(args []string) error {
 		return fmt.Errorf("approvals: %w", err)
 	}
 	svc.Approvals = approvals
-	p, err := peer.New(peer.Config{Keys: keys, Relay: rc, RelayURL: cfg.RelayURL, Profile: cfg.Profile, Store: records,
-		Events: svc, Log: log})
+	pc := peer.Config{Keys: keys, Relay: rc, RelayURL: cfg.RelayURL, Profile: cfg.Profile, Store: records,
+		Events: svc, Log: log}
+	if restored, err := tbl.Restored(ctx); err != nil {
+		return fmt.Errorf("restore marker: %w", err)
+	} else if restored {
+		pc.AfterRestore = tbl.ClearRestored
+	}
+	p, err := peer.New(pc)
 	if err != nil {
 		return err
 	}
@@ -460,7 +466,12 @@ func table(args []string, out io.Writer) error {
 	start := time.Now()
 	written, deleted, err := dst.CopyFrom(ctx, *from)
 	fmt.Fprintf(out, "%d items written, %d deleted, in %s\n", written, deleted, time.Since(start).Round(time.Second))
-	return err
+	if err != nil {
+		return err
+	}
+	// The next start reconnects every connection (README "Restoring the
+	// table").
+	return dst.MarkRestored(ctx, time.Now())
 }
 
 // errNoSecrets: the admin command found no keystore; it never makes one.

@@ -89,6 +89,9 @@ type Connection struct {
 
 	Keyring     handshake.KeyringState `json:"keyring"`
 	LastEpochID []byte                 `json:"last_epoch_id,omitempty"`
+	// Epochs are the epochs activated in the last EpochHistory, oldest
+	// first: a reconnect may name any of them (reconnect.go).
+	Epochs []EpochRef `json:"epochs,omitempty"`
 
 	Created   time.Time `json:"created"`
 	Activated time.Time `json:"activated"`
@@ -202,6 +205,9 @@ type outgoing struct {
 	Th1     []byte                   `json:"th1"`
 	Init    handshake.InitiatorState `json:"init"`
 	Created time.Time                `json:"created"`
+	// Issued are the jtis of the tokens a reconnect's hs.init carries,
+	// revoked if it is abandoned.
+	Issued []string `json:"issued,omitempty"`
 
 	ini *handshake.Initiator
 }

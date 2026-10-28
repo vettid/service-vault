@@ -50,6 +50,8 @@ type fixture struct {
 	p     *Peer
 	ev    *sink
 	ms    []*peertest.Member
+	// afterRestore, when set, is the next start's Config.AfterRestore.
+	afterRestore func(context.Context) error
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -67,7 +69,7 @@ func newFixture(t *testing.T) *fixture {
 func (f *fixture) start() {
 	f.t.Helper()
 	p, err := New(Config{Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Keys: f.keys, Relay: f.sv, RelayURL: peertest.RelayURL, Store: f.store, Events: f.ev, Now: f.clk.Now,
-		Profile: Profile{FirstName: "VettID", LastName: "Member Service"}})
+		Profile: Profile{FirstName: "VettID", LastName: "Member Service"}, AfterRestore: f.afterRestore})
 	if err != nil {
 		f.t.Fatal(err)
 	}

@@ -180,6 +180,22 @@ func TestRestoreChecksOnDynamoDB(t *testing.T) {
 	if at, ok, err := dst.LastHeartbeat(ctx); err != nil || !ok || at.Unix() != now.Add(-time.Minute).Unix() {
 		t.Fatalf("the copy touched the target's heartbeat: %v %v %v", at, ok, err)
 	}
+	// The restore marker: set after the copy, read and cleared at the start.
+	if ok, err := dst.Restored(ctx); err != nil || ok {
+		t.Fatalf("Restored before the marker: %v %v", ok, err)
+	}
+	if err := dst.MarkRestored(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := dst.Restored(ctx); err != nil || !ok {
+		t.Fatalf("Restored after MarkRestored: %v %v", ok, err)
+	}
+	if err := dst.ClearRestored(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := dst.Restored(ctx); err != nil || ok {
+		t.Fatalf("Restored after ClearRestored: %v %v", ok, err)
+	}
 	if err := dst.ClearHeartbeat(ctx); err != nil {
 		t.Fatal(err)
 	}
