@@ -89,6 +89,9 @@ destination.
 - `reconnect_failed`: after a table restore, a connection's reconnect
   could not start or complete, so that member must connect again (see
   "Restoring the table").
+- `reconnect_slow`: such a reconnect is unanswered after a day. It
+  stays open for 16 days, since a locked member vault answers when it is
+  unlocked.
 - `admins_short`: an admin's connection was removed (severed, or
   replaced by a new connection) and fewer admins than m remain, so no
   approval can pass (see "Recovering admins" under "Admin approvals").
@@ -310,8 +313,9 @@ cluster and the service share the name):
    `T-restore` is a finished restore of `T` (a swapped `-from` and `-to`
    fails), that both hold the same keys (another deployment's table
    fails), and that no task has written its heartbeat to `T` in the last
-   2 minutes (the daemon writes one every 30 seconds and deletes it when
-   it stops). Then it writes every item of `T-restore` into `T`, deletes
+   2 minutes (the daemon writes one every 30 seconds, deletes it when
+   it stops, and stops itself after 5 minutes of failed writes; the
+   heartbeat is read again before the deletes). Then it writes every item of `T-restore` into `T`, deletes
    the items `T` has that `T-restore` lacks, prints the counts, and
    leaves a restore marker in `T` for the next start (above). If it is
    cut short, run it again. `-other-keys` is only for a `T` the

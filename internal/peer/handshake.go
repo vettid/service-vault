@@ -270,7 +270,7 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 		}
 		return
 	}
-	p.mark(kindInner, reconnectKey(pi.Th1()), []byte{1}, now.Add(DedupeRetention))
+	p.mark(kindInner, reconnectKey(pi.Th1()), []byte{1}, now.Add(DedupeRetention+envelope.MaxClockSkewFuture))
 	if len(fresh) > 0 {
 		p.followRotation(c, body.From.IK, body.From.KEM, fresh)
 	}

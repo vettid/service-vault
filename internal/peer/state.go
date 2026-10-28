@@ -98,6 +98,8 @@ type Connection struct {
 	// (each spends one of the member's reconnect token's 4 messages).
 	Reconnecting   bool `json:"reconnecting,omitempty"`
 	ReconnectTries int  `json:"reconnect_tries,omitempty"`
+	// ReconnectSlow is set once the reconnect_slow alarm was raised.
+	ReconnectSlow bool `json:"reconnect_slow,omitempty"`
 
 	Created   time.Time `json:"created"`
 	Activated time.Time `json:"activated"`

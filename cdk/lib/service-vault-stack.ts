@@ -82,6 +82,8 @@ export const ALARMS = {
   webhook_dropped: 'A webhook was dropped as undeliverable after 24 h: the application missed an event',
   /** A reconnect after a restore could not complete (internal/peer/reconnect.go): the member must connect again. */
   reconnect_failed: 'A reconnect after a table restore failed: that member must connect again from a new invitation (README "Restoring the table")',
+  /** A reconnect after a restore unanswered for a day (internal/peer/reconnect.go): the member's vault may be locked. */
+  reconnect_slow: 'A reconnect after a table restore is unanswered after a day: the member\'s vault may be locked; it stays open for 16 days',
   /** A removed connection left fewer admins than the threshold (internal/approval/approval.go): no approval can pass. */
   admins_short: 'An admin connection was removed and fewer admins than the threshold remain: no approval can pass until the operator recovers the set (README "Recovering admins")',
 } as const;
