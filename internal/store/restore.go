@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -70,8 +71,10 @@ func (t *Table) anyItem(ctx context.Context, pkPrefix string, live bool) ([]byte
 // src is written to t, then every item of t that src lacks is deleted. It
 // is the restore path (README "Restoring the table"): DynamoDB restores a
 // backup into a new table, and its items are copied back into the
-// stack's table. The service must be stopped while it runs. src must be a
-// service vault table (one with its secrets).
+// stack's table. The service must be stopped while it runs (CheckRestore
+// checks first). src must be a service vault table (one with its secrets).
+// The run items (pk "run#…": the heartbeat) are neither copied nor
+// deleted: they describe a task, not the data.
 func (t *Table) CopyFrom(ctx context.Context, src string) (written, deleted int, err error) {
 	if src == t.Name {
 		return 0, 0, errors.New("store: copy from a table to itself")
@@ -89,7 +92,7 @@ func (t *Table) CopyFrom(ctx context.Context, src string) (written, deleted int,
 	}
 	if err := scanAll(ctx, from, nil, func(item map[string]types.AttributeValue) error {
 		k, err := itemKey(item)
-		if err != nil {
+		if err != nil || isRun(item) {
 			return err
 		}
 		keep[k] = true
@@ -110,7 +113,7 @@ func (t *Table) CopyFrom(ctx context.Context, src string) (written, deleted int,
 		if err != nil {
 			return err
 		}
-		if keep[k] {
+		if keep[k] || isRun(item) {
 			return nil
 		}
 		batch = append(batch, types.WriteRequest{DeleteRequest: &types.DeleteRequest{Key: map[string]types.AttributeValue{
@@ -148,6 +151,12 @@ func scanAll(ctx context.Context, t *Table, projection *string, f func(map[strin
 		}
 	}
 	return nil
+}
+
+// isRun reports whether item is a run item (pk "run#…").
+func isRun(item map[string]types.AttributeValue) bool {
+	pk, ok := item[attrPK].(*types.AttributeValueMemberS)
+	return ok && strings.HasPrefix(pk.Value, "run#")
 }
 
 // itemKey is an item's pk and sk as one string.
