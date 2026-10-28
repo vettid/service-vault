@@ -411,6 +411,8 @@ func (s *Service) Deliver(ctx context.Context, e *peer.Event) error {
 		data = map[string]string{"invite_id": e.InviteID}
 	case peer.EventConnectionRemoved:
 		data = map[string]string{"direction": e.Direction}
+	case peer.EventConnectionSuspended:
+		data = map[string]string{"reason": e.Reason}
 	}
 	return s.webhook(ctx, e, data)
 }

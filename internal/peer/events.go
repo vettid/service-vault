@@ -19,6 +19,11 @@ const (
 	EventConnectionExpired = "connection.expired"
 	// EventConnectionRemoved: the connection ended, by either side.
 	EventConnectionRemoved = "connection.removed"
+	// EventConnectionSuspended: the connection stopped after a rotation
+	// conflict (§3.4 "One successor per key"; rotation.go). It sends and
+	// accepts nothing; a new invitation replaces it (chosen; not in the
+	// spec).
+	EventConnectionSuspended = "connection.suspended"
 	// EventSignInApproved: the member signed a challenge (§10.4).
 	EventSignInApproved = "signin.approved"
 	// EventSignInDenied: the member's vault answered denied, or the
@@ -41,7 +46,7 @@ type Event struct {
 	SAS          string `json:"sas,omitempty"`        // connection.pending only
 	Name         string `json:"name,omitempty"`       // the member's account name (self-asserted, §6.4)
 	Tag          string `json:"tag,omitempty"`
-	Reason       string `json:"reason,omitempty"`      // signin.denied: denied | bad_signature
+	Reason       string `json:"reason,omitempty"`      // signin.denied: denied | bad_signature; connection.suspended: rotation_conflict
 	KeyChanged   bool   `json:"key_changed,omitempty"` // signin.approved: the pinned key changed (§10.4)
 	Direction    string `json:"direction,omitempty"`   // connection.removed: in (the member) | out (the service)
 	// The evidence of a challenge's answer (signin.*): the challenge's

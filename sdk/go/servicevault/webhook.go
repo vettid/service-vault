@@ -15,18 +15,19 @@ import (
 
 // Webhook event types.
 const (
-	TypeConnectionPending  = "connection.pending"
-	TypeConnectionAdded    = "connection.added"
-	TypeConnectionDeclined = "connection.declined"
-	TypeConnectionExpired  = "connection.expired"
-	TypeConnectionRemoved  = "connection.removed"
-	TypeSignInApproved     = "signin.approved"
-	TypeSignInDenied       = "signin.denied"
-	TypeSignInExpired      = "signin.expired"
-	TypeApprovalApproved   = "approval.approved"
-	TypeApprovalDenied     = "approval.denied"
-	TypeApprovalExpired    = "approval.expired"
-	TypeAdminSetChanged    = "admin_set.changed"
+	TypeConnectionPending   = "connection.pending"
+	TypeConnectionAdded     = "connection.added"
+	TypeConnectionDeclined  = "connection.declined"
+	TypeConnectionExpired   = "connection.expired"
+	TypeConnectionRemoved   = "connection.removed"
+	TypeConnectionSuspended = "connection.suspended"
+	TypeSignInApproved      = "signin.approved"
+	TypeSignInDenied        = "signin.denied"
+	TypeSignInExpired       = "signin.expired"
+	TypeApprovalApproved    = "approval.approved"
+	TypeApprovalDenied      = "approval.denied"
+	TypeApprovalExpired     = "approval.expired"
+	TypeAdminSetChanged     = "admin_set.changed"
 )
 
 // Header is what every webhook event carries.
@@ -91,6 +92,21 @@ type ConnectionRemoved struct {
 	Header
 	Direction string `json:"direction"`
 }
+
+// ConnectionSuspended: the connection stopped. It can't sign in, answer
+// approvals or carry messages until the member connects again from a new
+// invitation, which replaces it (connection.removed for this one, then
+// connection.added). The application can treat its sessions as ended and
+// ask the member to connect again.
+type ConnectionSuspended struct {
+	Header
+	Reason string `json:"reason"` // SuspendRotationConflict
+}
+
+// SuspendRotationConflict: the member's identity key got two different
+// successors (two copies of the vault rotating, or a replayed copy); the
+// service can't tell which is the member's.
+const SuspendRotationConflict = "rotation_conflict"
 
 // SignInApproved: the member approved the sign-in on the phone.
 type SignInApproved struct {
@@ -392,6 +408,8 @@ func decodeEvent(h Header, data json.RawMessage) (Event, error) {
 		ev = &ConnectionExpired{Header: h}
 	case TypeConnectionRemoved:
 		ev = &ConnectionRemoved{Header: h}
+	case TypeConnectionSuspended:
+		ev = &ConnectionSuspended{Header: h}
 	case TypeSignInApproved:
 		ev = &SignInApproved{Header: h}
 	case TypeSignInDenied:
