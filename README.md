@@ -71,7 +71,7 @@ npx cdk deploy \
 | `envName` | no (`prod`) | Part of every name and export: stack `ServiceVault-<envName>`. |
 | `relayUrl` | no (`https://relay.vettid.org`) | The relay. |
 | `serviceName` | no (`VettID Member Service`) | The name members see. |
-| `apiClientSecurityGroupId` / `apiClientCidr` | no | Who may reach the API port. Neither: nobody until a rule is added. `apiClientCidr` is a private (RFC 1918) IPv4 range, /16 or narrower: the task has a public IP, so a public range would expose the API port. Reach the API as an operator from inside the VPC. |
+| `apiClientSecurityGroupId` / `apiClientCidr` | no | Who may reach the API port. Neither: nobody until a rule is added. `apiClientCidr` is a private (RFC 1918) IPv4 range, /16 or narrower: the task has a public IP, so a public range would expose the API port. For an operator's direct access, one public address (`/32`) is allowed with `-c apiClientCidrPublic=true`, still behind the pinned TLS key and an API key. Drop it once the application is the only client. |
 | `vpcCidr` | no (`10.60.0.0/24`) | The VPC (two /26 public subnets). |
 | `adminBootstrapEmail` | no | `SV_ADMIN_BOOTSTRAP_EMAIL` (see "Admin approvals"). It is plain text in the task definition and stays in that definition's revisions after a redeploy without it: use an address you don't mind being kept there (a staging test member), or arm the bootstrap with `service-vault admin bootstrap` instead |
 | `adminThreshold` | no (1) | `SV_ADMIN_THRESHOLD` |

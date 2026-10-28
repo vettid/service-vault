@@ -77,6 +77,8 @@ describe('network', () => {
     expect(() => synth({ apiClientCidr: '203.0.113.7/33' })).toThrow(/IPv4/);
     expect(() => synth({ apiClientCidr: '10.0.0.0/16' })).not.toThrow();
     expect(() => synth({ apiClientCidr: '203.0.113.7/32' })).toThrow(/private/); // public: the task has a public IP
+    expect(() => synth({ apiClientCidr: '203.0.113.7/32', apiClientCidrPublic: true })).not.toThrow(); // an operator's address, opted in
+    expect(() => synth({ apiClientCidr: '203.0.113.0/24', apiClientCidrPublic: true })).toThrow(/private/); // never a public range
   });
 
   test('no load balancer; API discovered through a Cloud Map private DNS namespace', () => {

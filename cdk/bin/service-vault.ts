@@ -29,6 +29,7 @@ const stack = new ServiceVaultStack(app, `ServiceVault-${envName}`, {
   serviceName: ctx('serviceName'),
   apiClientSecurityGroupId: ctx('apiClientSecurityGroupId'),
   apiClientCidr: ctx('apiClientCidr'),
+  apiClientCidrPublic: ctx('apiClientCidrPublic') === 'true',
   vpcCidr: ctx('vpcCidr'),
   adminBootstrapEmail: ctx('adminBootstrapEmail'),
   adminThreshold: ctx('adminThreshold') === undefined ? undefined : Number(ctx('adminThreshold')),

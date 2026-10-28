@@ -103,8 +103,14 @@ export interface ServiceVaultStackProps extends cdk.StackProps {
   readonly serviceName?: string;
   /** Security group of the API's client (the member API task); allowed on API_PORT. */
   readonly apiClientSecurityGroupId?: string;
-  /** Or an IPv4 CIDR allowed on API_PORT, /16 or narrower (MIN_API_CIDR_PREFIX). */
+  /** Or an IPv4 CIDR allowed on API_PORT, /16 or narrower (MIN_API_CIDR_PREFIX), private (RFC 1918). */
   readonly apiClientCidr?: string;
+  /**
+   * Allow apiClientCidr to be one public address (/32): an operator's
+   * direct access to the API, which is then reachable from that address
+   * on the internet (still behind the pinned TLS key and an API key).
+   */
+  readonly apiClientCidrPublic?: boolean;
   /** The VPC's CIDR (two /26 public subnets are carved from it). */
   readonly vpcCidr?: string;
   /**
@@ -185,10 +191,13 @@ export class ServiceVaultStack extends cdk.Stack {
         throw new Error(`apiClientCidr must not be open to the internet: a prefix of /${MIN_API_CIDR_PREFIX} or longer (got "${props.apiClientCidr}")`);
       }
       // The task has a public IP: a public range would reach the API port
-      // from the internet. Private ranges only (RFC 1918).
+      // from the internet. Private ranges only (RFC 1918), unless the
+      // operator opts in to one public address (a /32) for direct access,
+      // still behind the pinned TLS key and an API key.
       const [a, b] = [Number(m[1]), Number(m[2])];
-      if (!(a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168))) {
-        throw new Error(`apiClientCidr must be a private (RFC 1918) range: the task has a public IP (got "${props.apiClientCidr}")`);
+      const isPrivate = a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+      if (!isPrivate && !(props.apiClientCidrPublic && m[5] === '32')) {
+        throw new Error(`apiClientCidr must be a private (RFC 1918) range, or one public address (/32) with apiClientCidrPublic: the task has a public IP (got "${props.apiClientCidr}")`);
       }
     }
     if (props.adminThreshold !== undefined && !(Number.isInteger(props.adminThreshold) && props.adminThreshold >= 1 && props.adminThreshold <= 64)) {
