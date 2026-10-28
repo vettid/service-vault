@@ -285,6 +285,17 @@ type Member struct {
 	// (for a reconnect, §6.6).
 	Rotations []*handshake.Rotation
 
+	// Epochs are the ids of the epochs activated, for a reconnect naming
+	// an earlier one (§6.6, after the service's restore).
+	Epochs [][suite.EpochIDSize]byte
+	// Reconnects counts the service's reconnects answered.
+	Reconnects int
+	retired    []*suite.PrivateKey // static KEM keys before a rotation (§6.6 "Retired keys")
+	lastRecon  []byte              // the last reconnect hs.init sent
+	// IgnoreRevoked lets a deposit fail (an answer on a token the service
+	// revoked when it replaced the handshake), as a vault's outbox does.
+	IgnoreRevoked bool
+
 	// IgnoreStray drops a sealed message no handshake of ours matches
 	// (an hs.resp to a reconnect we replaced), as a vault does.
 	IgnoreStray bool
@@ -365,7 +376,7 @@ func (m *Member) Accept(link string, profile string) {
 
 func (m *Member) DepositTo(tok string, payload []byte) {
 	m.t.Helper()
-	if _, err := m.R.Deposit(context.Background(), m.svc.Relay.Mailbox, tok, payload); err != nil {
+	if _, err := m.R.Deposit(context.Background(), m.svc.Relay.Mailbox, tok, payload); err != nil && !m.IgnoreRevoked {
 		m.t.Fatalf("Member deposit: %v", err)
 	}
 }
@@ -411,8 +422,10 @@ func (m *Member) handle(msg relayclient.Message) bool {
 			m.recon = nil
 			m.SvcStand, m.SvcRecon = res.Resp.Token, res.Resp.ReconnectToken
 			m.DepositTo(m.SvcStand, res.Fin)
-			m.KR.Activate(res.Epoch, now)
+			m.activate(res.Epoch, now)
 			m.Rotations = nil
+		case m.ownKEM(env.RecipientKid()) != nil:
+			m.answerReconnect(msg.Payload, sender)
 		case m.rekey != nil && env.RecipientKid().Equal(m.rekey.EphKid()):
 			res, err := m.rekey.HandleResp(msg.Payload, sender, now)
 			if err != nil {
@@ -420,7 +433,7 @@ func (m *Member) handle(msg relayclient.Message) bool {
 			}
 			m.rekey = nil
 			m.DepositTo(m.SvcStand, res.Fin)
-			m.KR.Activate(res.Epoch, now)
+			m.activate(res.Epoch, now)
 		default:
 			if !m.IgnoreStray {
 				m.t.Fatal("Member: unexpected sealed message")
@@ -462,7 +475,7 @@ func (m *Member) handle(msg relayclient.Message) bool {
 			fr, err := m.awaitFin.HandleFin(msg.Payload, sender, now)
 			if err == nil {
 				m.awaitFin = nil
-				m.KR.Activate(fr.Epoch, now)
+				m.activate(fr.Epoch, now)
 				return true
 			}
 		}
@@ -528,7 +541,7 @@ func (m *Member) maybeActivate() {
 	now := m.clk.Now()
 	m.ReqEp.MarkActivated(now)
 	m.KR = &handshake.Keyring{}
-	m.KR.Activate(m.ReqEp, now)
+	m.activate(m.ReqEp, now)
 	m.ReqEp, m.Active = nil, true
 	// The Member vault's profile at activation (§10.8).
 	m.Send(peerwire.TypeProfileUpdate, peerwire.ProfileUpdateBody(1, m.FirstName, m.LastName, m.IK.Public().(ed25519.PublicKey), nil))
@@ -590,6 +603,53 @@ func (m *Member) answerRekey(raw []byte, in *envelope.Inner, ep *handshake.Epoch
 	m.DepositTo(m.SvcStand, env)
 }
 
+// activate makes ep current and records it in the history.
+func (m *Member) activate(ep *handshake.Epoch, now time.Time) {
+	m.KR.Activate(ep, now)
+	m.Epochs = append(m.Epochs, ep.ID())
+}
+
+// ownKEM returns our static KEM key with that kid, current or retired.
+func (m *Member) ownKEM(kid suite.Kid) *suite.PrivateKey {
+	for _, k := range append([]*suite.PrivateKey{m.kem}, m.retired...) {
+		if kid.Equal(k.Public().Kid()) {
+			return k
+		}
+	}
+	return nil
+}
+
+// answerReconnect answers the service's reconnect hs.init (§6.6): its ctx
+// may name any epoch of the history, and the answer carries the
+// rotations since that epoch.
+func (m *Member) answerReconnect(raw []byte, sender ed25519.PublicKey) {
+	m.t.Helper()
+	now := m.clk.Now()
+	pi, err := handshake.OpenInit(raw, m.ownKEM, now)
+	if err != nil {
+		m.t.Fatalf("Member: reconnect hs.init: %v", err)
+	}
+	body := pi.Init()
+	known := false
+	for _, id := range m.Epochs {
+		known = known || handshake.EpochCtx(id) == body.Ctx
+	}
+	if body.Purpose != handshake.PurposeReconnect || !known {
+		pi.Discard()
+		return
+	}
+	resp, env, err := pi.Respond(handshake.ResponderConfig{Identity: m.IK, Policy: handshake.PolicyVaultToVault,
+		CollectSender: sender, RecordRelayKey: m.svc.Relay.PK, KnownInitiatorIK: m.svc.IK, ExpectedCtx: body.Ctx,
+		Token: m.Mint(peerwire.StandingMax), ReconnectToken: m.Mint(300 * 24 * time.Hour), Rotations: m.Rotations, Now: now})
+	if err != nil {
+		m.t.Fatalf("Member: respond reconnect: %v", err)
+	}
+	m.SvcStand, m.SvcRecon = body.Token, body.ReconnectToken
+	m.awaitFin = resp
+	m.Reconnects++
+	m.DepositTo(m.SvcStand, env)
+}
+
 // received returns the session messages of a type the Member received.
 func (m *Member) Received(typ string) []*envelope.Inner {
 	var out []*envelope.Inner
@@ -621,6 +681,7 @@ func (m *Member) RotateIdentity(seed byte, later bool) *handshake.Rotation {
 	} else {
 		m.SendRotation(r)
 	}
+	m.retired = append(m.retired, m.kem)
 	m.IK, m.kem = newIK, newKEM
 	if !later {
 		m.StartRekey()
@@ -668,10 +729,13 @@ func (m *Member) RotateRelay(w *World, seed byte) *View {
 
 // Reconnect sends a reconnect hs.init (§6.6) on the service's reconnect
 // token, carrying the rotations since the last epoch.
-func (m *Member) Reconnect() {
+func (m *Member) Reconnect() { m.ReconnectNaming(m.KR.Current().ID()) }
+
+// ReconnectNaming is Reconnect with ctx naming epoch id.
+func (m *Member) ReconnectNaming(id [suite.EpochIDSize]byte) {
 	m.t.Helper()
 	ini, err := handshake.NewInitiator(handshake.InitiatorConfig{
-		Purpose: handshake.PurposeReconnect, Ctx: handshake.EpochCtx(m.KR.Current().ID()),
+		Purpose: handshake.PurposeReconnect, Ctx: handshake.EpochCtx(id),
 		Identity: m.IK, StaticKEM: m.kem.Public(), Relay: m.Addr,
 		Token: m.Mint(peerwire.StandingMax), ReconnectToken: m.Mint(300 * 24 * time.Hour), Rotations: m.Rotations,
 		ResponderIK: m.svc.IK, ResponderEK: m.svc.KEM, ResponderRelayKey: m.svc.Relay.PK,
@@ -680,7 +744,7 @@ func (m *Member) Reconnect() {
 	if err != nil {
 		m.t.Fatal(err)
 	}
-	m.recon = ini
+	m.recon, m.lastRecon = ini, ini.Envelope()
 	m.DepositTo(m.SvcRecon, ini.Envelope())
 }
 
@@ -760,9 +824,9 @@ func (m *Member) AcceptOnToken(link, otherLink string) {
 	}
 }
 
-// ResendReconnect deposits the pending reconnect's hs.init again, the
-// same bytes, as an outbox retry after a lost relay answer does.
+// ResendReconnect deposits the last reconnect's hs.init again, the same
+// bytes, as an outbox retry after a lost relay answer (or a replay) does.
 func (m *Member) ResendReconnect() {
 	m.t.Helper()
-	m.DepositTo(m.SvcRecon, m.recon.Envelope())
+	m.DepositTo(m.SvcRecon, m.lastRecon)
 }

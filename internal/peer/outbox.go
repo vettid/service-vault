@@ -143,8 +143,17 @@ func (p *Peer) drainOutbox(ctx context.Context) {
 }
 
 // deposit performs one deposit and applies the §8.6 error table. finished
-// reports an entry that is done although the deposit failed.
+// reports an entry that is done although the deposit failed. A reconnect
+// hs.init the relay refuses for good ends the reconnect (reconnect.go).
 func (p *Peer) deposit(ctx context.Context, e *outboxEntry, now time.Time) (finished bool, err error) {
+	finished, err = p.depositOnce(ctx, e, now)
+	if c := p.conns[e.ConnID]; finished && err != nil && c != nil && c.Reconnecting && e.Token != "" && e.Token == c.Reconnect.Token {
+		p.dropConnOutgoing(c)
+	}
+	return finished, err
+}
+
+func (p *Peer) depositOnce(ctx context.Context, e *outboxEntry, now time.Time) (finished bool, err error) {
 	tok := e.Token
 	c := p.conns[e.ConnID]
 	if tok == "" {

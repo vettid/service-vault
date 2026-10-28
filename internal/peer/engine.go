@@ -57,6 +57,10 @@ type Config struct {
 	Log      *slog.Logger
 	// PollWait is the collect long-poll wait (default 25 s; at most 25 s).
 	PollWait time.Duration
+	// AfterRestore is set when the store was restored from a backup: the
+	// first Start reconnects every connection (reconnect.go) and, once
+	// the reconnects are stored and sent, calls it (to clear the marker).
+	AfterRestore func(context.Context) error
 }
 
 // Peer is the service's side of VMS v2 connections (VAULT-MESSAGING §6,
@@ -65,7 +69,8 @@ type Config struct {
 // of active connections, and challenges members to sign in (§10.4).
 //
 // It mirrors the member vault's behaviour as a connection's inviter. It
-// never initiates a connection (it only invites), never answers
+// never initiates a connection (it only invites; it initiates rekeys,
+// and reconnects only after a restore), never answers
 // challenges (it has no credential) and never rotates its identity.
 type Peer struct {
 	cfg    Config
@@ -157,6 +162,13 @@ func (p *Peer) Start(ctx context.Context) error {
 			return err
 		}
 		p.started = true
+		if p.cfg.AfterRestore != nil {
+			if err := p.reconnectAfterRestore(ctx); err != nil {
+				return err
+			}
+		} else {
+			p.resumeReconnects(p.now())
+		}
 	}
 	p.housekeeping(p.now())
 	if err := p.flush(ctx); err != nil {
@@ -164,6 +176,21 @@ func (p *Peer) Start(ctx context.Context) error {
 	}
 	p.drainOutbox(ctx)
 	return p.flush(ctx)
+}
+
+// reconnectAfterRestore starts the reconnects before any housekeeping
+// could start a rekey in an epoch the members may no longer hold.
+func (p *Peer) reconnectAfterRestore(ctx context.Context) error {
+	n := p.reconnectAll(p.now())
+	if err := p.flush(ctx); err != nil {
+		return err
+	}
+	p.drainOutbox(ctx)
+	if err := p.flush(ctx); err != nil {
+		return err
+	}
+	p.log().Info("restored: reconnects started", "connections", len(p.conns), "started", n)
+	return p.cfg.AfterRestore(ctx)
 }
 
 // Run collects and processes messages until ctx ends, runs the
@@ -347,6 +374,18 @@ func (p *Peer) handleMessage(ctx context.Context, m relayclient.Message, now tim
 	// awaiting approval and connection.approved / declined.
 	if t := p.issued[m.JTI]; m.JTI != "" && t != nil && t.Kind == tokRequest {
 		return p.handleOnRequestToken(env, m.Payload, sender, c, now), nil
+	}
+	// A reconnect hs.init answered before is not answered again (it may
+	// name an earlier epoch, so the epoch moving on no longer ends it).
+	if env.Mode() == envelope.ModeSealed && env.RecipientKid().Equal(p.cfg.Keys.KEM.Public().Kid()) {
+		_, seen, err := p.cfg.Store.Get(ctx, kindInner, reconnectKey(handshake.Th1(m.Payload)))
+		if err != nil {
+			return 0, err
+		}
+		if seen {
+			p.audit("reconnect_replay", connID(c))
+			return ackAfterFlush, nil
+		}
 	}
 	// §6.6: a connection's deposit on its reconnect token (or without a
 	// jti) may only be a sealed hs.init with purpose reconnect.

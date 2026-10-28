@@ -86,6 +86,9 @@ destination.
   connection is suspended (see "When a member moves phones").
 - `webhook_dropped`: a webhook was given up after 24 hours, so the
   application missed an event.
+- `reconnect_failed`: after a table restore, a connection's reconnect
+  could not start or complete, so that member must connect again (see
+  "Restoring the table").
 - `admins_short`: an admin's connection was removed (severed, or
   replaced by a new connection) and fewer admins than m remain, so no
   approval can pass (see "Recovering admins" under "Admin approvals").
@@ -259,12 +262,23 @@ and the member site shows its "didn't complete" step. After it, a
 connection whose state didn't change since the backup works as before
 (a restore minutes back, past a sign-in, did on staging). One that
 rekeyed, refreshed its tokens or changed keys or relay address since the
-backup stops working: sign-in requests don't reach the phone, nothing
-is leaked, and a reconnect (§6.6) can't mend it yet, because a reconnect
-must name both sides' last epoch. The member connects again from a new
-invitation, which replaces the old connection. So a restore more than a
-day back means every active member connects again; admins then also
-need "Recovering admins".
+backup would stop working (sign-in requests don't reach the phone;
+nothing is leaked). So the first start after `table restore` reconnects
+every active connection (§6.6): it names its last epoch, which the
+member's vault still keeps in its history, carries fresh tokens, and
+follows any identity rotation the member made since; it logs
+`restored: reconnects started` and `reconnected` per connection. A
+reconnect completes when the member's vault next collects, usually
+within minutes; until then nothing is sent on that connection (its
+sign-ins fail), and a restart sends it again (at most 3 times, as the
+member's reconnect token allows 4 messages). One that can't start or
+complete raises `reconnect_failed`. A reconnect the service answered is
+not answered again (a replay). Each side keeps a year of epoch ids for this (per the
+pending §6.6 change for restores; member vaults need the release that
+has it, until then the reconnect is refused and the member connects
+again from a new invitation, which replaces the old connection, and
+admins need "Recovering admins"). A member who changed relay address
+since the backup, past its grace period, connects again in any case.
 
 Before an upgrade that can't be rolled back, take an on-demand backup
 right before it, so the loss is minutes. Point-in-time recovery is on,
@@ -298,14 +312,15 @@ cluster and the service share the name):
    fails), and that no task has written its heartbeat to `T` in the last
    2 minutes (the daemon writes one every 30 seconds and deletes it when
    it stops). Then it writes every item of `T-restore` into `T`, deletes
-   the items `T` has that `T-restore` lacks, and prints the counts. If it
-   is cut short, run it again. `-other-keys` is only for a `T` the
+   the items `T` has that `T-restore` lacks, prints the counts, and
+   leaves a restore marker in `T` for the next start (above). If it is
+   cut short, run it again. `-other-keys` is only for a `T` the
    daemon started on after the original table was lost: its new keys are
    replaced by the backup's.
 4. If the image changes too, deploy it now. Start the service:
    `aws ecs update-service --cluster T --service T --desired-count 1`.
-5. Check `/health`, the TLS pin and a member's sign-in. Then delete
-   `T-restore`.
+5. Check `/health`, the TLS pin, the `reconnected` lines and a member's
+   sign-in. Then delete `T-restore`.
 
 The operator needs: `dynamodb:CreateBackup`, `ListBackups`,
 `DescribeContinuousBackups`, `RestoreTableFromBackup` or

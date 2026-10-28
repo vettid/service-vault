@@ -129,7 +129,7 @@ func (p *Peer) sendTo(c *Connection, typ string, body json.RawMessage, now time.
 }
 
 func (p *Peer) sendInner(c *Connection, in *envelope.Inner, now time.Time) string {
-	if c.kr == nil || c.kr.Current() == nil || c.State != StateActive {
+	if c.kr == nil || c.kr.Current() == nil || c.State != StateActive || c.Reconnecting {
 		return ""
 	}
 	if p.outboxFor(c.ID) >= MaxOutboxPerConn {
@@ -244,6 +244,7 @@ func (p *Peer) removeConnection(c *Connection, dir string, now time.Time) {
 		p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == c.ID })
 	}
 	p.denyConnTokens(c.ID, now)
+	c.Reconnecting = false // ended, not failed
 	if c.kr != nil {
 		c.kr.Destroy()
 	}
@@ -338,7 +339,7 @@ func (p *Peer) housekeeping(now time.Time) {
 		}
 	}
 	for _, c := range p.conns {
-		if c.State != StateActive {
+		if c.State != StateActive || c.Reconnecting {
 			continue
 		}
 		if c.kr != nil && c.kr.Current() != nil && c.kr.Current().NeedsRekey(now) {

@@ -136,7 +136,7 @@ func (p *Peer) latestIssued(connID, kind string) *IssuedToken {
 // relay.token.issued (§7.2).
 func (p *Peer) remintIssued(now time.Time) {
 	for _, c := range p.conns {
-		if c.State != StateActive {
+		if c.State != StateActive || c.Reconnecting {
 			continue
 		}
 		if t := p.latestIssued(c.ID, tokStanding); t == nil ||

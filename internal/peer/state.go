@@ -17,7 +17,7 @@ const (
 	kindInvite   = "invite"   // an invitation and what became of it
 	kindAwait    = "await"    // a handshake we answered, awaiting hs.fin
 	kindRequest  = "request"  // a connection after hs.fin, before activation
-	kindOutgoing = "outgoing" // a rekey we started, awaiting hs.resp
+	kindOutgoing = "outgoing" // a rekey or reconnect we started, awaiting hs.resp
 	kindToken    = "token"    // a token we issued, by jti (§6.6, §7.1)
 	kindOutbox   = "outbox"   // a relay operation to perform
 	kindAuth     = "auth"     // a connauth challenge we sent (§10.4)
@@ -89,6 +89,15 @@ type Connection struct {
 
 	Keyring     handshake.KeyringState `json:"keyring"`
 	LastEpochID []byte                 `json:"last_epoch_id,omitempty"`
+	// Epochs are the epochs activated in the last EpochHistory, oldest
+	// first: a reconnect may name any of them (reconnect.go).
+	Epochs []EpochRef `json:"epochs,omitempty"`
+	// Reconnecting is set while a reconnect we started awaits its hs.resp:
+	// the session is the restored one, which the member may no longer
+	// hold, so nothing is sent in it. ReconnectTries counts the attempts
+	// (each spends one of the member's reconnect token's 4 messages).
+	Reconnecting   bool `json:"reconnecting,omitempty"`
+	ReconnectTries int  `json:"reconnect_tries,omitempty"`
 
 	Created   time.Time `json:"created"`
 	Activated time.Time `json:"activated"`
@@ -202,6 +211,9 @@ type outgoing struct {
 	Th1     []byte                   `json:"th1"`
 	Init    handshake.InitiatorState `json:"init"`
 	Created time.Time                `json:"created"`
+	// Issued are the jtis of the tokens a reconnect's hs.init carries,
+	// revoked if it is abandoned.
+	Issued []string `json:"issued,omitempty"`
 
 	ini *handshake.Initiator
 }
