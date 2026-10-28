@@ -354,20 +354,32 @@ func serve(args []string) error {
 	}
 	// The heartbeat tells the restore that the service is running
 	// (README "Restoring the table").
+	// A task that can't write it for maxHeartbeatFails in a row stops,
+	// so that a restore never runs beside it unnoticed.
 	if err := tbl.Heartbeat(ctx, time.Now()); err != nil {
 		return fmt.Errorf("heartbeat: %w", err)
 	}
+	hbErr := make(chan error, 1)
 	go func() {
 		t := time.NewTicker(store.HeartbeatInterval)
 		defer t.Stop()
+		fails := 0
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				if err := tbl.Heartbeat(ctx, time.Now()); err != nil {
-					log.Warn("heartbeat", "err", err.Error())
+				err := tbl.Heartbeat(ctx, time.Now())
+				if err == nil {
+					fails = 0
+					continue
 				}
+				if fails++; fails < maxHeartbeatFails {
+					log.Warn("heartbeat", "err", err.Error(), "fails", fails)
+					continue
+				}
+				hbErr <- fmt.Errorf("heartbeat: %d writes failed: %w", fails, err)
+				return
 			}
 		}
 	}()
@@ -387,6 +399,7 @@ func serve(args []string) error {
 		runErr = fmt.Errorf("peer: %w", err)
 	case err := <-srvErr:
 		runErr = fmt.Errorf("api: %w", err)
+	case runErr = <-hbErr:
 	}
 	stop()
 	sctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -403,6 +416,11 @@ func serve(args []string) error {
 	log.Info("stopped")
 	return runErr
 }
+
+// maxHeartbeatFails is how many heartbeat writes in a row may fail
+// (HeartbeatInterval apart: 5 minutes) before the daemon stops; the
+// restore treats a heartbeat older than store.HeartbeatStale as stopped.
+const maxHeartbeatFails = 10
 
 // awsClients are the AWS clients the daemon uses.
 type awsClients struct {
@@ -464,7 +482,10 @@ func table(args []string, out io.Writer) error {
 		return err
 	}
 	start := time.Now()
-	written, deleted, err := dst.CopyFrom(ctx, *from)
+	// The heartbeat again before anything is deleted: a task started
+	// during the copy stops it there.
+	recheck := func(ctx context.Context) error { return dst.CheckTarget(ctx, *from, true, time.Now()) }
+	written, deleted, err := dst.CopyFrom(ctx, *from, recheck)
 	fmt.Fprintf(out, "%d items written, %d deleted, in %s\n", written, deleted, time.Since(start).Round(time.Second))
 	if err != nil {
 		return err

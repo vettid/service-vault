@@ -75,7 +75,10 @@ func (t *Table) anyItem(ctx context.Context, pkPrefix string, live bool) ([]byte
 // checks first). src must be a service vault table (one with its secrets).
 // The run items (pk "run#…": the heartbeat) are neither copied nor
 // deleted: they describe a task, not the data.
-func (t *Table) CopyFrom(ctx context.Context, src string) (written, deleted int, err error) {
+//
+// beforeDelete, if not nil, runs between the writes and the deletes; an
+// error stops the copy there.
+func (t *Table) CopyFrom(ctx context.Context, src string, beforeDelete func(context.Context) error) (written, deleted int, err error) {
 	if src == t.Name {
 		return 0, 0, errors.New("store: copy from a table to itself")
 	}
@@ -107,6 +110,11 @@ func (t *Table) CopyFrom(ctx context.Context, src string) (written, deleted int,
 	}
 	if err := flush(); err != nil {
 		return written, 0, err
+	}
+	if beforeDelete != nil {
+		if err := beforeDelete(ctx); err != nil {
+			return written, 0, err
+		}
 	}
 	if err := scanAll(ctx, t, aws.String("#pk, #sk"), func(item map[string]types.AttributeValue) error {
 		k, err := itemKey(item)

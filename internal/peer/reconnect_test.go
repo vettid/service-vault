@@ -236,3 +236,25 @@ func TestReconnectNotPossible(t *testing.T) {
 		}
 	}
 }
+
+// A reconnect unanswered for a day raises reconnect_slow once and stays
+// open (the member's vault may be locked); its answer is still taken.
+func TestReconnectSlow(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	b := f.backup()
+	m.StartRekey()
+	f.pump()
+	f.restore(b, true)
+	f.clk.Advance(ReconnectSlowAfter + time.Minute)
+	f.tick()
+	c := f.p.conns[cid]
+	if !c.Reconnecting || !c.ReconnectSlow {
+		t.Fatalf("reconnecting %v, slow %v", c.Reconnecting, c.ReconnectSlow)
+	}
+	f.pump() // the member's vault is unlocked
+	if c := f.p.conns[cid]; c.Reconnecting || c.ReconnectSlow || !f.signIn(m, cid) {
+		t.Fatal("the late answer was not taken")
+	}
+}

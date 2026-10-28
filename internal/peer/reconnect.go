@@ -67,12 +67,21 @@ func (c *Connection) knownEpoch(ctx string, now time.Time) bool {
 
 // reconnectKey is the dedupe key (kindInner) of a reconnect hs.init we
 // answered, by its th1: a replay is refused for DedupeRetention, past
-// which hs.init is stale anyway.
+// which (and the clock skew hs.init may have ahead) it is stale anyway.
 func reconnectKey(th1 [32]byte) string { return "reconnect|" + hex.EncodeToString(th1[:]) }
 
-// MaxReconnectTries bounds the reconnects started for one restore: each
-// spends one of the 4 messages of the member's reconnect token (§6.6).
+// MaxReconnectTries bounds the reconnects started for one restore, over
+// every start (the count is stored): each spends one of the 4 messages of
+// the member's reconnect token (§6.6).
 const MaxReconnectTries = 3
+
+// ReconnectSlowAfter is when an unanswered reconnect raises
+// reconnect_slow. It stays open until HandshakeTTL all the same: a
+// member's vault that is locked (an idle lock, failed checks) answers
+// when it is unlocked, and giving up sooner would only make the member
+// connect again, while nothing sent in the restored session could be
+// opened anyway (chosen; not in the spec).
+const ReconnectSlowAfter = 24 * time.Hour
 
 // reconnectAll starts a reconnect on every active or stale connection
 // and returns how many started.
@@ -110,6 +119,14 @@ func (p *Peer) resumeReconnects(now time.Time) {
 	}
 }
 
+// reconnectSlow raises reconnect_slow once for a reconnect unanswered
+// after ReconnectSlowAfter.
+func (p *Peer) reconnectSlow(c *Connection) {
+	c.ReconnectSlow = true
+	p.markDirty(kindConn, c.ID)
+	p.log().Error("reconnect unanswered for a day: the member's vault may be locked", "alarm", "reconnect_slow", "connection_id", c.ID)
+}
+
 // reconnectFailed ends a reconnect that cannot complete: its alarm tells
 // the operator the member must connect again (README "Restoring the
 // table").
@@ -117,7 +134,7 @@ func (p *Peer) reconnectFailed(c *Connection) {
 	if !c.Reconnecting {
 		return
 	}
-	c.Reconnecting, c.ReconnectTries = false, 0
+	c.Reconnecting, c.ReconnectTries, c.ReconnectSlow = false, 0, false
 	p.markDirty(kindConn, c.ID)
 	p.log().Error("reconnect failed: the member must connect again", "alarm", "reconnect_failed", "connection_id", c.ID)
 }
@@ -198,7 +215,7 @@ func (p *Peer) finishReconnect(c *Connection, og *outgoing, res *handshake.Resul
 	}
 	c.Standing, c.Reconnect = st, rt
 	c.State = StateActive
-	c.Reconnecting, c.ReconnectTries = false, 0
+	c.Reconnecting, c.ReconnectTries, c.ReconnectSlow = false, 0, false
 	p.markDirty(kindConn, c.ID)
 	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: res.Fin}, now)
 	p.installEpoch(c, res.Epoch, now) // and retries the connection's outbox

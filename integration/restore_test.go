@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"strings"
@@ -26,10 +27,10 @@ func TestCopyFromOnDynamoDB(t *testing.T) {
 	defer cancel()
 	src, dst := newTable(t, ctx), newTable(t, ctx)
 
-	if _, _, err := src.CopyFrom(ctx, src.Name); err == nil {
+	if _, _, err := src.CopyFrom(ctx, src.Name, nil); err == nil {
 		t.Fatal("copied a table to itself")
 	}
-	if _, _, err := dst.CopyFrom(ctx, src.Name); err == nil {
+	if _, _, err := dst.CopyFrom(ctx, src.Name, nil); err == nil {
 		t.Fatal("copied from a table without secrets")
 	}
 	if _, has, err := src.AnyRecord(ctx); err != nil || has {
@@ -78,7 +79,12 @@ func TestCopyFromOnDynamoDB(t *testing.T) {
 	}
 	put(t, ctx, dst.Client, dst.Name, "ctr#y", "-")
 
-	written, deleted, err := dst.CopyFrom(ctx, src.Name)
+	// A check before the deletes that fails stops the copy there.
+	stop := errors.New("a task started")
+	if w, d, err := dst.CopyFrom(ctx, src.Name, func(context.Context) error { return stop }); !errors.Is(err, stop) || w != 63 || d != 0 {
+		t.Fatalf("stopped copy: written %d deleted %d, %v", w, d, err)
+	}
+	written, deleted, err := dst.CopyFrom(ctx, src.Name, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +180,7 @@ func TestRestoreChecksOnDynamoDB(t *testing.T) {
 	if err := src.Heartbeat(ctx, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := dst.CopyFrom(ctx, src.Name); err != nil {
+	if _, _, err := dst.CopyFrom(ctx, src.Name, nil); err != nil {
 		t.Fatal(err)
 	}
 	if at, ok, err := dst.LastHeartbeat(ctx); err != nil || !ok || at.Unix() != now.Add(-time.Minute).Unix() {
