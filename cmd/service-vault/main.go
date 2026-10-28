@@ -256,7 +256,7 @@ func serve(args []string) error {
 	sc := ac.ssm
 	tbl := &store.Table{Client: ac.ddb, Name: cfg.Table}
 
-	secrets, err := keystore.LoadOrCreate(ctx, &keystore.AWSKMS{Client: ac.kms}, cfg.KMSKeyID, tbl.Blobs(), keystore.SecretsName, newSecretsIfFresh(ctx, tbl.Blobs(), tbl.AnyRecord))
+	secrets, err := keystore.LoadOrCreate(ctx, &keystore.AWSKMS{Client: ac.kms}, cfg.KMSKeyID, tbl.Blobs(), keystore.SecretsName, newSecretsIfFresh(ctx, tbl.AnyRecord, func(ctx context.Context) (bool, error) { return tbl.AnyBlob(ctx, sealstore.KeyName) }))
 	if err != nil {
 		return fmt.Errorf("keystore: %w", err)
 	}
@@ -572,10 +572,11 @@ func recordKinds() []string {
 var errKeysLost = errors.New("the table holds records but no keys: restore the table from a backup")
 
 // newSecretsIfFresh makes the service vault's secrets only for a new
-// deployment: a table with no records and no record key.
-func newSecretsIfFresh(ctx context.Context, blobs keystore.Blobs, anyRecord func(context.Context) ([]byte, bool, error)) func() (*keystore.Secrets, error) {
+// deployment: a table with no records and no version of the record key
+// (the start makes the secrets first).
+func newSecretsIfFresh(ctx context.Context, anyRecord func(context.Context) ([]byte, bool, error), anyRecordKey func(context.Context) (bool, error)) func() (*keystore.Secrets, error) {
 	return func() (*keystore.Secrets, error) {
-		if _, err := blobs.Get(ctx, sealstore.KeyName); !errors.Is(err, keystore.ErrNotFound) {
+		if has, err := anyRecordKey(ctx); err != nil || has {
 			if err == nil {
 				err = errKeysLost
 			}
@@ -606,7 +607,10 @@ var errNoKey = errors.New("no such record key")
 //   - over a table with no records (a new deployment);
 //   - as a rotation: the previous version exists (README "Rotating the
 //     record key"). The start reseals every record under the new
-//     version, then deletes the older ones from the keystore;
+//     version. The older versions are deleted at a later start that
+//     finds them, after it reseals what was written under them in the
+//     meantime (a process that read the version before the rotation,
+//     such as an admin run);
 //   - with migrate (the operator's SV_RECORD_SEAL_MIGRATE=1, for the
 //     deploy that upgrades a deployment from before sealing) over
 //     unsealed records: the start seals them in place.
@@ -617,7 +621,7 @@ func sealedStore(ctx context.Context, kc keystore.KMS, keyID string, blobs keyst
 	if err != nil {
 		return nil, err
 	}
-	version = max(version, sealstore.VersionOf(sample))
+	version = max(version, min(sealstore.VersionOf(sample), sealstore.MaxVersion))
 	for version < sealstore.MaxVersion {
 		_, err := blobs.Get(ctx, sealstore.KeyNameOf(version+1))
 		if errors.Is(err, keystore.ErrNotFound) {
@@ -634,11 +638,13 @@ func sealedStore(ctx context.Context, kc keystore.KMS, keyID string, blobs keyst
 			clear(k)
 		}
 	}()
+	// The older versions still kept: those just below, down to the first
+	// one missing (all of them are deleted together).
 	var older []uint32
-	for v := uint32(1); v < version; v++ {
+	for v := version - 1; v >= 1; v-- {
 		rk, err := keystore.LoadOrCreate(ctx, kc, keyID, blobs, sealstore.KeyNameOf(v), func() (*sealstore.RecordKey, error) { return nil, errNoKey })
 		if errors.Is(err, errNoKey) {
-			continue
+			break
 		}
 		if err != nil {
 			return nil, fmt.Errorf("keystore: %w", err)
@@ -646,6 +652,7 @@ func sealedStore(ctx context.Context, kc keystore.KMS, keyID string, blobs keyst
 		keys[v] = rk.Key
 		older = append(older, v)
 	}
+	made := false
 	rk, err := keystore.LoadOrCreate(ctx, kc, keyID, blobs, sealstore.KeyNameOf(version), func() (*sealstore.RecordKey, error) {
 		switch {
 		case !create:
@@ -653,11 +660,13 @@ func sealedStore(ctx context.Context, kc keystore.KMS, keyID string, blobs keyst
 		case !hasRecords:
 		case keys[version-1] != nil:
 		case migrate && sealstore.VersionOf(sample) == 0:
-		case len(older) > 0:
-			return nil, fmt.Errorf("SV_RECORD_KEY_VERSION %d skips a version: raise it by one (the table is at %d)", version, older[len(older)-1])
 		default:
+			if _, err := blobs.Get(ctx, sealstore.KeyNameOf(version-2)); version > 2 && err == nil {
+				return nil, fmt.Errorf("SV_RECORD_KEY_VERSION %d skips a version: raise it by one", version)
+			}
 			return nil, errKeysLost
 		}
+		made = true
 		return sealstore.NewRecordKey()
 	})
 	if err != nil {
@@ -679,7 +688,11 @@ func sealedStore(ctx context.Context, kc keystore.KMS, keyID string, blobs keyst
 	if migrate {
 		log.Warn("records sealed: remove " + sealstore.MigrateEnv)
 	}
-	for _, v := range older {
+	if made && len(older) > 0 {
+		log.Warn("record key version made, records resealed: start again to retire the older versions", "version", version)
+		return st, nil
+	}
+	for _, v := range slices.Backward(older) { // lowest first: what is left stays just below
 		if err := blobs.Delete(ctx, sealstore.KeyNameOf(v)); err != nil {
 			return nil, fmt.Errorf("keystore: retire record key %d: %w", v, err)
 		}

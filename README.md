@@ -187,13 +187,21 @@ service's identity, so the way back is restoring the table.
 names the version it is sealed under. Records under version 1 keep the
 layout from before versions, so this image can still be rolled back to
 an older one until the first rotation. To rotate:
-1. Take an on-demand backup (as in "Restoring the table").
+1. Take an on-demand backup (as in "Restoring the table"). The deploy
+   before must not have had `recordSealMigrate`: an image from before
+   versions, rolled back to with the migration on, would take the new
+   records for unsealed ones.
 2. Deploy with `-c recordKeyVersion=<the table's version + 1>`
    (`SV_RECORD_KEY_VERSION`). The table's version is in the last
-   `record key rotated` log line; it is 1 before the first rotation.
-3. The start makes the new version, reseals every record under it, then
-   deletes the older versions from the keystore, and logs
-   `record key rotated` (WARN). If it is cut short, the next start goes on.
+   `record key rotated` log line; it is 1 before the first rotation. The
+   start makes the new version and reseals every record under it, and
+   logs `record key version made` (WARN).
+3. Start the service again, by a deploy or
+   `aws ecs update-service --cluster T --service T --force-new-deployment`.
+   That start reseals anything written under the older versions since
+   (an admin run that started before the rotation), deletes them from
+   the keystore, and logs `record key rotated` (WARN). Don't run
+   `service-vault admin` between steps 2 and 3.
 
 The version in use is always the table's: the highest of the setting,
 the version the table's records are under, and any later version in the
@@ -208,9 +216,11 @@ The start reads every record before the API listens, so with a large
 audit log it can outlast the health check's grace (30 s, then 3 checks
 30 s apart). The reseal keeps what it has done, so the next start goes
 on from there. Expired records still in the table stay under the old
-version until DynamoDB deletes them; nothing reads them. A backup from
-before a rotation holds the old version, so after restoring it the next
-start rotates again.
+version until DynamoDB deletes them; nothing reads them. A backup holds
+the versions of its time: after restoring one from before a rotation,
+the table is back on the older version. If the stack's setting is still
+one above it, the next start rotates again (step 3 then retires the old
+version); otherwise rotate as above.
 
 **Restoring the table.** A last resort: it puts the service vault back
 as it was at the backup, and loses everything since:

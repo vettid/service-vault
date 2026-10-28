@@ -22,29 +22,45 @@ const maxBatchWrite = 25
 // new keys over existing records, and to read which version of the
 // record key they are under.
 func (t *Table) AnyRecord(ctx context.Context) ([]byte, bool, error) {
-	in := &dynamodb.ScanInput{
-		TableName:                aws.String(t.Name),
-		ConsistentRead:           aws.Bool(true),
-		ProjectionExpression:     aws.String("#d"),
-		FilterExpression:         aws.String("begins_with(#pk, :rec) AND (attribute_not_exists(#ttl) OR #ttl > :now)"),
-		ExpressionAttributeNames: map[string]string{"#pk": attrPK, "#d": attrData, "#ttl": attrTTL},
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":rec": &types.AttributeValueMemberS{Value: "rec#"},
-			":now": &types.AttributeValueMemberN{Value: strconv.FormatInt(time.Now().Unix(), 10)},
-		},
+	return t.anyItem(ctx, "rec#", true)
+}
+
+// AnyBlob reports whether the keystore holds a record whose name starts
+// with prefix (every version of the record key: sealstore.KeyName).
+func (t *Table) AnyBlob(ctx context.Context, prefix string) (bool, error) {
+	_, ok, err := t.anyItem(ctx, "blob#"+prefix, false)
+	return ok, err
+}
+
+// anyItem returns the data of one item whose pk starts with pkPrefix
+// (with live, only one that has not expired).
+func (t *Table) anyItem(ctx context.Context, pkPrefix string, live bool) ([]byte, bool, error) {
+	filter := "begins_with(#pk, :p)"
+	names := map[string]string{"#pk": attrPK, "#d": attrData}
+	vals := map[string]types.AttributeValue{":p": &types.AttributeValueMemberS{Value: pkPrefix}}
+	if live {
+		filter += " AND (attribute_not_exists(#ttl) OR #ttl > :now)"
+		names["#ttl"] = attrTTL
+		vals[":now"] = &types.AttributeValueMemberN{Value: strconv.FormatInt(time.Now().Unix(), 10)}
 	}
-	p := dynamodb.NewScanPaginator(t.Client, in)
+	p := dynamodb.NewScanPaginator(t.Client, &dynamodb.ScanInput{
+		TableName:                 aws.String(t.Name),
+		ConsistentRead:            aws.Bool(true),
+		ProjectionExpression:      aws.String("#d"),
+		FilterExpression:          aws.String(filter),
+		ExpressionAttributeNames:  names,
+		ExpressionAttributeValues: vals,
+	})
 	for p.HasMorePages() {
 		out, err := p.NextPage(ctx)
 		if err != nil {
 			return nil, false, err
 		}
 		for _, item := range out.Items {
-			d, _ := item[attrData].(*types.AttributeValueMemberB)
-			if d == nil {
-				return nil, true, nil
+			if d, ok := item[attrData].(*types.AttributeValueMemberB); ok {
+				return d.Value, true, nil
 			}
-			return d.Value, true, nil
+			return nil, true, nil
 		}
 	}
 	return nil, false, nil

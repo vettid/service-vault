@@ -64,7 +64,7 @@ func TestKeysNotRemadeOverRecords(t *testing.T) {
 	has := memAnyRecord(inner)
 
 	// A new deployment: the secrets, then the record key, then records.
-	if _, err := keystore.LoadOrCreate(ctx, plainKMS{}, "k", blobs, keystore.SecretsName, newSecretsIfFresh(ctx, blobs, has)); err != nil {
+	if _, err := keystore.LoadOrCreate(ctx, plainKMS{}, "k", blobs, keystore.SecretsName, newSecretsIfFresh(ctx, has, memAnyRecordKey(blobs))); err != nil {
 		t.Fatal(err)
 	}
 	st, err := sealedStore(ctx, plainKMS{}, "k", blobs, inner, nil, has, true, 1, false, log)
@@ -86,20 +86,28 @@ func TestKeysNotRemadeOverRecords(t *testing.T) {
 
 	lost = &memBlobs{m: maps.Clone(blobs.m)}
 	delete(lost.m, keystore.SecretsName)
-	if _, err := keystore.LoadOrCreate(ctx, plainKMS{}, "k", lost, keystore.SecretsName, newSecretsIfFresh(ctx, lost, has)); !errors.Is(err, errKeysLost) {
+	if _, err := keystore.LoadOrCreate(ctx, plainKMS{}, "k", lost, keystore.SecretsName, newSecretsIfFresh(ctx, has, memAnyRecordKey(lost))); !errors.Is(err, errKeysLost) {
 		t.Fatalf("secrets made again over records: %v", err)
 	}
 	// Nor over a record key alone (its records may all have been deleted).
-	if _, err := keystore.LoadOrCreate(ctx, plainKMS{}, "k", lost, keystore.SecretsName, newSecretsIfFresh(ctx, lost, memAnyRecord(peer.NewMemStore()))); !errors.Is(err, errKeysLost) {
+	if _, err := keystore.LoadOrCreate(ctx, plainKMS{}, "k", lost, keystore.SecretsName, newSecretsIfFresh(ctx, memAnyRecord(peer.NewMemStore()), memAnyRecordKey(lost))); !errors.Is(err, errKeysLost) {
 		t.Fatalf("secrets made again beside a record key: %v", err)
+	}
+	// Any version of it.
+	later := &memBlobs{m: map[string][]byte{sealstore.KeyNameOf(3): []byte("k")}}
+	if _, err := keystore.LoadOrCreate(ctx, plainKMS{}, "k", later, keystore.SecretsName, newSecretsIfFresh(ctx, memAnyRecord(peer.NewMemStore()), memAnyRecordKey(later))); !errors.Is(err, errKeysLost) {
+		t.Fatalf("secrets made again beside a later record key: %v", err)
 	}
 }
 
-// Rotating the record key: the start with a higher version makes it,
-// reseals every record under it and deletes the older versions; a restart
-// does nothing more, whatever the setting; a start cut short goes on,
-// also from a task with an older setting (a rollback). A version can't be
-// skipped over records, and the admin CLI never makes one.
+// Rotating the record key: the start with a higher version makes it and
+// reseals every record under it; the next start reseals what was written
+// under the older versions since (an admin run that read the version
+// before) and deletes them. Later starts do nothing more, whatever the
+// setting; a start cut short goes on, also from a task with an older
+// setting (a rollback). A version can't be skipped over records, a
+// planted version doesn't make the start probe without end, and the
+// admin CLI never makes a version.
 func TestRecordKeyRotation(t *testing.T) {
 	ctx := context.Background()
 	logs := &bytes.Buffer{}
@@ -113,6 +121,10 @@ func TestRecordKeyRotation(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = st.Apply(ctx, []peer.Change{{Kind: "conn", ID: "c1", Data: []byte(`{"id":"c1"}`)}, {Kind: "audit", ID: "a1", Data: []byte(`{"e":1}`)}})
+	stale, err := sealedStore(ctx, plainKMS{}, "k", blobs, inner, nil, memAnyRecord(inner), false, 1, false, log) // an admin run, before the rotation
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := sealedStore(ctx, plainKMS{}, "k", blobs, inner, nil, memAnyRecord(inner), false, 2, false, log); err == nil {
 		t.Fatal("the CLI made a record key version")
@@ -123,17 +135,28 @@ func TestRecordKeyRotation(t *testing.T) {
 	if _, err := start(2); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := blobs.m[sealstore.KeyName]; ok {
-		t.Fatal("version 1 not retired")
-	}
-	if !bytes.Contains(logs.Bytes(), []byte("record key rotated")) {
-		t.Fatal("no rotation log")
+	if _, ok := blobs.m[sealstore.KeyName]; !ok {
+		t.Fatal("version 1 retired by the start that made version 2")
 	}
 	for _, k := range []string{"conn", "audit"} {
 		raw, _ := inner.Load(ctx, k)
 		if len(raw) != 1 || sealstore.VersionOf(raw[0].Data) != 2 {
 			t.Fatalf("%s not under version 2", k)
 		}
+	}
+	// The admin run writes under version 1 after the reseal.
+	_ = stale.Apply(ctx, []peer.Change{{Kind: "admin_boot", ID: "b", Data: []byte(`{}`)}})
+	if _, err := start(1); err != nil { // the setting left out
+		t.Fatal(err)
+	}
+	if _, ok := blobs.m[sealstore.KeyName]; ok {
+		t.Fatal("version 1 not retired")
+	}
+	if !bytes.Contains(logs.Bytes(), []byte("record key rotated")) {
+		t.Fatal("no rotation log")
+	}
+	if raw, _, _ := inner.Get(ctx, "admin_boot", "b"); sealstore.VersionOf(raw) != 2 {
+		t.Fatal("the admin run's record not resealed before the retirement")
 	}
 	// The setting left out or lowered: the table's version is used.
 	for _, v := range []uint32{2, 1} {
@@ -151,11 +174,10 @@ func TestRecordKeyRotation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = cli.Apply(ctx, []peer.Change{{Kind: "admin_boot", ID: "b", Data: []byte(`{}`)}})
-	if raw, _, _ := inner.Get(ctx, "admin_boot", "b"); sealstore.VersionOf(raw) != 2 {
+	_ = cli.Apply(ctx, []peer.Change{{Kind: "admin_boot", ID: "b2", Data: []byte(`{}`)}})
+	if raw, _, _ := inner.Get(ctx, "admin_boot", "b2"); sealstore.VersionOf(raw) != 2 {
 		t.Fatal("the CLI wrote under an older version")
 	}
-
 	// The migration with an older setting makes no older version.
 	if _, err := sealedStore(ctx, plainKMS{}, "k", blobs, inner, nil, memAnyRecord(inner), true, 1, true, log); err != nil {
 		t.Fatal(err)
@@ -163,9 +185,13 @@ func TestRecordKeyRotation(t *testing.T) {
 	if _, ok := blobs.m[sealstore.KeyName]; ok {
 		t.Fatal("version 1 made again under the migration")
 	}
+	if _, err := start(4); err == nil || !strings.Contains(err.Error(), "skips a version") {
+		t.Fatalf("a skipped version after a retirement: %v", err)
+	}
 
 	// Cut short: version 3 made, version 2 still there, one record moved.
-	// A task with the older setting (a rollback) finishes the rotation.
+	// A task with the older setting (a rollback) finishes the reseal; the
+	// start after retires version 2.
 	k3, _ := sealstore.NewRecordKey()
 	pt, _ := json.Marshal(k3)
 	sealed, _ := keystore.Seal(ctx, plainKMS{}, "k", sealstore.KeyNameOf(3), pt)
@@ -183,6 +209,14 @@ func TestRecordKeyRotation(t *testing.T) {
 		t.Fatalf("after the rotation went on: %v %v", recs, err)
 	}
 
+	// A planted record under a huge version: refused at once.
+	first := recordKinds()[0] // the one memAnyRecord samples first
+	_ = inner.Apply(ctx, []peer.Change{{Kind: first, ID: "0", Data: append([]byte("vsr2\xff\xff\xff\xff"), make([]byte, 40)...)}})
+	if _, err := start(3); !errors.Is(err, errKeysLost) {
+		t.Fatalf("a planted version: %v", err)
+	}
+	_ = inner.Apply(ctx, []peer.Change{{Kind: first, ID: "0"}})
+
 	// The current version lost from a table with records: refused.
 	delete(blobs.m, sealstore.KeyNameOf(3))
 	if _, err := start(3); !errors.Is(err, errKeysLost) {
@@ -197,6 +231,20 @@ func mustRaw(t *testing.T, st peer.Store, id string) []byte {
 		t.Fatal(err)
 	}
 	return raw
+}
+
+// memAnyRecordKey is store.Table.AnyBlob(sealstore.KeyName) over memBlobs.
+func memAnyRecordKey(b *memBlobs) func(context.Context) (bool, error) {
+	return func(context.Context) (bool, error) {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		for name := range b.m {
+			if strings.HasPrefix(name, sealstore.KeyName) {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
 }
 
 // memAnyRecord is store.Table.AnyRecord over a MemStore.

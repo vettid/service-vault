@@ -53,6 +53,15 @@ func TestCopyFromOnDynamoDB(t *testing.T) {
 		t.Fatal(err)
 	}
 	put(t, ctx, src.Client, src.Name, "ctr#x", "-")
+	if has, err := src.AnyBlob(ctx, "record-key"); err != nil || has {
+		t.Fatalf("AnyBlob without a record key: %v %v", has, err)
+	}
+	if err := src.Blobs().Create(ctx, "record-key.v2", []byte("k")); err != nil {
+		t.Fatal(err)
+	}
+	if has, err := src.AnyBlob(ctx, "record-key"); err != nil || !has {
+		t.Fatalf("AnyBlob with a later record key: %v %v", has, err)
+	}
 	if d, has, err := src.AnyRecord(ctx); err != nil || !has || string(d) != "old" {
 		t.Fatalf("AnyRecord: %q %v %v", d, has, err)
 	}
@@ -71,8 +80,8 @@ func TestCopyFromOnDynamoDB(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if written != 62 || deleted != 3 {
-		t.Fatalf("written %d deleted %d, want 62 and 3", written, deleted)
+	if written != 63 || deleted != 3 {
+		t.Fatalf("written %d deleted %d, want 63 and 3", written, deleted)
 	}
 	want, got := items(t, ctx, src.Client, src.Name), items(t, ctx, dst.Client, dst.Name)
 	if !maps.Equal(want, got) {
