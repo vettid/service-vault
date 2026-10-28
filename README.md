@@ -86,6 +86,9 @@ destination.
   connection is suspended (see "When a member moves phones").
 - `webhook_dropped`: a webhook was given up after 24 hours, so the
   application missed an event.
+- `admins_short`: an admin's connection was removed (severed, or
+  replaced by a new connection) and fewer admins than m remain, so no
+  approval can pass (see "Recovering admins" under "Admin approvals").
 - `key_change`: the keystore KMS key was changed (a grant, its
   policy, an alias, tags, rotation, disabled, or scheduled for
   deletion). CloudTrail's KMS management events reach EventBridge from
@@ -439,7 +442,10 @@ the move:
   in the spec). The member's next connection from a new invitation
   replaces it: `connection.removed` for the suspended one, then
   `connection.added`, and the email binding moves to the new one. A service can't do the out-of-band
-  check that resolves a conflict for a person.
+  check that resolves a conflict for a person. An admin's new connection
+  is not an admin: the conflict may mean someone else holds the member's
+  keys, so the role comes back only by the other admins' approval or the
+  operator (see "Recovering admins").
 - *Credential key.* `connection.authenticate.rotated` moves the pinned
   key along its chain.
 
@@ -459,6 +465,16 @@ admin's connection.
   and from then on the setting is ignored (the start logs so), even if
   the set later becomes empty. A store whose set was not empty before
   this record existed is marked at the start. (chosen; not in the spec)
+- *Recovering admins.* An admin whose connection is removed leaves the
+  set, also when a new connection replaces it (after a suspension, for
+  example); the new one is an ordinary member (chosen; not in the
+  spec). While m admins remain, the others bring them back with
+  `admin_set.add` for the new connection id. When fewer than m remain,
+  no approval can pass and `admins_short` alarms: lower
+  `SV_ADMIN_THRESHOLD` (`adminThreshold`, a deploy) and approve the add, or, when the set
+  is empty, arm a bootstrap for their verified email (below); a member
+  already connected with that email becomes the admin within seconds.
+  Keep at least m + 1 admins so that losing one blocks nothing.
 - *Recovering an empty set* takes an explicit operator action:
   `service-vault admin bootstrap -email <address>`, run with the same
   environment as `serve` (for example as a one-off ECS task with the
