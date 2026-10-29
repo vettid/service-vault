@@ -406,3 +406,8 @@ func (r *Results) validate() error {
 func sortRows(rows []Row) {
 	sort.Slice(rows, func(i, j int) bool { return string(rows[i].RecordTag) < string(rows[j].RecordTag) })
 }
+
+// sortTags sorts tags bytewise (§2).
+func sortTags(tags [][]byte) {
+	sort.Slice(tags, func(i, j int) bool { return string(tags[i]) < string(tags[j]) })
+}
