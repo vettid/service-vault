@@ -53,11 +53,14 @@ type Event struct {
 	// context, and for a signed answer the credential key, the signature
 	// and its signed_at (§10.4). Kept with the event and given to Events;
 	// never logged.
-	Context   string    `json:"context,omitempty"`
-	Key       []byte    `json:"key,omitempty"`
-	Signature []byte    `json:"signature,omitempty"`
-	SignedAt  time.Time `json:"signed_at,omitzero"`
-	At        time.Time `json:"at"`
+	Context   string `json:"context,omitempty"`
+	Key       []byte `json:"key,omitempty"`
+	Signature []byte `json:"signature,omitempty"`
+	// Purpose is the purpose the signature covers ("" for a vault that
+	// signed without one, VAULT-MESSAGING 0.65.0 §10.4).
+	Purpose  string    `json:"purpose,omitempty"`
+	SignedAt time.Time `json:"signed_at,omitzero"`
+	At       time.Time `json:"at"`
 }
 
 // Events receives the peer's events after they are persisted. Deliver is

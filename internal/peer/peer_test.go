@@ -407,7 +407,7 @@ func TestServiceRekeysAfterThreshold(t *testing.T) {
 		t.Fatal("rekey did not complete")
 	}
 	// The new epoch carries a challenge.
-	if _, err := f.p.Authenticate(context.Background(), cid, "after rekey", time.Minute); err != nil {
+	if _, err := f.p.Authenticate(context.Background(), cid, "after rekey", "", time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	f.pump()
@@ -587,7 +587,7 @@ func TestSignIn(t *testing.T) {
 	const ctxt = "Sign in to VettID Member Service — match code 42"
 
 	// Signed: approved, key pinned.
-	id, err := f.p.Authenticate(ctx, cid, ctxt, 2*time.Minute)
+	id, err := f.p.Authenticate(ctx, cid, ctxt, "", 2*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -620,7 +620,7 @@ func TestSignIn(t *testing.T) {
 	}
 
 	// Denied.
-	id2, _ := f.p.Authenticate(ctx, cid, ctxt, 2*time.Minute)
+	id2, _ := f.p.Authenticate(ctx, cid, ctxt, "", 2*time.Minute)
 	f.pump()
 	m.Send(peerwire.TypeConnAuthResponse, peerwire.DeniedConnAuth(id2).Marshal())
 	f.pump()
@@ -629,7 +629,7 @@ func TestSignIn(t *testing.T) {
 	}
 
 	// A signature over another context does not verify.
-	id3, _ := f.p.Authenticate(ctx, cid, ctxt, 2*time.Minute)
+	id3, _ := f.p.Authenticate(ctx, cid, ctxt, "", 2*time.Minute)
 	f.pump()
 	forged := *m.Challenges[2]
 	forged.Context = "something else"
@@ -642,7 +642,7 @@ func TestSignIn(t *testing.T) {
 	}
 
 	// A different key: approved and reported as a change.
-	id4, _ := f.p.Authenticate(ctx, cid, ctxt, 2*time.Minute)
+	id4, _ := f.p.Authenticate(ctx, cid, ctxt, "", 2*time.Minute)
 	f.pump()
 	other := ed25519.NewKeyFromSeed(make([]byte, 32))
 	r4, _ := peerwire.SignConnAuth(other, f.keys.IKPublic(), m.IK.Public().(ed25519.PublicKey), m.Challenges[3], f.clk.Now(), nil)
@@ -653,7 +653,7 @@ func TestSignIn(t *testing.T) {
 	}
 
 	// Expired: no answer within the TTL.
-	id5, _ := f.p.Authenticate(ctx, cid, ctxt, 2*time.Minute)
+	id5, _ := f.p.Authenticate(ctx, cid, ctxt, "", 2*time.Minute)
 	f.pump()
 	f.clk.Advance(2 * time.Minute)
 	f.tick()
@@ -668,7 +668,7 @@ func TestSignIn(t *testing.T) {
 		t.Fatal("late answer approved")
 	}
 
-	if _, err := f.p.Authenticate(ctx, "nope", ctxt, time.Minute); err != ErrNotFound {
+	if _, err := f.p.Authenticate(ctx, "nope", ctxt, "", time.Minute); err != ErrNotFound {
 		t.Fatalf("unknown connection: %v", err)
 	}
 }
@@ -688,7 +688,7 @@ func TestRestartKeepsState(t *testing.T) {
 		t.Fatalf("added %+v", added)
 	}
 	cid := added[0].ConnectionID
-	id, err := f.p.Authenticate(context.Background(), cid, "x", time.Minute)
+	id, err := f.p.Authenticate(context.Background(), cid, "x", "", time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -707,7 +707,7 @@ func TestDedupeByMsgID(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
 	cid := f.connect(m, "")
-	id, _ := f.p.Authenticate(context.Background(), cid, "x", 5*time.Minute)
+	id, _ := f.p.Authenticate(context.Background(), cid, "x", "", 5*time.Minute)
 	f.pump()
 	r, _ := peerwire.SignConnAuth(m.Cred, f.keys.IKPublic(), m.IK.Public().(ed25519.PublicKey), m.Challenges[0], f.clk.Now(), nil)
 	m.Send(peerwire.TypeConnAuthResponse, r.Marshal())
@@ -747,7 +747,7 @@ func TestCancelChallengeAndDenyEnds(t *testing.T) {
 	ctx := context.Background()
 
 	// Cancelled: forgotten, a later signed answer is ignored, no event.
-	id, err := f.p.Authenticate(ctx, cid, "x", 2*time.Minute)
+	id, err := f.p.Authenticate(ctx, cid, "x", "", 2*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -774,7 +774,7 @@ func TestCancelChallengeAndDenyEnds(t *testing.T) {
 
 	// Denied on the phone: the challenge ends; a signed answer after the
 	// denial is ignored.
-	id2, _ := f.p.Authenticate(ctx, cid, "x", 2*time.Minute)
+	id2, _ := f.p.Authenticate(ctx, cid, "x", "", 2*time.Minute)
 	f.pump()
 	m.Send(peerwire.TypeConnAuthResponse, peerwire.DeniedConnAuth(id2).Marshal())
 	f.pump()

@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 )
 
 // recordVotes answers every vote.* request with ok and records it.
@@ -117,5 +119,46 @@ func TestSendMessage(t *testing.T) {
 	}
 	if _, err := f.p.SendMessage(context.Background(), cid, "Bad Type", nil); err == nil {
 		t.Fatal("invalid type sent")
+	}
+}
+
+// A sign-in challenge carries its purpose; a vault that knows purposes
+// signs over it, and one that doesn't (release 23 and earlier) answers
+// without, and both are approved (VAULT-MESSAGING 0.65.0 §10.4).
+func TestChallengePurpose(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "t")
+	if _, err := f.p.Authenticate(context.Background(), cid, "Sign in", "nonsense", time.Minute); err != ErrPurpose {
+		t.Fatalf("an unknown purpose: %v", err)
+	}
+	for _, old := range []bool{false, true} {
+		before := len(f.ev.of(EventSignInApproved))
+		id, err := f.p.Authenticate(context.Background(), cid, "Sign in", peerwire.PurposeSignIn, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.pump()
+		var ch *peerwire.ConnAuthChallenge
+		for _, c := range m.Challenges {
+			if c.RequestID == id {
+				ch = c
+			}
+		}
+		if ch == nil || ch.Purpose != peerwire.PurposeSignIn {
+			t.Fatalf("challenge %+v", ch)
+		}
+		if old {
+			ch.Purpose = "" // an older vault reads no purpose and signs without
+		}
+		r, err := peerwire.SignConnAuth(m.Cred, f.keys.IKPublic(), m.IK.Public().(ed25519.PublicKey), ch, f.clk.Now(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.Send(peerwire.TypeConnAuthResponse, r.Marshal())
+		f.pump()
+		if len(f.ev.of(EventSignInApproved)) != before+1 {
+			t.Fatalf("old vault %v: not approved", old)
+		}
 	}
 }

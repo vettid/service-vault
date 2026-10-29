@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 	"log/slog"
 	"slices"
 	"sync"
@@ -41,7 +42,7 @@ const (
 // Peer is the part of peer.Peer the manager uses.
 type Peer interface {
 	Connection(id string) (peer.ConnectionInfo, bool)
-	Authenticate(ctx context.Context, connID, ctxt string, ttl time.Duration) (string, error)
+	Authenticate(ctx context.Context, connID, ctxt, purpose string, ttl time.Duration) (string, error)
 	CancelChallenge(ctx context.Context, requestID string) (bool, error)
 }
 
@@ -410,7 +411,7 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 func (m *Manager) challenge(ctx context.Context, b *batch, r *record, conns []string, ctxt string) []Challenge {
 	var sent []Challenge
 	for _, c := range conns {
-		reqID, err := m.Peer.Authenticate(ctx, c, ctxt, 0)
+		reqID, err := m.Peer.Authenticate(ctx, c, ctxt, peerwire.PurposeApproval, 0)
 		if err != nil {
 			m.log().Warn("approval challenge", "approval_id", r.ID, "connection_id", c, "err", errName(err))
 			continue
@@ -617,7 +618,7 @@ func (m *Manager) Answer(ctx context.Context, e *peer.Event) (bool, error) {
 	}
 	at := e.At.UTC().Truncate(time.Millisecond)
 	ent := &AuditEntry{Type: AuditResponse, ApprovalID: r.ID, ActionHash: r.Hash, ConnectionID: e.ConnectionID,
-		RequestID: e.RequestID, Context: e.Context, Answer: answer, Counted: &counted, Key: e.Key, Signature: e.Signature,
+		RequestID: e.RequestID, Context: e.Context, Answer: answer, Counted: &counted, Key: e.Key, Signature: e.Signature, Purpose: e.Purpose,
 		KeyChanged: answer == AnswerApproved && e.KeyChanged}
 	if !e.SignedAt.IsZero() {
 		sa := e.SignedAt.UTC()

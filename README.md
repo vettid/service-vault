@@ -626,7 +626,8 @@ admin's connection.
   admins asked and the challenges), every reminder, every admin's answer
   (`approval.response`: the connection, the request id, the context as
   signed, the answer, whether it counted, and for a signed answer the
-  credential key, the signature and `signed_at` — the evidence, which
+  credential key, the signature, the purpose it covers and `signed_at` —
+  the evidence, which
   verifies against the challenge as VAULT-MESSAGING §10.4 defines it), every
   outcome, and every change of the admin set. Logs carry ids and counts,
   never contexts, summaries or signatures.

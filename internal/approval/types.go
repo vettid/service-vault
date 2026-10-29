@@ -207,6 +207,7 @@ type AuditEntry struct {
 	Counted      *bool      `json:"counted,omitempty"`
 	Key          []byte     `json:"key,omitempty"`       // the admin's credential key (Ed25519)
 	Signature    []byte     `json:"signature,omitempty"` // over the challenge (VAULT-MESSAGING §10.4)
+	Purpose      string     `json:"purpose,omitempty"`   // the purpose the signature covers; "" for none (0.65.0)
 	SignedAt     *time.Time `json:"signed_at,omitempty"`
 	KeyChanged   bool       `json:"key_changed,omitempty"`
 	// An outcome or an admin set change.

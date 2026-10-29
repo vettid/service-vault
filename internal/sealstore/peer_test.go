@@ -91,7 +91,7 @@ func TestPeerOnSealedStore(t *testing.T) {
 	if c, ok := p.Connection(rec.ConnID); !ok || c.State != peer.StateActive {
 		t.Fatalf("connection after restart: %+v %v", c, ok)
 	}
-	if _, err := p.Authenticate(ctx, rec.ConnID, "Sign in", time.Minute); err != nil {
+	if _, err := p.Authenticate(ctx, rec.ConnID, "Sign in", "", time.Minute); err != nil {
 		t.Fatalf("Authenticate after restart: %v", err)
 	}
 	pump()
