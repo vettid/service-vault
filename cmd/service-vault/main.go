@@ -41,6 +41,7 @@ import (
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
 	"github.com/vettid/vettid-relay/relayclient"
+	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/suite"
 
 	"github.com/vettid/service-vault/internal/api"
@@ -334,12 +335,12 @@ func serve(args []string) error {
 	svc.Approvals = approvals
 	pc := peer.Config{Keys: keys, Relay: rc, RelayURL: cfg.RelayURL, Profile: cfg.Profile, Store: records,
 		Events: svc, Log: log}
+	var ballots *ballot.RecordStore
+	signIK := func(label string, msg []byte) ([]byte, error) { return suite.Sign(keys.IK, label, msg) }
 	if cfg.BallotsTable != "" {
-		pc.Votes = &ballot.Box{
-			Store: &ballot.RecordStore{Records: records, Copy: &ballot.SealedCopy{
-				Inner: &store.Ballots{Client: ac.ddb, Name: cfg.BallotsTable}, Seal: records.Seal, Open: records.Open}},
-			Sign: func(label string, msg []byte) ([]byte, error) { return suite.Sign(keys.IK, label, msg) },
-		}
+		ballots = &ballot.RecordStore{Records: records, Copy: &ballot.SealedCopy{
+			Inner: &store.Ballots{Client: ac.ddb, Name: cfg.BallotsTable}, Seal: records.Seal, Open: records.Open}}
+		pc.Votes = &ballot.Box{Store: ballots, Sign: signIK}
 	}
 	if restored, err := tbl.Restored(ctx); err != nil {
 		return fmt.Errorf("restore marker: %w", err)
@@ -351,12 +352,19 @@ func serve(args []string) error {
 		return err
 	}
 	svc.Peer = p
+	var proposals api.Proposals
+	if ballots != nil {
+		// Publishing (BALLOT-PROTOCOL §3.3) comes with the anchor key; until
+		// then, creating a proposal answers publication_not_configured.
+		proposals = &ballot.Manager{Store: ballots, Sign: signIK, IK: keys.IKPublic(), Roster: p, Sender: p,
+			NewID: envelope.NewULID, Now: time.Now, Log: log}
+	}
 	approvals.Peer = p
 
 	srv := &http.Server{
 		Addr: cfg.Listen,
 		Handler: (&api.Server{Keys: cfg.APIKeyHashes, Email: email, Invites: svc.Invites(), SignIns: svc.SignIns(),
-			Approvals: approvals, Log: log}).Handler(),
+			Approvals: approvals, Proposals: proposals, Log: log}).Handler(),
 		TLSConfig:         tlsid.ServerConfig(cert),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,

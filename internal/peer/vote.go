@@ -79,3 +79,47 @@ func ulidMS(id string) (uint64, error) {
 	}
 	return ms, nil
 }
+
+// Eligible lists the active connections (ballot.Roster). Every active
+// connection counts until VAULT-MESSAGING says how a vault advertises the
+// vote feature (BALLOT-PROTOCOL §3.2, plan item 5.1).
+func (p *Peer) Eligible() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]string, 0, len(p.conns))
+	for id, c := range p.conns {
+		if c.State == StateActive {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// SendMessage sends a message the application asks for (a vote.proposal,
+// for one) to an active connection, and returns its inner id.
+func (p *Peer) SendMessage(ctx context.Context, connID, typ string, body json.RawMessage) (string, error) {
+	if !envelope.ValidType(typ) {
+		return "", errors.New("peer: invalid message type")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.started {
+		return "", ErrNotStarted
+	}
+	c := p.conns[connID]
+	if c == nil || c.State != StateActive {
+		return "", ErrNotFound
+	}
+	now := p.now()
+	id := p.sendTo(c, typ, body, now)
+	if id == "" {
+		if p.outboxFor(c.ID) >= MaxOutboxPerConn {
+			return "", ErrBusy
+		}
+		return "", ErrNotFound
+	}
+	if err := p.flushAndDrain(ctx); err != nil {
+		return "", err
+	}
+	return id, nil
+}

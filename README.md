@@ -408,6 +408,8 @@ billed.
 | `POST /v1/approvals/{id}/remind` | `{approval_id, reminded: [connection_id]}`: the challenge again to the admins who have not answered; `too_soon` (429) within 10 minutes of the last, `not_pending` (409) once settled |
 | `GET /v1/admins` | `{admins: [connection_id], threshold}` |
 | `GET /v1/audit?since=&limit=` | `{entries: [...], next?}`: the audit log after entry `since`, oldest first, `limit` 1–100 (default 100); pass `next` as `since` for the next page |
+| `POST /v1/proposals` `{title, text, choices, quorum, binding, removed_may_vote, opens_at, closes_at, outage_rule}` | `201 {proposal_id, proposal_hash, eligible, sent}`: the proposal is made from the active connections at this moment, published and sent to each (BALLOT-PROTOCOL §3); `abstain` is added to the choices if they lack it. `invalid_proposal` (400); `publication_not_configured` (503) until publication is configured. Served with `SV_BALLOTS_TABLE` |
+| `GET /v1/proposals/{id}` | `{proposal_id, proposal, proposal_hash, eligible, opens_at, closes_at, published}`: nothing that counts ballots before the results |
 | `GET /health` | `{status: "ok"}` (no key) |
 
 **Webhooks** (signed as `sdk/go/webhook` verifies): `connection.pending`

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/vettid/service-vault/internal/approval"
+	"github.com/vettid/service-vault/internal/ballot"
 	"github.com/vettid/service-vault/internal/connect"
 	"github.com/vettid/service-vault/internal/signin"
 )
@@ -104,6 +105,13 @@ type Approvals interface {
 	Audit(ctx context.Context, since string, limit int) (*approval.AuditPage, error)
 }
 
+// Proposals creates and reports votes' proposals (ballot.Manager).
+type Proposals interface {
+	Create(ctx context.Context, in ballot.ProposalInput) (*ballot.Created, error)
+	// Status reports a proposal, or nil for an unknown id.
+	Status(ctx context.Context, id string) (*ballot.ProposalStatus, error)
+}
+
 // ErrNotFound is returned by Invites.Status and SignIns.Status for an
 // unknown id.
 var ErrNotFound = errors.New("api: not found")
@@ -115,6 +123,7 @@ type Server struct {
 	Invites     Invites
 	SignIns     SignIns
 	Approvals   Approvals     // nil: the approval routes are not served
+	Proposals   Proposals     // nil: the proposal routes are not served
 	LookupFloor time.Duration // uniform response time for POST /v1/signin; default 1.5 s
 	Log         *slog.Logger
 }
@@ -139,6 +148,10 @@ func (s *Server) Handler() http.Handler {
 		v1.HandleFunc("POST /v1/approvals/{id}/remind", s.remindApproval)
 		v1.HandleFunc("GET /v1/admins", s.admins)
 		v1.HandleFunc("GET /v1/audit", s.audit)
+	}
+	if s.Proposals != nil {
+		v1.HandleFunc("POST /v1/proposals", s.createProposal)
+		v1.HandleFunc("GET /v1/proposals/{id}", s.proposalStatus)
 	}
 	mux.Handle("/v1/", s.auth(v1))
 	return mux
@@ -395,6 +408,48 @@ func (s *Server) approvalError(w http.ResponseWriter, what string, err error) {
 	default:
 		s.log().Error(what, "err", err)
 		writeError(w, http.StatusServiceUnavailable, "unavailable")
+	}
+}
+
+// maxProposalBody bounds POST /v1/proposals: the text's 16 KiB, the
+// title and the choices, with room for JSON escaping.
+const maxProposalBody = 64 << 10
+
+// createProposal serves POST /v1/proposals (BALLOT-PROTOCOL §3): the
+// proposal is made from the roster at this moment, published and sent to
+// every eligible member.
+func (s *Server) createProposal(w http.ResponseWriter, r *http.Request) {
+	var b ballot.ProposalInput
+	if !readJSONMax(w, r, &b, maxProposalBody) {
+		return
+	}
+	c, err := s.Proposals.Create(r.Context(), b)
+	var ei *ballot.ErrInput
+	switch {
+	case errors.As(err, &ei):
+		writeError(w, http.StatusBadRequest, "invalid_proposal")
+	case errors.Is(err, ballot.ErrNoPublisher):
+		writeError(w, http.StatusServiceUnavailable, "publication_not_configured")
+	case err != nil:
+		s.log().Error("create proposal", "err", err)
+		writeError(w, http.StatusServiceUnavailable, "unavailable")
+	default:
+		writeJSON(w, http.StatusCreated, c)
+	}
+}
+
+// proposalStatus serves GET /v1/proposals/{id}: the proposal and its
+// times, and nothing that counts ballots before the results.
+func (s *Server) proposalStatus(w http.ResponseWriter, r *http.Request) {
+	st, err := s.Proposals.Status(r.Context(), r.PathValue("id"))
+	switch {
+	case err != nil:
+		s.log().Error("proposal status", "err", err)
+		writeError(w, http.StatusServiceUnavailable, "unavailable")
+	case st == nil:
+		writeError(w, http.StatusNotFound, "not_found")
+	default:
+		writeJSON(w, http.StatusOK, st)
 	}
 }
 

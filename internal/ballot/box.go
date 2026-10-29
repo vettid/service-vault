@@ -46,9 +46,10 @@ type Member struct {
 
 // OpenProposal is what the box holds of a proposal while it runs.
 type OpenProposal struct {
-	Doc    []byte          `json:"doc"`
-	Sig    []byte          `json:"sig"`
-	Bundle json.RawMessage `json:"bundle"`
+	Doc []byte `json:"doc"`
+	Sig []byte `json:"sig"`
+	// Bundle is the proposal's anchor (§3.3); nil until it is published.
+	Bundle json.RawMessage `json:"bundle,omitempty"`
 	// ClosesAt is the close in force, after any extensions.
 	ClosesAt int64 `json:"closes_at"`
 	// Members are the eligible connections, by connection id.

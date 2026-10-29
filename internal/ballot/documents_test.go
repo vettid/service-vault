@@ -140,17 +140,6 @@ func newVote(t *testing.T, n, k int) *vote {
 	return v
 }
 
-func sortTags(tags [][]byte) {
-	rows := make([]Row, len(tags))
-	for i := range tags {
-		rows[i].RecordTag = tags[i]
-	}
-	sortRows(rows)
-	for i := range rows {
-		tags[i] = rows[i].RecordTag
-	}
-}
-
 func (v *vote) sign(t *testing.T, label string, msg []byte) []byte {
 	t.Helper()
 	s, err := suite.Sign(v.ik, label, msg)

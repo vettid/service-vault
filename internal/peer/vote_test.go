@@ -94,3 +94,28 @@ func TestULIDMS(t *testing.T) {
 		t.Fatal("accepted")
 	}
 }
+
+// Eligible lists the active connections, and SendMessage reaches one.
+func TestSendMessage(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "t")
+	if got := f.p.Eligible(); len(got) != 1 || got[0] != cid {
+		t.Fatalf("Eligible = %v", got)
+	}
+	id, err := f.p.SendMessage(context.Background(), cid, "vote.proposal", json.RawMessage(`{"proposal":"x"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.pump()
+	got := m.Received("vote.proposal")
+	if len(got) != 1 || got[0].ID != id || string(got[0].Body) != `{"proposal":"x"}` {
+		t.Fatalf("received %v", got)
+	}
+	if _, err := f.p.SendMessage(context.Background(), "nope", "vote.proposal", nil); err != ErrNotFound {
+		t.Fatalf("unknown connection: %v", err)
+	}
+	if _, err := f.p.SendMessage(context.Background(), cid, "Bad Type", nil); err == nil {
+		t.Fatal("invalid type sent")
+	}
+}
