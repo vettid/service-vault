@@ -389,12 +389,21 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 	return len(msgs), err
 }
 
-// unacked is a message left unacked: its relay time, and when the relay
-// drops it unhandled (its TTL).
+// unacked is a message left unacked: its relay time, and when it stops
+// holding Caught: when the relay drops it unhandled (its TTL), or
+// MaxUnackedWait after it was first left, whichever is sooner.
 type unacked struct {
-	ms  uint64
-	exp time.Time
+	ms     uint64
+	exp    time.Time
+	capped bool // exp is the cap, not the TTL
 }
+
+// MaxUnackedWait caps how long one message left unacked holds Caught
+// false. A member can keep a message coming back (a new-epoch message
+// before hs.fin, a withheld connection.approved); past the cap it no
+// longer delays a count, and the peer logs that it stopped waiting
+// (chosen; not in the spec).
+const MaxUnackedWait = 24 * time.Hour
 
 // leaveUnacked notes a collected message that was not acked.
 func (p *Peer) leaveUnacked(m relayclient.Message, now time.Time) {
@@ -404,32 +413,38 @@ func (p *Peer) leaveUnacked(m relayclient.Message, now time.Time) {
 	}
 	ttl := time.Duration(p.limits.MessageTTLSeconds) * time.Second
 	if ttl <= 0 {
-		ttl = 7 * 24 * time.Hour
+		ttl = 14 * 24 * time.Hour // the relay's default (RELAY-PROTOCOL §6.1)
 	}
 	if p.unacked == nil {
 		p.unacked = map[string]unacked{}
 	}
-	p.unacked[m.MsgID] = unacked{ms: ms, exp: time.UnixMilli(int64(ms)).Add(ttl + leaseMargin)}
+	if _, ok := p.unacked[m.MsgID]; ok {
+		return // the cap counts from the first time
+	}
+	u := unacked{ms: ms, exp: time.UnixMilli(int64(ms)).Add(ttl + leaseMargin)}
+	if c := now.Add(MaxUnackedWait); c.Before(u.exp) {
+		u.exp, u.capped = c, true
+	}
+	p.unacked[m.MsgID] = u
 }
 
-// leaseMark is the lease marker's record: the process that last leased
-// messages, and when.
+// leaseMark is a process's lease marker: when it last leased messages.
+// Each process has its own (by instance), which expires once its leases
+// can't be out any more, so one process's marker never hides another's.
 type leaseMark struct {
-	Instance string    `json:"instance"`
-	At       time.Time `json:"at"`
+	At time.Time `json:"at"`
 }
 
-const leaseMarkID = "last"
-
-// markLeased writes the lease marker before a batch is handled, so that
-// another process (a deploy's overlap, a Spot replacement) waits out the
-// leases this one may leave behind.
+// markLeased writes this process's lease marker before a batch is
+// handled, so that another process (a deploy's overlap, a Spot
+// replacement) waits out the leases this one may leave behind.
 func (p *Peer) markLeased(ctx context.Context, at time.Time) error {
-	data, err := json.Marshal(leaseMark{Instance: p.instance, At: at.UTC()})
+	data, err := json.Marshal(leaseMark{At: at.UTC()})
 	if err != nil {
 		return err
 	}
-	return p.cfg.Store.Apply(ctx, []Change{{Kind: kindLease, ID: leaseMarkID, Data: data}})
+	return p.cfg.Store.Apply(ctx, []Change{{Kind: kindLease, ID: p.instance, Data: data,
+		Expires: at.Add(p.visibility() + leaseMargin)}})
 }
 
 // leaseMargin covers the difference between our clock and the relay's
