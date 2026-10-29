@@ -212,7 +212,12 @@ leave every record unreadable, and new secrets would replace the
 service's identity, so the way back is restoring the table.
 
 **Rotating the record key.** The record key is versioned: each record
-names the version it is sealed under. Records under version 1 keep the
+names the version it is sealed under. The write-once copy of accepted
+ballots (`SV_BALLOTS_TABLE`) is sealed under a key of its own
+(`ballot-copy-key` in the keystore), which a rotation doesn't touch: its
+items can't be rewritten, so they can't be resealed, and that key is
+kept for as long as the ballots are. Never delete it; a start refuses to
+make a new one while proposals exist. Records under version 1 keep the
 layout from before versions, so this image can still be rolled back to
 an older one until the first rotation. To rotate:
 1. Take an on-demand backup (as in "Restoring the table"). The deploy

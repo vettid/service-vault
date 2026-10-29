@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/vettid/service-vault/internal/ballot"
 	"github.com/vettid/service-vault/internal/keystore"
 	"github.com/vettid/service-vault/internal/peer"
 	"github.com/vettid/service-vault/internal/sealstore"
@@ -260,5 +261,55 @@ func memAnyRecord(st peer.Store) func(context.Context) ([]byte, bool, error) {
 			}
 		}
 		return nil, false, nil
+	}
+}
+
+// The write-once ballot copy is sealed under a key of its own: a ballot
+// written before a rotation of the record key still opens after it, once
+// the older record key versions are gone. Vote records in the table are
+// resealed with the rest. A lost copy key is not made again over
+// proposals.
+func TestBallotCopySurvivesRotation(t *testing.T) {
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	blobs, inner := &memBlobs{m: map[string][]byte{}}, peer.NewMemStore()
+	start := func(version uint32) *sealstore.Store {
+		t.Helper()
+		st, err := sealedStore(ctx, plainKMS{}, "k", blobs, inner, nil, memAnyRecord(inner), true, version, false, log)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	st := start(1)
+	cs, err := ballotCopySeal(ctx, plainKMS{}, "k", blobs, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := cs.Seal(ballot.KindBallot, "p|aa", []byte(`{"ballot":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Apply(ctx, []peer.Change{{Kind: ballot.KindProposal, ID: "p", Data: []byte(`{"doc":"x"}`)}}); err != nil {
+		t.Fatal(err)
+	}
+	start(2)      // rotate: reseal under 2
+	st = start(2) // retire version 1
+	if _, err := blobs.Get(ctx, sealstore.KeyNameOf(1)); !errors.Is(err, keystore.ErrNotFound) {
+		t.Fatalf("record key version 1 not retired: %v", err)
+	}
+	if got, ok, err := st.Get(ctx, ballot.KindProposal, "p"); err != nil || !ok || string(got) != `{"doc":"x"}` {
+		t.Fatalf("a proposal after the rotation: %s %v %v", got, ok, err)
+	}
+	cs, err = ballotCopySeal(ctx, plainKMS{}, "k", blobs, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := cs.Open(ballot.KindBallot, "p|aa", item); err != nil || string(got) != `{"ballot":1}` {
+		t.Fatalf("a copied ballot after the rotation: %s %v", got, err)
+	}
+	delete(blobs.m, keystore.BallotCopyKeyName)
+	if _, err := ballotCopySeal(ctx, plainKMS{}, "k", blobs, st); err == nil {
+		t.Fatal("a new copy key made over proposals")
 	}
 }

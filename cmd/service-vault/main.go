@@ -362,8 +362,12 @@ func serve(args []string) error {
 	var ballots *ballot.RecordStore
 	signIK := func(label string, msg []byte) ([]byte, error) { return suite.Sign(keys.IK, label, msg) }
 	if cfg.BallotsTable != "" {
+		cs, err := ballotCopySeal(ctx, &keystore.AWSKMS{Client: ac.kms}, cfg.KMSKeyID, tbl.Blobs(), records)
+		if err != nil {
+			return err
+		}
 		ballots = &ballot.RecordStore{Records: records, Copy: &ballot.SealedCopy{
-			Inner: &store.Ballots{Client: ac.ddb, Name: cfg.BallotsTable}, Seal: records.Seal, Open: records.Open}}
+			Inner: &store.Ballots{Client: ac.ddb, Name: cfg.BallotsTable}, Seal: cs.Seal, Open: cs.Open}}
 		pc.Votes = &ballot.Box{Store: ballots, Sign: signIK}
 	}
 	if restored, err := tbl.Restored(ctx); err != nil {
@@ -743,7 +747,7 @@ func healthcheck(listen string) error {
 
 // recordKinds is every kind the service vault stores.
 func recordKinds() []string {
-	return slices.Concat(peer.Kinds(), service.Kinds(), approval.Kinds())
+	return slices.Concat(peer.Kinds(), service.Kinds(), approval.Kinds(), ballot.Kinds(), []string{publish.KindBundle})
 }
 
 // errKeysLost: a key is missing from a table that holds records. A new
@@ -771,6 +775,29 @@ func newSecretsIfFresh(ctx context.Context, anyRecord func(context.Context) ([]b
 		}
 		return keystore.NewSecrets()
 	}
+}
+
+// ballotCopySeal returns the sealing of the write-once ballot copy, under
+// a key of its own (keystore.BallotCopyKeyName) that the record key's
+// rotation doesn't touch. It is made only while the service has no
+// proposal: a copy holding ballots under a lost key can't be read, so a
+// new one is refused rather than made over it.
+func ballotCopySeal(ctx context.Context, kc keystore.KMS, keyID string, blobs keystore.Blobs, records peer.Store) (*sealstore.Store, error) {
+	rk, err := keystore.LoadOrCreate(ctx, kc, keyID, blobs, keystore.BallotCopyKeyName, func() (*sealstore.RecordKey, error) {
+		props, err := records.Load(ctx, ballot.KindProposal)
+		if err != nil {
+			return nil, err
+		}
+		if len(props) > 0 {
+			return nil, errors.New("the ballot copy's key is missing while proposals exist: restore it from a backup of the table")
+		}
+		return sealstore.NewRecordKey()
+	})
+	if err != nil {
+		return nil, fmt.Errorf("keystore: %w", err)
+	}
+	defer clear(rk.Key)
+	return sealstore.New(nil, map[uint32][]byte{1: rk.Key}, 1, false)
 }
 
 // errNoKey: a version of the record key that is not in the keystore.
