@@ -5,6 +5,7 @@ go 1.26.0
 toolchain go1.26.10
 
 require (
+	filippo.io/edwards25519 v1.1.0
 	github.com/aws/aws-sdk-go-v2 v1.47.5
 	github.com/aws/aws-sdk-go-v2/config v1.33.12
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.12

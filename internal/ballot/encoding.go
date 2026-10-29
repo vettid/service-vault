@@ -1,6 +1,6 @@
-// Package ballot is the service vault's side of the secret ballot
+// Package ballot is the service vault's side of the vote
 // (docs/BALLOT-PROTOCOL.md): the signed encodings, the Merkle trees, the
-// certification and the ballot box.
+// cast handling and the results.
 package ballot
 
 import (
@@ -10,17 +10,20 @@ import (
 	"regexp"
 )
 
-// Labels (BALLOT-PROTOCOL §2): the VMS convention, each followed by 0x00
-// where it starts a hashed or signed string.
+// Labels (BALLOT-PROTOCOL §2): the VMS convention, each ending in its own
+// 0x00, which separates it from the message (suite.Sign signs label ‖ m).
 const (
-	labelProposal = "vettid/vote/1/proposal\x00"
-	labelPool     = "vettid/vote/1/pool\x00"
-	labelExtended = "vettid/vote/1/extended\x00"
-	labelResults  = "vettid/vote/1/results\x00"
-	labelBallot   = "vettid/vote/1/ballot\x00"
-	labelCert     = "vettid/vote/1/cert\x00"
-	labelRecord   = "vettid/vote/1/record\x00"
-	labelIssued   = "vettid/vote/1/issued\x00"
+	LabelProposal    = "vettid/vote/1/proposal\x00"
+	LabelExtended    = "vettid/vote/1/extended\x00"
+	LabelResults     = "vettid/vote/1/results\x00"
+	LabelBallot      = "vettid/vote/1/ballot\x00"
+	LabelCast        = "vettid/vote/1/cast\x00"
+	LabelReceipt     = "vettid/vote/1/receipt\x00"
+	LabelStatus      = "vettid/vote/1/status\x00"
+	LabelRefusal     = "vettid/vote/1/refusal\x00"
+	LabelAnchorKey   = "vettid/vote/1/anchor-key\x00"
+	LabelServiceList = "vettid/vote/1/service-list\x00"
+	labelRecord      = "vettid/vote/1/record\x00"
 )
 
 // Sizes of the fixed fields.
@@ -28,6 +31,7 @@ const (
 	ProposalIDLen = 26 // a canonical ULID
 	HashLen       = sha256.Size
 	VKLen         = 32 // an Ed25519 public key
+	SigLen        = 64 // an Ed25519 signature
 	SecretLen     = 32 // record_secret
 )
 
@@ -50,88 +54,124 @@ func lp(b []byte, x []byte) []byte {
 	return append(b, x...)
 }
 
-// CertMsg is the certified message, "vettid/vote/1/cert" ‖ 0x00 ‖
-// proposal_hash ‖ vk (§5.1). The randomized variant signs
-// cert_prefix ‖ CertMsg.
-func CertMsg(proposalHash, vk []byte) ([]byte, error) {
-	if len(proposalHash) != HashLen || len(vk) != VKLen {
-		return nil, errField
+func sum(parts ...[]byte) []byte {
+	h := sha256.New()
+	for _, p := range parts {
+		h.Write(p)
 	}
-	b := append([]byte(labelCert), proposalHash...)
-	return append(b, vk...), nil
+	return h.Sum(nil)
 }
 
-// BallotMsg is the signed ballot, proposal_hash ‖ u32(seq) ‖
-// u32(pool_seq) ‖ pool_hash ‖ lp(choice_id) (§6.1); it is signed under
-// BallotLabel.
-func BallotMsg(proposalHash []byte, seq, poolSeq uint32, poolHash []byte, choiceID string) ([]byte, error) {
-	if len(proposalHash) != HashLen || len(poolHash) != HashLen || seq == 0 || !ValidChoiceID(choiceID) {
-		return nil, errField
-	}
-	b := append([]byte{}, proposalHash...)
-	b = binary.BigEndian.AppendUint32(b, seq)
-	b = binary.BigEndian.AppendUint32(b, poolSeq)
-	b = append(b, poolHash...)
-	return lp(b, []byte(choiceID)), nil
-}
-
-// BallotLabel is the label a ballot is signed under (suite.Sign).
-const BallotLabel = labelBallot
-
-// RecordTag is H("vettid/vote/1/record" ‖ 0x00 ‖ proposal_id ‖
-// record_secret) (§3.2).
+// RecordTag is H("vettid/vote/1/record\x00" ‖ proposal_id ‖ record_secret)
+// (§3.2).
 func RecordTag(proposalID string, secret []byte) ([]byte, error) {
-	return tag(labelRecord, proposalID, secret)
-}
-
-// IssuedTag is H("vettid/vote/1/issued" ‖ 0x00 ‖ proposal_id ‖
-// record_secret) (§3.2, §5.3).
-func IssuedTag(proposalID string, secret []byte) ([]byte, error) {
-	return tag(labelIssued, proposalID, secret)
-}
-
-func tag(label, proposalID string, secret []byte) ([]byte, error) {
 	if !ValidProposalID(proposalID) || len(secret) != SecretLen {
 		return nil, errField
 	}
-	h := sha256.New()
-	h.Write([]byte(label))
-	h.Write([]byte(proposalID))
-	h.Write(secret)
-	return h.Sum(nil), nil
+	return sum([]byte(labelRecord), []byte(proposalID), secret), nil
 }
 
-// Ballot is a counted ballot as the ballot box keeps and publishes it
-// (§7.2, §8.2).
-type Ballot struct {
-	VK         []byte
-	CertPrefix []byte
-	CertSig    []byte
-	Seq        uint32
-	PoolSeq    uint32
-	PoolHash   []byte
-	ChoiceID   string
-	BallotSig  []byte
-	Day        string // YYYY-MM-DD, UTC
-}
-
-var dayRe = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}$`)
-
-// Leaf is the ballot's Merkle leaf: lp(vk) ‖ lp(cert_prefix) ‖
-// lp(cert_sig) ‖ u32(seq) ‖ u32(pool_seq) ‖ pool_hash ‖ lp(choice_id) ‖
-// lp(ballot_sig) ‖ lp(day) (§8.2).
-func (b *Ballot) Leaf() ([]byte, error) {
-	if len(b.VK) != VKLen || len(b.PoolHash) != HashLen || !ValidChoiceID(b.ChoiceID) || !dayRe.MatchString(b.Day) ||
-		len(b.CertPrefix) > 0xffff || len(b.CertSig) > 0xffff || len(b.BallotSig) > 0xffff {
+// BallotMsg is proposal_hash ‖ record_tag ‖ lp(choice_id), signed under
+// LabelBallot with the voting key (§5).
+func BallotMsg(proposalHash, recordTag []byte, choiceID string) ([]byte, error) {
+	if len(proposalHash) != HashLen || len(recordTag) != HashLen || !ValidChoiceID(choiceID) {
 		return nil, errField
 	}
-	out := lp(nil, b.VK)
-	out = lp(out, b.CertPrefix)
-	out = lp(out, b.CertSig)
-	out = binary.BigEndian.AppendUint32(out, b.Seq)
-	out = binary.BigEndian.AppendUint32(out, b.PoolSeq)
-	out = append(out, b.PoolHash...)
+	b := append(append([]byte{}, proposalHash...), recordTag...)
+	return lp(b, []byte(choiceID)), nil
+}
+
+// Ballot is a ballot as the service keeps and publishes it (§5, §7).
+type Ballot struct {
+	RecordTag []byte
+	VK        []byte
+	ChoiceID  string
+	BallotSig []byte
+}
+
+// Leaf is ballot_leaf, record_tag ‖ lp(vk) ‖ lp(choice_id) ‖
+// lp(ballot_sig) (§5, §8.2): the row leaf of a ballot, and what the
+// credential signature and the receipt cover.
+func (b *Ballot) Leaf() ([]byte, error) {
+	if len(b.RecordTag) != HashLen || len(b.VK) != VKLen || !ValidChoiceID(b.ChoiceID) || len(b.BallotSig) != SigLen {
+		return nil, errField
+	}
+	out := append([]byte{}, b.RecordTag...)
+	out = lp(out, b.VK)
 	out = lp(out, []byte(b.ChoiceID))
-	out = lp(out, b.BallotSig)
-	return lp(out, []byte(b.Day)), nil
+	return lp(out, b.BallotSig), nil
+}
+
+// Msg is the ballot's signed message (BallotMsg) under proposalHash.
+func (b *Ballot) Msg(proposalHash []byte) ([]byte, error) {
+	return BallotMsg(proposalHash, b.RecordTag, b.ChoiceID)
+}
+
+// EmptyRowLeaf is the row leaf of a tag that didn't vote: the tag alone
+// (§8.2).
+func EmptyRowLeaf(recordTag []byte) ([]byte, error) {
+	if len(recordTag) != HashLen {
+		return nil, errField
+	}
+	return append([]byte{}, recordTag...), nil
+}
+
+// CastMsg is proposal_hash ‖ H(ballot_leaf), signed under LabelCast with
+// the member's credential key (§5).
+func CastMsg(proposalHash, ballotLeaf []byte) ([]byte, error) {
+	if len(proposalHash) != HashLen {
+		return nil, errField
+	}
+	return append(append([]byte{}, proposalHash...), sum(ballotLeaf)...), nil
+}
+
+// ReceiptMsg is proposal_hash ‖ H(ballot_leaf) ‖ u64(msg_ms), signed under
+// LabelReceipt with the service identity key (§5).
+func ReceiptMsg(proposalHash, ballotLeaf []byte, msgMS uint64) ([]byte, error) {
+	b, err := CastMsg(proposalHash, ballotLeaf)
+	if err != nil {
+		return nil, err
+	}
+	return binary.BigEndian.AppendUint64(b, msgMS), nil
+}
+
+// StatusMsg is lp(proposal_id) ‖ lp(record_tag) ‖ H(ballot_leaf or empty),
+// signed under LabelStatus (§4.2). recordTag and ballotLeaf may be empty.
+func StatusMsg(proposalID string, recordTag, ballotLeaf []byte) ([]byte, error) {
+	if !ValidProposalID(proposalID) || (len(recordTag) != 0 && len(recordTag) != HashLen) {
+		return nil, errField
+	}
+	b := lp(nil, []byte(proposalID))
+	b = lp(b, recordTag)
+	return append(b, sum(ballotLeaf)...), nil
+}
+
+// RefusalMsg is lp(proposal_id) ‖ lp(connection) ‖ lp(record_tag) ‖
+// lp(type) ‖ lp(code) ‖ u64(msg_ms) ‖ request_hash, signed under
+// LabelRefusal (§4.2). connection is H(the connection's peer identity
+// key); recordTag may be empty.
+func RefusalMsg(proposalID string, connection, recordTag []byte, typ, code string, msgMS uint64, requestHash []byte) ([]byte, error) {
+	if !ValidProposalID(proposalID) || len(connection) != HashLen || (len(recordTag) != 0 && len(recordTag) != HashLen) ||
+		typ == "" || len(typ) > 64 || code == "" || len(code) > 64 || len(requestHash) != HashLen {
+		return nil, errField
+	}
+	b := lp(nil, []byte(proposalID))
+	b = lp(b, connection)
+	b = lp(b, recordTag)
+	b = lp(b, []byte(typ))
+	b = lp(b, []byte(code))
+	b = binary.BigEndian.AppendUint64(b, msgMS)
+	return append(b, requestHash...), nil
+}
+
+// ProposalSigMsg is H(proposal_bytes), signed under LabelProposal (§3.1).
+func ProposalSigMsg(doc []byte) []byte { return sum(doc) }
+
+// DocSigMsg is proposal_hash ‖ H(document bytes), the signed message of an
+// extension or the results (§7, §8.5).
+func DocSigMsg(proposalHash, doc []byte) ([]byte, error) {
+	if len(proposalHash) != HashLen {
+		return nil, errField
+	}
+	return append(append([]byte{}, proposalHash...), sum(doc)...), nil
 }
