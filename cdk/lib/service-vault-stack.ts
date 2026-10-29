@@ -25,8 +25,8 @@ export const TABLE_ACTIONS = ['GetItem', 'PutItem', 'UpdateItem', 'DeleteItem', 
 
 /**
  * The calls the daemon makes on the ballots table: a conditional put, a
- * get and a query. Nothing can change or delete a ballot once written
- * (BALLOT-PROTOCOL §6 "Durability").
+ * get and a query: no update and no delete (BALLOT-PROTOCOL §6
+ * "Durability"). IAM can't require the put's condition; the daemon sets it.
  */
 export const BALLOTS_TABLE_ACTIONS = ['GetItem', 'PutItem', 'Query'] as const;
 
@@ -339,7 +339,9 @@ export class ServiceVaultStack extends cdk.Stack {
     // The write-once copy of accepted ballots, kept apart from the main
     // table so that a restore of that table can't lose a ballot or let a
     // second one in. Its items are sealed by the daemon under the record
-    // key, like the main table's records.
+    // key, like the main table's records. The role allows no update or
+    // delete; a put that would replace an item is refused by the daemon's
+    // condition, not by IAM, and point-in-time recovery keeps the past.
     this.ballotsTable = new dynamodb.Table(this, 'BallotsTable', {
       tableName: `${prefix}-ballots`,
       partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },

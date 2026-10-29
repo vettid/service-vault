@@ -15,8 +15,11 @@ import (
 // Ballots is the write-once copy of accepted ballots (ballot.Copy;
 // BALLOT-PROTOCOL §6 "Durability"): a table of its own, pk the
 // proposal_id, sk the tag in hex, with the ballot record in "data". The
-// task may only put (conditionally), get and query it; nothing can change
-// or delete an item, and a restore of the main table doesn't touch it.
+// task's role may only put, get and query it, so it can't update or
+// delete an item; that a put never replaces one is this code's condition
+// (attribute_not_exists), which IAM can't require, and point-in-time
+// recovery keeps what was there. A restore of the main table doesn't
+// touch it.
 type Ballots struct {
 	Client *dynamodb.Client
 	Name   string
