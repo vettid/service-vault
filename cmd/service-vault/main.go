@@ -15,6 +15,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
@@ -44,6 +45,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/suite"
 
+	"github.com/vettid/service-vault/internal/anchor"
 	"github.com/vettid/service-vault/internal/api"
 	"github.com/vettid/service-vault/internal/approval"
 	"github.com/vettid/service-vault/internal/ballot"
@@ -102,7 +104,10 @@ type Config struct {
 	Table    string
 	// BallotsTable is the write-once copy of accepted ballots
 	// (BALLOT-PROTOCOL §6); without it, vote requests are unsupported.
-	BallotsTable  string
+	BallotsTable string
+	// Sigstore is the Sigstore instance votes are anchored in: staging or
+	// production (BALLOT-PROTOCOL §3.3).
+	Sigstore      string
 	KMSKeyID      string
 	Listen        string
 	WebhookURL    string
@@ -133,7 +138,7 @@ const (
 // configFromEnv reads and checks the SV_* variables.
 func configFromEnv(getenv func(string) string) (*Config, error) {
 	c := &Config{
-		RelayURL: strings.TrimRight(getenv("SV_RELAY_URL"), "/"), Table: getenv("SV_TABLE"), BallotsTable: getenv("SV_BALLOTS_TABLE"), KMSKeyID: getenv("SV_KMS_KEY_ID"),
+		RelayURL: strings.TrimRight(getenv("SV_RELAY_URL"), "/"), Table: getenv("SV_TABLE"), BallotsTable: getenv("SV_BALLOTS_TABLE"), Sigstore: getenv("SV_SIGSTORE"), KMSKeyID: getenv("SV_KMS_KEY_ID"),
 		Listen: getenv("SV_LISTEN"), WebhookURL: getenv("SV_WEBHOOK_URL"), ServiceName: getenv("SV_SERVICE_NAME"),
 		TLSName: getenv("SV_TLS_NAME"), TLSPinParam: getenv("SV_TLS_PIN_PARAM"), WebhookSecret: []byte(getenv("SV_WEBHOOK_SECRET")),
 	}
@@ -148,6 +153,9 @@ func configFromEnv(getenv func(string) string) (*Config, error) {
 	}
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("missing %s", strings.Join(missing, ", "))
+	}
+	if c.BallotsTable != "" && c.Sigstore != anchor.Staging && c.Sigstore != anchor.Production {
+		return nil, errors.New("SV_SIGSTORE must be staging or production when SV_BALLOTS_TABLE is set")
 	}
 	if !strings.HasPrefix(c.WebhookURL, "https://") {
 		return nil, errors.New("SV_WEBHOOK_URL must be https")
@@ -353,9 +361,28 @@ func serve(args []string) error {
 	}
 	svc.Peer = p
 	var proposals api.Proposals
+	var anchorInfo *api.AnchorKey
 	if ballots != nil {
 		// Publishing (BALLOT-PROTOCOL §3.3) comes with the anchor key; until
 		// then, creating a proposal answers publication_not_configured.
+		ak, err := keystore.LoadOrCreate(ctx, &keystore.AWSKMS{Client: ac.kms}, cfg.KMSKeyID, tbl.Blobs(), keystore.AnchorKeyName, keystore.NewAnchorKey)
+		if err != nil {
+			return fmt.Errorf("anchor key: %w", err)
+		}
+		akPriv, err := ak.Private()
+		if err != nil {
+			return err
+		}
+		spki, err := x509.MarshalPKIXPublicKey(&akPriv.PublicKey)
+		if err != nil {
+			return err
+		}
+		h := sha256.Sum256(spki)
+		cert, err := signIK(ballot.LabelAnchorKey, h[:])
+		if err != nil {
+			return err
+		}
+		anchorInfo = &api.AnchorKey{Key: spki, Cert: cert, IK: keys.IKPublic(), Sigstore: cfg.Sigstore}
 		mgr := &ballot.Manager{Store: ballots, Sign: signIK, IK: keys.IKPublic(), Roster: p, Sender: p,
 			Catcher: p, NewID: envelope.NewULID, Now: time.Now, Log: log}
 		if pc.AfterRestore != nil {
@@ -373,7 +400,7 @@ func serve(args []string) error {
 	srv := &http.Server{
 		Addr: cfg.Listen,
 		Handler: (&api.Server{Keys: cfg.APIKeyHashes, Email: email, Invites: svc.Invites(), SignIns: svc.SignIns(),
-			Approvals: approvals, Proposals: proposals, Log: log}).Handler(),
+			Approvals: approvals, Proposals: proposals, AnchorKey: anchorInfo, Log: log}).Handler(),
 		TLSConfig:         tlsid.ServerConfig(cert),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,

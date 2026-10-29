@@ -364,6 +364,7 @@ which is retained and never deleted with the stack.
 | `SV_RELAY_URL` | env | Relay base URL |
 | `SV_TABLE` | env | DynamoDB table name |
 | `SV_BALLOTS_TABLE` | env | The write-once DynamoDB table of accepted ballots (BALLOT-PROTOCOL §6); without it, members' vote requests are answered `unsupported_type` |
+| `SV_SIGSTORE` | env | `staging` or `production`: the Sigstore instance votes are anchored in (BALLOT-PROTOCOL §3.3); required with `SV_BALLOTS_TABLE`. The CDK sets `production` for the `prod` stack and `staging` otherwise |
 | `SV_KMS_KEY_ID` | env | KMS key ARN for the keystore |
 | `SV_LISTEN` | env | API listen address (`:8080`) |
 | `SV_WEBHOOK_URL` | env | Webhook destination |
@@ -413,6 +414,7 @@ billed.
 | `POST /v1/proposals/{id}/extend` `{closes_at, outage: {from, to, source}}` | The extension (BALLOT-PROTOCOL §10.2), published and sent to each member: for a relay outage of over an hour within the window, by its length rounded up to the hour, 24 h in all at most. `invalid_extension` (400), `too_late` (409) once the close has passed |
 | `POST /v1/proposals/{id}/close` | `{proposal_id, results_hash, tally, counts}`: counts the vote and publishes the results (BALLOT-PROTOCOL §7), or reports them if already published. `not_closed` (409) before `closes_at` + 1 minute; `collecting` (503) until the relay's messages from before then are all handled: retry |
 | `GET /v1/proposals/{id}/results` | `{results, results_sig, rows, bundle}` once published |
+| `GET /v1/anchor-key` | `{anchor_key, anchor_cert, service_ik, sigstore}`: the service's anchor key (DER SubjectPublicKeyInfo), certified by its identity key, for registering the service on votes.vettid.org (BALLOT-PROTOCOL §3.3) |
 | `GET /health` | `{status: "ok"}` (no key) |
 
 **Webhooks** (signed as `sdk/go/webhook` verifies): `connection.pending`

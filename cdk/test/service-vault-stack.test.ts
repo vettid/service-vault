@@ -148,9 +148,10 @@ describe('compute', () => {
     const c = container();
     const env = Object.fromEntries(c.Environment.map((e: any) => [e.Name, e.Value]));
     expect(Object.keys(env).sort()).toEqual(
-      ['AWS_REGION', 'SV_BALLOTS_TABLE', 'SV_KMS_KEY_ID', 'SV_LISTEN', 'SV_RELAY_URL', 'SV_SERVICE_NAME', 'SV_TABLE', 'SV_TLS_NAME', 'SV_TLS_PIN_PARAM', 'SV_WEBHOOK_URL'],
+      ['AWS_REGION', 'SV_BALLOTS_TABLE', 'SV_KMS_KEY_ID', 'SV_LISTEN', 'SV_RELAY_URL', 'SV_SERVICE_NAME', 'SV_SIGSTORE', 'SV_TABLE', 'SV_TLS_NAME', 'SV_TLS_PIN_PARAM', 'SV_WEBHOOK_URL'],
     );
     expect(env.SV_RELAY_URL).toBe('https://relay.vettid.org');
+    expect(env.SV_SIGSTORE).toBe('staging'); // the test stack's envName is not prod
     expect(env.SV_LISTEN).toBe(`:${API_PORT}`);
     expect(env.SV_SERVICE_NAME).toBe('VettID Member Service');
     expect(env.SV_WEBHOOK_URL).toBe(base.webhookUrl);
