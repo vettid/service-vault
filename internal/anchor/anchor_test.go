@@ -26,6 +26,7 @@ type fakeSigstore struct {
 	entered  []byte // the canonical body it last entered
 	tamper   bool   // enter another digest than the one sent
 	conflict bool   // answer 409, as for an entry already there
+	location string // the 409's Location, when set
 }
 
 func (f *fakeSigstore) handler(t *testing.T) http.Handler {
@@ -51,7 +52,11 @@ func (f *fakeSigstore) handler(t *testing.T) http.Handler {
 		}
 		f.entered, _ = json.Marshal(pe)
 		if f.conflict {
-			w.Header().Set("Location", "/api/v1/log/entries/24296fb24b8ad77a")
+			loc := "/api/v1/log/entries/24296fb24b8ad77a"
+			if f.location != "" {
+				loc = f.location
+			}
+			w.Header().Set("Location", loc)
 			w.WriteHeader(409)
 			return
 		}
@@ -132,6 +137,13 @@ func TestAnchorRetryAndTamper(t *testing.T) {
 	if _, err := a.Anchor(context.Background(), []byte("doc")); err != nil {
 		t.Fatalf("an entry already there: %v", err)
 	}
+	for _, loc := range []string{"https://elsewhere.example/api/v1/log/entries/x", "//elsewhere.example/x"} {
+		f.location = loc
+		if _, err := a.Anchor(context.Background(), []byte("doc")); err == nil {
+			t.Fatalf("followed a 409 to %s", loc)
+		}
+	}
+	f.location = ""
 	f.conflict, f.tamper = false, true
 	if _, err := a.Anchor(context.Background(), []byte("doc")); err == nil {
 		t.Fatal("accepted an entry of another digest")
