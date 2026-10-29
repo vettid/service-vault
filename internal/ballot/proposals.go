@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/vettid/service-vault/vote"
 	"log/slog"
 	"sort"
 	"time"
@@ -56,15 +57,15 @@ type Manager struct {
 // ProposalInput is what the application asks for (§3.1); the rest of the
 // proposal is the service's.
 type ProposalInput struct {
-	Title          string   `json:"title"`
-	Text           string   `json:"text"`
-	Choices        []Choice `json:"choices"`
-	Quorum         Quorum   `json:"quorum"`
-	Binding        bool     `json:"binding"`
-	RemovedMayVote bool     `json:"removed_may_vote"`
-	OpensAt        int64    `json:"opens_at"`
-	ClosesAt       int64    `json:"closes_at"`
-	OutageRule     string   `json:"outage_rule"`
+	Title          string        `json:"title"`
+	Text           string        `json:"text"`
+	Choices        []vote.Choice `json:"choices"`
+	Quorum         vote.Quorum   `json:"quorum"`
+	Binding        bool          `json:"binding"`
+	RemovedMayVote bool          `json:"removed_may_vote"`
+	OpensAt        int64         `json:"opens_at"`
+	ClosesAt       int64         `json:"closes_at"`
+	OutageRule     string        `json:"outage_rule"`
 }
 
 // Created is a new proposal.
@@ -93,20 +94,20 @@ func (m *Manager) Create(ctx context.Context, in ProposalInput) (*Created, error
 	if err != nil {
 		return nil, err
 	}
-	choices := append([]Choice{}, in.Choices...)
-	if !(&Proposal{Choices: choices}).HasChoice(AbstainID) {
-		choices = append(choices, Choice{ID: AbstainID, Label: "Abstain"})
+	choices := append([]vote.Choice{}, in.Choices...)
+	if !(&vote.Proposal{Choices: choices}).HasChoice(vote.AbstainID) {
+		choices = append(choices, vote.Choice{ID: vote.AbstainID, Label: "Abstain"})
 	}
 	conns := m.Roster.Eligible()
 	sort.Strings(conns)
 	members := map[string]Member{}
 	tags := make([][]byte, 0, len(conns))
 	for _, c := range conns {
-		secret := make([]byte, SecretLen)
+		secret := make([]byte, vote.SecretLen)
 		if _, err := rand.Read(secret); err != nil {
 			return nil, err
 		}
-		tag, err := RecordTag(id, secret)
+		tag, err := vote.RecordTag(id, secret)
 		if err != nil {
 			return nil, err
 		}
@@ -114,15 +115,15 @@ func (m *Manager) Create(ctx context.Context, in ProposalInput) (*Created, error
 		tags = append(tags, tag)
 	}
 	sortTags(tags)
-	p := &Proposal{V: 1, ProposalID: id, Service: m.IK, Title: in.Title, Text: in.Text, Choices: choices,
+	p := &vote.Proposal{V: 1, ProposalID: id, Service: m.IK, Title: in.Title, Text: in.Text, Choices: choices,
 		Quorum: in.Quorum, Binding: in.Binding, RemovedMayVote: in.RemovedMayVote,
 		RecordAt: now.Unix(), OpensAt: in.OpensAt, ClosesAt: in.ClosesAt,
-		Eligible: int64(len(tags)), RecordRoot: Root(tags), OutageRule: in.OutageRule}
-	doc, err := EncodeProposal(p)
+		Eligible: int64(len(tags)), RecordRoot: vote.Root(tags), OutageRule: in.OutageRule}
+	doc, err := vote.EncodeProposal(p)
 	if err != nil {
 		return nil, &ErrInput{err}
 	}
-	sig, err := m.Sign(LabelProposal, ProposalSigMsg(doc))
+	sig, err := m.Sign(vote.LabelProposal, vote.ProposalSigMsg(doc))
 	if err != nil {
 		return nil, err
 	}

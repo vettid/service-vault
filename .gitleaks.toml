@@ -5,8 +5,9 @@
 useDefault = true
 
 # The ballot protocol's test vectors (BALLOT-PROTOCOL §11): every value
-# is derived from a fixed, public phrase (internal/ballot/vectors_test.go),
-# so a field such as record_secret is not a secret. Only this file.
+# is derived from a fixed, public phrase (vote/vectors_test.go),
+# so a field such as record_secret is not a secret. Only this file, at
+# its path and the path it had before (internal/ballot), which history keeps.
 [[allowlists]]
 description = "ballot protocol test vectors from fixed public inputs"
-paths = ['''^internal/ballot/testdata/vectors\.json$''']
+paths = ['''^vote/testdata/vectors\.json$''', '''^internal/ballot/testdata/vectors\.json$''']

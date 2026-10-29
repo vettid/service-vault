@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/vettid/service-vault/internal/ballot"
+	"github.com/vettid/service-vault/vote"
 )
 
 type fakeProposals struct {
@@ -47,14 +48,14 @@ func (f *fakeProposals) Results(_ context.Context, id string) (*ballot.Published
 	return &ballot.PublishedResults{Results: []byte(`{"v":1}`), Sig: []byte{1}, Rows: []byte(`{"rows":[]}`), Bundle: []byte(`{}`)}, nil
 }
 
-func (f *fakeProposals) Extend(_ context.Context, id string, in ballot.ExtensionInput) (*ballot.Extension, error) {
+func (f *fakeProposals) Extend(_ context.Context, id string, in ballot.ExtensionInput) (*vote.Extension, error) {
 	switch id {
 	case "late":
 		return nil, ballot.ErrTooLate
 	case "bad":
 		return nil, &ballot.ErrInput{Err: errors.New("short")}
 	}
-	return &ballot.Extension{V: 1, ProposalID: id, N: 1, ClosesAt: in.ClosesAt}, nil
+	return &vote.Extension{V: 1, ProposalID: id, N: 1, ClosesAt: in.ClosesAt}, nil
 }
 
 func TestProposalRoutes(t *testing.T) {

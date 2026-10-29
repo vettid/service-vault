@@ -31,7 +31,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vettid/service-vault/internal/ballot"
+	"github.com/vettid/service-vault/vote"
 )
 
 // Sigstore instances.
@@ -301,7 +301,7 @@ func (a *Anchorer) check(e *logEntry, digest, sig []byte) (*tlogEntry, error) {
 			return nil, errors.New("anchor: bad proof hash")
 		}
 	}
-	if !ballot.VerifyProof(root, canon, int(ip.LogIndex), int(ip.TreeSize), hashes) {
+	if !vote.VerifyProof(root, canon, int(ip.LogIndex), int(ip.TreeSize), hashes) {
 		return nil, errors.New("anchor: the inclusion proof doesn't reach the root")
 	}
 	id, err := hex.DecodeString(e.LogID)

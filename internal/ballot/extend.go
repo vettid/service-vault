@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/vettid/service-vault/vote"
 )
 
 // Extensions (BALLOT-PROTOCOL §10.2): a relay outage of more than an hour
@@ -23,8 +24,8 @@ const MinOutage = 3600
 
 // ExtensionInput is what the application asks for.
 type ExtensionInput struct {
-	ClosesAt int64  `json:"closes_at"`
-	Outage   Outage `json:"outage"`
+	ClosesAt int64       `json:"closes_at"`
+	Outage   vote.Outage `json:"outage"`
 }
 
 // ErrTooLate is an extension asked for once the close it would extend has
@@ -33,7 +34,7 @@ var ErrTooLate = errors.New("ballot: the close to extend has passed")
 
 // Extend publishes an extension and sends vote.extended to every eligible
 // member.
-func (m *Manager) Extend(ctx context.Context, id string, in ExtensionInput) (*Extension, error) {
+func (m *Manager) Extend(ctx context.Context, id string, in ExtensionInput) (*vote.Extension, error) {
 	ep, ok := m.Publisher.(ExtensionPublisher)
 	if m.Publisher == nil || !ok {
 		return nil, ErrNoPublisher
@@ -62,16 +63,16 @@ func (m *Manager) Extend(ctx context.Context, id string, in ExtensionInput) (*Ex
 		return nil, &ErrInput{errors.New("ballot: the outage isn't within the window")}
 	case in.ClosesAt <= o.ClosesAt || in.ClosesAt-o.ClosesAt > allowed:
 		return nil, &ErrInput{errors.New("ballot: the new close isn't the outage's length, rounded up to the hour")}
-	case in.ClosesAt-p.ClosesAt > MaxExtension:
+	case in.ClosesAt-p.ClosesAt > vote.MaxExtension:
 		return nil, &ErrInput{errors.New("ballot: extensions over 24 h")}
 	}
-	e := &Extension{V: 1, ProposalID: id, N: int64(len(o.Extensions) + 1), ClosesAt: in.ClosesAt, Outage: out}
-	doc, err := EncodeExtension(e)
+	e := &vote.Extension{V: 1, ProposalID: id, N: int64(len(o.Extensions) + 1), ClosesAt: in.ClosesAt, Outage: out}
+	doc, err := vote.EncodeExtension(e)
 	if err != nil {
 		return nil, &ErrInput{err}
 	}
-	msg, _ := DocSigMsg(sum(o.Doc), doc)
-	sig, err := m.Sign(LabelExtended, msg)
+	msg, _ := vote.DocSigMsg(sum(o.Doc), doc)
+	sig, err := m.Sign(vote.LabelExtended, msg)
 	if err != nil {
 		return nil, err
 	}
@@ -79,7 +80,7 @@ func (m *Manager) Extend(ctx context.Context, id string, in ExtensionInput) (*Ex
 	if err != nil {
 		return nil, fmt.Errorf("ballot: publish extension %d of %s: %w", e.N, id, err)
 	}
-	o.Extensions = append(o.Extensions, Signed{Doc: doc, Sig: sig})
+	o.Extensions = append(o.Extensions, vote.Signed{Doc: doc, Sig: sig})
 	o.ClosesAt = e.ClosesAt
 	if err := m.Store.SaveProposal(ctx, o, false); err != nil {
 		return nil, err

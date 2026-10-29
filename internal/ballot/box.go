@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"github.com/vettid/service-vault/vote"
 	"strings"
 
 	"github.com/vettid/service-vault/internal/peer"
@@ -56,12 +57,12 @@ type OpenProposal struct {
 	// Members are the eligible connections, by connection id.
 	Members map[string]Member `json:"members"`
 	// Extensions are the published extensions, in order (§10.2).
-	Extensions []Signed `json:"extensions,omitempty"`
+	Extensions []vote.Signed `json:"extensions,omitempty"`
 	// Published is set once collection ended and the results are being
 	// published (§7): a cast handled after it is late.
 	Published bool `json:"published"`
 
-	p *Proposal
+	p *vote.Proposal
 }
 
 // Tags returns every eligible tag, sorted.
@@ -78,7 +79,7 @@ func (o *OpenProposal) Tags() [][]byte {
 func (o *OpenProposal) proofOf(tags [][]byte, tag []byte) (recordProof, error) {
 	for i, t := range tags {
 		if bytes.Equal(t, tag) {
-			path, err := Proof(tags, i)
+			path, err := vote.Proof(tags, i)
 			return recordProof{Index: i, TreeSize: int64(len(tags)), Path: nonNil(path)}, err
 		}
 	}
@@ -86,9 +87,9 @@ func (o *OpenProposal) proofOf(tags [][]byte, tag []byte) (recordProof, error) {
 }
 
 // Parsed returns the proposal document.
-func (o *OpenProposal) Parsed() (*Proposal, error) {
+func (o *OpenProposal) Parsed() (*vote.Proposal, error) {
 	if o.p == nil {
-		p, err := ParseProposal(o.Doc)
+		p, err := vote.ParseProposal(o.Doc)
 		if err != nil {
 			return nil, err
 		}
@@ -101,12 +102,12 @@ func (o *OpenProposal) Parsed() (*Proposal, error) {
 // ballot, the member's credential signature and key, the relay's time and
 // the receipt, and the connection, for the organisation's record.
 type BallotRecord struct {
-	Ballot        Ballot `json:"ballot"`
-	ConnectionID  string `json:"connection_id"`
-	CredentialKey []byte `json:"credential_key"`
-	CastSig       []byte `json:"cast_sig"`
-	MsgMS         uint64 `json:"msg_ms"`
-	ReceiptSig    []byte `json:"receipt_sig"`
+	Ballot        vote.Ballot `json:"ballot"`
+	ConnectionID  string      `json:"connection_id"`
+	CredentialKey []byte      `json:"credential_key"`
+	CastSig       []byte      `json:"cast_sig"`
+	MsgMS         uint64      `json:"msg_ms"`
+	ReceiptSig    []byte      `json:"receipt_sig"`
 }
 
 // BoxStore is the box's storage.
@@ -167,7 +168,7 @@ func decodeB64(s string, n int) ([]byte, bool) {
 func (b *Box) cast(ctx context.Context, r *peer.VoteRequest) (peer.VoteAnswer, error) {
 	var body castBody
 	reqHash := sum(r.Body) // until the ballot's leaf is known
-	if json.Unmarshal(r.Body, &body) != nil || !ValidProposalID(body.ProposalID) {
+	if json.Unmarshal(r.Body, &body) != nil || !vote.ValidProposalID(body.ProposalID) {
 		return b.refuse(nil, r, nil, CodeBadBallot, reqHash)
 	}
 	o, err := b.Store.OpenProposal(ctx, body.ProposalID)
@@ -182,11 +183,11 @@ func (b *Box) cast(ctx context.Context, r *peer.VoteRequest) (peer.VoteAnswer, e
 		return peer.VoteAnswer{}, err
 	}
 	m, eligible := o.Members[r.ConnectionID]
-	tag, ok1 := decodeB64(body.RecordTag, HashLen)
-	vk, ok2 := decodeB64(body.VK, VKLen)
-	bsig, ok3 := decodeB64(body.BallotSig, SigLen)
-	csig, ok4 := decodeB64(body.CastSig, SigLen)
-	bal := Ballot{RecordTag: tag, VK: vk, ChoiceID: body.ChoiceID, BallotSig: bsig}
+	tag, ok1 := decodeB64(body.RecordTag, vote.HashLen)
+	vk, ok2 := decodeB64(body.VK, vote.VKLen)
+	bsig, ok3 := decodeB64(body.BallotSig, vote.SigLen)
+	csig, ok4 := decodeB64(body.CastSig, vote.SigLen)
+	bal := vote.Ballot{RecordTag: tag, VK: vk, ChoiceID: body.ChoiceID, BallotSig: bsig}
 	leaf, lerr := bal.Leaf()
 	if lerr == nil {
 		reqHash = sum(leaf)
@@ -234,20 +235,20 @@ func (b *Box) cast(ctx context.Context, r *peer.VoteRequest) (peer.VoteAnswer, e
 	// here, and it is kept with the ballot.
 	cred := r.CredentialKey
 	if len(cred) == 0 {
-		k, ok := decodeB64(body.CredentialKey, VKLen)
+		k, ok := decodeB64(body.CredentialKey, vote.VKLen)
 		if !ok {
 			return b.refuse(o, r, m.Tag, CodeBadBallot, reqHash)
 		}
 		cred = k
 	}
 	msg, _ := bal.Msg(sum(o.Doc))
-	cmsg, _ := CastMsg(sum(o.Doc), leaf)
-	if !p.HasChoice(bal.ChoiceID) || Verify(vk, LabelBallot, msg, bsig) != nil || Verify(cred, LabelCast, cmsg, csig) != nil {
+	cmsg, _ := vote.CastMsg(sum(o.Doc), leaf)
+	if !p.HasChoice(bal.ChoiceID) || vote.Verify(vk, vote.LabelBallot, msg, bsig) != nil || vote.Verify(cred, vote.LabelCast, cmsg, csig) != nil {
 		return b.refuse(o, r, m.Tag, CodeBadBallot, reqHash)
 	}
 	// 5. One per tag, then 6. the receipt.
-	rmsg, _ := ReceiptMsg(sum(o.Doc), leaf, r.MsgMS)
-	rsig, err := b.Sign(LabelReceipt, rmsg)
+	rmsg, _ := vote.ReceiptMsg(sum(o.Doc), leaf, r.MsgMS)
+	rsig, err := b.Sign(vote.LabelReceipt, rmsg)
 	if err != nil {
 		return peer.VoteAnswer{}, err
 	}
@@ -262,7 +263,7 @@ func (b *Box) cast(ctx context.Context, r *peer.VoteRequest) (peer.VoteAnswer, e
 	return b.receiptAnswer(p.ProposalID, got)
 }
 
-func sameBallot(a, b *Ballot) bool {
+func sameBallot(a, b *vote.Ballot) bool {
 	return bytes.Equal(a.RecordTag, b.RecordTag) && bytes.Equal(a.VK, b.VK) && a.ChoiceID == b.ChoiceID && bytes.Equal(a.BallotSig, b.BallotSig)
 }
 
@@ -272,7 +273,7 @@ type rowBallotJSON struct {
 	BallotSig []byte `json:"ballot_sig"`
 }
 
-func toRowBallot(b *Ballot) *rowBallotJSON {
+func toRowBallot(b *vote.Ballot) *rowBallotJSON {
 	return &rowBallotJSON{VK: b.VK, ChoiceID: b.ChoiceID, BallotSig: b.BallotSig}
 }
 
@@ -316,16 +317,16 @@ func (b *Box) refusal(o *OpenProposal, r *peer.VoteRequest, tag []byte, code str
 		id = proposalID[0]
 	}
 	conn := sha256.Sum256(r.PeerIK)
-	if !ValidProposalID(id) {
+	if !vote.ValidProposalID(id) {
 		// A request naming no valid proposal: nothing to bind the refusal
 		// to, so it goes unsigned (§4.2: the vault treats it as no answer).
 		return &refusalBody{MsgMS: r.MsgMS, Connection: conn[:], RecordTag: tag}, nil
 	}
-	msg, err := RefusalMsg(id, conn[:], tag, r.Type, code, r.MsgMS, reqHash)
+	msg, err := vote.RefusalMsg(id, conn[:], tag, r.Type, code, r.MsgMS, reqHash)
 	if err != nil {
 		return nil, err
 	}
-	sig, err := b.Sign(LabelRefusal, msg)
+	sig, err := b.Sign(vote.LabelRefusal, msg)
 	if err != nil {
 		return nil, err
 	}
@@ -372,7 +373,7 @@ func (b *Box) status(ctx context.Context, r *peer.VoteRequest) (peer.VoteAnswer,
 	var body struct {
 		ProposalID string `json:"proposal_id"`
 	}
-	if json.Unmarshal(r.Body, &body) != nil || !ValidProposalID(body.ProposalID) {
+	if json.Unmarshal(r.Body, &body) != nil || !vote.ValidProposalID(body.ProposalID) {
 		return b.refuse(nil, r, nil, CodeUnknownProposal, sum(r.Body))
 	}
 	reqHash := sum([]byte(body.ProposalID))
@@ -408,11 +409,11 @@ func (b *Box) status(ctx context.Context, r *peer.VoteRequest) (peer.VoteAnswer,
 		}
 		out.Ballot, out.MsgMS, out.ReceiptSig = toRowBallot(&rec.Ballot), rec.MsgMS, rec.ReceiptSig
 	}
-	smsg, err := StatusMsg(p.ProposalID, m.Tag, leaf)
+	smsg, err := vote.StatusMsg(p.ProposalID, m.Tag, leaf)
 	if err != nil {
 		return peer.VoteAnswer{}, err
 	}
-	if out.StatusSig, err = b.Sign(LabelStatus, smsg); err != nil {
+	if out.StatusSig, err = b.Sign(vote.LabelStatus, smsg); err != nil {
 		return peer.VoteAnswer{}, err
 	}
 	j, err := json.Marshal(out)

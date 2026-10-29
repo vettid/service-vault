@@ -20,6 +20,7 @@ import (
 	"github.com/vettid/service-vault/internal/ballot"
 	"github.com/vettid/service-vault/internal/connect"
 	"github.com/vettid/service-vault/internal/signin"
+	"github.com/vettid/service-vault/vote"
 )
 
 // Invites makes connection invitations, remembering the email the member
@@ -115,7 +116,7 @@ type Proposals interface {
 	// Results returns a vote's results once counted, or nil.
 	Results(ctx context.Context, id string) (*ballot.PublishedResults, error)
 	// Extend publishes an extension for a relay outage.
-	Extend(ctx context.Context, id string, in ballot.ExtensionInput) (*ballot.Extension, error)
+	Extend(ctx context.Context, id string, in ballot.ExtensionInput) (*vote.Extension, error)
 }
 
 // AnchorKey is the service's anchor key, certified by its identity key

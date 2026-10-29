@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vettid/service-vault/internal/ballot"
+	"github.com/vettid/service-vault/vote"
 )
 
 // fakeSigstore is a Rekor that enters whatever it is sent in a one-entry
@@ -31,7 +31,7 @@ type fakeSigstore struct {
 func (f *fakeSigstore) handler(t *testing.T) http.Handler {
 	mux := http.NewServeMux()
 	entry := func() []byte {
-		leaf := ballot.LeafHash(f.entered)
+		leaf := vote.LeafHash(f.entered)
 		out, _ := json.Marshal(map[string]any{"24296fb24b8ad77a": map[string]any{
 			"body": base64.StdEncoding.EncodeToString(f.entered), "integratedTime": 1793520000, "logID": "c0d23d6ad406973f", "logIndex": 7,
 			"verification": map[string]any{"signedEntryTimestamp": []byte("set"),
