@@ -27,7 +27,7 @@ func (p *approvalPeer) Connection(id string) (peer.ConnectionInfo, bool) {
 	return peer.ConnectionInfo{ID: id, State: peer.StateActive}, id == "c1" || id == "c2" || id == "c3"
 }
 
-func (p *approvalPeer) Authenticate(_ context.Context, conn, _ string, _ time.Duration) (string, error) {
+func (p *approvalPeer) Authenticate(_ context.Context, conn, _, _ string, _ time.Duration) (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.n++

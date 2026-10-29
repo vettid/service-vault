@@ -79,8 +79,11 @@ func TestApprovalEndToEnd(t *testing.T) {
 	if resp == nil || resp.Answer != approval.AnswerApproved || resp.Context != ch.Context || resp.RequestID != ch.RequestID {
 		t.Fatalf("audit %+v", p.Entries)
 	}
+	if resp.Purpose != peerwire.PurposeApproval {
+		t.Fatalf("audited purpose %q", resp.Purpose)
+	}
 	if peerwire.VerifyConnAuthResponse(&peerwire.ConnAuthResponse{RequestID: resp.RequestID, Status: peerwire.ConnAuthSigned,
-		Key: ed25519.PublicKey(resp.Key), Sig: resp.Signature}, f.keys.IKPublic(), f.m.IK.Public().(ed25519.PublicKey), ch) != nil {
+		Key: ed25519.PublicKey(resp.Key), Sig: resp.Signature, Purpose: resp.Purpose}, f.keys.IKPublic(), f.m.IK.Public().(ed25519.PublicKey), ch) != nil {
 		t.Fatal("audited signature does not verify")
 	}
 	if logs := f.logs.String(); strings.Contains(logs, "proposal 7") || strings.Contains(logs, hash[:8]) {

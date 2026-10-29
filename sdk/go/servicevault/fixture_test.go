@@ -61,7 +61,7 @@ func (*fakePeer) Connection(id string) (peer.ConnectionInfo, bool) {
 	return peer.ConnectionInfo{ID: id, State: peer.StateActive}, id == "c1"
 }
 
-func (p *fakePeer) Authenticate(context.Context, string, string, time.Duration) (string, error) {
+func (p *fakePeer) Authenticate(context.Context, string, string, string, time.Duration) (string, error) {
 	return "req" + strconv.Itoa(int(p.n.Add(1))), nil
 }
 

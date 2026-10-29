@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 	"log/slog"
 	"slices"
 	"strings"
@@ -28,6 +29,7 @@ type fakePeer struct {
 	sent      []sent
 	cancelled []string
 	fail      map[string]error // Authenticate fails for these connections
+	purposes  []string         // each Authenticate's purpose
 }
 
 type sent struct{ conn, req, ctxt string }
@@ -41,7 +43,8 @@ func (p *fakePeer) Connection(id string) (peer.ConnectionInfo, bool) {
 	return peer.ConnectionInfo{ID: id, State: peer.StateActive}, true
 }
 
-func (p *fakePeer) Authenticate(_ context.Context, conn, ctxt string, _ time.Duration) (string, error) {
+func (p *fakePeer) Authenticate(_ context.Context, conn, ctxt, purpose string, _ time.Duration) (string, error) {
+	p.purposes = append(p.purposes, purpose)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if err := p.fail[conn]; err != nil {
@@ -847,5 +850,21 @@ func TestAuditIDsIncrease(t *testing.T) {
 	}
 	if incrementULID("01ARZ3NDEKTSV4RRFFQ69G5FAZ") != "01ARZ3NDEKTSV4RRFFQ69G5FB0" {
 		t.Fatal("increment")
+	}
+}
+
+// Approval challenges carry the approval purpose (VAULT-MESSAGING 0.65.0
+// §10.4.1), so a member's vault shows its approval screen and counts them
+// in the approval bucket.
+func TestApprovalPurpose(t *testing.T) {
+	f := newFixture(t, 1, "c1", "c2")
+	f.create(ActionVoteOpen, "Open the vote", `{}`)
+	if len(f.p.purposes) != 2 {
+		t.Fatalf("%d challenges", len(f.p.purposes))
+	}
+	for _, p := range f.p.purposes {
+		if p != peerwire.PurposeApproval {
+			t.Fatalf("purpose %q", p)
+		}
 	}
 }

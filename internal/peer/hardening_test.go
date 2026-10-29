@@ -32,7 +32,7 @@ func TestLateAnswerRefused(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
 	cid := f.connect(m, "")
-	if _, err := f.p.Authenticate(context.Background(), cid, "Sign in", time.Minute); err != nil {
+	if _, err := f.p.Authenticate(context.Background(), cid, "Sign in", "", time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	f.pump()

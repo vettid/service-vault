@@ -18,7 +18,7 @@ import (
 func (f *fixture) signIn(m *peertest.Member, cid string) bool {
 	f.t.Helper()
 	before := len(f.ev.of(EventSignInApproved))
-	id, err := f.p.Authenticate(context.Background(), cid, "Sign in — match code 42", 5*time.Minute)
+	id, err := f.p.Authenticate(context.Background(), cid, "Sign in — match code 42", "", 5*time.Minute)
 	if err != nil {
 		f.t.Fatalf("Authenticate: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestRotationConflictSuspends(t *testing.T) {
 	if evs := f.ev.of(EventConnectionSuspended); len(evs) != 1 || evs[0].ConnectionID != cid || evs[0].Reason != SuspendRotationConflict {
 		t.Fatalf("connection.suspended %+v", evs)
 	}
-	if _, err := f.p.Authenticate(context.Background(), cid, "Sign in", time.Minute); err == nil {
+	if _, err := f.p.Authenticate(context.Background(), cid, "Sign in", "", time.Minute); err == nil {
 		t.Fatal("a challenge to a suspended connection")
 	}
 	m.Send(peerwire.TypeProfileUpdate, peerwire.ProfileUpdateBody(5, "Nora", "Ignored", ikOf(m.IK), nil))

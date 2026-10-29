@@ -282,10 +282,13 @@ type outboxEntry struct {
 
 // challenge is a connection.authenticate.challenge we sent (§10.4).
 type challenge struct {
-	ID      string    `json:"id"`
-	ConnID  string    `json:"conn_id"`
-	Nonce   []byte    `json:"nonce"`
-	Context string    `json:"context,omitempty"`
+	ID      string `json:"id"`
+	ConnID  string `json:"conn_id"`
+	Nonce   []byte `json:"nonce"`
+	Context string `json:"context,omitempty"`
+	// Purpose is the challenge's purpose (VAULT-MESSAGING 0.65.0 §10.4),
+	// or "" for none.
+	Purpose string    `json:"purpose,omitempty"`
 	Exp     time.Time `json:"exp"`
 }
 

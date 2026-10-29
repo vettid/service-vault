@@ -24,16 +24,22 @@ var (
 	ErrNotStarted = errors.New("peer: not started")
 	ErrLimit      = errors.New("peer: too many pending challenges")
 	ErrContext    = errors.New("peer: challenge context too long")
+	ErrPurpose    = errors.New("peer: unknown challenge purpose")
 )
 
 // Authenticate sends a connection.authenticate.challenge with context
-// ctxt to an active connection, answerable for ttl (at most
+// ctxt and purpose (peerwire.PurposeSignIn, PurposeApproval or "" for
+// none; VAULT-MESSAGING 0.65.0 §10.4, §10.4.1) to an active connection,
+// answerable for ttl (at most
 // peerwire.ConnAuthChallengeTTL; the inner exp, §10.4). The outcome
 // arrives as an event with the returned request id: signin.approved,
 // signin.denied or signin.expired.
-func (p *Peer) Authenticate(ctx context.Context, connID, ctxt string, ttl time.Duration) (string, error) {
+func (p *Peer) Authenticate(ctx context.Context, connID, ctxt, purpose string, ttl time.Duration) (string, error) {
 	if len(ctxt) > peerwire.ConnAuthMaxContext {
 		return "", ErrContext
+	}
+	if purpose != "" && !peerwire.KnownPurpose(purpose) {
+		return "", ErrPurpose
 	}
 	if ttl <= 0 || ttl > peerwire.ConnAuthChallengeTTL {
 		ttl = peerwire.ConnAuthChallengeTTL
@@ -61,6 +67,7 @@ func (p *Peer) Authenticate(ctx context.Context, connID, ctxt string, ttl time.D
 	if err != nil {
 		return "", err
 	}
+	wc.Purpose = purpose
 	exp := now.Add(ttl).UTC().Truncate(time.Millisecond)
 	if p.sendInnerExp(c, peerwire.TypeConnAuthChallenge, wc.Marshal(), exp, now) == "" {
 		if c.State == StateActive && p.outboxFor(c.ID) >= MaxOutboxPerConn {
@@ -68,7 +75,7 @@ func (p *Peer) Authenticate(ctx context.Context, connID, ctxt string, ttl time.D
 		}
 		return "", ErrNotFound
 	}
-	p.challenges[wc.RequestID] = &challenge{ID: wc.RequestID, ConnID: connID, Nonce: wc.Nonce, Context: ctxt, Exp: exp}
+	p.challenges[wc.RequestID] = &challenge{ID: wc.RequestID, ConnID: connID, Nonce: wc.Nonce, Context: ctxt, Purpose: purpose, Exp: exp}
 	p.markDirty(kindAuth, wc.RequestID)
 	if err := p.flushAndDrain(ctx); err != nil {
 		return "", err
@@ -108,7 +115,7 @@ func (p *Peer) sendInnerExp(c *Connection, typ string, body []byte, exp, now tim
 }
 
 func (ch *challenge) wire() *peerwire.ConnAuthChallenge {
-	return &peerwire.ConnAuthChallenge{RequestID: ch.ID, Nonce: ch.Nonce, Context: ch.Context}
+	return &peerwire.ConnAuthChallenge{RequestID: ch.ID, Nonce: ch.Nonce, Context: ch.Context, Purpose: ch.Purpose}
 }
 
 // connAuthResponse handles a connection's answer to a challenge: the
@@ -135,6 +142,7 @@ func (p *Peer) connAuthResponse(c *Connection, body []byte, now time.Time) {
 	ev := &Event{ConnectionID: c.ID, RequestID: ch.ID, Tag: c.Tag, Context: ch.Context}
 	if r.Status == peerwire.ConnAuthSigned {
 		ev.Key, ev.Signature, ev.SignedAt = append([]byte(nil), r.Key...), append([]byte(nil), r.Sig...), r.SignedAt.UTC()
+		ev.Purpose = r.Purpose
 	}
 	switch {
 	case r.Status == peerwire.ConnAuthDenied:

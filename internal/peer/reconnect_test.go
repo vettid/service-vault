@@ -195,7 +195,7 @@ func TestReconnectWindowAndReplay(t *testing.T) {
 	m.StartRekey()
 	f.pump()
 	f.restore(b, true)
-	if _, err := f.p.Authenticate(context.Background(), cid, "Sign in", time.Minute); err == nil {
+	if _, err := f.p.Authenticate(context.Background(), cid, "Sign in", "", time.Minute); err == nil {
 		t.Fatal("a challenge sealed in the restored session")
 	}
 	f.pump()
@@ -278,7 +278,7 @@ func TestReconnectTimeout(t *testing.T) {
 	if f.p.conns[cid].State != StateStale {
 		t.Fatal("a reconnect taken after its timeout")
 	}
-	if _, err := f.p.Authenticate(context.Background(), cid, "Sign in", time.Minute); err == nil {
+	if _, err := f.p.Authenticate(context.Background(), cid, "Sign in", "", time.Minute); err == nil {
 		t.Fatal("a challenge on a stale connection")
 	}
 }
