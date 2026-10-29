@@ -95,22 +95,28 @@ func (s peerStore) Load(ctx context.Context, kind string) ([]peer.Record, error)
 
 // Get implements peer.Store.
 func (s peerStore) Get(ctx context.Context, kind, id string) ([]byte, bool, error) {
+	r, ok, err := s.GetRecord(ctx, kind, id)
+	return r.Data, ok, err
+}
+
+// GetRecord implements peer.RecordGetter.
+func (s peerStore) GetRecord(ctx context.Context, kind, id string) (peer.Record, bool, error) {
 	out, err := s.t.Client.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName:      aws.String(s.t.Name),
 		Key:            key(recPK(kind), id),
 		ConsistentRead: aws.Bool(true),
 	})
 	if err != nil {
-		return nil, false, err
+		return peer.Record{}, false, err
 	}
 	if out.Item == nil || expired(out.Item, time.Now()) {
-		return nil, false, nil
+		return peer.Record{}, false, nil
 	}
 	r, err := toRecord(kind, out.Item)
 	if err != nil {
-		return nil, false, err
+		return peer.Record{}, false, err
 	}
-	return r.Data, true, nil
+	return r, true, nil
 }
 
 // Page returns at most limit records of a kind whose ids sort after

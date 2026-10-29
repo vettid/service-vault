@@ -52,21 +52,33 @@ func ballotID(proposalID string, tag []byte) string {
 	return proposalID + "|" + hex.EncodeToString(tag)
 }
 
-// OpenProposal implements BoxStore.
+// ErrProposalChanged is a save of a proposal that another writer saved
+// since it was read: read it again and retry.
+var ErrProposalChanged = errors.New("ballot: the proposal changed since it was read")
+
+// OpenProposal implements BoxStore. The proposal keeps the version it was
+// read at, for SaveProposal.
 func (s *RecordStore) OpenProposal(ctx context.Context, id string) (*OpenProposal, error) {
-	data, ok, err := s.Records.Get(ctx, KindProposal, id)
+	g, ok := s.Records.(peer.RecordGetter)
+	if !ok {
+		return nil, errors.New("ballot: the record store returns no versions")
+	}
+	r, ok, err := g.GetRecord(ctx, KindProposal, id)
 	if err != nil || !ok {
 		return nil, err
 	}
 	var o OpenProposal
-	if err := json.Unmarshal(data, &o); err != nil {
+	if err := json.Unmarshal(r.Data, &o); err != nil {
 		return nil, fmt.Errorf("ballot: stored proposal %s: %w", id, err)
 	}
+	o.version = r.Version
 	return &o, nil
 }
 
 // SaveProposal writes a proposal's record: created with IfAbsent, or
-// replaced (an extension, publication).
+// replaced (an extension, publication) only if no other writer saved it
+// since o was read (ErrProposalChanged): the lock in Manager holds within
+// one process, the version across two tasks running at once.
 func (s *RecordStore) SaveProposal(ctx context.Context, o *OpenProposal, create bool) error {
 	p, err := o.Parsed()
 	if err != nil {
@@ -76,7 +88,21 @@ func (s *RecordStore) SaveProposal(ctx context.Context, o *OpenProposal, create 
 	if err != nil {
 		return err
 	}
-	return s.Records.Apply(ctx, []peer.Change{{Kind: KindProposal, ID: p.ProposalID, Data: data, IfAbsent: create}})
+	c := peer.Change{Kind: KindProposal, ID: p.ProposalID, Data: data, IfAbsent: create}
+	if !create {
+		if o.version == 0 {
+			return errors.New("ballot: saving a proposal that wasn't read")
+		}
+		c.IfVersion = o.version
+	}
+	switch err := s.Records.Apply(ctx, []peer.Change{c}); {
+	case errors.Is(err, peer.ErrConflict) && !create:
+		return ErrProposalChanged
+	case err != nil:
+		return err
+	}
+	o.version = c.IfVersion + 1
+	return nil
 }
 
 // Ballot implements BoxStore.

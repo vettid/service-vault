@@ -63,7 +63,8 @@ type OpenProposal struct {
 	// published (§7): a cast handled after it is late.
 	Published bool `json:"published"`
 
-	p *vote.Proposal
+	p       *vote.Proposal
+	version uint64 // as read from the record store (SaveProposal)
 }
 
 // Tags returns every eligible tag, sorted.
