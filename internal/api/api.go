@@ -117,6 +117,9 @@ type Proposals interface {
 	Results(ctx context.Context, id string) (*ballot.PublishedResults, error)
 	// Extend publishes an extension for a relay outage.
 	Extend(ctx context.Context, id string, in ballot.ExtensionInput) (*vote.Extension, error)
+	// Publish publishes a proposal if it isn't yet, sends it to every
+	// eligible member, and returns how many it sent.
+	Publish(ctx context.Context, id string) (int, error)
 }
 
 // AnchorKey is the service's anchor key, certified by its identity key
@@ -172,6 +175,7 @@ func (s *Server) Handler() http.Handler {
 	if s.Proposals != nil {
 		v1.HandleFunc("POST /v1/proposals", s.createProposal)
 		v1.HandleFunc("GET /v1/proposals/{id}", s.proposalStatus)
+		v1.HandleFunc("POST /v1/proposals/{id}/publish", s.publishProposal)
 		v1.HandleFunc("POST /v1/proposals/{id}/extend", s.extendProposal)
 		v1.HandleFunc("POST /v1/proposals/{id}/close", s.closeProposal)
 		v1.HandleFunc("GET /v1/proposals/{id}/results", s.proposalResults)
@@ -448,7 +452,12 @@ func (s *Server) createProposal(w http.ResponseWriter, r *http.Request) {
 	}
 	c, err := s.Proposals.Create(r.Context(), b)
 	var ei *ballot.ErrInput
+	var np *ballot.ErrNotPublished
 	switch {
+	case errors.As(err, &np):
+		// Kept, but not published: POST /v1/proposals/{id}/publish retries.
+		s.log().Error("create proposal: not published", "proposal_id", np.ProposalID, "err", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "not_published", "proposal_id": np.ProposalID})
 	case errors.As(err, &ei):
 		writeError(w, http.StatusBadRequest, "invalid_proposal")
 	case errors.Is(err, ballot.ErrNoPublisher):
@@ -473,6 +482,24 @@ func (s *Server) proposalStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found")
 	default:
 		writeJSON(w, http.StatusOK, st)
+	}
+}
+
+// publishProposal serves POST /v1/proposals/{id}/publish: a proposal
+// whose publication failed is published, and it is sent again to every
+// eligible member (who asks with vote.status otherwise, §4.2).
+func (s *Server) publishProposal(w http.ResponseWriter, r *http.Request) {
+	n, err := s.Proposals.Publish(r.Context(), r.PathValue("id"))
+	switch {
+	case errors.Is(err, ballot.ErrUnknownProposal):
+		writeError(w, http.StatusNotFound, "not_found")
+	case errors.Is(err, ballot.ErrNoPublisher):
+		writeError(w, http.StatusServiceUnavailable, "publication_not_configured")
+	case err != nil:
+		s.log().Error("publish proposal", "err", err)
+		writeError(w, http.StatusServiceUnavailable, "unavailable")
+	default:
+		writeJSON(w, http.StatusOK, map[string]int{"sent": n})
 	}
 }
 

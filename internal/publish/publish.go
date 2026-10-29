@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,7 +20,12 @@ import (
 
 	"github.com/vettid/service-vault/internal/anchor"
 	"github.com/vettid/service-vault/internal/ballot"
+	"github.com/vettid/service-vault/internal/peer"
 )
+
+// KindBundle is a document's Sigstore bundle in the record store, by the
+// document's SHA-256 (hex).
+const KindBundle = "vote_bundle"
 
 // Anchorer anchors a document and returns its Sigstore bundle.
 type Anchorer interface {
@@ -32,6 +38,11 @@ type Publisher struct {
 	URL    string
 	Anchor Anchorer
 	Client *http.Client
+	// Records keeps each bundle before its upload. The site takes a
+	// document once, with its bundle (§4 "Write-once"), so a retry after
+	// a restart must send the same bundle, not a new anchor. Nil: kept in
+	// memory only (tests).
+	Records peer.Store
 
 	mu      sync.Mutex
 	bundles map[[32]byte]json.RawMessage // anchored this run, by document
@@ -70,24 +81,56 @@ func (p *Publisher) PublishResults(ctx context.Context, id string, results, sig,
 	return p.publish(ctx, id, "results", results, sig, rows)
 }
 
-// publish anchors doc (once per document in this run: a retry sends the
-// same bundle, which the site wants, §4 "Write-once") and uploads it.
-func (p *Publisher) publish(ctx context.Context, id, name string, doc, sig, rows []byte) (json.RawMessage, error) {
+// bundle returns doc's bundle: the one kept, or a new anchor, kept
+// before it is returned.
+func (p *Publisher) bundle(ctx context.Context, doc []byte) (json.RawMessage, error) {
 	key := sha256.Sum256(doc)
 	p.mu.Lock()
-	bundle := p.bundles[key]
+	b := p.bundles[key]
 	p.mu.Unlock()
-	if bundle == nil {
-		var err error
-		if bundle, err = p.Anchor.Anchor(ctx, doc); err != nil {
+	if b != nil {
+		return b, nil
+	}
+	id := hex.EncodeToString(key[:])
+	if p.Records != nil {
+		data, ok, err := p.Records.Get(ctx, KindBundle, id)
+		if err != nil {
 			return nil, err
 		}
-		p.mu.Lock()
-		if p.bundles == nil {
-			p.bundles = map[[32]byte]json.RawMessage{}
+		if ok {
+			b = data
 		}
-		p.bundles[key] = bundle
-		p.mu.Unlock()
+	}
+	if b == nil {
+		var err error
+		if b, err = p.Anchor.Anchor(ctx, doc); err != nil {
+			return nil, err
+		}
+		if p.Records != nil {
+			err := p.Records.Apply(ctx, []peer.Change{{Kind: KindBundle, ID: id, Data: b, IfAbsent: true}})
+			if errors.Is(err, peer.ErrConflict) {
+				return p.bundle(ctx, doc) // kept meanwhile: that one
+			}
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	p.mu.Lock()
+	if p.bundles == nil {
+		p.bundles = map[[32]byte]json.RawMessage{}
+	}
+	p.bundles[key] = b
+	p.mu.Unlock()
+	return b, nil
+}
+
+// publish anchors doc (once: a retry, even after a restart, sends the
+// same bundle, which the site wants, §4 "Write-once") and uploads it.
+func (p *Publisher) publish(ctx context.Context, id, name string, doc, sig, rows []byte) (json.RawMessage, error) {
+	bundle, err := p.bundle(ctx, doc)
+	if err != nil {
+		return nil, err
 	}
 	body, err := json.Marshal(struct {
 		Doc    []byte          `json:"doc"`

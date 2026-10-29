@@ -48,6 +48,13 @@ func (f *fakeProposals) Results(_ context.Context, id string) (*ballot.Published
 	return &ballot.PublishedResults{Results: []byte(`{"v":1}`), Sig: []byte{1}, Rows: []byte(`{"rows":[]}`), Bundle: []byte(`{}`)}, nil
 }
 
+func (f *fakeProposals) Publish(_ context.Context, id string) (int, error) {
+	if id != "p1" {
+		return 0, ballot.ErrUnknownProposal
+	}
+	return 3, nil
+}
+
 func (f *fakeProposals) Extend(_ context.Context, id string, in ballot.ExtensionInput) (*vote.Extension, error) {
 	switch id {
 	case "late":
@@ -81,10 +88,20 @@ func TestProposalRoutes(t *testing.T) {
 		&ballot.ErrInput{Err: errors.New("bad")}: "invalid_proposal",
 		ballot.ErrNoPublisher:                    "publication_not_configured",
 		errors.New("store down"):                 "unavailable",
+		&ballot.ErrNotPublished{ProposalID: "p1", Err: errors.New("rekor down")}: "not_published",
 	} {
 		fp.err = err
 		if _, m := do(t, h, "POST", "/v1/proposals", apiKey, body); m["error"] != want {
 			t.Errorf("%v: %v", err, m)
+		}
+	}
+	fp.err = &ballot.ErrNotPublished{ProposalID: "p1", Err: errors.New("rekor down")}
+	if rec, m := do(t, h, "POST", "/v1/proposals", apiKey, body); rec.Code != 503 || m["proposal_id"] != "p1" {
+		t.Fatalf("not published: %d %v", rec.Code, m)
+	}
+	for id, want := range map[string]int{"p1": 200, "nope": 404} {
+		if rec, m := do(t, h, "POST", "/v1/proposals/"+id+"/publish", apiKey, ""); rec.Code != want || (want == 200 && m["sent"] != float64(3)) {
+			t.Errorf("publish %s: %d %v", id, rec.Code, m)
 		}
 	}
 	if rec, m := do(t, h, "GET", "/v1/proposals/01JBQZ0000000000000000000A", apiKey, ""); rec.Code != 200 || m["published"] != true {

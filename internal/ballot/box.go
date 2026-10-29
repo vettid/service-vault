@@ -175,7 +175,8 @@ func (b *Box) cast(ctx context.Context, r *peer.VoteRequest) (peer.VoteAnswer, e
 	if err != nil {
 		return peer.VoteAnswer{}, err
 	}
-	if o == nil {
+	// Not yet published (§3.3): no member should have it.
+	if o == nil || o.Bundle == nil {
 		return b.refuse(nil, r, nil, CodeNotEligible, reqHash, body.ProposalID)
 	}
 	p, err := o.Parsed()
@@ -379,7 +380,7 @@ func (b *Box) status(ctx context.Context, r *peer.VoteRequest) (peer.VoteAnswer,
 	if err != nil {
 		return peer.VoteAnswer{}, err
 	}
-	if o == nil {
+	if o == nil || o.Bundle == nil {
 		return b.refuse(nil, r, nil, CodeUnknownProposal, reqHash, body.ProposalID)
 	}
 	p, err := o.Parsed()
