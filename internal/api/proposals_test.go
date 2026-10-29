@@ -47,6 +47,16 @@ func (f *fakeProposals) Results(_ context.Context, id string) (*ballot.Published
 	return &ballot.PublishedResults{Results: []byte(`{"v":1}`), Sig: []byte{1}, Rows: []byte(`{"rows":[]}`), Bundle: []byte(`{}`)}, nil
 }
 
+func (f *fakeProposals) Extend(_ context.Context, id string, in ballot.ExtensionInput) (*ballot.Extension, error) {
+	switch id {
+	case "late":
+		return nil, ballot.ErrTooLate
+	case "bad":
+		return nil, &ballot.ErrInput{Err: errors.New("short")}
+	}
+	return &ballot.Extension{V: 1, ProposalID: id, N: 1, ClosesAt: in.ClosesAt}, nil
+}
+
 func TestProposalRoutes(t *testing.T) {
 	s, _, _ := newServer(t)
 	if rec, _ := do(t, s.Handler(), "POST", "/v1/proposals", apiKey, `{}`); rec.Code != 404 {
@@ -85,6 +95,12 @@ func TestProposalRoutes(t *testing.T) {
 	for id, want := range map[string]int{"done": 200, "open": 409, "busy": 503, "nope": 404} {
 		if rec, m := do(t, h, "POST", "/v1/proposals/"+id+"/close", apiKey, ""); rec.Code != want {
 			t.Errorf("close %s: %d %v", id, rec.Code, m)
+		}
+	}
+	ext := `{"closes_at":9,"outage":{"from":1,"to":5000,"source":"https://status.vettid.org/"}}`
+	for id, want := range map[string]int{"ok": 200, "late": 409, "bad": 400} {
+		if rec, m := do(t, h, "POST", "/v1/proposals/"+id+"/extend", apiKey, ext); rec.Code != want {
+			t.Errorf("extend %s: %d %v", id, rec.Code, m)
 		}
 	}
 	if rec, m := do(t, h, "GET", "/v1/proposals/done/results", apiKey, ""); rec.Code != 200 || m["results"] != `{"v":1}` {

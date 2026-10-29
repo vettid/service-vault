@@ -356,8 +356,17 @@ func serve(args []string) error {
 	if ballots != nil {
 		// Publishing (BALLOT-PROTOCOL §3.3) comes with the anchor key; until
 		// then, creating a proposal answers publication_not_configured.
-		proposals = &ballot.Manager{Store: ballots, Sign: signIK, IK: keys.IKPublic(), Roster: p, Sender: p,
+		mgr := &ballot.Manager{Store: ballots, Sign: signIK, IK: keys.IKPublic(), Roster: p, Sender: p,
 			Catcher: p, NewID: envelope.NewULID, Now: time.Now, Log: log}
+		if pc.AfterRestore != nil {
+			// The table was restored: ballots it lost are in the copy (§6).
+			n, err := mgr.RebuildAll(ctx)
+			if err != nil {
+				return fmt.Errorf("rebuild ballots after the restore: %w", err)
+			}
+			log.Info("ballots rebuilt after the restore", "count", n)
+		}
+		proposals = mgr
 	}
 	approvals.Peer = p
 

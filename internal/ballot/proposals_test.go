@@ -275,3 +275,80 @@ func TestClose(t *testing.T) {
 		t.Fatalf("second close: %v, sent %d", err, len(s.sent))
 	}
 }
+
+func (p *fakePublisher) PublishExtension(_ context.Context, id string, n int64, doc, sig []byte) (json.RawMessage, error) {
+	p.calls++
+	if p.fail {
+		return nil, errors.New("rekor down")
+	}
+	return json.RawMessage(`{}`), nil
+}
+
+func TestExtend(t *testing.T) {
+	ctx := context.Background()
+	m, s, _ := newManager(t)
+	m.Catcher = &fakeCatcher{caught: true}
+	c, err := m.Create(ctx, input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := input()
+	clock := time.Unix(in.ClosesAt-600, 0)
+	m.Now = func() time.Time { return clock }
+	outage := Outage{From: in.ClosesAt - 7200, To: in.ClosesAt - 7200 + 5400, Source: "https://status.vettid.org/"} // 1.5 h
+	var ei *ErrInput
+	for name, x := range map[string]ExtensionInput{
+		"short outage":   {ClosesAt: in.ClosesAt + 3600, Outage: Outage{From: outage.From, To: outage.From + 3600, Source: outage.Source}},
+		"too long":       {ClosesAt: in.ClosesAt + 3*3600, Outage: outage},
+		"not later":      {ClosesAt: in.ClosesAt, Outage: outage},
+		"outside window": {ClosesAt: in.ClosesAt + 3600, Outage: Outage{From: in.OpensAt - 7200, To: in.OpensAt - 1800, Source: "x"}},
+	} {
+		if _, err := m.Extend(ctx, c.ProposalID, x); !errors.As(err, &ei) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	s.sent = nil
+	e, err := m.Extend(ctx, c.ProposalID, ExtensionInput{ClosesAt: in.ClosesAt + 7200, Outage: outage})
+	if err != nil || e.N != 1 {
+		t.Fatalf("Extend: %v", err)
+	}
+	if len(s.sent) != 3 || s.sent[0].typ != TypeExtended {
+		t.Fatalf("vote.extended sent %d", len(s.sent))
+	}
+	// A cast after the first close, inside the extension, counts.
+	if code := castFor(t, m, c.ProposalID, "c0", "yes", uint64(in.ClosesAt)*1000+60000); code != "" {
+		t.Fatalf("a cast inside the extension: %q", code)
+	}
+	// After the extended close: too late to extend.
+	clock = time.Unix(in.ClosesAt+7200+120, 0)
+	if _, err := m.Extend(ctx, c.ProposalID, ExtensionInput{ClosesAt: in.ClosesAt + 4*3600, Outage: outage}); !errors.Is(err, ErrTooLate) {
+		t.Fatalf("after the close: %v", err)
+	}
+	sum, err := m.Close(ctx, c.ProposalID)
+	if err != nil || sum.Counts.Ballots != 1 {
+		t.Fatalf("Close: %v", err)
+	}
+	pr, _ := m.Results(ctx, c.ProposalID)
+	_, res, err := Check(m.IK, pr.Results, pr.Sig, pr.Rows)
+	if err != nil || len(res.Extensions) != 1 {
+		t.Fatalf("results with the extension: %v", err)
+	}
+}
+
+func TestRebuildAll(t *testing.T) {
+	ctx := context.Background()
+	m, _, _ := newManager(t)
+	c, err := m.Create(ctx, input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	castFor(t, m, c.ProposalID, "c1", "no", uint64(input().OpensAt)*1000+1)
+	// The table loses the ballot (a restore); the proposal stays.
+	recs, _ := m.Store.Records.Load(ctx, KindProposal)
+	fresh := peer.NewMemStore()
+	_ = fresh.Apply(ctx, []peer.Change{{Kind: KindProposal, ID: recs[0].ID, Data: recs[0].Data}})
+	m.Store.Records = fresh
+	if n, err := m.RebuildAll(ctx); err != nil || n != 1 {
+		t.Fatalf("RebuildAll: %d, %v", n, err)
+	}
+}
