@@ -22,6 +22,15 @@ func TestCanonicalize(t *testing.T) {
 			t.Errorf("Canonicalize(%s) = %s, %v; want %s", in, got, err, want)
 		}
 	}
+	// Nesting is bounded: a deep input is refused, not a stack overflow.
+	deep := strings.Repeat("[", 1<<20) + strings.Repeat("]", 1<<20)
+	if _, err := Canonicalize([]byte(deep)); err == nil {
+		t.Error("a deeply nested input accepted")
+	}
+	ok := `{"a":` + strings.Repeat("[", MaxDepth-1) + strings.Repeat("]", MaxDepth-1) + `}`
+	if _, err := Canonicalize([]byte(ok)); err != nil {
+		t.Errorf("nesting of %d refused: %v", MaxDepth, err)
+	}
 	for _, in := range []string{
 		`{"a":1,"a":2}`, `{"a":{"b":1,"b":1}}`, `{"a":1.5}`, `{"a":1e3}`, `{"a":-0}`,
 		`{"a":9007199254740992}`, `{"a":1} x`, "{\"a\":\"\xff\"}", `[1,]`,
