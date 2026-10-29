@@ -242,23 +242,22 @@ func TestCastExtensionAndRemoval(t *testing.T) {
 	}
 }
 
-func TestCastNamesCredential(t *testing.T) {
+// A member who has never signed in has no pinned credential key, and is
+// refused even if the ballot names a key that signs it: the service could
+// make up both, so such a ballot would prove nothing (BALLOT-PROTOCOL §5).
+func TestCastNeedsSignIn(t *testing.T) {
 	f := newBoxFixture(t)
-	body, _ := f.castBody("c0", "yes")
-	j, _ := json.Marshal(body)
-	req := &peer.VoteRequest{ConnectionID: "c0", PeerIK: f.ik(), Active: true, Type: TypeCast, Body: j, MsgMS: f.during()}
-	// No pinned key, and none named: refused.
-	if a, _ := f.box.Vote(context.Background(), req); a.Code != CodeBadBallot {
-		t.Fatalf("no credential key: %q", a.Code)
-	}
+	body, leaf := f.castBody("c0", "yes")
 	body["credential_key"] = base64.StdEncoding.EncodeToString(f.creds["c0"].Public().(ed25519.PublicKey))
-	req.Body, _ = json.Marshal(body)
-	if a, _ := f.box.Vote(context.Background(), req); a.Code != "" {
-		t.Fatalf("named credential key refused: %q", a.Code)
+	j, _ := json.Marshal(body)
+	a, err := f.box.Vote(context.Background(), &peer.VoteRequest{ConnectionID: "c0",
+		PeerIK: ed25519.NewKeyFromSeed(digest("peer c0")).Public().(ed25519.PublicKey), Active: true, Type: TypeCast, Body: j, MsgMS: f.during()})
+	if err != nil {
+		t.Fatal(err)
 	}
-	rec, _ := f.store.Ballot(context.Background(), f.p.ProposalID, f.open.Members["c0"].Tag)
-	if !bytes.Equal(rec.CredentialKey, f.creds["c0"].Public().(ed25519.PublicKey)) {
-		t.Fatal("the named key isn't kept with the ballot")
+	f.checkRefusal(a, "c0", CodeNotSignedIn, f.open.Members["c0"].Tag, sum(leaf))
+	if rec, _ := f.store.Ballot(context.Background(), f.p.ProposalID, f.open.Members["c0"].Tag); rec != nil {
+		t.Fatal("a ballot was recorded")
 	}
 }
 

@@ -36,6 +36,7 @@ const (
 	CodeBadBallot       = "bad_ballot"
 	CodeLate            = "late"
 	CodeUnknownProposal = "unknown_proposal"
+	CodeNotSignedIn     = "not_signed_in"
 )
 
 // Member is an eligible connection's tag for one proposal (§3.2). Its
@@ -143,13 +144,12 @@ func (b *Box) Vote(ctx context.Context, r *peer.VoteRequest) (peer.VoteAnswer, e
 }
 
 type castBody struct {
-	ProposalID    string `json:"proposal_id"`
-	RecordTag     string `json:"record_tag"`
-	VK            string `json:"vk"`
-	ChoiceID      string `json:"choice_id"`
-	BallotSig     string `json:"ballot_sig"`
-	CastSig       string `json:"cast_sig"`
-	CredentialKey string `json:"credential_key"`
+	ProposalID string `json:"proposal_id"`
+	RecordTag  string `json:"record_tag"`
+	VK         string `json:"vk"`
+	ChoiceID   string `json:"choice_id"`
+	BallotSig  string `json:"ballot_sig"`
+	CastSig    string `json:"cast_sig"`
 }
 
 // decodeB64 is VAULT-MESSAGING §5.3's base64: standard, padded,
@@ -230,16 +230,14 @@ func (b *Box) cast(ctx context.Context, r *peer.VoteRequest) (peer.VoteAnswer, e
 	if !r.Active && !p.RemovedMayVote {
 		return b.refuse(o, r, m.Tag, CodeNotActive, reqHash)
 	}
-	// 4. The ballot and the credential signature. The credential key is
-	// the one pinned at sign-in; a member who never signed in names it
-	// here, and it is kept with the ballot.
+	// 4. The ballot and the credential signature, under the credential
+	// key pinned at the member's first sign-in. Without a pinned key the
+	// service would have to take the key the ballot names, and a ballot
+	// it made up itself would then look like the member's: so a member
+	// who has never signed in is refused until they do (§5).
 	cred := r.CredentialKey
 	if len(cred) == 0 {
-		k, ok := decodeB64(body.CredentialKey, vote.VKLen)
-		if !ok {
-			return b.refuse(o, r, m.Tag, CodeBadBallot, reqHash)
-		}
-		cred = k
+		return b.refuse(o, r, m.Tag, CodeNotSignedIn, reqHash)
 	}
 	msg, _ := bal.Msg(sum(o.Doc))
 	cmsg, _ := vote.CastMsg(sum(o.Doc), leaf)
