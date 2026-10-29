@@ -36,7 +36,7 @@ service vault reaches members only through their vaults over the relay.
 | `vote` | The ballot protocol's encodings, documents, Merkle trees and checks, with no messaging dependency: shared with votes.vettid.org |
 | `internal/ballot` | The ballot box, proposals, counting and publication (Phase 5) |
 | `internal/anchor` | Anchoring documents in Rekor (Phase 5) |
-| `internal/keystore` | KMS envelope; Ed25519, suite-2 KEM, RSA for blind signing |
+| `internal/keystore` | KMS envelope; Ed25519, suite-2 KEM, the P-256 anchor key |
 | `internal/store` | DynamoDB: connections, pending challenges, audit |
 | `internal/webhook` | HMAC over `timestamp.body`; the outbox: in order, retried with backoff, dropped at 24 h |
 | `internal/api` | Private HTTPS API, API keys |
