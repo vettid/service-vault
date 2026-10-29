@@ -9,11 +9,15 @@
 package approval
 
 import (
+	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/vettid/vettid-vault/vms/peerwire"
 )
 
 // Actions an approval can be for (MEMBER-SERVICE-PLAN §4.5).
@@ -209,7 +213,12 @@ type AuditEntry struct {
 	Signature    []byte     `json:"signature,omitempty"` // over the challenge (VAULT-MESSAGING §10.4)
 	Purpose      string     `json:"purpose,omitempty"`   // the purpose the signature covers; "" for none (0.65.0)
 	SignedAt     *time.Time `json:"signed_at,omitempty"`
-	KeyChanged   bool       `json:"key_changed,omitempty"`
+	// What else the signature covers (§10.4), so the entry verifies on
+	// its own (AuditEntry.Verify).
+	Nonce      []byte `json:"nonce,omitempty"`
+	ServiceIK  []byte `json:"service_ik,omitempty"`
+	MemberIK   []byte `json:"member_ik,omitempty"`
+	KeyChanged bool   `json:"key_changed,omitempty"`
 	// An outcome or an admin set change.
 	Status  string `json:"status,omitempty"`
 	Reason  string `json:"reason,omitempty"`
@@ -280,4 +289,22 @@ func ChallengeContext(serviceName, summary, actionHash string) (string, error) {
 		cut = i
 	}
 	return f(summary[:cut] + ell), nil
+}
+
+// ErrNoEvidence is an entry without a signed answer's evidence: not a
+// signed approval.response, or one written before the nonce and the
+// identity keys were kept.
+var ErrNoEvidence = errors.New("approval: the entry holds no complete signed answer")
+
+// Verify checks a signed approval.response entry's signature over the
+// challenge it answered (VAULT-MESSAGING §10.4), from the entry alone.
+func (e *AuditEntry) Verify() error {
+	if e.Type != AuditResponse || len(e.Signature) == 0 || len(e.Key) != ed25519.PublicKeySize || len(e.Nonce) == 0 ||
+		len(e.ServiceIK) != ed25519.PublicKeySize || len(e.MemberIK) != ed25519.PublicKeySize {
+		return ErrNoEvidence
+	}
+	ch := &peerwire.ConnAuthChallenge{RequestID: e.RequestID, Nonce: e.Nonce, Context: e.Context, Purpose: e.Purpose}
+	r := &peerwire.ConnAuthResponse{RequestID: e.RequestID, Status: peerwire.ConnAuthSigned, Key: e.Key, Sig: e.Signature,
+		Purpose: e.Purpose, HasPurpose: e.Purpose != ""}
+	return peerwire.VerifyConnAuthResponse(r, e.ServiceIK, e.MemberIK, ch)
 }

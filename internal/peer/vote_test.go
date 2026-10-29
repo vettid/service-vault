@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
@@ -230,5 +231,27 @@ func TestChallengePurpose(t *testing.T) {
 		if len(f.ev.of(EventSignInApproved)) != before+1 {
 			t.Fatalf("old vault %v: not approved", old)
 		}
+	}
+}
+
+// A signed answer's event carries all that its signature covers, so the
+// signature verifies from the event alone (§10.4).
+func TestSignInEventEvidence(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "t")
+	if !f.signIn(m, cid) {
+		t.Fatal("sign-in failed")
+	}
+	evs := f.ev.of(EventSignInApproved)
+	e := evs[len(evs)-1]
+	if !bytes.Equal(e.ServiceIK, f.keys.IKPublic()) || !bytes.Equal(e.MemberIK, m.IK.Public().(ed25519.PublicKey)) || len(e.Nonce) == 0 {
+		t.Fatalf("evidence: nonce %x, service %x, member %x", e.Nonce, e.ServiceIK, e.MemberIK)
+	}
+	ch := &peerwire.ConnAuthChallenge{RequestID: e.RequestID, Nonce: e.Nonce, Context: e.Context, Purpose: e.Purpose}
+	r := &peerwire.ConnAuthResponse{RequestID: e.RequestID, Status: peerwire.ConnAuthSigned, Key: e.Key, Sig: e.Signature,
+		Purpose: e.Purpose, HasPurpose: e.Purpose != ""}
+	if err := peerwire.VerifyConnAuthResponse(r, e.ServiceIK, e.MemberIK, ch); err != nil {
+		t.Fatalf("the event's evidence doesn't verify: %v", err)
 	}
 }
