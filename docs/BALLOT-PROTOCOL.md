@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** draft 0.2.0 (2026-10-28), for review before any ballot code
+**Status:** draft 0.3.0 (2026-10-28), for review before any ballot code
 (MEMBER-SERVICE-PLAN §10, item 5.0). The plan-level design is
 MEMBER-SERVICE-PLAN §8. This document marks two kinds of choice, all
 listed in §12 for the owner to decide before code:
@@ -26,7 +26,7 @@ wire vectors; this document is its source.
 | Secrecy against the service | The service vault, which is also the ballot box, cannot tell whose a ballot is, from the certificate (blind, §5), the token (a shared pool, §3.3) or the time. Every member of record certifies at opening and deposits exactly one ballot, real or abstain, at a random time in a shared deposit phase (§6.4). So neither when someone certified nor when they decided says anything about when their ballot arrives. The remaining operator boundary is §9.2. |
 | Verifiability | A member confirms their ballot is counted as cast, and that it is in the same results everyone sees (§8.3). An observer confirms every counted ballot has a valid certificate, no voting key counts twice, `ballots ≤ issued ≤ members_of_record` (equal when every vault deposited), and the tally (§8.4). |
 | Decline-ability | A member who does nothing has their vault cast an abstain (§6.2). Declining and abstaining look the same. |
-| Availability | No one but the member can stop an eligible member from casting a counted ballot (§10). One part depends on a relay revision; that is an owner decision (§10.1, D7). |
+| Availability | No one but the member can stop an eligible member from casting a counted ballot (§10). Closing pool exhaustion by a member needs relay admission tokens, a RELAY-PROTOCOL revision (D7, decided: §3.4). |
 | Receipt-freeness | Out of scope (owner decision). |
 
 ## 2. Notation and primitives
@@ -157,11 +157,41 @@ wire vectors; this document is its source.
       app fetching the pool (D6, §12).
   - Re-issue is limited to two further pools per vote. Its trigger is
     §7.3.
+  - **The pool is the interim mechanism**, until relay admission tokens
+    (§3.4) replace it, for scale (D6) as well as availability (D7).
 - **What bearer tokens cannot do (§10.1):** a member, who holds the pool,
   can spend its tokens with junk. Only members of record hold it, and
   each junk deposit is one 4 KiB message, but the pool can still be
-  exhausted. The real fix is a relay-checked anonymous admission token
-  (D7).
+  exhausted.
+
+### 3.4 Relay admission tokens (D6, D7: decided 2026-10-28)
+
+The owner decided to replace the pool with tokens the relay itself
+checks, issued per member at certification without the issuer learning
+which token is whose. This is a RELAY-PROTOCOL revision (vettid.org,
+VettID's relay), to be specified there. What this protocol needs from
+it:
+
+- **Issuance:** with the certificate (§5.2), the ballot box blind-signs
+  `k` fresh random token values for the member (`k` small, for example
+  4: retries and a second copy). It uses a per-proposal admission key,
+  in the style of Privacy Pass's publicly verifiable tokens (RFC 9578,
+  blind RSA per RFC 9474). Issuance is per connection and counted, so a
+  member holds `k` tokens, not a shared pool.
+- **Checking:** the relay accepts a deposit to the ballot mailbox only
+  with an unspent token that verifies under the admission key named for
+  that mailbox. It spends the token value once.
+  - The relay learns nothing about the member.
+  - The ballot box learns nothing from the token beyond its validity.
+- **Effects:**
+  - A member can spend only their own `k` tokens, so pool exhaustion is
+    no longer possible.
+  - Distribution is O(N): one message per member, at certification.
+  - There is no pool to re-issue, publish or equivocate.
+  - The ballot and its leaf name the admission key instead of
+    `pool_seq` and `pool_hash`.
+- **Until it exists:** the pool (§3.3) is used for non-binding votes.
+  Binding votes wait for admission tokens.
 
 ## 4. Messages from the service
 
@@ -410,9 +440,20 @@ certified members at publication (§8.1), then deletes the records.
   - `ballot_root` (§8.2).
 - **Signature:** detached, `results_sig = Sign(service IK, "vettid/vote/1/results" ‖ 0x00, H(results_bytes))`.
 - **Published** on member.vettid.org, as one file.
-- **Anchored:** `H(results_bytes)` also goes to a public transparency log
-  outside VettID's control. Sigstore's Rekor is proposed (D8); `anchor`
-  names the entry.
+- **Anchored (D8):** the results hash goes into Sigstore's public
+  transparency log, Rekor, outside VettID's control.
+  - **The entry** is a `hashedrekord`: `H(results_bytes)`, `results_sig`
+    and the service's identity key. No ballot data goes into the log.
+  - **The anchor** is the Sigstore bundle Rekor's answer is packaged in:
+    the log index, the inclusion proof and the signed checkpoint. It is
+    published as `results.json.sigstore.json` and sent in `vote.closed`.
+  - **Checking:** vaults verify the bundle offline, against Rekor's
+    public key pinned in the vault's release config. Observers use
+    standard Sigstore tools (for example `cosign verify-blob`).
+  - **For binding votes**, the same hash also goes to Bitcoin through
+    OpenTimestamps, as a second, permanent time anchor.
+  - The bundle version and Rekor's key (v1, or the tiled v2) are pinned
+    in items 5.3 and 5.4.
 - **Then:** the RSA private key is destroyed, and the issuance records
   deleted.
 
@@ -506,8 +547,10 @@ the host too.
 | C. Casting from the phone through an oblivious relay (RFC 9458) | The host sees no ballot traffic. | An OHTTP gateway in front of VettID's relay (a relay change), app work on both platforms, and a third-party OHTTP relay. Phones can't reliably deposit at a drawn time, so the vault→app hand-off times correlate with deposits. It also gives up the every-vault-deposits property for members whose phones are idle. |
 | D. The ballot box in an enclave (Phase 7) | The operator's access to decrypted ballots, but not the network link. | As planned. |
 
-**Recommendation: B for binding votes, A until then.** It keeps every
-property above and needs no app change. This is the owner's decision.
+**Decided (owner, 2026-10-28): B for binding votes, A until then.** It
+keeps every property above and needs no app change. The mix and its
+operator are chosen before the first binding vote. Its hold, shuffle and
+forward feature is specified with the relay revision of §3.4.
 
 ### 9.3 Residual trust
 
@@ -541,7 +584,7 @@ casting a counted ballot during the voting window.
 | Ask gate (VAULT-MESSAGING §10.4.1) | Certification, choosing and depositing are not asks. Nothing in the vote path is a service challenge. |
 | Site sign-in blocked | Voting needs no site sign-in. |
 | Ballot mailbox flooded with junk | Pool tokens carry `quota: {msgs: 1, bytes: 4096}`, and the pool is held by members only. Junk is at most one 4 KiB message per token, about 2 MiB for a pool of 600, well under the 32 MiB quota. The box collects continuously and alarms at 20% (§7.3). |
-| **Pool exhaustion by a member** (a member of record spends the pool's tokens with junk) | **Not fully met.** Re-issue (§7.3) and the flood guard slow it, but don't stop a member determined to burn every pool. The fix is a relay-checked anonymous admission token, for example a blind-signed token the relay verifies. That is a RELAY-PROTOCOL revision (**D7**). Until then a binding vote states this limit, and the box's alarms name the spending rate. |
+| **Pool exhaustion by a member** (a member of record spends the pool's tokens with junk) | **Met only with relay admission tokens** (§3.4, decided). With the interim pool, re-issue (§7.3) and the flood guard slow it but don't stop a determined member. So binding votes wait for admission tokens. |
 | Relay flood | The relay's per-network limits and WAF (RELAY-PROTOCOL §7.2). Deposits spread over the phase and retry. |
 | Service vault, relay or host outage | Deposits wait in the ballot mailbox (14 days). Certification requests wait on the connection. Beyond the §10.2 bound, the phase is extended. |
 | The member's vault locked, or its host restarted, through the deposit phase | The vault deposits when unlocked, before `deposit_until`. The app reminds the member during the phase. A member whose vault stays locked has no ballot counted, a published shortfall (§8.4 check 5). |
@@ -613,16 +656,24 @@ stop-and-report item.
 13. **JCS documents** are verified as exact canonical bytes, with
     detached signatures (§2).
 
-**Open decisions:**
-- **D5:** the operator-metadata mitigation for binding votes
-  (recommended: an independent mix, §9.2).
-- **D6:** pool distribution beyond about 500 members (app fetch, or
-  D7).
-- **D7:** a relay-checked anonymous admission token, to close pool
-  exhaustion by a member (a RELAY-PROTOCOL revision, §10.1).
-- **D8:** the transparency log for the results anchor.
+**Decided (owner, 2026-10-28):**
+- **D5:** an independent mix for binding votes; non-binding votes state
+  the boundary (§9.2).
+- **D6 and D7:** relay admission tokens (§3.4), a RELAY-PROTOCOL
+  revision. The pool stays the interim mechanism, for non-binding votes
+  only.
+
+**Proposed:**
+- **D8:** Sigstore Rekor as the results anchor, as a Sigstore bundle,
+  plus OpenTimestamps for binding votes (§8.1).
 
 ## Changes
+
+- **0.3.0 (2026-10-28):** owner decisions.
+  - D5: an independent mix for binding votes.
+  - D6 and D7: relay admission tokens (§3.4) replace the pool for
+    binding votes.
+  - D8 proposed: Rekor, as a Sigstore bundle, plus OpenTimestamps.
 
 - **0.2.0 (2026-10-28):** after review of 0.1.0.
   - Every member deposits once, in a shared deposit phase, with abstain
