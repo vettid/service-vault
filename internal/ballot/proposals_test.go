@@ -197,7 +197,7 @@ func (p *fakePublisher) PublishResults(_ context.Context, id string, results, si
 
 type fakeCatcher struct{ caught bool }
 
-func (c *fakeCatcher) Caught(time.Time) bool { return c.caught }
+func (c *fakeCatcher) Caught(context.Context, time.Time) (bool, error) { return c.caught, nil }
 
 // castFor votes for a member of a created proposal through the box.
 func castFor(t *testing.T, m *Manager, id, conn, choice string, ms uint64) string {

@@ -25,13 +25,14 @@ const (
 	kindMsg      = "msg"      // relay msg_id dedupe (§8.2 layer 1)
 	kindInner    = "inner"    // inner id dedupe, per connection (§8.2 layer 2)
 	kindResp     = "resp"     // cached responses (§8.2)
+	kindLease    = "lease"    // the latest collect that leased messages, by process (Caught)
 )
 
 // Kinds lists every record kind the peer stores, for a migration that
 // must touch them all (internal/sealstore).
 func Kinds() []string {
 	return []string{kindConn, kindInvite, kindAwait, kindRequest, kindOutgoing, kindToken, kindOutbox, kindAuth, kindEvent,
-		kindMsg, kindInner, kindResp}
+		kindMsg, kindInner, kindResp, kindLease}
 }
 
 // Retention (VAULT-MESSAGING §8.2, §6.4).
