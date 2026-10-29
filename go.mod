@@ -11,7 +11,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.72.2
 	github.com/aws/aws-sdk-go-v2/service/kms v1.62.1
 	github.com/aws/aws-sdk-go-v2/service/ssm v1.81.1
-	github.com/cloudflare/circl v1.6.5
 	github.com/vettid/vettid-relay v0.0.0-20261027144202-528df9b0bf76
 	github.com/vettid/vettid-vault v0.0.0-20261028202841-fd1af0a51da3
 	rsc.io/qr v0.2.0
