@@ -178,3 +178,100 @@ func TestCreateRefusals(t *testing.T) {
 		t.Fatalf("Publish: %d, %v", n, err)
 	}
 }
+
+func (p *fakePublisher) PublishResults(_ context.Context, id string, results, sig, rows []byte) (json.RawMessage, error) {
+	p.calls++
+	if p.fail {
+		return nil, errors.New("rekor down")
+	}
+	return json.RawMessage(`{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}`), nil
+}
+
+type fakeCatcher struct{ caught bool }
+
+func (c *fakeCatcher) Caught(time.Time) bool { return c.caught }
+
+// castFor votes for a member of a created proposal through the box.
+func castFor(t *testing.T, m *Manager, id, conn, choice string, ms uint64) string {
+	t.Helper()
+	ctx := context.Background()
+	o, _ := m.Store.OpenProposal(ctx, id)
+	ph := sum(o.Doc)
+	vk := ed25519.NewKeyFromSeed(digest("vk " + conn))
+	cred := ed25519.NewKeyFromSeed(digest("cred " + conn))
+	bal := Ballot{RecordTag: o.Members[conn].Tag, VK: vk.Public().(ed25519.PublicKey), ChoiceID: choice}
+	msg, _ := bal.Msg(ph)
+	bal.BallotSig, _ = suite.Sign(vk, LabelBallot, msg)
+	leaf, _ := bal.Leaf()
+	cmsg, _ := CastMsg(ph, leaf)
+	csig, _ := suite.Sign(cred, LabelCast, cmsg)
+	body, _ := json.Marshal(map[string]any{"proposal_id": id, "record_tag": bal.RecordTag, "vk": bal.VK, "choice_id": choice,
+		"ballot_sig": bal.BallotSig, "cast_sig": csig})
+	a, err := (&Box{Store: m.Store, Sign: m.Sign}).Vote(ctx, &peer.VoteRequest{ConnectionID: conn, PeerIK: m.IK,
+		CredentialKey: cred.Public().(ed25519.PublicKey), Active: true, Type: TypeCast, Body: body, MsgMS: ms})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a.Code
+}
+
+func TestClose(t *testing.T) {
+	ctx := context.Background()
+	m, s, pub := newManager(t)
+	ct := &fakeCatcher{}
+	m.Catcher = ct
+	c, err := m.Create(ctx, input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	during := uint64(input().OpensAt)*1000 + 1
+	if castFor(t, m, c.ProposalID, "c0", "yes", during) != "" || castFor(t, m, c.ProposalID, "c1", "no", during) != "" {
+		t.Fatal("casts refused")
+	}
+	clock := time.Unix(input().ClosesAt, 0)
+	m.Now = func() time.Time { return clock }
+	if _, err := m.Close(ctx, c.ProposalID); !errors.Is(err, ErrNotClosed) {
+		t.Fatalf("at the close: %v", err)
+	}
+	clock = clock.Add(2 * CollectMargin)
+	if _, err := m.Close(ctx, c.ProposalID); !errors.Is(err, ErrNotCaught) {
+		t.Fatalf("before the relay is caught up: %v", err)
+	}
+	ct.caught = true
+	pub.fail = true
+	if _, err := m.Close(ctx, c.ProposalID); err == nil {
+		t.Fatal("closed while Rekor is down")
+	}
+	// Counting started: a cast now is late, even one inside the window.
+	if code := castFor(t, m, c.ProposalID, "c2", "abstain", during); code != CodeLate {
+		t.Fatalf("a cast during the count: %q", code)
+	}
+	pub.fail = false
+	s.sent = nil
+	sum1, err := m.Close(ctx, c.ProposalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum1.Counts.Ballots != 2 || sum1.Counts.Eligible != 3 || sum1.Tally["yes"] != 1 || sum1.Tally["no"] != 1 || sum1.Tally[AbstainID] != 0 {
+		t.Fatalf("summary %+v", sum1)
+	}
+	closed := 0
+	for _, x := range s.sent {
+		if x.typ == TypeClosed {
+			closed++
+		}
+	}
+	if closed != 3 {
+		t.Fatalf("vote.closed sent %d times", closed)
+	}
+	pr, _ := m.Results(ctx, c.ProposalID)
+	if _, _, err := Check(m.IK, pr.Results, pr.Sig, pr.Rows); err != nil || pr.Bundle == nil {
+		t.Fatalf("published results: %v", err)
+	}
+	// Again: the same results, announced once.
+	s.sent = nil
+	sum2, err := m.Close(ctx, c.ProposalID)
+	if err != nil || !bytes.Equal(sum2.ResultsHash, sum1.ResultsHash) || len(s.sent) != 0 {
+		t.Fatalf("second close: %v, sent %d", err, len(s.sent))
+	}
+}

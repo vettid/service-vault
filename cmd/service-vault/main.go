@@ -357,7 +357,7 @@ func serve(args []string) error {
 		// Publishing (BALLOT-PROTOCOL §3.3) comes with the anchor key; until
 		// then, creating a proposal answers publication_not_configured.
 		proposals = &ballot.Manager{Store: ballots, Sign: signIK, IK: keys.IKPublic(), Roster: p, Sender: p,
-			NewID: envelope.NewULID, Now: time.Now, Log: log}
+			Catcher: p, NewID: envelope.NewULID, Now: time.Now, Log: log}
 	}
 	approvals.Peer = p
 

@@ -410,6 +410,8 @@ billed.
 | `GET /v1/audit?since=&limit=` | `{entries: [...], next?}`: the audit log after entry `since`, oldest first, `limit` 1–100 (default 100); pass `next` as `since` for the next page |
 | `POST /v1/proposals` `{title, text, choices, quorum, binding, removed_may_vote, opens_at, closes_at, outage_rule}` | `201 {proposal_id, proposal_hash, eligible, sent}`: the proposal is made from the active connections at this moment, published and sent to each (BALLOT-PROTOCOL §3); `abstain` is added to the choices if they lack it. `invalid_proposal` (400); `publication_not_configured` (503) until publication is configured. Served with `SV_BALLOTS_TABLE` |
 | `GET /v1/proposals/{id}` | `{proposal_id, proposal, proposal_hash, eligible, opens_at, closes_at, published}`: nothing that counts ballots before the results |
+| `POST /v1/proposals/{id}/close` | `{proposal_id, results_hash, tally, counts}`: counts the vote and publishes the results (BALLOT-PROTOCOL §7), or reports them if already published. `not_closed` (409) before `closes_at` + 1 minute; `collecting` (503) until the relay's messages from before then are all handled: retry |
+| `GET /v1/proposals/{id}/results` | `{results, results_sig, rows, bundle}` once published |
 | `GET /health` | `{status: "ok"}` (no key) |
 
 **Webhooks** (signed as `sdk/go/webhook` verifies): `connection.pending`

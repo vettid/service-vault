@@ -123,3 +123,13 @@ func (p *Peer) SendMessage(ctx context.Context, connID, typ string, body json.Ra
 	}
 	return id, nil
 }
+
+// Caught reports whether every message the relay received before t has
+// been handled: the relay hands out a mailbox's messages in msg_id order
+// (RELAY-PROTOCOL §6.2), so it holds once a later message was handled, or
+// a collect that started after t found nothing (BALLOT-PROTOCOL §7).
+func (p *Peer) Caught(t time.Time) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lastMsgMS >= uint64(t.UnixMilli()) || !p.emptyAt.Before(t)
+}
