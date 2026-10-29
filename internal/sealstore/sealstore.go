@@ -164,6 +164,21 @@ func (s *Store) seal(kind, id string, data []byte) ([]byte, error) {
 	return g.Seal(out, nonce, data, aad(s.current, kind, id)), nil
 }
 
+// Seal seals data for a record's place (kind and id) under the current
+// version of the record key, for a store kept outside Inner (the ballots'
+// write-once copy).
+func (s *Store) Seal(kind, id string, data []byte) ([]byte, error) { return s.seal(kind, id, data) }
+
+// Open opens data sealed for a record's place by Seal, under whichever
+// version it names.
+func (s *Store) Open(kind, id string, data []byte) ([]byte, error) {
+	out, v, err := s.open(kind, id, data)
+	if err == nil && v == 0 {
+		return nil, ErrPlaintext
+	}
+	return out, err
+}
+
 // open returns a record's plaintext and the version it was sealed under
 // (0: not sealed).
 func (s *Store) open(kind, id string, data []byte) ([]byte, uint32, error) {
