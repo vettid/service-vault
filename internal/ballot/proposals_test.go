@@ -409,3 +409,62 @@ func TestRebuildAll(t *testing.T) {
 		t.Fatalf("RebuildAll: %d, %v", n, err)
 	}
 }
+
+// Two tasks running at once (a deploy's overlap) don't share the lock:
+// the record's version stops a save over the other's. An Extend that
+// published while the other task closed the vote doesn't reopen it.
+func TestTwoTasksSaveByVersion(t *testing.T) {
+	ctx := context.Background()
+	m1, _, pub := newManager(t)
+	m1.Catcher = &fakeCatcher{caught: true}
+	c, err := m1.Create(ctx, input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := input()
+	m1.Now = func() time.Time { return time.Unix(in.ClosesAt-600, 0) }
+	m2 := &Manager{Store: m1.Store, Sign: m1.Sign, IK: m1.IK, Roster: m1.Roster, Sender: m1.Sender, Publisher: &fakePublisher{},
+		Catcher: &fakeCatcher{caught: true}, NewID: m1.NewID, Now: func() time.Time { return time.Unix(in.ClosesAt, 0).Add(2 * CollectMargin) }}
+	pub.started, pub.release = make(chan struct{}), make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		outage := vote.Outage{From: in.ClosesAt - 7200, To: in.ClosesAt - 7200 + 5400, Source: "https://status.vettid.org/"}
+		_, err := m1.Extend(ctx, c.ProposalID, ExtensionInput{ClosesAt: in.ClosesAt + 7200, Outage: outage})
+		done <- err
+	}()
+	<-pub.started
+	if _, err := m2.Close(ctx, c.ProposalID); err != nil {
+		t.Fatalf("the other task's close: %v", err)
+	}
+	close(pub.release)
+	if err := <-done; !errors.Is(err, ErrProposalChanged) {
+		t.Fatalf("the extension saved over the close: %v", err)
+	}
+	o, _ := m1.Store.OpenProposal(ctx, c.ProposalID)
+	if !o.Published || o.ClosesAt != in.ClosesAt || len(o.Extensions) != 0 {
+		t.Fatalf("after both: published %v, closes %d, %d extensions", o.Published, o.ClosesAt, len(o.Extensions))
+	}
+}
+
+// An extension whose publication ran past the close it extends doesn't
+// take effect (§10.2).
+func TestExtendPublishedTooLate(t *testing.T) {
+	ctx := context.Background()
+	m, _, pub := newManager(t)
+	c, err := m.Create(ctx, input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := input()
+	now := time.Unix(in.ClosesAt-600, 0)
+	m.Now = func() time.Time { return now }
+	pub.started, pub.release = make(chan struct{}, 1), make(chan struct{})
+	go func() { <-pub.started; now = time.Unix(in.ClosesAt, 0); close(pub.release) }()
+	outage := vote.Outage{From: in.ClosesAt - 7200, To: in.ClosesAt - 7200 + 5400, Source: "https://status.vettid.org/"}
+	if _, err := m.Extend(ctx, c.ProposalID, ExtensionInput{ClosesAt: in.ClosesAt + 7200, Outage: outage}); !errors.Is(err, ErrTooLate) {
+		t.Fatalf("published past the close: %v", err)
+	}
+	if o, _ := m.Store.OpenProposal(ctx, c.ProposalID); o.ClosesAt != in.ClosesAt || len(o.Extensions) != 0 {
+		t.Fatal("the late extension was saved")
+	}
+}

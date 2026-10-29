@@ -258,6 +258,22 @@ func (s *Store) Get(ctx context.Context, kind, id string) ([]byte, bool, error) 
 	return pt, true, nil
 }
 
+// GetRecord implements peer.RecordGetter when Inner does.
+func (s *Store) GetRecord(ctx context.Context, kind, id string) (peer.Record, bool, error) {
+	g, ok := s.Inner.(peer.RecordGetter)
+	if !ok {
+		return peer.Record{}, false, errors.New("sealstore: the inner store returns no versions")
+	}
+	r, ok, err := g.GetRecord(ctx, kind, id)
+	if err != nil || !ok {
+		return peer.Record{}, ok, err
+	}
+	if r.Data, _, err = s.open(kind, id, r.Data); err != nil {
+		return peer.Record{}, false, err
+	}
+	return r, true, nil
+}
+
 // Page reads a page of a kind through Pages and opens it.
 func (s *Store) Page(ctx context.Context, kind, after string, limit int) ([]peer.Record, error) {
 	if s.Pages == nil {

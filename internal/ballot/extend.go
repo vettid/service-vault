@@ -85,6 +85,11 @@ func (m *Manager) Extend(ctx context.Context, id string, in ExtensionInput) (*vo
 	if err != nil {
 		return nil, fmt.Errorf("ballot: publish extension %d of %s: %w", e.N, id, err)
 	}
+	// Each extension is published before the close it extends (§10.2):
+	// one whose publication ran past it doesn't take effect.
+	if m.Now().Unix() >= o.ClosesAt {
+		return nil, ErrTooLate
+	}
 	o.Extensions = append(o.Extensions, vote.Signed{Doc: doc, Sig: sig})
 	o.ClosesAt = e.ClosesAt
 	if err := m.Store.SaveProposal(ctx, o, false); err != nil {

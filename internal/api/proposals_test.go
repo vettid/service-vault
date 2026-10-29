@@ -59,6 +59,8 @@ func (f *fakeProposals) Extend(_ context.Context, id string, in ballot.Extension
 	switch id {
 	case "late":
 		return nil, ballot.ErrTooLate
+	case "changed":
+		return nil, ballot.ErrProposalChanged
 	case "bad":
 		return nil, &ballot.ErrInput{Err: errors.New("short")}
 	}
@@ -116,7 +118,7 @@ func TestProposalRoutes(t *testing.T) {
 		}
 	}
 	ext := `{"closes_at":9,"outage":{"from":1,"to":5000,"source":"https://status.vettid.org/"}}`
-	for id, want := range map[string]int{"ok": 200, "late": 409, "bad": 400} {
+	for id, want := range map[string]int{"ok": 200, "late": 409, "bad": 400, "changed": 409} {
 		if rec, m := do(t, h, "POST", "/v1/proposals/"+id+"/extend", apiKey, ext); rec.Code != want {
 			t.Errorf("extend %s: %d %v", id, rec.Code, m)
 		}
