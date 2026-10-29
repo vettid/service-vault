@@ -51,11 +51,15 @@ type Event struct {
 	Direction    string `json:"direction,omitempty"`   // connection.removed: in (the member) | out (the service)
 	// The evidence of a challenge's answer (signin.*): the challenge's
 	// context, and for a signed answer the credential key, the signature
-	// and its signed_at (§10.4). Kept with the event and given to Events;
-	// never logged.
+	// and its signed_at, with what else the signature covers: the
+	// challenge's nonce and the two identity keys (§10.4). Kept with the
+	// event and given to Events; never logged.
 	Context   string `json:"context,omitempty"`
 	Key       []byte `json:"key,omitempty"`
 	Signature []byte `json:"signature,omitempty"`
+	Nonce     []byte `json:"nonce,omitempty"`
+	ServiceIK []byte `json:"service_ik,omitempty"` // the challenger's
+	MemberIK  []byte `json:"member_ik,omitempty"`  // the responder's
 	// Purpose is the purpose the signature covers ("" for a vault that
 	// signed without one, VAULT-MESSAGING 0.65.0 §10.4).
 	Purpose  string    `json:"purpose,omitempty"`

@@ -619,6 +619,7 @@ func (m *Manager) Answer(ctx context.Context, e *peer.Event) (bool, error) {
 	at := e.At.UTC().Truncate(time.Millisecond)
 	ent := &AuditEntry{Type: AuditResponse, ApprovalID: r.ID, ActionHash: r.Hash, ConnectionID: e.ConnectionID,
 		RequestID: e.RequestID, Context: e.Context, Answer: answer, Counted: &counted, Key: e.Key, Signature: e.Signature, Purpose: e.Purpose,
+		Nonce: e.Nonce, ServiceIK: e.ServiceIK, MemberIK: e.MemberIK,
 		KeyChanged: answer == AnswerApproved && e.KeyChanged}
 	if !e.SignedAt.IsZero() {
 		sa := e.SignedAt.UTC()

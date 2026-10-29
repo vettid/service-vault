@@ -143,6 +143,9 @@ func (p *Peer) connAuthResponse(c *Connection, body []byte, now time.Time) {
 	if r.Status == peerwire.ConnAuthSigned {
 		ev.Key, ev.Signature, ev.SignedAt = append([]byte(nil), r.Key...), append([]byte(nil), r.Sig...), r.SignedAt.UTC()
 		ev.Purpose = r.Purpose
+		ev.Nonce = append([]byte(nil), ch.Nonce...)
+		ev.ServiceIK = append([]byte(nil), p.cfg.Keys.IKPublic()...)
+		ev.MemberIK = append([]byte(nil), c.Peer.IK...)
 	}
 	switch {
 	case r.Status == peerwire.ConnAuthDenied:
