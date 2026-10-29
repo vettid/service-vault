@@ -40,6 +40,9 @@ func (s *fakeSender) SendMessage(_ context.Context, conn, typ string, body json.
 type fakePublisher struct {
 	fail  bool
 	calls int
+	// started and release, when set, hold an extension's publication
+	// until release is closed, after telling started.
+	started, release chan struct{}
 }
 
 func (p *fakePublisher) PublishProposal(_ context.Context, id string, doc, sig []byte) (json.RawMessage, error) {
@@ -278,6 +281,10 @@ func TestClose(t *testing.T) {
 }
 
 func (p *fakePublisher) PublishExtension(_ context.Context, id string, n int64, doc, sig []byte) (json.RawMessage, error) {
+	if p.release != nil {
+		p.started <- struct{}{}
+		<-p.release
+	}
 	p.calls++
 	if p.fail {
 		return nil, errors.New("rekor down")
@@ -333,6 +340,51 @@ func TestExtend(t *testing.T) {
 	_, res, err := vote.Check(m.IK, pr.Results, pr.Sig, pr.Rows)
 	if err != nil || len(res.Extensions) != 1 {
 		t.Fatalf("results with the extension: %v", err)
+	}
+}
+
+// While an extension is being published, the proposal's other writers
+// wait for it, so neither saves over the other's change.
+func TestExtendHoldsTheProposal(t *testing.T) {
+	ctx := context.Background()
+	m, _, pub := newManager(t)
+	m.Catcher = &fakeCatcher{caught: true}
+	c, err := m.Create(ctx, input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := input()
+	m.Now = func() time.Time { return time.Unix(in.ClosesAt-600, 0) }
+	outage := vote.Outage{From: in.ClosesAt - 7200, To: in.ClosesAt - 7200 + 5400, Source: "https://status.vettid.org/"}
+	pub.started, pub.release = make(chan struct{}), make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		_, err := m.Extend(ctx, c.ProposalID, ExtensionInput{ClosesAt: in.ClosesAt + 7200, Outage: outage})
+		done <- err
+	}()
+	<-pub.started
+	for name, f := range map[string]func(context.Context) error{
+		"close":   func(ctx context.Context) error { _, err := m.Close(ctx, c.ProposalID); return err },
+		"publish": func(ctx context.Context) error { _, err := m.Publish(ctx, c.ProposalID); return err },
+		"extend": func(ctx context.Context) error {
+			_, err := m.Extend(ctx, c.ProposalID, ExtensionInput{ClosesAt: in.ClosesAt + 3600, Outage: outage})
+			return err
+		},
+	} {
+		short, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+		if err := f(short); !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("%s during the extension's publication: %v", name, err)
+		}
+		cancel()
+	}
+	close(pub.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	pub.started, pub.release = nil, nil
+	o, _ := m.Store.OpenProposal(ctx, c.ProposalID)
+	if o.ClosesAt != in.ClosesAt+7200 || len(o.Extensions) != 1 || o.Published {
+		t.Fatalf("after the extension: closes %d, %d extensions, published %v", o.ClosesAt, len(o.Extensions), o.Published)
 	}
 }
 

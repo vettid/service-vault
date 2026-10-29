@@ -59,6 +59,11 @@ type ResultsSummary struct {
 // Close counts a vote and publishes its results, or reports them if they
 // are published already.
 func (m *Manager) Close(ctx context.Context, id string) (*ResultsSummary, error) {
+	unlock, err := m.lock(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	rp, ok := m.Publisher.(ResultsPublisher)
 	if m.Publisher == nil || !ok {
 		return nil, ErrNoPublisher
