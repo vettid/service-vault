@@ -196,7 +196,7 @@ listed anchor key. A second, different proposal under the same
 
 | Type | Body | Answer |
 |---|---|---|
-| `vote.cast` | `{proposal_id, record_tag, vk, choice_id, ballot_sig, cast_sig}` (§5) | `{proposal_id, msg_ms, receipt_sig}`, or a refusal |
+| `vote.cast` | `{proposal_id, record_tag, vk, choice_id, ballot_sig, cast_sig, credential_key?}` (§5) | `{proposal_id, msg_ms, receipt_sig}`, or a refusal |
 | `vote.status` | `{proposal_id}` | `{proposal_id, proposal?, record_secret?, record_proof?, ballot?, msg_ms?, receipt_sig?, status_sig}`, or a refusal |
 
 - **`vote.status`** gives a vault what the service holds for its
@@ -214,14 +214,16 @@ listed anchor key. A second, different proposal under the same
   `record_tag` is empty when the connection has none, `msg_ms` is the
   relay's time of the request (§6), and `request_hash` is
   `H(ballot_leaf)` for `vote.cast` and `H(proposal_id)` for
-  `vote.status`. A vault treats an unsigned refusal as no answer.
+  `vote.status`, or `H(the request body)` when the body is too malformed
+  to form them. A request that names no valid `proposal_id` gets an
+  unsigned refusal. A vault treats an unsigned refusal as no answer.
 
 | Code | For | Meaning |
 |---|---|---|
 | `not_eligible` | both | The connection has no tag for this proposal. |
 | `not_open`, `closed` | `vote.cast` | The relay's time is outside the window. |
 | `not_active` | `vote.cast` | Removed or suspended, and `removed_may_vote` is false. |
-| `already_voted` | `vote.cast` | A different ballot is already recorded for this tag; the body also carries that ballot and its receipt. |
+| `already_voted` | `vote.cast` | A different ballot is already recorded for this tag; the body also carries that ballot as `ballot` `{vk, choice_id, ballot_sig}`, with its `ballot_msg_ms` and `receipt_sig`. |
 | `bad_ballot` | `vote.cast` | The tag isn't the connection's, the choice isn't the proposal's, or a signature fails. |
 | `late` | `vote.cast` | The window was open, but the results were already published (§7). |
 | `unknown_proposal` | `vote.status` | No such proposal. |
@@ -237,7 +239,10 @@ listed anchor key. A second, different proposal under the same
   - `ballot_leaf = record_tag ‖ lp(vk) ‖ lp(choice_id) ‖ lp(ballot_sig)`;
   - `cast_sig = Sign(credential key, "vettid/vote/1/cast\x00", proposal_hash ‖ H(ballot_leaf))`,
     under the member's credential key, which the service already pins
-    at sign-in (SERVICE-VAULT.md §5). It is never published.
+    at sign-in (SERVICE-VAULT.md §5). A member who has never signed in
+    names the key in `credential_key`, and the service keeps it with the
+    ballot; once a key is pinned, the field is ignored. It is never
+    published.
 - **Disclosure:** before the member approves a ballot, the app shows a
   fixed sentence, in the app's own words and not the proposal's: *"<the
   service's name> will see how you vote and keep that record. The
@@ -282,7 +287,8 @@ listed anchor key. A second, different proposal under the same
      tag, and it is active or `removed_may_vote` is true.
   4. **Ballot:** `choice_id` is the proposal's, `ballot_sig` verifies
      under `vk`, and `cast_sig` verifies under the connection's pinned
-     credential key (§2).
+     credential key, or the one the request names if none is pinned
+     (§2).
   5. **One per tag:** a conditional write stores the ballot, with
      `cast_sig` and `msg_ms`, only if the tag has none; otherwise the
      answer is `already_voted`.

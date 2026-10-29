@@ -61,6 +61,9 @@ type Config struct {
 	// first Start reconnects every connection (reconnect.go) and, once
 	// the reconnects are stored and sent, calls it (to clear the marker).
 	AfterRestore func(context.Context) error
+	// Votes answers members' vote.* requests (vote.go); without it they
+	// are answered unsupported_type.
+	Votes Votes
 }
 
 // Peer is the service's side of VMS v2 connections (VAULT-MESSAGING §6,
@@ -402,7 +405,7 @@ func (p *Peer) handleMessage(ctx context.Context, m relayclient.Message, now tim
 	if c != nil && c.kr != nil {
 		in, ep, err := c.kr.Open(env, now)
 		if err == nil {
-			return p.dispatch(ctx, c, in, ep, m.Payload, sender, now)
+			return p.dispatch(ctx, c, in, ep, m.Payload, sender, m.MsgID, now)
 		}
 		if !errors.Is(err, envelope.ErrKid) {
 			p.audit("decrypt_failed", c.ID)
