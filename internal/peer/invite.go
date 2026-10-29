@@ -80,6 +80,10 @@ func (iv *Inviter) Create(ctx context.Context) (*Invite, error) {
 		Token:    tok,
 		Exp:      exp,
 		HintName: iv.HintName,
+		// A member vault keeps a service connection's epoch history, so it
+		// takes the service's reconnect after a restore (VAULT-MESSAGING
+		// §6.4, §6.6).
+		PeerKind: invite.PeerKindService,
 	}
 	bj, err := b.Marshal()
 	if err != nil {

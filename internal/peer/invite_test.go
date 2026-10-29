@@ -108,7 +108,7 @@ func TestInviteOpensAsMemberVaultWould(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenBundle: %v", err)
 	}
-	if b.Kind != "connection" || b.Remote || b.InviteID != inv.ID || b.HintName != "VettID Member Service" {
+	if b.Kind != "connection" || b.Remote || b.InviteID != inv.ID || b.HintName != "VettID Member Service" || b.PeerKind != invite.PeerKindService {
 		t.Fatalf("bundle %+v", b)
 	}
 	if !suite.EqualPublic(b.Vault.IK, keys.IKPublic()) || !b.Vault.KEM.Equal(keys.KEM.Public()) ||
