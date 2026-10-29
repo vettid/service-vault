@@ -333,8 +333,8 @@ certified members at publication (§8.1), then deletes the records.
     leaves no unused certificate for the service to vote with (§9.3).
   - An abstain sent then says only "had not cast an hour before close",
     which the tally's abstain count largely shows anyway.
-  - **(chosen; differs from the plan:** the plan's members who don't
-    vote cast nothing.)
+  - **(differs from the plan; kept by owner decision 2026-10-28:** the
+    plan's members who don't vote cast nothing.)
 - **Reminders:** the app reminds the member a day before `closes_at`.
 
 ### 6.3 The deposit
@@ -639,12 +639,15 @@ stop-and-report item.
 
 ## 12. Decisions for the owner
 
+All items below were approved by the owner on 2026-10-28, item 3 as
+amended in 0.4.0.
+
 **Departures from the plan:**
 1. **Labels:** `vettid/vote/1/...`, the VMS convention (§2).
 2. **No timestamp in the ballot** (§6.1).
 3. **Ballots are sent the moment they are cast** (owner decision
    2026-10-28). A member who hasn't cast an hour before close has an
-   abstain sent by their vault. For non-binding votes, arrival time is
+   abstain sent by their vault (kept, owner decision 2026-10-28). For non-binding votes, arrival time is
    a stated link (§9.1); the mix removes it for binding votes (§6.4,
    §9.2).
 4. **A 409 deposits again with another token,** instead of stopping at
