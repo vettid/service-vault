@@ -56,6 +56,15 @@ func TestConfigFromEnv(t *testing.T) {
 	if c, err := configFromEnv(env(e)); err != nil || c.Sigstore != "staging" || c.BallotsTable != "t-ballots" {
 		t.Fatalf("ballots %+v %v", c, err)
 	}
+	e["SV_VOTES_URL"] = "https://votes.vettid.org/"
+	if c, err := configFromEnv(env(e)); err != nil || c.VotesURL != "https://votes.vettid.org" {
+		t.Fatalf("votes URL %+v %v", c, err)
+	}
+	e["SV_VOTES_URL"] = "http://votes.vettid.org"
+	if _, err := configFromEnv(env(e)); err == nil {
+		t.Fatal("an http votes URL")
+	}
+	delete(e, "SV_VOTES_URL")
 	e["SV_SIGSTORE"] = "public"
 	if _, err := configFromEnv(env(e)); err == nil {
 		t.Fatal("an unknown Sigstore instance")

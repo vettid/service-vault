@@ -52,6 +52,7 @@ import (
 	"github.com/vettid/service-vault/internal/connect"
 	"github.com/vettid/service-vault/internal/keystore"
 	"github.com/vettid/service-vault/internal/peer"
+	"github.com/vettid/service-vault/internal/publish"
 	"github.com/vettid/service-vault/internal/sealstore"
 	"github.com/vettid/service-vault/internal/service"
 	"github.com/vettid/service-vault/internal/signin"
@@ -108,7 +109,10 @@ type Config struct {
 	BallotsTable string
 	// Sigstore is the Sigstore instance votes are anchored in: staging or
 	// production (BALLOT-PROTOCOL §3.3).
-	Sigstore      string
+	Sigstore string
+	// VotesURL is votes.vettid.org (or staging's); without it, proposals
+	// can't be published, so none can be created.
+	VotesURL      string
 	KMSKeyID      string
 	Listen        string
 	WebhookURL    string
@@ -139,7 +143,7 @@ const (
 // configFromEnv reads and checks the SV_* variables.
 func configFromEnv(getenv func(string) string) (*Config, error) {
 	c := &Config{
-		RelayURL: strings.TrimRight(getenv("SV_RELAY_URL"), "/"), Table: getenv("SV_TABLE"), BallotsTable: getenv("SV_BALLOTS_TABLE"), Sigstore: getenv("SV_SIGSTORE"), KMSKeyID: getenv("SV_KMS_KEY_ID"),
+		RelayURL: strings.TrimRight(getenv("SV_RELAY_URL"), "/"), Table: getenv("SV_TABLE"), BallotsTable: getenv("SV_BALLOTS_TABLE"), Sigstore: getenv("SV_SIGSTORE"), VotesURL: strings.TrimRight(getenv("SV_VOTES_URL"), "/"), KMSKeyID: getenv("SV_KMS_KEY_ID"),
 		Listen: getenv("SV_LISTEN"), WebhookURL: getenv("SV_WEBHOOK_URL"), ServiceName: getenv("SV_SERVICE_NAME"),
 		TLSName: getenv("SV_TLS_NAME"), TLSPinParam: getenv("SV_TLS_PIN_PARAM"), WebhookSecret: []byte(getenv("SV_WEBHOOK_SECRET")),
 	}
@@ -157,6 +161,9 @@ func configFromEnv(getenv func(string) string) (*Config, error) {
 	}
 	if c.BallotsTable != "" && c.Sigstore != anchor.Staging && c.Sigstore != anchor.Production {
 		return nil, errors.New("SV_SIGSTORE must be staging or production when SV_BALLOTS_TABLE is set")
+	}
+	if c.VotesURL != "" && (c.BallotsTable == "" || !strings.HasPrefix(c.VotesURL, "https://")) {
+		return nil, errors.New("SV_VOTES_URL must be https, with SV_BALLOTS_TABLE")
 	}
 	if !strings.HasPrefix(c.WebhookURL, "https://") {
 		return nil, errors.New("SV_WEBHOOK_URL must be https")
@@ -364,8 +371,8 @@ func serve(args []string) error {
 	var proposals api.Proposals
 	var anchorInfo *api.AnchorKey
 	if ballots != nil {
-		// Publishing (BALLOT-PROTOCOL §3.3) comes with the anchor key; until
-		// then, creating a proposal answers publication_not_configured.
+		// Publishing (BALLOT-PROTOCOL §3.3) needs SV_VOTES_URL; without it,
+		// creating a proposal answers publication_not_configured.
 		ak, err := keystore.LoadOrCreate(ctx, &keystore.AWSKMS{Client: ac.kms}, cfg.KMSKeyID, tbl.Blobs(), keystore.AnchorKeyName, keystore.NewAnchorKey)
 		if err != nil {
 			return fmt.Errorf("anchor key: %w", err)
@@ -386,6 +393,13 @@ func serve(args []string) error {
 		anchorInfo = &api.AnchorKey{Key: spki, Cert: cert, IK: keys.IKPublic(), Sigstore: cfg.Sigstore}
 		mgr := &ballot.Manager{Store: ballots, Sign: signIK, IK: keys.IKPublic(), Roster: p, Sender: p,
 			Catcher: p, NewID: envelope.NewULID, Now: time.Now, Log: log}
+		if cfg.VotesURL != "" {
+			anc, err := anchor.New(cfg.Sigstore, akPriv)
+			if err != nil {
+				return err
+			}
+			mgr.Publisher = &publish.Publisher{URL: cfg.VotesURL, Anchor: anc, Client: &http.Client{Timeout: time.Minute}}
+		}
 		if pc.AfterRestore != nil {
 			// The table was restored: ballots it lost are in the copy (§6).
 			n, err := mgr.RebuildAll(ctx)

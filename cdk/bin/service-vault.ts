@@ -3,7 +3,8 @@ import * as cdk from 'aws-cdk-lib';
 import { ServiceVaultStack } from '../lib/service-vault-stack';
 
 // Parameters come from context (cdk.json, ~/.cdk.json or -c key=value):
-//   envName (default prod), image (required, by digest), webhookUrl
+//   envName (default prod), image (required, by digest), votesUrl
+//   (votes.vettid.org, for publishing votes; optional), webhookUrl
 //   (required), relayUrl, serviceName, apiClientSecurityGroupId,
 //   apiClientCidr, vpcCidr, adminBootstrapEmail, adminThreshold,
 //   approvalTtl, recordSealMigrate, recordKeyVersion, and one of alarmTopicArn and
@@ -25,6 +26,7 @@ const stack = new ServiceVaultStack(app, `ServiceVault-${envName}`, {
   envName,
   image: required('image'),
   webhookUrl: required('webhookUrl'),
+  votesUrl: ctx('votesUrl'),
   relayUrl: ctx('relayUrl'),
   serviceName: ctx('serviceName'),
   apiClientSecurityGroupId: ctx('apiClientSecurityGroupId'),

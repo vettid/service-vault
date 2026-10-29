@@ -123,6 +123,9 @@ export interface ServiceVaultStackProps extends cdk.StackProps {
   readonly image: string;
   /** Where the application receives signed webhooks (SV_WEBHOOK_URL). */
   readonly webhookUrl: string;
+  /** votes.vettid.org (or staging's), where vote documents are published;
+   * without it no proposal can be created (SV_VOTES_URL). */
+  readonly votesUrl?: string;
   /** The relay the service vault uses (SV_RELAY_URL). */
   readonly relayUrl?: string;
   /** The service's display name, shown to members (SV_SERVICE_NAME). */
@@ -470,6 +473,7 @@ export class ServiceVaultStack extends cdk.Stack {
         // Votes anchor in Sigstore's staging log outside production
         // (BALLOT-PROTOCOL §3.3; owner decision 2026-10-29).
         SV_SIGSTORE: envName === 'prod' ? 'production' : 'staging',
+        ...(props.votesUrl ? { SV_VOTES_URL: props.votesUrl } : {}),
         SV_KMS_KEY_ID: this.key.keyArn,
         SV_LISTEN: `:${API_PORT}`,
         SV_WEBHOOK_URL: props.webhookUrl,
