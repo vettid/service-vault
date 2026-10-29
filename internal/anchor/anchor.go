@@ -67,7 +67,17 @@ func New(instance string, key *ecdsa.PrivateKey) (*Anchorer, error) {
 	if !ok {
 		return nil, fmt.Errorf("anchor: unknown Sigstore instance %q", instance)
 	}
-	return NewWith(key, ep, &http.Client{Timeout: 30 * time.Second})
+	return NewWith(key, ep, Client(30*time.Second))
+}
+
+// Client is an HTTP client that follows no redirect: a 3xx is an answer,
+// so a document goes only to the host it was meant for. It ignores proxy
+// settings in the environment.
+func Client(timeout time.Duration) *http.Client {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.Proxy = nil
+	return &http.Client{Timeout: timeout, Transport: t,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 }
 
 // NewWith returns an Anchorer on given endpoints (tests).

@@ -160,8 +160,10 @@ func TestCreateRefusals(t *testing.T) {
 	// Publishing fails: nothing is sent; a later Publish finishes.
 	m.Publisher = pub
 	pub.fail = true
-	if _, err := m.Create(ctx, input()); err == nil {
-		t.Fatal("created while Rekor is down")
+	c, err := m.Create(ctx, input())
+	var np *ErrNotPublished
+	if !errors.As(err, &np) || c == nil || np.ProposalID != c.ProposalID {
+		t.Fatalf("created while Rekor is down: %v", err)
 	}
 	if len(s.sent) != 0 {
 		t.Fatal("sent an unpublished proposal")
@@ -171,7 +173,9 @@ func TestCreateRefusals(t *testing.T) {
 	if len(recs) != 1 {
 		t.Fatalf("%d stored proposals", len(recs))
 	}
-	id = recs[0].ID
+	if id = recs[0].ID; id != c.ProposalID {
+		t.Fatal("the error names another proposal")
+	}
 	if st, _ := m.Status(ctx, id); st.Published {
 		t.Fatal("marked published")
 	}

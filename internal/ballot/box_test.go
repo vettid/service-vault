@@ -66,7 +66,7 @@ func newBoxFixture(t *testing.T) *boxFixture {
 	sortTags(sorted)
 	f := &boxFixture{t: t, v: v, p: p, creds: map[string]ed25519.PrivateKey{}, vks: map[string]ed25519.PrivateKey{}}
 	f.open = &OpenProposal{Doc: v.propDoc, Sig: v.sign(t, vote.LabelProposal, vote.ProposalSigMsg(v.propDoc)),
-		ClosesAt: p.ClosesAt, Members: map[string]Member{}}
+		Bundle: json.RawMessage(`{}`), ClosesAt: p.ClosesAt, Members: map[string]Member{}}
 	for i, tag := range v.tags {
 		id := "c" + string(rune('0'+i))
 		f.open.Members[id] = Member{Tag: tag, Secret: digest(string(rune('a' + i)))}
@@ -303,5 +303,24 @@ func TestStatus(t *testing.T) {
 	}
 	if a := f.send("c0", TypeStatus, map[string]string{"proposal_id": "01JBQZ0000000000000000000B"}, f.during(), true); a.Code != CodeUnknownProposal {
 		t.Fatalf("unknown proposal: %q", a.Code)
+	}
+}
+
+// A proposal not yet published (no bundle, §3.3) is no member's to cast
+// on or ask about.
+func TestUnpublishedProposal(t *testing.T) {
+	f := newBoxFixture(t)
+	f.open.Bundle = nil
+	body, _ := f.castBody("c0", "yes")
+	if a := f.send("c0", TypeCast, body, f.during(), true); a.Code != CodeNotEligible {
+		t.Fatalf("cast: %q", a.Code)
+	}
+	q := map[string]string{"proposal_id": f.p.ProposalID}
+	if a := f.send("c0", TypeStatus, q, f.during(), true); a.Code != CodeUnknownProposal {
+		t.Fatalf("status: %q", a.Code)
+	}
+	f.open.Bundle = json.RawMessage(`{}`)
+	if a := f.send("c0", TypeStatus, q, f.during(), true); a.Code != "" {
+		t.Fatalf("status once published: %q", a.Code)
 	}
 }

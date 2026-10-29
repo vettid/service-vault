@@ -151,17 +151,30 @@ func (m *Manager) Create(ctx context.Context, in ProposalInput) (*Created, error
 	if err := m.Store.SaveProposal(ctx, o, true); err != nil {
 		return nil, err
 	}
-	sent, err := m.Publish(ctx, id)
-	if err != nil {
-		return nil, err
+	c := &Created{ProposalID: id, ProposalHash: sum(doc), Eligible: len(tags)}
+	if c.Sent, err = m.Publish(ctx, id); err != nil {
+		return c, &ErrNotPublished{ProposalID: id, Err: err}
 	}
-	return &Created{ProposalID: id, ProposalHash: sum(doc), Eligible: len(tags), Sent: sent}, nil
+	return c, nil
 }
+
+// ErrNotPublished is a proposal created but not yet published (and so
+// sent to no member): Publish retries it.
+type ErrNotPublished struct {
+	ProposalID string
+	Err        error
+}
+
+func (e *ErrNotPublished) Error() string { return e.Err.Error() }
+func (e *ErrNotPublished) Unwrap() error { return e.Err }
 
 // Publish publishes a stored proposal if it isn't yet, then sends
 // vote.proposal to every eligible member, and returns how many it sent.
 // A member it couldn't reach asks later (vote.status, §4.2).
 func (m *Manager) Publish(ctx context.Context, id string) (int, error) {
+	if m.Publisher == nil {
+		return 0, ErrNoPublisher
+	}
 	unlock, err := m.lock(ctx, id)
 	if err != nil {
 		return 0, err
