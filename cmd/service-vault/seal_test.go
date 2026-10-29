@@ -282,7 +282,8 @@ func TestBallotCopySurvivesRotation(t *testing.T) {
 		return st
 	}
 	st := start(1)
-	cs, err := ballotCopySeal(ctx, plainKMS{}, "k", blobs, st)
+	cp := &ballot.MemCopy{}
+	cs, err := ballotCopySeal(ctx, plainKMS{}, "k", blobs, st, cp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,7 +302,7 @@ func TestBallotCopySurvivesRotation(t *testing.T) {
 	if got, ok, err := st.Get(ctx, ballot.KindProposal, "p"); err != nil || !ok || string(got) != `{"doc":"x"}` {
 		t.Fatalf("a proposal after the rotation: %s %v %v", got, ok, err)
 	}
-	cs, err = ballotCopySeal(ctx, plainKMS{}, "k", blobs, st)
+	cs, err = ballotCopySeal(ctx, plainKMS{}, "k", blobs, st, cp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,7 +310,51 @@ func TestBallotCopySurvivesRotation(t *testing.T) {
 		t.Fatalf("a copied ballot after the rotation: %s %v", got, err)
 	}
 	delete(blobs.m, keystore.BallotCopyKeyName)
-	if _, err := ballotCopySeal(ctx, plainKMS{}, "k", blobs, st); err == nil {
-		t.Fatal("a new copy key made over proposals")
+	var ck *errCopyKey
+	if _, err := ballotCopySeal(ctx, plainKMS{}, "k", blobs, st, cp); !errors.As(err, &ck) {
+		t.Fatalf("a new copy key made over proposals: %v", err)
+	}
+}
+
+// The copy's key check ties the key to the copy: a lost key isn't made
+// again over a copy that has a check, even with no proposals in the
+// table (a restore of the table from before the key), and another key
+// is refused. Either is errCopyKey: the daemon runs with ballots off.
+func TestBallotCopyKeyCheck(t *testing.T) {
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	blobs, inner := &memBlobs{m: map[string][]byte{}}, peer.NewMemStore()
+	st, err := sealedStore(ctx, plainKMS{}, "k", blobs, inner, nil, memAnyRecord(inner), true, 1, false, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp := &ballot.MemCopy{}
+	if _, err := ballotCopySeal(ctx, plainKMS{}, "k", blobs, st, cp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ballotCopySeal(ctx, plainKMS{}, "k", blobs, st, cp); err != nil {
+		t.Fatalf("the same key again: %v", err)
+	}
+	var ck *errCopyKey
+	saved := blobs.m[keystore.BallotCopyKeyName]
+	delete(blobs.m, keystore.BallotCopyKeyName)
+	if _, err := ballotCopySeal(ctx, plainKMS{}, "k", blobs, st, cp); !errors.As(err, &ck) {
+		t.Fatalf("a new key over a checked copy: %v", err)
+	}
+	if _, ok := blobs.m[keystore.BallotCopyKeyName]; ok {
+		t.Fatal("a key was made over a checked copy")
+	}
+	// Another key in the keystore: its check doesn't match the copy's.
+	other := &memBlobs{m: map[string][]byte{}}
+	if _, err := ballotCopySeal(ctx, plainKMS{}, "k", other, st, &ballot.MemCopy{}); err != nil {
+		t.Fatal(err)
+	}
+	blobs.m[keystore.BallotCopyKeyName] = other.m[keystore.BallotCopyKeyName]
+	if _, err := ballotCopySeal(ctx, plainKMS{}, "k", blobs, st, cp); !errors.As(err, &ck) {
+		t.Fatalf("another key over the copy: %v", err)
+	}
+	blobs.m[keystore.BallotCopyKeyName] = saved
+	if _, err := ballotCopySeal(ctx, plainKMS{}, "k", blobs, st, cp); err != nil {
+		t.Fatalf("the key restored: %v", err)
 	}
 }

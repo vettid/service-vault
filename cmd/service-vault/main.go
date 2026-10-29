@@ -15,6 +15,7 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
@@ -362,13 +363,19 @@ func serve(args []string) error {
 	var ballots *ballot.RecordStore
 	signIK := func(label string, msg []byte) ([]byte, error) { return suite.Sign(keys.IK, label, msg) }
 	if cfg.BallotsTable != "" {
-		cs, err := ballotCopySeal(ctx, &keystore.AWSKMS{Client: ac.kms}, cfg.KMSKeyID, tbl.Blobs(), records)
-		if err != nil {
+		raw := &store.Ballots{Client: ac.ddb, Name: cfg.BallotsTable}
+		cs, err := ballotCopySeal(ctx, &keystore.AWSKMS{Client: ac.kms}, cfg.KMSKeyID, tbl.Blobs(), records, raw)
+		var ck *errCopyKey
+		switch {
+		case errors.As(err, &ck):
+			// Sign-ins and approvals go on; votes wait for the operator.
+			log.Error("ballots off: "+ck.why, "alarm", "ballots_off")
+		case err != nil:
 			return err
+		default:
+			ballots = &ballot.RecordStore{Records: records, Copy: &ballot.SealedCopy{Inner: raw, Seal: cs.Seal, Open: cs.Open}}
+			pc.Votes = &ballot.Box{Store: ballots, Sign: signIK}
 		}
-		ballots = &ballot.RecordStore{Records: records, Copy: &ballot.SealedCopy{
-			Inner: &store.Ballots{Client: ac.ddb, Name: cfg.BallotsTable}, Seal: cs.Seal, Open: cs.Open}}
-		pc.Votes = &ballot.Box{Store: ballots, Sign: signIK}
 	}
 	if restored, err := tbl.Restored(ctx); err != nil {
 		return fmt.Errorf("restore marker: %w", err)
@@ -779,26 +786,57 @@ func newSecretsIfFresh(ctx context.Context, anyRecord func(context.Context) ([]b
 
 // ballotCopySeal returns the sealing of the write-once ballot copy, under
 // a key of its own (keystore.BallotCopyKeyName) that the record key's
-// rotation doesn't touch. It is made only while the service has no
-// proposal: a copy holding ballots under a lost key can't be read, so a
-// new one is refused rather than made over it.
-func ballotCopySeal(ctx context.Context, kc keystore.KMS, keyID string, blobs keystore.Blobs, records peer.Store) (*sealstore.Store, error) {
+// rotation doesn't touch, and ties that key to the copy: the copy holds a
+// key-check item (an HMAC under the key, written once), so a key that
+// isn't the one its ballots are under is found at the start. A copy
+// holding ballots under a lost key can't be read, so no new key is made
+// while proposals exist or the copy has a key check; such a start, or a
+// key that doesn't match the check, is errCopyKey, and the daemon runs
+// with ballots off rather than not at all.
+func ballotCopySeal(ctx context.Context, kc keystore.KMS, keyID string, blobs keystore.Blobs, records peer.Store, cp ballot.Copy) (*sealstore.Store, error) {
 	rk, err := keystore.LoadOrCreate(ctx, kc, keyID, blobs, keystore.BallotCopyKeyName, func() (*sealstore.RecordKey, error) {
 		props, err := records.Load(ctx, ballot.KindProposal)
 		if err != nil {
 			return nil, err
 		}
-		if len(props) > 0 {
-			return nil, errors.New("the ballot copy's key is missing while proposals exist: restore it from a backup of the table")
+		checks, err := cp.List(ctx, copyKeyCheckID)
+		if err != nil {
+			return nil, err
+		}
+		if len(props) > 0 || len(checks) > 0 {
+			return nil, &errCopyKey{"the ballot copy's key is missing while proposals or copied ballots exist: restore it from a backup of the table"}
 		}
 		return sealstore.NewRecordKey()
 	})
 	if err != nil {
+		var ck *errCopyKey
+		if errors.As(err, &ck) {
+			return nil, ck
+		}
 		return nil, fmt.Errorf("keystore: %w", err)
 	}
 	defer clear(rk.Key)
+	mac := hmac.New(sha256.New, rk.Key)
+	mac.Write([]byte("vettid/ballot-copy-key-check/1"))
+	check := mac.Sum(nil)
+	stored, err := cp.PutOnce(ctx, copyKeyCheckID, []byte{0}, check)
+	if err != nil {
+		return nil, fmt.Errorf("ballot copy key check: %w", err)
+	}
+	if !hmac.Equal(stored, check) {
+		return nil, &errCopyKey{"the ballot copy's key isn't the one its ballots are under: restore the keystore's ballot-copy-key from a backup of the table"}
+	}
 	return sealstore.New(nil, map[uint32][]byte{1: rk.Key}, 1, false)
 }
+
+// copyKeyCheckID is the copy's partition for its key check: not a
+// proposal id (those are ULIDs).
+const copyKeyCheckID = "_copy_key"
+
+// errCopyKey is a ballot copy whose key is missing or not its own.
+type errCopyKey struct{ why string }
+
+func (e *errCopyKey) Error() string { return e.why }
 
 // errNoKey: a version of the record key that is not in the keystore.
 var errNoKey = errors.New("no such record key")

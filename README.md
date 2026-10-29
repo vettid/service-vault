@@ -94,6 +94,11 @@ destination.
 - `reconnect_slow`: such a reconnect is unanswered after a day. It
   stays open for 7 days, since a locked member vault answers when it is
   unlocked.
+- `ballots_off`: the ballot copy's key (`ballot-copy-key`) is missing
+  while proposals or copied ballots exist, or isn't the key the copy's
+  ballots are under (the copy holds a key check). The daemon runs with
+  votes off, so sign-ins and approvals go on; restore the keystore item
+  from a backup of the table.
 - `admins_short`: an admin's connection was removed (severed, or
   replaced by a new connection) and fewer admins than m remain, so no
   approval can pass (see "Recovering admins" under "Admin approvals").
@@ -216,8 +221,10 @@ names the version it is sealed under. The write-once copy of accepted
 ballots (`SV_BALLOTS_TABLE`) is sealed under a key of its own
 (`ballot-copy-key` in the keystore), which a rotation doesn't touch: its
 items can't be rewritten, so they can't be resealed, and that key is
-kept for as long as the ballots are. Never delete it; a start refuses to
-make a new one while proposals exist. Records under version 1 keep the
+kept for as long as the ballots are. Never delete it. The copy holds a
+check of it, so a start doesn't make a new one while proposals or copied
+ballots exist, and finds a key that isn't the copy's; either turns votes
+off with the `ballots_off` alarm. Records under version 1 keep the
 layout from before versions, so this image can still be rolled back to
 an older one until the first rotation. To rotate:
 1. Take an on-demand backup (as in "Restoring the table"). The deploy
