@@ -21,6 +21,12 @@ var errJCS = errors.New("ballot: not a canonical document")
 
 const maxSafeInt = 1<<53 - 1
 
+// MaxDepth bounds the nesting of a document. The deepest the protocol's
+// documents go is 4 (results → rows → a row → its ballot); the bound stops
+// a deeply nested input from exhausting the stack, which is a fatal
+// error, not a recoverable panic.
+const MaxDepth = 8
+
 // parseStrict parses data as one JSON value with no duplicate member
 // names at any depth, no fractions or exponents, and nothing after it.
 // Objects come back as map[string]any, arrays as []any, integers as
@@ -31,7 +37,7 @@ func parseStrict(data []byte) (any, error) {
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
-	v, err := parseValue(dec)
+	v, err := parseValue(dec, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -41,10 +47,13 @@ func parseStrict(data []byte) (any, error) {
 	return v, nil
 }
 
-func parseValue(dec *json.Decoder) (any, error) {
+func parseValue(dec *json.Decoder, depth int) (any, error) {
 	tok, err := dec.Token()
 	if err != nil {
 		return nil, errJCS
+	}
+	if d, ok := tok.(json.Delim); ok && (d == '{' || d == '[') && depth >= MaxDepth {
+		return nil, fmt.Errorf("%w: nested deeper than %d", errJCS, MaxDepth)
 	}
 	switch t := tok.(type) {
 	case json.Delim:
@@ -63,7 +72,7 @@ func parseValue(dec *json.Decoder) (any, error) {
 				if _, dup := m[k]; dup {
 					return nil, fmt.Errorf("%w: duplicate member %q", errJCS, k)
 				}
-				v, err := parseValue(dec)
+				v, err := parseValue(dec, depth+1)
 				if err != nil {
 					return nil, err
 				}
@@ -76,7 +85,7 @@ func parseValue(dec *json.Decoder) (any, error) {
 		case '[':
 			a := []any{}
 			for dec.More() {
-				v, err := parseValue(dec)
+				v, err := parseValue(dec, depth+1)
 				if err != nil {
 					return nil, err
 				}

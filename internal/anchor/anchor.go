@@ -250,8 +250,12 @@ func (a *Anchorer) enter(ctx context.Context, digest, sig []byte) (*tlogEntry, e
 	}
 	if status == http.StatusConflict && loc != "" {
 		// Already entered (a retry after a lost answer): the same entry.
+		// Only an entry on the same Rekor: a path, or a URL under its base.
 		u := loc
-		if !strings.HasPrefix(u, "https://") {
+		if !strings.HasPrefix(u, a.ep.Rekor+"/") {
+			if !strings.HasPrefix(loc, "/") || strings.HasPrefix(loc, "//") {
+				return nil, errors.New("anchor: Rekor's 409 points elsewhere")
+			}
 			u = a.ep.Rekor + loc
 		}
 		if status, body, _, err = a.do(ctx, http.MethodGet, u, "", nil); err != nil {
@@ -273,7 +277,12 @@ func (a *Anchorer) enter(ctx context.Context, digest, sig []byte) (*tlogEntry, e
 }
 
 // check makes sure Rekor entered what was sent, under this key, and that
-// the inclusion proof reaches its root (RFC 6962, which Rekor's tree is).
+// the inclusion proof reaches the root it gives (RFC 6962, which Rekor's
+// tree is). It doesn't check Rekor's signatures (the signed entry
+// timestamp and the checkpoint): that needs the instance's log keys, and
+// votes.vettid.org checks every bundle in full with Sigstore's verifier
+// before publishing it. These checks catch a wrong or garbled answer
+// early.
 func (a *Anchorer) check(e *logEntry, digest, sig []byte) (*tlogEntry, error) {
 	canon, err := base64.StdEncoding.DecodeString(e.Body)
 	if err != nil {
