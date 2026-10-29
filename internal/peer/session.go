@@ -16,7 +16,7 @@ import (
 
 // dispatch handles a decrypted session-mode message from an active
 // connection (§8.2, §8.3, §8.4, §7.3).
-func (p *Peer) dispatch(ctx context.Context, c *Connection, in *envelope.Inner, ep *handshake.Epoch, raw []byte, sender ed25519.PublicKey, now time.Time) (disposition, error) {
+func (p *Peer) dispatch(ctx context.Context, c *Connection, in *envelope.Inner, ep *handshake.Epoch, raw []byte, sender ed25519.PublicKey, msgID string, now time.Time) (disposition, error) {
 	p.markDirty(kindConn, c.ID)     // the epoch's receive count moved
 	if !c.relayKeyIs(sender, now) { // §6.3, or the key before a relay.address.update
 		p.audit("sender_mismatch", c.ID)
@@ -92,6 +92,12 @@ func (p *Peer) dispatch(ctx context.Context, c *Connection, in *envelope.Inner, 
 		// challenge to it is never answered (chosen; not in the spec).
 		p.audit("challenge_unsupported", c.ID)
 	default:
+		if isVoteType(in.Type) && p.cfg.Votes != nil {
+			if err := p.vote(ctx, c, in, ikey, msgID, now); err != nil {
+				return 0, err
+			}
+			break
+		}
 		p.respondErrorBody(c, in, ikey, "unsupported_type", nil, now)
 	}
 	return ackAfterFlush, nil

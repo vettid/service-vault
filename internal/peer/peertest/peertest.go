@@ -9,7 +9,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -81,11 +80,20 @@ func NewWorld(clk *Clock) *World {
 }
 
 func (w *World) id() string {
+	// A ULID, as the relay's msg_id is (RELAY-PROTOCOL §6.2): the clock's
+	// milliseconds, then a counter, so that ids never go backwards.
 	w.nextID++
-	s := fmt.Sprintf("%026d", w.nextID)
-	b := []byte(s)
-	for i := range b {
-		b[i] = 'A' + (b[i] - '0')
+	const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+	ms := uint64(w.clk.Now().UnixMilli())
+	b := make([]byte, 26)
+	for i := 9; i >= 0; i-- {
+		b[i] = alphabet[ms&31]
+		ms >>= 5
+	}
+	n := uint64(w.nextID)
+	for i := 25; i >= 10; i-- {
+		b[i] = alphabet[n&31]
+		n >>= 5
 	}
 	return string(b)
 }
