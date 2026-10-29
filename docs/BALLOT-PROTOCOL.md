@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** draft 0.4.0 (2026-10-28), for review before any ballot code
+**Status:** 0.4.1 (2026-10-28), for review before any ballot code
 (MEMBER-SERVICE-PLAN §10, item 5.0). The plan-level design is
 MEMBER-SERVICE-PLAN §8. This document marks two kinds of choice, all
 listed in §12 for the owner to decide before code:
@@ -251,10 +251,19 @@ instead drop and audit. That needs the §6.4 change of item 5.1.
 - **Blinding values are derived, not stored**, so a retry is identical
   even after a restore from backup:
   - `msg_prefix = HKDF-SHA256(vote_root, H(proposal_id), "vettid/vote/1/msg-prefix", 32)`
+  - `pss_salt = HKDF-SHA256(vote_root, H(proposal_id), "vettid/vote/1/pss-salt", 48)`:
+    the salt of RFC 9474's EMSA-PSS encoding, which is otherwise random.
   - `blind_seed = HKDF-SHA256(vote_root, H(proposal_id), "vettid/vote/1/blind", 32)`
-  - The RFC 9474 blinding factor `r` comes from `blind_seed` by
-    rejection sampling: a counter, SHA-384 output expansion to 2048 bits,
-    and a candidate taken only when `0 < r < n` and `gcd(r, n) = 1`.
+  - **The blinding factor `r`** comes from `blind_seed` by rejection
+    sampling. For `ctr = 0, 1, 2, …`:
+    1. `c = SHA-384(blind_seed ‖ u32(ctr) ‖ 0x00) ‖ … ‖ SHA-384(blind_seed ‖ u32(ctr) ‖ 0x05)`,
+       which is 288 bytes, truncated to its first 256.
+    2. `r = OS2IP(c)`, taken if `0 < r < n` and `gcd(r, n) = 1`.
+    3. Otherwise the next `ctr`.
+
+    The expected number of tries is under 2.
+  - The blinded message is then `blinded = r^e · OS2IP(EMSA-PSS-ENCODE(msg_prefix ‖ cert_msg; pss_salt)) mod n`
+    (RFC 9474 §4.2 with the salt and `r` fixed).
   - These values stay secret, since the vote root is, so blinding is
     unchanged.
   - **(chosen; not in the spec.)**
@@ -682,6 +691,10 @@ amended in 0.4.0.
   plus OpenTimestamps for binding votes (§8.1).
 
 ## Changes
+
+- **0.4.1 (2026-10-28):** found while writing the reference
+  implementation. The PSS salt is derived too (`pss_salt`), so a retry
+  is identical. The derivation of `r` is fixed exactly.
 
 - **0.4.0 (2026-10-28):** owner decision on item 3.
   - Ballots are sent the moment they are cast; the deposit phase and
