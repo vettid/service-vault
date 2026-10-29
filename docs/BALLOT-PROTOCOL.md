@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.10.0 (2026-10-29), for review before more ballot code
+**Status:** 0.10.1 (2026-10-29)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -196,7 +196,7 @@ listed anchor key. A second, different proposal under the same
 
 | Type | Body | Answer |
 |---|---|---|
-| `vote.cast` | `{proposal_id, record_tag, vk, choice_id, ballot_sig, cast_sig, credential_key?}` (§5) | `{proposal_id, msg_ms, receipt_sig}`, or a refusal |
+| `vote.cast` | `{proposal_id, record_tag, vk, choice_id, ballot_sig, cast_sig}` (§5) | `{proposal_id, msg_ms, receipt_sig}`, or a refusal |
 | `vote.status` | `{proposal_id}` | `{proposal_id, proposal?, record_secret?, record_proof?, ballot?, msg_ms?, receipt_sig?, status_sig}`, or a refusal |
 
 - **`vote.status`** gives a vault what the service holds for its
@@ -223,6 +223,7 @@ listed anchor key. A second, different proposal under the same
 | `not_eligible` | both | The connection has no tag for this proposal. |
 | `not_open`, `closed` | `vote.cast` | The relay's time is outside the window. |
 | `not_active` | `vote.cast` | Removed or suspended, and `removed_may_vote` is false. |
+| `not_signed_in` | `vote.cast` | The member has never signed in, so no credential key is pinned (§5). |
 | `already_voted` | `vote.cast` | A different ballot is already recorded for this tag; the body also carries that ballot as `ballot` `{vk, choice_id, ballot_sig}`, with its `ballot_msg_ms` and `receipt_sig`. |
 | `bad_ballot` | `vote.cast` | The tag isn't the connection's, the choice isn't the proposal's, or a signature fails. |
 | `late` | `vote.cast` | The window was open, but the results were already published (§7). |
@@ -239,10 +240,14 @@ listed anchor key. A second, different proposal under the same
   - `ballot_leaf = record_tag ‖ lp(vk) ‖ lp(choice_id) ‖ lp(ballot_sig)`;
   - `cast_sig = Sign(credential key, "vettid/vote/1/cast\x00", proposal_hash ‖ H(ballot_leaf))`,
     under the member's credential key, which the service already pins
-    at sign-in (SERVICE-VAULT.md §5). A member who has never signed in
-    names the key in `credential_key`, and the service keeps it with the
-    ballot; once a key is pinned, the field is ignored. It is never
+    at the member's first sign-in (SERVICE-VAULT.md §5). It is never
     published.
+  - **A member must have signed in once before voting.** The pinned key
+    comes from a signed sign-in the member's own vault records, so a
+    ballot the service made up couldn't carry the member's signature. A
+    key the ballot named itself would prove nothing: the service could
+    make up both. A member who has never signed in is refused
+    `not_signed_in`, and the app asks them to sign in first.
 - **Disclosure:** before the member approves a ballot, the app shows a
   fixed sentence, in the app's own words and not the proposal's: *"<the
   service's name> will see how you vote and keep that record. The
@@ -287,8 +292,7 @@ listed anchor key. A second, different proposal under the same
      tag, and it is active or `removed_may_vote` is true.
   4. **Ballot:** `choice_id` is the proposal's, `ballot_sig` verifies
      under `vk`, and `cast_sig` verifies under the connection's pinned
-     credential key, or the one the request names if none is pinned
-     (§2).
+     credential key (§2); with no key pinned, `not_signed_in`.
   5. **One per tag:** a conditional write stores the ballot, with
      `cast_sig` and `msg_ms`, only if the tag has none; otherwise the
      answer is `already_voted`.
@@ -532,6 +536,10 @@ item.
 
 ## Changes
 
+- **0.10.1 (2026-10-29):** a member must have signed in once before
+  voting (`not_signed_in`): a credential key named by the ballot itself
+  proved nothing, since the service could make up both the key and the
+  signature. The `credential_key` field is gone.
 - **0.10.0 (2026-10-29):**
   - Ballots carry an unpublished `cast_sig` under the member's
     credential key, so the organisation's record proves who cast each
