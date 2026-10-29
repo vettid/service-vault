@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** draft 0.3.0 (2026-10-28), for review before any ballot code
+**Status:** draft 0.4.0 (2026-10-28), for review before any ballot code
 (MEMBER-SERVICE-PLAN §10, item 5.0). The plan-level design is
 MEMBER-SERVICE-PLAN §8. This document marks two kinds of choice, all
 listed in §12 for the owner to decide before code:
@@ -22,8 +22,8 @@ wire vectors; this document is its source.
 | Requirement | Meaning here |
 |---|---|
 | Eligibility | Only a member of record (§3.2) obtains a certificate, one per proposal. |
-| One vote | One counted ballot per certificate: the first valid ballot for a voting key counts (§7.2). |
-| Secrecy against the service | The service vault, which is also the ballot box, cannot tell whose a ballot is, from the certificate (blind, §5), the token (a shared pool, §3.3) or the time. Every member of record certifies at opening and deposits exactly one ballot, real or abstain, at a random time in a shared deposit phase (§6.4). So neither when someone certified nor when they decided says anything about when their ballot arrives. The remaining operator boundary is §9.2. |
+| One vote | One counted ballot per certificate: the valid ballot with the highest `seq` for a voting key counts (§7.2). A member can change their vote until close by casting again. |
+| Secrecy against the service | The service vault, which is also the ballot box, cannot tell whose a ballot is from the certificate (blind, §5) or the token (a shared pool, §3.3, or admission tokens, §3.4). Every member of record certifies at opening, so certification times say nothing. A ballot is sent the moment the member casts it (§6.4, owner decision). **Its arrival time is a link** for whoever also knows when the member was active (for example a site visit just before). For binding votes the mix (§9.2, D5) holds and shuffles deposits until close, which removes it. Non-binding votes state it. |
 | Verifiability | A member confirms their ballot is counted as cast, and that it is in the same results everyone sees (§8.3). An observer confirms every counted ballot has a valid certificate, no voting key counts twice, `ballots ≤ issued ≤ members_of_record` (equal when every vault deposited), and the tally (§8.4). |
 | Decline-ability | A member who does nothing has their vault cast an abstain (§6.2). Declining and abstaining look the same. |
 | Availability | No one but the member can stop an eligible member from casting a counted ballot (§10). Closing pool exhaustion by a member needs relay admission tokens, a RELAY-PROTOCOL revision (D7, decided: §3.4). |
@@ -83,9 +83,8 @@ wire vectors; this document is its source.
 | `binding` | `false` until D5 is decided (§9.2). |
 | `record_at` | The roster snapshot, at or before the proposal's creation (§3.2). |
 | `opens_at` | Certification opens; members can vote. |
-| `decide_by` | The member's last moment to choose. After it, the vault casts what the member chose, or abstain. |
-| `deposit_from`, `deposit_until` | The deposit phase: `decide_by ≤ deposit_from < deposit_until`. It lasts 12 h by default and at least 6 h (§6.4). |
-| `count_until` | `deposit_until` + 2 h: the ballot box collects until then (§7.1). |
+| `closes_at` | The last moment to cast: ballots deposited before it count. An hour before it, the vault of a member who hasn't cast sends an abstain (§6.2). `closes_at − opens_at ≤ 7 days − 1 h`. |
+| `count_until` | `closes_at` + 2 h: the ballot box collects until then (§7.1). |
 | `cert_key` | The RSA public key (§2). |
 | `ballot_mailbox` | Relay URL and mailbox id: a relay keypair for this proposal only. |
 | `ballot_kem` | The ballot box's KEM public key for this proposal. |
@@ -93,9 +92,10 @@ wire vectors; this document is its source.
 | `record_root` | The Merkle root of the record tags (§3.2). |
 | `outage_rule` | The rule of §10.2, as text. |
 
-- **Timing:** `deposit_until − deposit_from ≤ 24 h`, so the pool's
-  tokens (minted at `deposit_from`, §3.3) stay far below the relay's
-  open-token lifetime (RELAY-PROTOCOL §5.6; 168 h deployed).
+- **Timing:** the window's cap keeps the pool's tokens, minted at
+  `opens_at` with `iat` backdated 60 s and `exp = closes_at + 15 min`
+  (§3.3), within the relay's open-token lifetime (RELAY-PROTOCOL §5.6;
+  168 h deployed).
 - **Signature:** the proposal is a JCS document;
   `proposal_sig = Sign(service IK, "vettid/vote/1/proposal" ‖ 0x00, proposal_bytes)`.
 - **Hash:** `proposal_hash = H(proposal_bytes)` binds the certificate
@@ -129,9 +129,9 @@ wire vectors; this document is its source.
 - **What it is:** one-shot open deposit tokens for the ballot mailbox
   (RELAY-PROTOCOL §5.6: scope `deposit_open`, `sub` `*`, a fresh ULID
   `jti` each). They are minted locally, with no relay call, at
-  `deposit_from`.
+  `opens_at`.
   - `iat` is backdated by 60 s (§5.2 there).
-  - `exp = deposit_until + 15 min`.
+  - `exp = closes_at + 15 min`.
   - Each carries `quota: {msgs: 1, bytes: 4096}` (RELAY-PROTOCOL §5.2;
     a deposit is about 1 KiB, §6.3). A junk deposit on a pool token is
     therefore one small message.
@@ -142,7 +142,7 @@ wire vectors; this document is its source.
   two pools under one `pool_seq`, or one shown to a single member, are
   visible in the results.
 - **Size:** `2 × members_of_record + 64` tokens.
-- **Distribution:** sent at `deposit_from` over the connection, to every
+- **Distribution:** sent at `opens_at` over the connection, to every
   member of record, as identical bytes (§4.2). It is **not published
   before `count_until`**, so only members hold it.
   - Over about 120 members of record, a pool exceeds one message: the
@@ -226,8 +226,8 @@ instead drop and audit. That needs the §6.4 change of item 5.1.
 
 ### 4.4 `vote.extended`
 
-`{proposal_id, deposit_until, count_until, reason}`, signed like a pool:
-`Sign(service IK, "vettid/vote/1/extended" ‖ 0x00, proposal_hash ‖ u64(deposit_until) ‖ u64(count_until))`
+`{proposal_id, closes_at, count_until, reason}`, signed like a pool:
+`Sign(service IK, "vettid/vote/1/extended" ‖ 0x00, proposal_hash ‖ u64(closes_at) ‖ u64(count_until))`
 (§10.2).
 
 ## 5. Certification
@@ -291,7 +291,7 @@ instead drop and audit. That needs the §6.4 change of item 5.1.
        evidence, retries once, and then reports
        `certification_failed` (§8.3).
      - With no answer, it retries the same request with backoff until
-       `decide_by`.
+       `closes_at`.
 
 The service sees `blinded` and `blind_sig`, which tell it nothing about
 `vk` or `cert_sig` without `r`.
@@ -306,8 +306,11 @@ certified members at publication (§8.1), then deletes the records.
 
 ### 6.1 The ballot
 
-- `ballot_msg = proposal_hash ‖ u32(pool_seq) ‖ pool_hash ‖ lp(choice_id)`
+- `ballot_msg = proposal_hash ‖ u32(seq) ‖ u32(pool_seq) ‖ pool_hash ‖ lp(choice_id)`
 - `ballot_sig = Sign(vk, "vettid/vote/1/ballot" ‖ 0x00, ballot_msg)`
+- `seq` starts at 1 and goes up by one each time the member casts again
+  (§6.2). The highest counts, so the order holds however deposits
+  arrive, even shuffled by the mix.
 - `pool_seq` and `pool_hash` are those of the pool whose token carries
   the deposit.
 - **No timestamp.** **(chosen; differs from the plan:** a signed time
@@ -316,21 +319,23 @@ certified members at publication (§8.1), then deletes the records.
 
 ### 6.2 Choosing
 
-- **The member's choice:** made in the app, at any time from `opens_at`
-  to `decide_by`. The vault records the choice only with the member's
-  approval inside the credential's unlock window (VAULT-MESSAGING
-  §3.5.3). It is not an ask.
-  - The member may change it until `decide_by`. Only the choice held at
-    deposit time is cast.
-  - **(chosen; not in the spec:** one ballot is still counted per key.)
-- **Abstain:** a member who has chosen nothing by `decide_by` has
-  `abstain` cast for them. Every member of record therefore deposits
-  exactly one ballot. That is what makes the deposit timing say nothing
-  (§1), and what leaves no unused certificate for the service to vote
-  with (§9.3).
+- **Casting:** the member casts in the app, at any time from `opens_at`
+  to `closes_at`. The vault signs only with the member's approval inside
+  the credential's unlock window (VAULT-MESSAGING §3.5.3), and sends the
+  ballot at once (§6.4). It is not an ask.
+- **Changing:** the member may cast again until `closes_at`. The new
+  ballot has the next `seq`, and the highest `seq` counts (§7.2).
+  - **(chosen; not in the spec:** still one counted ballot per key.)
+- **Abstain before close:** a member who hasn't cast by `closes_at − 1 h`
+  has `abstain` sent for them by their vault, with `seq` 1. If they
+  then cast after all, their ballot has a higher `seq` and replaces it.
+  - Every member of record therefore has one counted ballot, which
+    leaves no unused certificate for the service to vote with (§9.3).
+  - An abstain sent then says only "had not cast an hour before close",
+    which the tally's abstain count largely shows anyway.
   - **(chosen; differs from the plan:** the plan's members who don't
     vote cast nothing.)
-- **Reminders:** the app reminds the member a day before `decide_by`.
+- **Reminders:** the app reminds the member a day before `closes_at`.
 
 ### 6.3 The deposit
 
@@ -347,13 +352,13 @@ certified members at publication (§8.1), then deletes the records.
 
 ### 6.4 Sending it
 
-1. **Time.** At `decide_by`, the vault draws its deposit time uniformly
-   in `[deposit_from, deposit_until − 1 h]`. That time is independent of
-   when the member certified, chose, or changed their mind.
-   - It deposits at that time. If it is locked then, it deposits as soon
-     as it is unlocked again, before `deposit_until`.
-   - Its stored state (the choice, the certificate) is in its encrypted
-     state and survives a restart, not a lock.
+1. **Time.** At once, when the member casts (owner decision 2026-10-28).
+   For binding votes the deposit goes to the mix (§9.2), which holds it
+   until close.
+   - An abstain goes at `closes_at − 1 h`. If the vault is locked then,
+     it goes as soon as the vault is unlocked, before `closes_at`.
+   - The ballot and the certificate are in the vault's encrypted state,
+     and survive a restart.
 2. **Token.** It picks a token uniformly at random from the newest
    complete pool, among those it hasn't tried.
 3. **Key.** It makes a fresh Ed25519 key for this deposit and signs the
@@ -366,24 +371,25 @@ certified members at publication (§8.1), then deletes the records.
    | Answer | What the vault does |
    |---|---|
    | `2xx` | Records "cast". Keeps `vk`, the certificate, `ballot_sig` and the pool hash for §8.3. |
-   | `409 token_used` (spent by someone else, or by a first attempt whose answer was lost) | Deposits again with another token and a fresh key. A second copy is harmless, because the first valid ballot per `vk` counts (§7.2). **(chosen; differs from the plan,** which stopped at "probably cast".) |
+   | `409 token_used` (spent by someone else, or by a first attempt whose answer was lost) | Deposits again with another token and a fresh key. A second copy is harmless: it has the same `seq` and choice (§7.2). **(chosen; differs from the plan,** which stopped at "probably cast".) |
    | `token_expired`, `token_revoked`, `token_invalid` | Drops that token. With none left, waits for the next pool. |
    | `quota_exceeded` with `quota: "token"` | Drops the token. |
    | Mailbox `quota_exceeded`, 5xx, network errors | Retries the same token, with a backoff of up to 5 min. |
    | `replay_detected`, `timestamp_stale` | Re-signs and retries. |
    | `payload_too_large`, `mailbox_unknown` | Reports `deposit_failed` (§8.3). |
 
-   Retries continue until `deposit_until`.
+   Retries continue until `closes_at`.
 
 ## 7. The ballot box
 
 ### 7.1 Collecting
 
-- **When:** the ballot box (the service vault) collects from
-  `deposit_from` to `count_until`, acknowledging each message once it
-  has been handled.
-- **The arrival cutoff** is `deposit_until`, by the relay's
-  `deposited_at`.
+- **When:** the ballot box (the service vault) collects from `opens_at`
+  to `count_until`, acknowledging each message once it has been
+  handled. For binding votes it collects from the mix, which forwards
+  everything at `closes_at` (§9.2).
+- **The arrival cutoff** is `closes_at`, by the relay's `deposited_at`
+  (for binding votes, the mix's arrival time).
 - **Publication** waits until the mailbox is empty at `count_until`, and
   for at least 10 minutes after the last collect that returned nothing.
   **(chosen; not in the spec.)**
@@ -393,19 +399,21 @@ certified members at publication (§8.1), then deletes the records.
 1. **Format:** the size is within bounds, `deposit` unseals, and `body`
    parses strictly.
 2. **Proposal and time:** `proposal_id` is this proposal's, and
-   `deposited_at < deposit_until`.
+   `deposited_at < closes_at`.
 3. **Pool:** `pool_seq` and `pool_hash` name a pool this proposal issued.
 4. **Certificate:** `cert_sig` verifies under `cert_key` for
    `cert_prefix ‖ cert_msg(proposal_hash, vk)`.
 5. **Ballot:** `ballot_sig` verifies under `vk` for `ballot_msg`, and
    `choice_id` is one of the proposal's.
-6. **Repeats:** `vk` has no ballot yet. The first, by `msg_id` order, is
-   kept. A later copy with the same `choice_id` is a duplicate, and one
-   with a different `choice_id` is counted as `conflict`. Both are
-   dropped.
+6. **Repeats:** for each `vk` the ballot with the highest `seq` is kept,
+   whatever the arrival order, and lower ones are dropped. A copy with
+   the same `seq` and `choice_id` is a duplicate, and is dropped. Two
+   valid ballots with the same `seq` but different choices are a
+   `conflict`: both are dropped and the count is published. Only the
+   holder of `vk` can make one.
 
 - **What is kept:** a ballot that passes is stored as
-  `{vk, cert_prefix, cert_sig, pool_seq, pool_hash, choice_id, ballot_sig, day}`,
+  `{vk, cert_prefix, cert_sig, seq, pool_seq, pool_hash, choice_id, ballot_sig, day}`,
   where `day` is the UTC date of `deposited_at`.
 - **What is not kept:** `msg_id`, `jti`, `sender` and `deposited_at` are
   used for checks 2 and 6, then discarded. No log line carries them.
@@ -416,8 +424,8 @@ certified members at publication (§8.1), then deletes the records.
 ### 7.3 Pool and quota watch
 
 - **Re-issue:** when fewer than `members_of_record / 4` of the newest
-  pool's tokens are unspent, and the deposit phase has more than an hour
-  left, the box mints the next pool (`pool_seq + 1`). There are at most
+  pool's tokens are unspent, and the vote has more than an hour left,
+  the box mints the next pool (`pool_seq + 1`). There are at most
   two re-issues (§3.3).
 - **Alarms:**
   - mailbox use above 20% of its quota (10,000 messages, 32 MiB;
@@ -467,7 +475,7 @@ certified members at publication (§8.1), then deletes the records.
   - This replaces vettid-dev's hex-string tree, which had no leaf/node
     separation and duplicated odd nodes.
 - **Ballot leaf:**
-  `lp(vk) ‖ lp(cert_prefix) ‖ lp(cert_sig) ‖ u32(pool_seq) ‖ pool_hash ‖ lp(choice_id) ‖ lp(ballot_sig) ‖ lp(day)`,
+  `lp(vk) ‖ lp(cert_prefix) ‖ lp(cert_sig) ‖ u32(seq) ‖ u32(pool_seq) ‖ pool_hash ‖ lp(choice_id) ‖ lp(ballot_sig) ‖ lp(day)`,
   with `day` as `YYYY-MM-DD`. The certificate is in the leaf (plan §8).
 - **Record leaf:** the 32-byte tag.
 
@@ -487,9 +495,10 @@ The check runs on `vote.closed`, and in any case at `count_until` + 1 h.
    - Every pool the vault holds is in the file, under its `pool_seq`.
 3. **Its own entry:** its record tag is present, and its issuance tag is
    present.
-4. **Its ballot:** exactly one ballot under its stored `vk`, with its
-   stored `cert_sig`, `pool_hash` and the choice it cast; the inclusion
-   proof reaches `ballot_root`.
+4. **Its ballot:** exactly one ballot under its stored `vk`. It is its
+   latest cast, with the highest `seq` it sent, its stored `cert_sig`
+   and `pool_hash`, and that cast's choice. The inclusion proof reaches
+   `ballot_root`.
 5. **Outcome:** the vault shows the member the result. A failure names
    the check, and the vault keeps the evidence: the proposal bytes, the
    pools, the certificate, `blinded`/`blind_sig`, `ballot_sig` and the
@@ -512,7 +521,7 @@ From `results.json` and the anchor:
    deposits, so a shortfall of ballots below `issued` measures
    undelivered ballots, and is published.
 6. **Tally and roots:** the tally and both roots recompute, and every
-   `day` is in the deposit phase.
+   `day` is within the voting window.
 
 ## 9. Trust boundaries
 
@@ -520,14 +529,16 @@ From `results.json` and the anchor:
 
 - **It learns:** who the members of record are, that their vaults
   certified (all of them, at opening), the ballots and the tally.
-- **It does not learn:**
-  - whose a ballot is;
-  - who chose and who abstained by default (an explicit `abstain` and a
-    default one are the same ballot);
-  - when anyone decided.
-- **Its view of arrivals:** times, `msg_id` and `jti`, which carry
-  nothing: deposit times are drawn independently of everything the
-  member did (§6.4), and tokens come from a pool every member holds.
+- **It does not learn,** from the ballot, certificate or token: whose a
+  ballot is.
+- **Its view of arrivals:** times, `msg_id` and `jti`.
+  - **Non-binding votes:** ballots are sent the moment they are cast
+    (§6.4), so an arrival time is a link for a service that also knows
+    when the member was active: a site visit or sign-in just before,
+    or other traffic on the connection. Each non-binding proposal says
+    so. Tokens from the shared pool add nothing.
+  - **Binding votes:** the mix forwards everything at close, shuffled,
+    so arrival times say nothing.
 
 ### 9.2 Operator metadata (D5: decide before the first binding vote)
 
@@ -543,7 +554,7 @@ the host too.
 | Option | What it closes | Cost |
 |---|---|---|
 | A. State it | Nothing. Each proposal says so. | None. Non-binding votes only. |
-| B. An independent mix | Deposits go to a relay run by an independent party. It holds them until `deposit_until`, then forwards them to the ballot box shuffled and at once. VettID sees vault→mix connections, but its box receives ballots with no arrival order. | An operating agreement, and a small relay feature (hold, shuffle, forward). The mix sees host addresses, not vaults. |
+| B. An independent mix | Deposits go to a relay run by an independent party. It holds them until `closes_at`, then forwards them to the ballot box shuffled and at once. VettID sees vault→mix connections, but its box receives ballots with no arrival order. That also removes the cast-time link of §9.1. | An operating agreement, and a small relay feature (hold, shuffle, forward). The mix sees host addresses, not vaults. |
 | C. Casting from the phone through an oblivious relay (RFC 9458) | The host sees no ballot traffic. | An OHTTP gateway in front of VettID's relay (a relay change), app work on both platforms, and a third-party OHTTP relay. Phones can't reliably deposit at a drawn time, so the vault→app hand-off times correlate with deposits. It also gives up the every-vault-deposits property for members whose phones are idle. |
 | D. The ballot box in an enclave (Phase 7) | The operator's access to decrypted ballots, but not the network link. | As planned. |
 
@@ -580,26 +591,26 @@ casting a counted ballot during the voting window.
 
 | Vector | How it is met, or what remains |
 |---|---|
-| Certification refused or ignored | Every vault certifies at opening and retries until `decide_by`. A refusal is evidence (§8.3). An outage is covered by §10.2. |
+| Certification refused or ignored | Every vault certifies at opening and retries until `closes_at`. A refusal is evidence (§8.3). An outage is covered by §10.2. |
 | Ask gate (VAULT-MESSAGING §10.4.1) | Certification, choosing and depositing are not asks. Nothing in the vote path is a service challenge. |
 | Site sign-in blocked | Voting needs no site sign-in. |
 | Ballot mailbox flooded with junk | Pool tokens carry `quota: {msgs: 1, bytes: 4096}`, and the pool is held by members only. Junk is at most one 4 KiB message per token, about 2 MiB for a pool of 600, well under the 32 MiB quota. The box collects continuously and alarms at 20% (§7.3). |
 | **Pool exhaustion by a member** (a member of record spends the pool's tokens with junk) | **Met only with relay admission tokens** (§3.4, decided). With the interim pool, re-issue (§7.3) and the flood guard slow it but don't stop a determined member. So binding votes wait for admission tokens. |
-| Relay flood | The relay's per-network limits and WAF (RELAY-PROTOCOL §7.2). Deposits spread over the phase and retry. |
-| Service vault, relay or host outage | Deposits wait in the ballot mailbox (14 days). Certification requests wait on the connection. Beyond the §10.2 bound, the phase is extended. |
-| The member's vault locked, or its host restarted, through the deposit phase | The vault deposits when unlocked, before `deposit_until`. The app reminds the member during the phase. A member whose vault stays locked has no ballot counted, a published shortfall (§8.4 check 5). |
+| Relay flood | The relay's per-network limits and WAF (RELAY-PROTOCOL §7.2). Deposits spread over the window and retry. |
+| Service vault, relay or host outage | Deposits wait in the ballot mailbox (14 days). Certification requests wait on the connection. Beyond the §10.2 bound, the vote is extended. |
+| The member's vault locked, or its host restarted, when the member casts or at the abstain time | Casting needs the app and so an unlocked vault. A pending abstain goes when the vault is unlocked, before `closes_at`. The app reminds the member before close. A member whose vault stays locked to the end has no ballot counted, a published shortfall (§8.4 check 5). |
 
 ### 10.2 The outage rule (fixed before opening)
 
 - **Measured by:** the member vaults, not the service.
-  - A vault that, during the deposit phase, had no `2xx` from the relay
+  - A vault that, during the vote, had no `2xx` from the relay
     for more than 30 minutes while trying, or no answer to
     `vote.certify` for more than 1 hour, records that span.
   - It reports it after the vote with its check (§8.3).
-- **During the phase:** the service vault's own health checks and the
+- **During the vote:** the service vault's own health checks and the
   relay's status page also count. If they show an outage of the relay
   or the ballot mailbox longer than 1 hour, the service extends
-  `deposit_until` and `count_until` by the outage, rounded up to the
+  `closes_at` and `count_until` by the outage, rounded up to the
   hour, at most once, by up to 24 h, by `vote.extended` (§4.4).
 - **In the results:** every reported span. A binding vote states the
   share of vaults reporting an outage at which the vote is repeated.
@@ -623,18 +634,19 @@ stop-and-report item.
    plus refusals: non-canonical bytes and duplicate names.
 7. **Ballot box rejections:** one deposit each for a bad certificate, a
    bad ballot signature, an unknown choice, an unknown pool, a repeated
-   `vk` with the same choice and with another choice, and a deposit
-   after `deposit_until`.
+   `vk` (same `seq` and choice; a lower `seq`; the same `seq` with another
+   choice), and a deposit after `closes_at`.
 
 ## 12. Decisions for the owner
 
 **Departures from the plan:**
 1. **Labels:** `vettid/vote/1/...`, the VMS convention (§2).
 2. **No timestamp in the ballot** (§6.1).
-3. **Every member deposits one ballot,** with abstain cast by default,
-   at a time drawn in a shared deposit phase. Members choose by
-   `decide_by`, before that phase (§6.2, §6.4). Without this, the ballot
-   box links ballots to members by timing alone.
+3. **Ballots are sent the moment they are cast** (owner decision
+   2026-10-28). A member who hasn't cast an hour before close has an
+   abstain sent by their vault. For non-binding votes, arrival time is
+   a stated link (§9.1); the mix removes it for binding votes (§6.4,
+   §9.2).
 4. **A 409 deposits again with another token,** instead of stopping at
    "probably cast" (§6.4).
 5. **The pool goes over the connection** to every member, identical,
@@ -646,7 +658,8 @@ stop-and-report item.
    credential, so the vault can certify and abstain without the
    password (§5.1).
 7. **Blinding values are derived** from the vote root (§5.1).
-8. **The member may change their choice** until `decide_by` (§6.2).
+8. **The member may cast again until `closes_at`;** the highest `seq`
+   counts (§6.1, §6.2).
 9. **The seal construction** is left to item 5.1 (§6.3).
 10. **Publication** waits for the mailbox to drain (§7.1).
 11. **Results are anchored** in a public transparency log (D8: Rekor
@@ -666,6 +679,16 @@ stop-and-report item.
   plus OpenTimestamps for binding votes (§8.1).
 
 ## Changes
+
+- **0.4.0 (2026-10-28):** owner decision on item 3.
+  - Ballots are sent the moment they are cast; the deposit phase and
+    `decide_by` are gone.
+  - A cast-again ballot carries `seq`, and the highest counts.
+  - The vault sends an abstain an hour before close for a member who
+    hasn't cast.
+  - For non-binding votes, arrival time is a stated link; the mix
+    removes it for binding votes.
+  - Pool tokens are minted at opening, within the relay's lifetime.
 
 - **0.3.0 (2026-10-28):** owner decisions.
   - D5: an independent mix for binding votes.
