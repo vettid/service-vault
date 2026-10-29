@@ -7,7 +7,7 @@ import { ServiceVaultStack } from '../lib/service-vault-stack';
 //   (votes.vettid.org, for publishing votes; optional), webhookUrl
 //   (required), relayUrl, serviceName, apiClientSecurityGroupId,
 //   apiClientCidr, vpcCidr, adminBootstrapEmail, adminThreshold,
-//   approvalTtl, recordSealMigrate, recordKeyVersion, and one of alarmTopicArn and
+//   approvalTtl, approvalAllowNoPurpose, recordSealMigrate, recordKeyVersion, and one of alarmTopicArn and
 //   alarmEmail (required). See
 //   README "Deployment".
 const app = new cdk.App();
@@ -36,6 +36,7 @@ const stack = new ServiceVaultStack(app, `ServiceVault-${envName}`, {
   adminBootstrapEmail: ctx('adminBootstrapEmail'),
   adminThreshold: ctx('adminThreshold') === undefined ? undefined : Number(ctx('adminThreshold')),
   approvalTtl: ctx('approvalTtl'),
+  approvalAllowNoPurpose: ctx('approvalAllowNoPurpose') === 'true',
   alarmTopicArn: ctx('alarmTopicArn'),
   alarmEmail: ctx('alarmEmail'),
   recordSealMigrate: ctx('recordSealMigrate') === 'true',

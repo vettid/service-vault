@@ -128,6 +128,7 @@ type Config struct {
 	AdminBootstrapEmail string        // SV_ADMIN_BOOTSTRAP_EMAIL, normalized; "" for none
 	AdminThreshold      int           // SV_ADMIN_THRESHOLD (m), default 1
 	ApprovalTTL         time.Duration // SV_APPROVAL_TTL, default 24h
+	AllowNoPurpose      bool          // SV_APPROVAL_ALLOW_NO_PURPOSE, default false
 	// RecordKeyVersion is the lowest record key version to use
 	// (SV_RECORD_KEY_VERSION, default 1; README "Rotating the record key").
 	RecordKeyVersion uint32
@@ -200,6 +201,13 @@ func configFromEnv(getenv func(string) string) (*Config, error) {
 		if c.ApprovalTTL, err = time.ParseDuration(v); err != nil || c.ApprovalTTL < minApprovalTTL || c.ApprovalTTL > maxApprovalTTL {
 			return nil, fmt.Errorf("SV_APPROVAL_TTL: a duration from %v to %v", minApprovalTTL, maxApprovalTTL)
 		}
+	}
+	switch v := strings.TrimSpace(getenv("SV_APPROVAL_ALLOW_NO_PURPOSE")); v {
+	case "", "false":
+	case "true":
+		c.AllowNoPurpose = true
+	default:
+		return nil, errors.New("SV_APPROVAL_ALLOW_NO_PURPOSE: true or false")
 	}
 	c.RecordKeyVersion = 1
 	if v := strings.TrimSpace(getenv("SV_RECORD_KEY_VERSION")); v != "" {
@@ -343,7 +351,7 @@ func serve(args []string) error {
 		}
 	}
 	approvals := &approval.Manager{Store: records, Pager: records, ServiceName: cfg.ServiceName,
-		Threshold: cfg.AdminThreshold, TTL: cfg.ApprovalTTL, BootstrapKey: bootKey, BoundConnection: svc.BoundConnection, Log: log,
+		Threshold: cfg.AdminThreshold, TTL: cfg.ApprovalTTL, AllowNoPurpose: cfg.AllowNoPurpose, BootstrapKey: bootKey, BoundConnection: svc.BoundConnection, Log: log,
 		Hooks: &webhook.Outbox{Store: records, Kind: approval.HookKind, Sender: sender, Log: log}}
 	if err := approvals.Start(ctx); err != nil {
 		return fmt.Errorf("approvals: %w", err)

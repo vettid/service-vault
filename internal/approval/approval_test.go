@@ -218,11 +218,16 @@ func (f *fixture) answerTo(s sent, how string) *peer.Event {
 		e.Key = bytes.Repeat([]byte{0x11}, 32)
 		e.Signature = bytes.Repeat([]byte{0x22}, 64)
 		e.SignedAt = f.clk.Now()
+		e.Purpose = peerwire.PurposeApproval
 	}
 	switch how {
 	case "approve", "approve-changed":
 		e.Type, e.KeyChanged = peer.EventSignInApproved, how == "approve-changed"
 		sig()
+	case "approve-no-purpose": // a vault before VAULT-MESSAGING 0.65.0
+		e.Type = peer.EventSignInApproved
+		sig()
+		e.Purpose = ""
 	case "deny":
 		e.Type, e.Reason = peer.EventSignInDenied, "denied"
 	case "bad":
@@ -865,6 +870,31 @@ func TestApprovalPurpose(t *testing.T) {
 	for _, p := range f.p.purposes {
 		if p != peerwire.PurposeApproval {
 			t.Fatalf("purpose %q", p)
+		}
+	}
+}
+
+// An approval signed without a purpose is audited, marked no_purpose,
+// and not counted (§10.4) unless AllowNoPurpose; then it counts, still
+// marked.
+func TestApprovalWithoutPurpose(t *testing.T) {
+	for _, allow := range []bool{false, true} {
+		f := newFixture(t, 1, "c1")
+		f.m.AllowNoPurpose = allow
+		a := f.create(ActionVoteOpen, "Open the vote", `{}`)
+		f.answerTo(f.p.last("c1"), "approve-no-purpose")
+		got := f.status(a.ID)
+		if want := map[bool]string{false: StatusPending, true: StatusApproved}[allow]; got.Status != want {
+			t.Fatalf("allow %v: status %q", allow, got.Status)
+		}
+		var resp *AuditEntry
+		for _, e := range f.audit() {
+			if e.Type == AuditResponse {
+				resp = &e
+			}
+		}
+		if resp == nil || resp.Reason != ReasonNoPurpose || *resp.Counted != allow {
+			t.Fatalf("allow %v: entry %+v", allow, resp)
 		}
 	}
 }

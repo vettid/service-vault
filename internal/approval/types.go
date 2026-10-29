@@ -79,6 +79,10 @@ const (
 	AnswerBadSignature = "bad_signature" // signed, but the signature did not verify
 )
 
+// ReasonNoPurpose marks an approval.response signed without a purpose
+// (Manager.AllowNoPurpose): weaker evidence, counted only when allowed.
+const ReasonNoPurpose = "no_purpose"
+
 // Reasons an admin set changed.
 const (
 	ChangeBootstrap         = "bootstrap"
