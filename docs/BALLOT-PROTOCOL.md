@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.6.0 (2026-10-29), for review before more ballot code
+**Status:** 0.7.0 (2026-10-29), for review before more ballot code
 (MEMBER-SERVICE-PLAN §10, item 5.0). The plan-level design is
 MEMBER-SERVICE-PLAN §8. This document marks two kinds of choice, all
 listed in §12 for the owner to decide before code:
@@ -15,19 +15,20 @@ vault sends a service only `connection.authenticate.response` and
 `.rotated`, upkeep and profile (VAULT-MESSAGING §6.4 "Service
 connections", 0.69.0). Votes are listed there as planned, not specified
 (§1.1). Item 5.1 registers the types of both directions there, with
-wire vectors; this document is its source.
+wire vectors; this document is its source. The relay's part, admission
+tokens and the mix, is a RELAY-PROTOCOL revision (§3.3).
 
 **Two kinds of vote.** A proposal is binding or not (§3.1), and the two
 run differently:
 
 | | Non-binding | Binding |
 |---|---|---|
-| Members of record | The roster at `record_at` (§3.2) | Vaults that registered a record key before `register_until` (§3.6) |
+| Members of record | The roster at `record_at` (§3.2) | Vaults that registered a record key before `register_until` (§3.5) |
 | Certification | At opening, automatically (§5.2) | At the member's first cast (§5.2) |
-| Deposit tokens | A shared pool (§3.3) | Admission tokens, checked by the mix (§3.4) |
-| Arrival at the box | At once | Held by the mix until close, shuffled (§3.4) |
-| A member who doesn't vote | Their vault declines after close (§6.5) | Nothing: they never certify |
+| Deposits | To the ballot mailbox, with admission tokens the relay checks (§3.3) | To the mix, with admission tokens the mix checks; the mix forwards each voter's last ballot at the closing, shuffled (§3.3) |
 | Deposits per voter | One per cast | Exactly `max_casts` (§6.4) |
+| A member who doesn't vote | Their vault declines after the closing (§6.5) | Nothing: they never certify |
+| After close | The service publishes | The service publishes; if it doesn't, an escrowed key lets anyone count (§7.4) |
 
 ## 1. Requirements
 
@@ -35,11 +36,11 @@ run differently:
 |---|---|
 | Eligibility | Only a member of record obtains a certificate, one per proposal. |
 | One vote | At most one counted ballot per certificate: the valid ballot with the highest `seq` for a voting key counts (§7.2). A member can change their vote until close by casting again, up to `max_casts` times. |
-| Secrecy of the choice | **Binding votes:** no one can tell how a member voted, not the service vault (which is also the ballot box), the relay, the mix or the vault hosts, unless the mix colludes with them (§9.2). **Non-binding votes:** the same against the service from the ballot alone, but a ballot's arrival time is a link for whoever knows when the member was active, and VettID's operator can join host and relay records (§9.1, §9.2). Each proposal's `statement` says which applies. **Not secret in either:** *whether* a member voted (§9). |
-| Results only at close | No one sees a tally before the vote's final close. The box stores deposits sealed until the closing document is published (§7.1). A dishonest box could open them early in a non-binding vote; the mix prevents it in a binding one. |
+| Secrecy of the choice | **Binding votes:** no one can tell how a member voted: not the service vault (which is also the ballot box), the relay, the vault hosts or the mix, unless the mix colludes with the operator or the service (§9.2). **Non-binding votes:** the same against the service from the ballot alone, but a ballot's arrival time is a link for whoever knows when the member was active, and VettID's operator can join host and relay records (§9.1, §9.2). Each proposal's `statement` says which applies. **Not secret in either:** *whether* a member voted (§9). |
+| Results only at close | No one sees a tally before the closing (§7.1). A dishonest box could open deposits early in a non-binding vote; in a binding one the mix holds them. |
 | Verifiability | A member confirms that their ballot is counted as cast, or their decline recorded, and that everyone sees the same documents (§8.3). An observer confirms that every counted ballot has a valid certificate, that no voting key counts twice, the counts of §8.4, and the tally. |
-| Publicity | Every proposal and its documents are published on votes.vettid.org and anchored in Rekor under the service's registered anchor key (§3.5), so a member learns of a proposal without the service, and a forked document is visible to anyone watching that key. |
-| Availability | No one but the member can stop an eligible member from casting a counted ballot. Against the service itself the protocol gives detection, not prevention (§10). |
+| Publicity | Every proposal and its documents are published on votes.vettid.org and anchored in Rekor under the service's listed anchor key (§3.4), so a member learns of a proposal without the service, and a forked document is visible to anyone watching that key. Binding votes add an independent mirror. |
+| Availability | No one but the member can stop an eligible member from casting a counted ballot. Each member holds only their own admission tokens (§3.3). Against the service itself the protocol detects rather than prevents (§10), and in a binding vote the service can't cancel the count after the closing (§7.4). |
 | Receipt-freeness | Out of scope (owner decision). The vault's post-vote check (§8.3) shows the member their counted choice, and so works as a receipt. Casting again gives no protection against a coercer who checks the outcome. |
 
 ## 2. Notation and primitives
@@ -48,33 +49,36 @@ run differently:
   integers. `lp(x) = u16(len(x)) ‖ x`, with `len(x) ≤ 65535`.
 - `H` is SHA-256.
 - **Labels** follow the VMS convention (VAULT-MESSAGING §4.1): ASCII
-  strings embedding the version, `vettid/vote/1/...`. Where a label
-  starts a hashed or signed string, a `0x00` follows it as a separator.
-  Every signature the service identity key makes, in VMS and here, is
-  over a label-prefixed string, so the two can't be confused.
+  strings embedding the version, `vettid/vote/1/...`. Every signature
+  the service identity key makes, in VMS and here, is over a
+  label-prefixed string, so the two can't be confused.
   **(chosen; differs from the plan:** the plan's `"vettid-vote-v1"`
   follows vettid-dev.)
 - **Signatures:** `Sign(sk, label, m)` is `suite.Sign` from vettid-vault
-  `vms/suite`, Ed25519 over `label ‖ 0x00 ‖ m`. (Every use below writes
-  the `0x00` out.)
-- **Ed25519 verification** is exactly:
+  `vms/suite`, Ed25519 over `label ‖ 0x00 ‖ m`.
+- **Hashed strings** that start with a label have the `0x00` written
+  out. **HKDF `info`** values are the label's ASCII bytes with no
+  separator, followed by `u32(i)` where an index is shown (§5.1).
+- **Ed25519 verification,** by every verifier (the service vault, the
+  member vault, observers and the site), is exactly:
   1. `A` (the public key) and `R` are 32 bytes whose `y` is below p, and
      not `x = 0` with the sign bit set;
   2. `[8]A` is not the identity (no small-order key);
   3. `S < L`;
   4. `[S]B = R + [k]A`, cofactorless, with `k = SHA-512(R ‖ A ‖ m) mod L`.
 
-  Go's `ed25519.Verify` does steps 3 and 4. The service vault adds 1 and
-  2. §11 item 8 has vectors for each rule.
+  Go's `ed25519.Verify` does steps 3 and 4, and Go's point decoding
+  accepts a non-canonical `y`, so Go code makes steps 1 and 2 itself.
+  §11 item 8 has vectors for each rule.
 - **`proposal_id`** is a canonical upper-case ULID: 26 ASCII bytes.
   Another form is refused.
-- **Documents** (the proposal, a pool, the roster, an extension, the
-  closing, the results; §8.5) are JCS (RFC 8785). A verifier parses
-  strictly (VAULT-MESSAGING §5.3: no duplicate names), then
-  re-serializes per RFC 8785 and refuses the document unless the bytes
-  are identical. Each is signed with a detached signature over a string
-  that contains `H(document bytes)` (§8.5 lists them). **(chosen; not in
-  the spec.)**
+- **Documents** (the proposal, the roster, an extension, the closing,
+  the mix list, the results, the service list; §8.5) are JCS (RFC 8785).
+  A verifier parses strictly (VAULT-MESSAGING §5.3: no duplicate names),
+  then re-serializes per RFC 8785 and refuses the document unless the
+  bytes are identical. Each is signed with a detached signature over a
+  string that contains `H(document bytes)` (§8.5). **(chosen; not in the
+  spec.)**
   - Times in them are Unix seconds, as JSON integers.
   - Binary values are standard base64 with padding (VAULT-MESSAGING
     §5.3).
@@ -85,7 +89,8 @@ run differently:
 - **The signing key:** the service identity key that signs a proposal
   signs every document and message of that proposal. A service vault
   starts no `identity.rotate` from a proposal's creation until its
-  results are published.
+  results are published. The service list keeps every past identity
+  key, so old proposals still verify.
 - **Blind signatures** are RFC 9474 RSABSSA-SHA384-PSS-Randomized: RSA
   with a modulus of exactly 2048 bits, `e = 65537`, SHA-384, MGF1-SHA-384,
   salt length 48, and a 32-byte message prefix.
@@ -94,8 +99,8 @@ run differently:
     (RFC 9474 §6.2 requires the OID; RFC 4055 §3.1 defines the
     parameters). The SHA-384 AlgorithmIdentifiers omit their parameters
     (RFC 5754 §2), and the trailer field is the default. The exact DER
-    prefix is a vector (§11 item 2). The member vault parses it by hand
-    and refuses anything else; Go's `x509` does not parse it.
+    of a fixed key is a vector (§11 item 2). The member vault parses it
+    by hand and refuses anything else; Go's `x509` does not parse it.
   - A key is used for one purpose of one proposal only (RFC 9474 §6.2):
     certificates or admission tokens.
   - The service vault uses `cloudflare/circl` `blindsign/blindrsa`.
@@ -104,9 +109,11 @@ run differently:
     (vettid-vault README; V3-NOTES).
   - RSA-2048 is the plan's choice: the key lives for one vote and is
     destroyed at publication. Blinding hides the message whatever the
-    signer's computing power (RFC 9474 security considerations).
+    signer's computing power (RFC 9474 security considerations). The
+    vault checks only the key's size and exponent; blindness under a
+    deliberately malformed modulus is a residual (§9.3).
 - **Anchoring** uses ECDSA P-256 with SHA-256 (FIPS 186-5), under the
-  service's anchor key (§3.5). It is what Rekor's `hashedrekord` and the
+  service's anchor key (§3.4). It is what Rekor's `hashedrekord` and the
   standard Sigstore tools verify; Ed25519 there would have to be its
   pre-hashed variant.
 - **The seal** is the VMS v2 envelope in sealed mode (§6.3).
@@ -126,41 +133,36 @@ The proposal is a document (§8.5 has the schema).
 | `quorum` | The plan's quorum rule, as text, and the number of counted ballots it needs. `abstain` ballots count toward it; conflicts don't. |
 | `binding` | Whether the vote is binding (the table at the top). |
 | `record_at` | The roster snapshot, at or before the proposal's creation (§3.2). |
-| `register_until` | Binding only: the end of registration (§3.6), at least 24 h after creation. |
+| `register_until` | Binding only: the end of registration (§3.5), at least 24 h after the proposal is published. |
 | `opens_at` | Members can vote. For binding votes, at or after `register_until`. |
-| `closes_at` | The last moment to cast: ballots deposited before it count. `closes_at − created_at ≤ 7 days − 1 h`. |
+| `closes_at` | The last moment to cast: ballots deposited before it count. `closes_at − opens_at ≤ 7 days`. |
 | `count_until` | `closes_at` + 2 h: the box collects until then (§7.1). |
-| `created_at` | When the proposal was made: the pool's `iat` (§3.3). |
 | `cert_key` | The RSA public key for certificates (§2). |
-| `ballot_mailbox` | Relay URL and mailbox id: a relay keypair for this proposal only. |
+| `admission` | The admission key, the number of tokens per member, and where deposits go (§3.3). |
 | `ballot_kem` | The box's KEM public key for this proposal. |
 | `max_casts` | How many times a member may cast: 1–8. |
-| `pool` | Non-binding only: the first pool's `pool_hash` (§3.3). |
 | `members_of_record` | Non-binding only: the count. Binding votes have it in the roster. |
 | `record_root` | Non-binding only: the Merkle root of the record tags (§3.2). |
-| `admission` | Binding only: the admission key and the mix (§3.4). |
-| `mirrors` | Binding only: the independent mirrors' URLs (§3.5). |
+| `mirrors` | Binding only: the independent mirrors (§3.4), with their escrow keys (§7.4). |
+| `escrow` | Binding only: the sealed copy of `ballot_kem`'s secret key (§7.4). |
 | `outage_rule` | The rule of §10.2, as text. |
 | `statement` | What the vote does not protect, in words for members: the links of §9 that apply to it. |
 
-- **Timing:** the window's cap keeps the first pool's tokens, minted at
-  creation with `iat` backdated 60 s and `exp = closes_at + 15 min`
-  (§3.3), within the relay's open-token lifetime (RELAY-PROTOCOL §5.6;
-  168 h deployed).
 - **Signature:**
   `proposal_sig = Sign(service IK, "vettid/vote/1/proposal", H(proposal_bytes))`.
-- **Hash:** `proposal_hash = H(proposal_bytes)` binds the certificate
-  and the ballot to this one proposal (§5.1, §6.1).
+- **Hash:** `proposal_hash = H(proposal_bytes)` binds the certificate,
+  the tokens and the ballot to this one proposal (§5.1, §6.1).
 - **Publicity:** the proposal is anchored and published before it is
-  sent to anyone (§3.5). A vault certifies only under an anchored
+  sent to anyone (§3.4). A vault certifies only under an anchored
   proposal, and deposits only under the published one (§5.2, §6.4).
 
 ### 3.2 Members of record and record tags (non-binding)
 
 - **Members of record** are the connections active on the service vault's
   roster at `record_at`: connected, not removed, not suspended, and with
-  a vault that advertised the vote feature. One connection is one
-  member. Two consequences, stated with the proposal:
+  a vault that advertised the vote feature (how it advertises is item
+  5.1's). One connection is one member. Two consequences, stated with
+  the proposal:
   - A person holding several VettID accounts is several members.
   - A member whose connection is replaced after `record_at` (they
     connect again, for example after a suspension) is not a member of
@@ -174,95 +176,72 @@ The proposal is a document (§8.5 has the schema).
   `record_secret` and an inclusion proof of their tag, with
   `tree_size = members_of_record`. The vault checks it at once, against
   the root in the signed proposal (RFC 9162 §2.1.3.2).
-- **Issuance tags:**
-  `issued_tag = H("vettid/vote/1/issued" ‖ 0x00 ‖ proposal_id ‖ record_secret)`,
-  for each member certified (§5.3).
-- The service knows every `record_secret`, so it can publish an issuance
-  tag for any member. What stops it is that each member's vault checks
-  its own tag (§8.3). A member whose vault never checks is room the
-  service can use; non-binding votes state this, and binding votes use
-  registration (§3.6) instead.
+- **Issuance:** the results mark each record tag that was issued a
+  certificate (§8.5), so the issued set is a published subset of the
+  record tags.
+- The service knows every `record_secret`, so it can mark any member
+  issued. What stops it is that each member's vault checks its own mark
+  (§8.3). A member whose vault never checks is room the service can
+  use; non-binding votes state this, and binding votes use registration
+  (§3.5) instead.
 - The service keeps the record secrets until the proposal leaves the
-  site's index (§3.5), so a late vault can still ask for its proposal
+  site's index (§3.4), so a late vault can still ask for its proposal
   and check.
 
-### 3.3 The token pool (non-binding)
+### 3.3 Admission tokens and the mix
 
-- **What it is:** one-shot open deposit tokens for the ballot mailbox
-  (RELAY-PROTOCOL §5.6: scope `deposit_open`, `sub` `*`, a fresh ULID
-  `jti` each). They are minted locally, with no relay call.
-  - `iat` is the mint time backdated by 60 s (§5.2 there).
-  - `exp = closes_at + 15 min`.
-  - Each carries `quota: {msgs: 1, bytes: 4096}` (RELAY-PROTOCOL §5.2;
-    a deposit is 2,180 bytes, §6.3).
-- **The pool** is a document (§8.5) with `pool_hash = H(pool_bytes)` and
-  `pool_sig = Sign(service IK, "vettid/vote/1/pool", proposal_hash ‖ u32(pool_seq) ‖ pool_hash)`.
-- **Pool 1** is minted when the proposal is made, and its hash is in the
-  proposal. Later pools are re-issues (§7.3) or come with an extension
-  (§10.2). There are at most four.
-- **Publicity:** each later pool's hash, signature and anchor are
-  published when it is minted (§3.5), but not its tokens.
-- **Use:** a vault deposits only while it holds every published pool,
-  and draws its token uniformly across all of them (§6.4). A pool sent to
-  one member therefore marks no one: either it is published and everyone
-  holds it, or the vault refuses to use it.
-- **Size:** `2 × members_of_record + 64` tokens.
-- **Distribution:** sent at `opens_at` over the connection, to every
-  member of record, as identical bytes (§4.2). Its tokens are not
-  published before `count_until`, so only members hold them.
-  - A pool over one message (the 245,760-byte inner limit,
-    VAULT-MESSAGING §5.5, at about 200 members; to be measured with
-    real tokens) goes in parts (§4.2).
-  - The bytes the service sends grow with N² (N pools of 2N tokens).
-    Through the relay's per-key byte budget of 64 KiB/s per relay process
-    (RELAY-PROTOCOL §7.2 limit 11), N = 300 takes minutes and N = 1,000
-    hours. **Non-binding votes are limited to 500 members of record**
-    until they too can use admission tokens.
-- **What bearer tokens cannot do (§10.1):** a member, who holds the pool,
-  can spend its tokens with junk, or by casting the maximum. Re-issue
-  slows it; admission tokens stop it.
+**(Owner decisions 2026-10-28 and 2026-10-29:** admission tokens for
+every vote, and the mix for binding votes.) They are a RELAY-PROTOCOL
+revision (vettid.org), to be specified there. What this protocol needs
+from it:
 
-### 3.4 Admission tokens and the mix (binding)
-
-The owner decided (D5–D7) that binding votes use tokens checked when a
-deposit is accepted, issued per member at certification without the
-issuer learning which token is whose, and an independent mix. Both are a
-RELAY-PROTOCOL revision (vettid.org), to be specified there. What this
-protocol needs from it:
-
-- **In the proposal:** `admission = {key, tokens, mix}`.
-  - `key` is an RFC 9474 key (§2) for admission tokens of this proposal
+- **In the proposal:** `admission = {key, tokens, to}`.
+  - `key` is an RFC 9474 key (§2) for this proposal's admission tokens
     only.
-  - `tokens = max_casts + 2`; the 2 cover lost answers.
-  - `mix` is the mix's relay URL, mailbox and receipt key (Ed25519).
+  - `tokens = max_casts + 3`: one per cast, one report token (§10.2),
+    and two spare.
+  - `to` is the ballot mailbox (relay URL and mailbox id, a relay
+    keypair for this proposal only) for a non-binding vote, or the mix
+    (relay URL, mailbox and receipt key) for a binding one.
 - **Issuance:** with the certificate (§5.2), the box blind-signs
   `tokens` token values for the member, the same number for everyone.
-  No token is issued later.
-  - Token `i` (from 0) is `token_value_i`, 32 bytes, blind-signed as
+  No token is issued later, so issuance says nothing about how often a
+  member casts.
+  - Token `i` (from 0) is `token_value_i`, 32 bytes, signed as
     `token_msg_i = "vettid/vote/1/token" ‖ 0x00 ‖ proposal_hash ‖ token_value_i`,
     with its own prefix, salt and blinding factor (§5.1).
-- **At the mix:** a deposit is `{token_value, token_prefix, token_sig,
-  envelope}`.
-  - The mix verifies the token under `key`, refuses it if spent, and
-    otherwise spends it and answers with a receipt:
-    `mix_receipt = Sign(mix key, "vettid/vote/1/mix-receipt", proposal_hash ‖ H(envelope))`.
-  - The same token with the same envelope gets the same receipt again,
-    so a retry after a lost answer costs nothing.
+  - The last token, `i = tokens − 1`, is the report token.
+- **Checking:** the receiver of a deposit (the relay for a ballot
+  mailbox, the mix for a binding vote) verifies the token under `key`,
+  refuses it if spent, and otherwise spends it.
   - It refuses deposits at or after `closes_at` by its own clock, as
-    extended by a published extension (§10.2).
-  - **At close,** once the closing document is published (§7.1), it
-    forwards every accepted envelope to the ballot mailbox in a random
-    order, at once, with no times, pacing so that the mailbox's 10,000
-    messages are never exceeded while the box collects. It publishes the
-    sorted list of their hashes on votes.vettid.org, signed with its
-    receipt key, as `mix.json`.
+    extended by any extension published on votes.vettid.org (§10.2).
+  - The same token with the same bytes is answered the same way again,
+    so a retry after a lost answer costs nothing.
+  - The relay learns nothing about the member, and the box nothing
+    beyond the token's validity.
+- **The mix (binding):**
+  - A deposit is `{token, chain_tag, envelope}`, where `chain_tag` is
+    derived per voter (§5.1). The vault sends its deposits one at a
+    time, each after the previous one's receipt.
+  - The mix answers with a receipt:
+    `mix_receipt = Sign(mix receipt key, "vettid/vote/1/mix-receipt", proposal_hash ‖ chain_tag ‖ H(envelope))`.
+  - **At the closing** (§7.1), it keeps only the last envelope of each
+    `chain_tag`, forwards those to the ballot mailbox in a random order
+    with no times, pacing so that the mailbox's 10,000 messages are never
+    exceeded, and publishes the **mix list**: the forwarded envelopes
+    themselves, signed with its receipt key (§8.5).
+  - So the box sees one envelope per voter, and nothing of a voter's
+    earlier casts.
   - The relay accepts the mix's batch under the mix's own credential.
-- **The ballot** names no pool (§6.1).
-- **Effects:** a member can spend only their own tokens, so exhaustion
-  is impossible; distribution is O(N); there is no pool.
-- **Until it exists,** binding votes wait.
+- **Effects:** a member can spend only their own tokens, so no member
+  can exhaust anything for others; distribution is one message per
+  member, at certification, whatever the number of members.
+- **Until the revision exists,** no vote runs. **(chosen; differs from
+  0.6.0,** whose shared pool for non-binding votes let one member spend
+  every token.)
 
-### 3.5 Publication on votes.vettid.org
+### 3.4 Publication on votes.vettid.org
 
 **(chosen; differs from the plan,** which published results on
 member.vettid.org only. Owner decision 2026-10-29.)
@@ -270,41 +249,40 @@ member.vettid.org only. Owner decision 2026-10-29.)
 votes.vettid.org is a public site run by VettID, separate from every
 service vault (its design: vettid/votes, docs/VOTES-SITE.md).
 
+- **The service list** (§8.5) is a document the site signs and anchors
+  under its own anchor key, which is pinned in the vault's release
+  config. It is append-only: each version contains the previous one's
+  entries and its hash. For each registered service it names every
+  identity key it has had, and its anchor keys with their certificates.
+  VettID maintains it; a service is added by the owner. Vaults fetch it
+  when they connect to a service and on every site check, keep the
+  latest valid version, and accept an anchor key only if it is on it.
 - **The anchor key:** each service has one long-lived ECDSA P-256 anchor
-  key, sealed in the service vault's keystore.
-  - It is certified by the service identity key:
-    `anchor_cert = Sign(service IK, "vettid/vote/1/anchor-key", H(anchor_key SPKI DER))`.
-  - The site's service list (§8.5) names each registered service's
-    identity key, anchor keys and certificates. VettID maintains it; a
-    service is added by the owner.
-  - Every document of every proposal of the service is anchored under
-    it. The site publishes the set of anchor keys, and anyone can watch
-    Rekor for them.
-  - A new anchor key is certified the same way and added; old ones stay
-    listed and watched.
+  key, sealed in the service vault's keystore, certified by its
+  identity key:
+  `anchor_cert = Sign(service IK, "vettid/vote/1/anchor-key", H(anchor_key SPKI DER))`.
+  Every document of every proposal of the service is anchored under it.
+  A new anchor key is certified the same way and added to the list; old
+  ones stay listed and watched.
 - **The documents,** in order of upload:
-  1. the proposal, with pool 1's hash (non-binding), before the
-     proposal is sent to any member;
+  1. the proposal, before it is sent to any member;
   2. the roster (binding), after `register_until` and before `opens_at`
-     (§3.6);
-  3. each later pool's hash and signature, when it is minted;
-  4. any extension, before the current `closes_at` (§10.2);
-  5. the closing, at the final close (§7.1);
-  6. the mix's forward list (binding; §3.4);
-  7. the results (§8.1), with every pool's bytes.
-- **The anchor:** before uploading, the service vault anchors each
-  document in Rekor: a `hashedrekord` entry with `H(document bytes)` and
-  an ECDSA P-256 signature over the document bytes under its anchor key.
-  The Sigstore bundle of Rekor's answer (§8.5 "Rekor profile") goes up
-  with the document and with the message that carries it to vaults.
-  - A pool is anchored over its full bytes, which Rekor and the site see
-    only as a hash.
-  - The mix's forward list is anchored by the site, under the site's own
-    anchor key, also on the service list.
+     (§3.5);
+  3. any extensions, before the closing (§10.2);
+  4. the closing (§7.1);
+  5. the mix list (binding; §3.3), uploaded by the mix;
+  6. the results (§8.1).
+- **The anchor:** before uploading, the service vault (the mix, for its
+  list) anchors each document in Rekor: a `hashedrekord` entry with
+  `H(document bytes)` and an ECDSA P-256 signature over the document
+  bytes, with an RFC 3161 timestamp from a timestamp authority in the
+  trusted root. The Sigstore bundle (§8.5 "Rekor profile") goes up with
+  the document and with the message that carries it to vaults. The
+  mix's anchor key is on the service list with the mix's receipt key.
 - **What the site checks** before it publishes an upload: the service is
-  registered; the signatures; the exact JCS bytes; the anchor bundle
-  under a registered anchor key; the order above; the document's fields
-  against the proposal.
+  on the list; the signatures; the exact JCS bytes; the anchor bundle
+  under a listed key, and its timestamp; the order above; the document's
+  fields against the proposal.
 - **Write-once:** each document has one path. The site accepts the same
   bytes again, refuses different bytes, and never changes or removes a
   document.
@@ -313,64 +291,72 @@ service vault (its design: vettid/votes, docs/VOTES-SITE.md).
   session, and hands the vault the entries of its services. It then
   fetches the pages of those proposals, which tells the site (as any web
   server) which proposals that address reads.
-- **Monitor:** the site watches Rekor for entries under every registered
-  anchor key. An entry that matches no published document within an
-  hour of its log time is an alarm, published on the service's page. It
-  means the service anchored a document it didn't publish: a fork.
-- **Time anchor:** for binding votes the site stamps each document's
-  hash with OpenTimestamps, upgrades the proof once Bitcoin confirms it,
-  and publishes it. It shows when the site held the document; vaults
-  don't wait for it.
+- **Watching:** the site watches every log the Rekor profile pins for
+  entries under every listed anchor key.
+  - An entry that matches no published document is a **pending**
+    alarm. A later upload of a valid document with that digest clears
+    it.
+  - Two anchored documents for the same slot (the proposal, the roster,
+    extension `n`, the closing, the mix list, the results) with
+    different bytes, or a pending alarm still open at `count_until` +
+    24 h, is a **fork**, published on the service's page.
+  - Entries with the same digest are one document.
+- **Time anchor:** for binding votes the site also stamps each
+  document's hash with OpenTimestamps, upgrades the proof once Bitcoin
+  confirms it, and publishes it. Vaults don't wait for it.
+- **An independent mirror (binding):** a binding vote names at least one
+  mirror run by a party other than VettID and the organisation
+  (`mirrors` in the proposal). It runs the open-source watcher from
+  vettid/votes:
+  - it watches the same logs for the listed anchor keys, and raises
+    pending alarms and forks by the same rules;
+  - it fetches each document from votes.vettid.org and verifies it, and
+    also accepts any anchored document uploaded by anyone, so a vault
+    can give it what the site withholds;
+  - it republishes everything with its own index;
+  - it holds its escrow key (§7.4) and nothing else.
+
+  The app fetches the index from votes.vettid.org and from every mirror.
+  A proposal of its service on one and missing from another is evidence,
+  and the vault asks for it (§4.1). A mirror that doesn't answer is
+  recorded (`mirror_unreachable`), and the vote goes on. The mirror's
+  operator is chosen before the first binding vote, like the mix's.
 - **What the site can and cannot do:**
   - It cannot alter a document or serve a fork that no one sees: a fork
     must be anchored under a watched key.
   - It could withhold a document, or refuse a reader. A vault checks
     anchors offline from the bundles its messages carry, so this delays
-    the site checks rather than stopping a vote (§6.4).
+    the site checks rather than stopping a vote (§6.4), and in a binding
+    vote the mirror has the documents.
   - It is independent of an organisation's service vault, not of VettID.
-    For VettID's own member service the guarantee rests on VettID and on
-    outside watchers of the anchor key, and each such proposal's
-    `statement` says so.
-- **An independent mirror (binding votes):** a binding vote needs at
-  least one mirror run by a party other than VettID and other than the
-  organisation, named in the proposal (`mirrors`) and on the service
-  list. It runs the open-source watcher from vettid/votes: it reads
-  Rekor for the registered anchor keys, fetches each document it finds
-  from votes.vettid.org, verifies it, and republishes it, with its own
-  index. It holds no keys and needs only to stay up; it can't alter
-  anything either.
-  - The app fetches the index from votes.vettid.org and from every
-    mirror. A proposal of its service on one and missing from another
-    is evidence, and the vault asks for it (§4.1).
-  - So no single party, VettID included, can hide a vote from some
-    members or run one that only some of them see.
-  - The mirror's operator is chosen before the first binding vote, like
-    the mix's.
+    For VettID's own member service, a non-binding vote's guarantee rests
+    on VettID and on outside watchers of the anchor key, and its
+    `statement` says so; a binding vote has the mirror.
 
-### 3.6 Registration (binding)
+### 3.5 Registration (binding)
 
 **(Owner decision 2026-10-29.)**
 
 - **Who may register:** the connections active at `record_at` whose
   vault advertised the vote feature.
 - **How:** on a valid `vote.proposal`, the vault derives a record key
-  `rk` for the proposal (§5.1) and sends
+  `rk` for the proposal (§5.1), records "registering", and sends
   `vote.register {proposal_id, record_key, register_sig}`, with
   `register_sig = Sign(rk, "vettid/vote/1/register", proposal_hash)`.
   It needs no member action, and retries until `register_until`.
 - **The roster:** after `register_until` the service publishes the
-  roster document: the sorted record keys, their signatures, their
+  roster document: the sorted record keys with their signatures, their
   Merkle root and their count, `members_of_record` (§8.5). It is
   anchored and published before `opens_at`, and sent to every
   registered vault in `vote.roster`.
-- **The vault checks** that its record key is in the roster. A missing
-  key is evidence (§8.3).
+- **The vault checks** that its record key is in the roster, before it
+  deposits and again in §8.3. A missing key is evidence.
 - **Members of record** are exactly the roster's keys. A member whose
   vault was locked through the whole window can't vote in this vote;
-  the app tells them.
+  the app tells them. The outage rule covers the window (§10.2).
 - **What it closes:** the service cannot claim a registered member
-  certified, since issuance is that member's own signature (§5.3).
-  It can still add phantom keys to the roster, as it could add phantom
+  certified, since issuance is that member's own signature (§5.3). It
+  can still add phantom keys to the roster, as it could add phantom
   members (§9.3), but only before `opens_at`, in a published count.
 
 ## 4. Messages from the service
@@ -381,46 +367,42 @@ names it (`re`), so the service knows it arrived. A vault without the
 vote feature answers `unsupported_type`, which today's rules would
 instead drop and audit. That needs the §6.4 change of item 5.1.
 
+**Refusals** of the vault's requests (§5.4) are signed, so that a member
+can show them:
+`refusal_sig = Sign(service IK, "vettid/vote/1/refusal", proposal_hash ‖ lp(type) ‖ lp(code) ‖ H(request body))`,
+in the error body as `{refusal_sig}`, where `type` is the request's type
+and `code` the error code. A vault treats an unsigned refusal as no
+answer.
+
 ### 4.1 `vote.proposal`
 
-`{proposal, proposal_sig, bundle, anchor, record_secret?, record_proof?}`
-- `proposal` is the §3.1 bytes, in base64; `bundle` its Sigstore bundle;
-  `anchor` the service's anchor key with its `anchor_cert`.
+`{proposal, proposal_sig, bundle, record_secret?, record_proof?}`
+- `proposal` is the §3.1 bytes, in base64; `bundle` its Sigstore bundle.
 - Non-binding: `record_secret` and `record_proof`
   `{index, tree_size, path}` (§8.5), the only per-member part.
-- **The vault keeps** a proposal whose signature, anchor certificate and
-  bundle verify (§8.5 "Rekor profile"). Under one `proposal_id`, it uses
-  the one the site publishes (§6.4) and keeps any other as evidence
-  (§8.3). It certifies only once one is chosen this way, or, with the
-  site unreachable, under the only anchored one it holds.
+- **The vault keeps** a proposal whose signature verifies under a listed
+  identity key and whose bundle verifies under a listed anchor key (§3.4,
+  §8.5 "Rekor profile"). Under one `proposal_id`, it uses the one the
+  site publishes (§6.4) and keeps any other as evidence (§8.3). It
+  certifies only once one is chosen this way, or, with the site
+  unreachable, under the only anchored one it holds.
 - **Requested:** a vault that sees a proposal of its service on
-  votes.vettid.org but holds none sends `vote.request {proposal_id}`
-  (§5.4), and the service answers with `vote.proposal` or refuses.
+  votes.vettid.org or a mirror but holds none sends `vote.request
+  {proposal_id}` (§5.4), and the service answers with `vote.proposal` or
+  refuses.
 
-### 4.2 `vote.pool` (non-binding)
-
-`{proposal_id, pool_seq, part, parts, pool_part, pool_sig, bundle}`
-- `pool_part` is a byte range of the pool document, in base64, of at
-  most 196,608 bytes before encoding; parts are numbered from 1, in
-  order. `pool_sig` and `bundle` are the same in every part.
-- The vault assembles all `parts`, then checks `pool_hash` (against the
-  proposal for pool 1), `pool_sig` and the bundle. Parts that disagree
-  are dropped and asked for again with `vote.pool.request` (§5.4).
-- A different pool under a `pool_seq` it already holds is kept as
-  evidence and not used.
-
-### 4.3 `vote.roster` (binding)
+### 4.2 `vote.roster` (binding)
 
 `{proposal_id, roster, roster_sig, bundle}`, sent after `register_until`
 to every registered vault.
 
-### 4.4 `vote.extended`
+### 4.3 `vote.extended`
 
 `{proposal_id, extension, extension_sig, bundle}` (§10.2). The vault
-uses it once it is anchored, and checks it on the site before it next
-deposits or declines.
+uses it once its bundle verifies, and checks the site for any later one
+before it next deposits or declines.
 
-### 4.5 `vote.closed`
+### 4.4 `vote.closed`
 
 `{proposal_id, results_hash}`. The vault doesn't depend on it: it runs
 its check at `count_until` + 1 h anyway (§8.3).
@@ -431,16 +413,23 @@ its check at `count_until` + 1 h anyway (§8.3).
 
 - **The proposal seed** is 32 random bytes the vault draws when it first
   keeps a proposal (§4.1), and stores in its DEK-encrypted state as
-  feature data (VAULT-MESSAGING §3.3) before using it. It is erased once
-  the §8.3 check has passed, or 7 days after `count_until`. Because it is
+  feature data (VAULT-MESSAGING §3.3) before using it. Because it is
   opened by the vault's unlock rather than by the password, the vault
   can register, certify and decline on its own.
   - The member's choice still needs the member's approval (§6.2).
-  - Erasing it means a later compromise of the vault exposes no past
-    vote.
+  - **The seed and the vote state** (the voting key, the choice, the
+    ballot, the evidence) **are kept out of the vault's backups,** and
+    are erased once the §8.3 check has passed, leaving only its outcome.
+    If the check fails, the evidence is kept for 30 days and then erased;
+    it links the member to their ballot while it exists, and the vault
+    says so. Without a passed check, they are erased 7 days after
+    `count_until`.
+  - So a later compromise of the vault, or of a backup, exposes no
+    finished vote.
   - **(chosen; not in the spec;** it replaces 0.5.0's single vote root.)
 - **Derived values:** each is
-  `HKDF-SHA256(ikm = proposal_seed, salt = proposal_hash, info = label, L)`:
+  `HKDF-SHA256(ikm = proposal_seed, salt = proposal_hash, info, L)`,
+  with `info` the ASCII label (and `u32(i)` where shown):
 
   | Value | `info` | `L` |
   |---|---|---|
@@ -449,7 +438,11 @@ its check at `count_until` + 1 h anyway (§8.3).
   | `pss_salt` (the salt of RFC 9474's EMSA-PSS encoding) | `vettid/vote/1/pss-salt` | 48 |
   | `blind_seed` | `vettid/vote/1/blind` | 32 |
   | The record key `rk`'s seed (binding) | `vettid/vote/1/record-key` | 32 |
-  | Token `i`'s value, prefix, salt and blind seed (binding) | `vettid/vote/1/token-value`, `vettid/vote/1/token-prefix`, `vettid/vote/1/token-salt`, `vettid/vote/1/token-blind`, each followed by `u32(i)` | 32, 32, 48, 32 |
+  | `chain_tag` (binding) | `vettid/vote/1/chain` | 32 |
+  | Token `i`'s value | `vettid/vote/1/token-value` ‖ `u32(i)` | 32 |
+  | Token `i`'s prefix | `vettid/vote/1/token-prefix` ‖ `u32(i)` | 32 |
+  | Token `i`'s salt | `vettid/vote/1/token-salt` ‖ `u32(i)` | 48 |
+  | Token `i`'s blind seed | `vettid/vote/1/token-blind` ‖ `u32(i)` | 32 |
 
   So a retried request is identical, and these values stay secret
   because the seed is.
@@ -462,12 +455,12 @@ its check at `count_until` + 1 h anyway (§8.3).
 
   The expected number of tries is under 2.
 - **Blinding:** `blinded = r^e · OS2IP(EMSA-PSS-ENCODE(msg_prefix ‖ cert_msg; pss_salt)) mod n`
-  (RFC 9474 §4.2 with the salt and `r` fixed). Tokens likewise.
+  (RFC 9474 §4.2 with the salt and `r` fixed). Tokens likewise, under
+  the admission key.
 - **The certified message:**
   `cert_msg = "vettid/vote/1/cert" ‖ 0x00 ‖ proposal_hash ‖ vk`.
-- **A restore** (VMS restore event) that loses the seed loses the vote:
-  the vault reports `seed_lost` and runs no tag check for the proposal
-  (§8.3), since its earlier requests can't be recomputed.
+- **A restore** (VMS restore event) brings back no seed, so the vault
+  marks every proposal it held as `seed_lost` (§6.6).
 
 ### 5.2 Request and answer
 
@@ -477,14 +470,15 @@ its check at `count_until` + 1 h anyway (§8.3).
     certifies then; a locked one when it is next unlocked, which may be
     just before its member casts (a link the `statement` names, §9.1).
   - **Binding:** at the member's first cast, just before the first
-    deposit. The service learns when each member first cast, not how
-    (the mix holds the ballot).
+    deposit.
   - Either way it is a vault step, not an ask (VAULT-MESSAGING §10.4.1).
 - **How:**
-  1. The vault sends `vote.certify {proposal_id, blinded}`; for binding
-     votes with `admission_blinded` (`tokens` entries) and
-     `certify_sig = Sign(rk, "vettid/vote/1/issued", proposal_hash ‖ H(blinded ‖ admission_blinded_0 ‖ …))`.
-     It records "asked".
+  1. The vault computes `blinded` and the `tokens` blinded token values,
+     and records "asked", with them, **before** sending
+     `vote.certify {proposal_id, blinded, admission_blinded}`; for
+     binding votes with
+     `certify_sig = Sign(rk, "vettid/vote/1/issued", proposal_hash ‖ request_hash)`,
+     where `request_hash = H(blinded ‖ admission_blinded_0 ‖ …)`.
   2. **The service vault** checks:
      - the proposal is open: `opens_at ≤ now < closes_at`;
      - the connection is a member of record and still active (binding:
@@ -496,31 +490,32 @@ its check at `count_until` + 1 h anyway (§8.3).
      if no issuance exists for the connection, or one exists for the same
      request. Only then does it sign: `blind_sig = BlindSign(cert_sk, blinded)`,
      and the tokens likewise.
-     - It answers `vote.certified {proposal_id, blind_sig, admission_sigs?}`.
+     - It answers `vote.certified {proposal_id, blind_sig, admission_sigs}`.
      - A repeated request gets the stored answer.
-     - Refusals are the response with `status: error` and `error.code`
-       one of `already_certified`, `not_open`, `closed`,
-       `not_of_record` or `not_active`.
+     - Refusals are signed (§4): `already_certified`, `not_open`,
+       `closed`, `not_of_record`, `not_active` or `bad_signature`.
   3. **The vault** computes `cert_sig = Finalize(cert_key, msg_prefix ‖ cert_msg, blind_sig, r)`,
      which includes verifying it, and the tokens likewise. It keeps
-     `(cert_prefix = msg_prefix, cert_sig)` and records "certified".
+     `(cert_prefix = msg_prefix, cert_sig)` and the tokens, and records
+     "certified".
      - If `Finalize` fails, it keeps `blinded` and `blind_sig` as
-       evidence, retries once, and then reports
-       `certification_failed` (§8.3).
+       evidence and reports `certification_failed` (§8.3). A retry would
+       be identical, so it doesn't retry.
      - With no answer, it retries the same request with backoff until
        `closes_at`.
+     - On `not_open`, it retries after `opens_at` + 1 min, since its
+       clock may lead; that refusal is not evidence.
 
 The service sees `blinded` and `blind_sig`, which tell it nothing about
-`vk` or `cert_sig` without `r`.
+`vk`, `cert_sig` or the tokens without the blinding values.
 
 ### 5.3 The issuance list
 
 The service vault records `connection, proposal_id, request, answer`
 (the conditional write above). At publication (§8.1) it publishes:
-- **non-binding:** the issuance tags of certified members;
+- **non-binding:** which record tags were issued (§3.2);
 - **binding:** each issuance as `{record_key, request_hash, certify_sig}`,
-  where `request_hash = H(blinded ‖ admission_blinded_0 ‖ …)`, which
-  observers verify against the roster.
+  which observers verify against the roster.
 
 Then it deletes the records.
 
@@ -528,11 +523,10 @@ Then it deletes the records.
 
 | Type | Body | Answer |
 |---|---|---|
-| `vote.register` | `{proposal_id, record_key, register_sig}` (binding) | `ok`, or an error `not_of_record`, `closed` |
-| `vote.certify` | `{proposal_id, blinded, admission_blinded?, certify_sig?}` | `vote.certified {proposal_id, blind_sig, admission_sigs?}`, or an error (§5.2) |
-| `vote.decline` | `{proposal_id, vk, cert_prefix, cert_sig, decline_sig}` (non-binding; §6.5) | `ok`, or an error `not_certified`, `too_late` |
-| `vote.request` | `{proposal_id}` | `vote.proposal` (§4.1) as the response, or an error `not_of_record`, `unknown_proposal` |
-| `vote.pool.request` | `{proposal_id, pool_seq}` (non-binding) | `vote.pool` parts, or an error `unknown_pool` |
+| `vote.register` | `{proposal_id, record_key, register_sig}` (binding) | `ok`, or a refusal `not_of_record`, `closed`, `bad_signature` |
+| `vote.certify` | `{proposal_id, blinded, admission_blinded, certify_sig?}` | `vote.certified {proposal_id, blind_sig, admission_sigs}`, or a refusal (§5.2) |
+| `vote.decline` | `{proposal_id, vk, cert_prefix, cert_sig, decline_sig}` (non-binding; §6.5) | `ok`, or a refusal `not_certified`, `not_closed`, `too_late`, `bad_signature` |
+| `vote.request` | `{proposal_id}` | `vote.proposal` (§4.1) as the response, or a refusal `not_of_record`, `unknown_proposal` |
 
 ## 6. Casting
 
@@ -545,13 +539,10 @@ Then it deletes the records.
   - each further cast adds a step drawn uniformly from [1, 2^16];
   - the vault stores the new `seq` before signing with it.
 
-  The highest counts, so the order holds however deposits arrive, even
-  shuffled by the mix, and the published `seq` says nothing about how
-  often the member cast.
-- **No pool and no timestamp.** The pool a deposit used is checked at
-  deposit (§7.2) but not signed, so a retry through another pool is the
-  same ballot. **(chosen; differs from the plan:** a signed time would be
-  published with the ballot.)
+  The highest counts, so the order holds however deposits arrive, and
+  the published `seq` says nothing about how often the member cast.
+- **No timestamp.** **(chosen; differs from the plan:** a signed time
+  would be published with the ballot.)
 
 ### 6.2 Choosing
 
@@ -566,17 +557,17 @@ Then it deletes the records.
   (§7.2). **(chosen; not in the spec:** still one counted ballot per
   key.)
 - **Not voting:** a member who never casts has no ballot. In a
-  non-binding vote their vault declines after close (§6.5); in a binding
-  one it never certifies. **(Owner decisions 2026-10-29;** the earlier
-  automatic abstain is gone.)
+  non-binding vote their vault declines after the closing (§6.5); in a
+  binding one it never certifies. **(Owner decisions 2026-10-29;** the
+  earlier automatic abstain is gone.)
 - **Reminders:** the app reminds the member a day before `closes_at`.
 
 ### 6.3 The deposit
 
 - **The seal** is a VMS v2 envelope in sealed mode (VAULT-MESSAGING §5.2,
   §4.3), to `ballot_kem`:
-  - `sender_kid` all-zero (anonymous), `recipient_kid` the kid of
-    `ballot_kem` (§4.4 there);
+  - `ver` 2, `suite` 2, `mode` sealed, `flags` 0; `sender_kid` all-zero
+    (anonymous), `recipient_kid` the kid of `ballot_kem` (§4.4 there);
   - the HPKE `info` is VAULT-MESSAGING's `vettid/vms/2/sealed`, and the
     AAD is the header, as for every sealed envelope;
   - the inner plaintext is **the deposit body, not the §5.3 inner
@@ -584,28 +575,28 @@ Then it deletes the records.
     the time. `ballot_kem` receives nothing else, so the recipient knows
     the format. Item 5.1 registers this exception to VAULT-MESSAGING
     §5.3.
-- **`body`** is the JSON
-  `{v: 1, proposal_id, vk, cert_prefix, cert_sig, seq, choice_id, ballot_sig, pool_seq?}`
-  (§8.5; `pool_seq` for non-binding votes only), padded to exactly 1,024
-  bytes: `json ‖ 0x80 ‖ 0x00*` (VAULT-MESSAGING §5.4's bucket, which
-  every honest body of 512–1,023 bytes reaches). Every deposit is
-  therefore a 2,180-byte envelope.
-- Nothing in the deposit identifies the vault. A member's own kid or
-  key there would link the ballot.
+- **`body`** is compact JSON (no whitespace),
+  `{v: 1, proposal_id, vk, cert_prefix, cert_sig, seq, choice_id, ballot_sig}`
+  (§8.5), padded to exactly 1,024 bytes: `json ‖ 0x80 ‖ 0x00*`
+  (VAULT-MESSAGING §5.4's bucket; an honest body is 649–702 bytes).
+  Every deposit is therefore a 2,180-byte envelope.
+- Nothing in the deposit identifies the vault.
 
 ### 6.4 Sending it
 
-1. **Checks before depositing.** Before each deposit the app fetches the
-   proposal's page on votes.vettid.org (§3.5), and the vault checks:
-   - the proposal it holds is the published one;
-   - non-binding: it holds every published pool, asking for any it
-     lacks (`vote.pool.request`);
+1. **Site checks.** While a vote is open, the app fetches the proposal's
+   page on votes.vettid.org and the mirrors every hour, and before a
+   cast, and the vault checks:
+   - the proposal it holds is the published one, and its anchor key is
+     on the service list;
+   - binding: its record key is in the roster;
    - any extension on the site is one it holds, and it uses the latest
      `closes_at`.
 
-   If the site doesn't answer within 10 minutes, the vault deposits on
-   the strength of the Rekor bundles its messages carried, and records
-   the site checks as deferred, to be made in §8.3. Any other failure is
+   A deposit uses the latest check. If the site doesn't answer within
+   `min(10 min, closes_at − now − 60 s)`, the vault deposits on the
+   strength of the bundles its messages carried, and records the site
+   checks as deferred, to be made in §8.3. Any other failure is
    evidence (§8.3), and it doesn't deposit.
 2. **Time.** At once, when the member casts (owner decision 2026-10-28).
    - **Binding:** every voter makes exactly `max_casts` deposits to the
@@ -613,28 +604,31 @@ Then it deletes the records.
      scheduled at times drawn uniformly between then and
      `closes_at − 5 min`, each a fresh seal of the latest ballot. A
      cast again is sent at once, using the next scheduled deposit, and
-     the remaining ones are drawn again. The host and the mix therefore
-     see the same number of deposits from every voter.
-   - The ballot, the certificate and the schedule are in the vault's
-     encrypted state, and survive a restart.
-3. **Token.** Non-binding: a token drawn uniformly at random across all
-   published pools the vault holds, among those it hasn't tried.
-   Binding: the next unspent admission token.
-4. **Key.** For the relay (non-binding), a fresh Ed25519 key for this
-   deposit signs the request (RELAY-PROTOCOL §4.1). An open token needs
-   no registered sender (§5.6). Every attempt is signed anew, with a
-   fresh timestamp. A byte-identical request within 90 s is refused as
+     the remaining ones are drawn again. A slot missed while the vault
+     was locked is sent when it unlocks, the missed ones spread at
+     random over the time left; a slot that can't be sent before
+     `closes_at − 5 min` is dropped.
+   - The ballot, the certificate, the tokens and the schedule are in the
+     vault's encrypted state, and survive a restart.
+3. **Token and bytes.** The next unspent admission token (not the report
+   token). The vault stores the envelope and its token before the first
+   attempt, and every retry sends exactly those, under a fresh request
+   signature.
+4. **Key.** A fresh Ed25519 key for each deposit signs the request
+   (RELAY-PROTOCOL §4.1), to the relay or the mix. An admission token
+   needs no registered sender. Every attempt is signed anew, with a
+   fresh timestamp; a byte-identical request within 90 s is refused as
    a replay.
-5. **Outcomes** (non-binding, at the relay; the mix's answers are in the
-   relay revision, with the same meanings):
+5. **Outcomes** (the relay's or the mix's answers, as the relay
+   revision defines them):
 
    | Answer | What the vault does |
    |---|---|
-   | `2xx` | Reads the time of the `msg_id` ULID in the answer (RELAY-PROTOCOL §6.2). Before `closes_at` (to the millisecond, `closes_at` being a whole second): records "cast", and keeps `vk`, the certificate, `ballot_sig`, `seq` and every `pool_seq` it used. At or after it: records "late". |
-   | `409 token_used` (spent by someone else, or by a first attempt whose answer was lost) | Deposits again with another token and a fresh key. A second copy is harmless: it is the same ballot (§7.2). **(chosen; differs from the plan,** which stopped at "probably cast".) |
-   | `token_expired`, `token_revoked`, `token_invalid`, `quota_exceeded` with `quota: "token"` | Drops that token. With none left, waits for the next pool. |
+   | Accepted | Reads the receiver's time in the answer (the `msg_id` ULID at the relay; the receipt at the mix). Before `closes_at`, to the millisecond: records "cast" and keeps `vk`, the certificate, `ballot_sig`, `seq` and any receipt. At or after it: records "late". |
+   | Token spent, with the same bytes | Treated as accepted: it was this deposit's own earlier attempt. |
+   | Token spent, other bytes; token invalid | Drops the token and uses the next one (a spare), and reports `token_refused`. |
    | `429 rate_limited` | Waits `retry_after`, then retries. |
-   | Mailbox `quota_exceeded`, 5xx, network errors | Retries the same token, with a backoff of up to 5 min. |
+   | Mailbox `quota_exceeded`, 5xx, network errors | Retries the same bytes, re-signed, with a backoff of up to 5 min (RELAY-PROTOCOL §7.1: never unchanged). |
    | `replay_detected`, `timestamp_stale`, `signature_invalid` | Re-signs and retries, once for `signature_invalid`, then reports `deposit_failed`. |
    | `400`, `payload_too_large`, `mailbox_unknown` | Reports `deposit_failed` (§8.3). |
 
@@ -643,18 +637,17 @@ Then it deletes the records.
 ### 6.5 Declining (non-binding)
 
 - **Who:** a vault that is certified, has never signed a ballot for the
-  proposal, and whose cast state is not "unknown" (§6.6). Once it has
-  declined it never casts.
-- **When:** after the final `closes_at` (it checks the site for an
-  extension first), at a time drawn uniformly from then to 90 minutes
-  later. A vault locked then declines when it is unlocked, until
-  `count_until`.
+  proposal, and is not `seed_lost`. Once it has declined it never casts.
+- **When:** after the closing is published (§7.1), at a time drawn
+  uniformly from then to 90 minutes later. A vault locked then declines
+  when it is unlocked, until `count_until`.
 - **How:** `vote.decline {proposal_id, vk, cert_prefix, cert_sig, decline_sig}`
   on the service connection (§5.4), with
   `decline_sig = Sign(vk, "vettid/vote/1/declined", proposal_hash)`,
-  retried until `count_until`. The service refuses a decline whose
-  certificate or signature fails, from a connection it never certified
-  (`not_certified`), or after `count_until` (`too_late`).
+  retried until `count_until`. The service refuses a decline before the
+  closing (`not_closed`; the vault retries), whose certificate or
+  signature fails (`bad_signature`), from a connection it never
+  certified (`not_certified`), or after `count_until` (`too_late`).
 - **In the results:** every decline, with its `vk` and certificate. A
   `vk` that both declined and has a ballot is a conflict (§7.2).
 - **What it does:** each certified member is accounted for by a ballot
@@ -668,49 +661,54 @@ Then it deletes the records.
 
 ### 6.6 After a restore
 
-A vault restored from backup (the VMS restore event) marks every open
-proposal it holds with cast state "unknown":
-- it doesn't decline;
-- its next cast uses `seq ≥ 2^30 + 2^24`, above any `seq` it could have
-  signed before (a `seq` in that range shows a restore happened, nothing
-  more);
-- its §8.3 check accepts any ballot under its `vk`, and shows its
-  choice.
+A vault restored from backup (the VMS restore event) has no proposal
+seeds (§5.1). For every proposal open or unchecked at the time, it
+records `seed_lost`:
+- it doesn't cast, decline or run the tag checks of §8.3 for it;
+- a ballot it cast before the restore still counts;
+- an `already_certified` refusal is then expected, not evidence;
+- the app tells the member they can't change their vote in it.
 
 ## 7. The ballot box
 
 ### 7.1 Collecting and closing
 
 - **When:** the ballot box (the service vault) collects from `opens_at`
-  to `count_until`, acknowledging each message once its write is
-  durable. For binding votes it collects the mix's batch (§3.4).
-- **Sealed until close:** the box stores each deposit as received, with
-  its `deposited_at` and token `jti`, and opens none until the closing
-  document is published.
-- **The closing:** at `closes_at`, if no extension was published before
-  it, the service publishes the closing document (§8.5), anchored. It
-  is the final close: from then on no extension is possible, the mix
-  forwards, and the box opens what it holds and runs §7.2.
-- **The arrival cutoff** is `closes_at`, by the time of the deposit's
-  relay `msg_id` ULID, the same clock the vault reads (§6.4). For
-  binding votes the mix enforces it, and the box takes every envelope
-  in the mix's forward list.
-- **Publication** waits until the mailbox is empty at `count_until`, and
-  then until collects have come back empty for 10 minutes.
-  **(chosen; not in the spec.)**
-- **A restore of the service vault's table** while a proposal is open or
-  unpublished loses acknowledged deposits. The service records it, the
-  results say so (`restored: true`), and the vote is held again.
+  to `count_until` (non-binding), or until it holds every envelope of
+  the mix list (binding), acknowledging each message once its write is
+  durable.
+- **Sealed until the closing:** the box stores each deposit as received,
+  with its `msg_id` and token, and opens none until the closing is
+  published.
+- **The closing:** at `closes_at` + 1 h, if no extension was published
+  before then, the service publishes the closing document (§8.5),
+  anchored and timestamped. It is the final close: from then on no
+  extension is possible, the mix forwards, the box opens what it holds
+  and runs §7.2, and vaults decline. The hour lets an outage in the last
+  hour be covered (§10.2); deposits made in it are refused, as after
+  `closes_at`, unless an extension reopens the vote.
+- **The arrival cutoff** is `closes_at`, by the receiver's time, the
+  same clock the vault reads (§6.4). The relay or the mix enforces it.
+- **Publication** (non-binding) waits until the mailbox is empty at
+  `count_until`, and then until collects have come back empty for 10
+  minutes. **(chosen; not in the spec.)**
+- **A restore of the service vault's table:**
+  - before the closing, in a non-binding vote: acknowledged deposits are
+    lost. The results say so (`restored: true`), and the vote is held
+    again;
+  - in a binding vote, or after the closing: nothing is held again. The
+    mix list holds every counted envelope (§7.4), and the box counts
+    from it.
 
 ### 7.2 Checks, in order
 
-1. **Format:** the envelope is 2,180 bytes, unseals, has exactly the
-   1,024-byte padding, and `body` parses strictly.
+1. **Format:** the envelope is 2,180 bytes, its header is as §6.3
+   states, it unseals, it has exactly the 1,024-byte padding, and `body`
+   parses strictly.
 2. **Proposal and time:** `proposal_id` is this proposal's, and
    (non-binding) the deposit's `msg_id` time is before `closes_at`.
-3. **Token:** non-binding: the deposit's token is from a published pool
-   of this proposal, and `pool_seq` is that pool's. Binding: the
-   envelope is in the mix's forward list.
+3. **Delivery:** non-binding: it came to the ballot mailbox on a token
+   the relay accepted. Binding: it is in the mix list.
 4. **Certificate:** `cert_prefix` is 32 bytes, and `cert_sig` verifies
    under `cert_key` for `cert_prefix ‖ cert_msg(proposal_hash, vk)`.
 5. **Ballot:** `seq ≥ 1`, `vk` passes §2's checks, `ballot_sig` verifies
@@ -720,7 +718,7 @@ proposal it holds with cast state "unknown":
    every decline:
    - copies of one `(seq, choice_id)` are one ballot; if their
      `ballot_sig`s differ (only the holder of `vk` can make that), the
-     lowest bytewise is kept;
+     lowest bytewise is kept, and the others are `copies`;
    - if the highest `seq` has two different choices, or the `vk` also
      declined, the `vk` is a **conflict**: neither its ballots nor its
      decline count, and all of them are published (§8.1). Only the
@@ -731,45 +729,59 @@ proposal it holds with cast state "unknown":
 
 - **What is kept:** a counted ballot as
   `{vk, cert_prefix, cert_sig, seq, choice_id, ballot_sig}`.
-- **What is not kept:** `msg_id`, `jti`, `sender`, `deposited_at`,
-  `pool_seq` and how many copies arrived are used for checks 2, 3 and 6,
-  then discarded. No log line carries them.
+- **What is not kept:** `msg_id`, the token and `sender` are used for
+  checks 2 and 3, then discarded. No log line carries them.
 - **Failures** are counted by reason (§8.5) and dropped.
-- **Spent tokens:** the box keeps a count of spent `jti`s per pool,
-  with no link to the ballots (§7.3).
 
-### 7.3 Pool and quota watch (non-binding)
+### 7.3 Watch
 
-- **Re-issue:** when fewer than `members_of_record / 4` of the pools'
-  tokens are unspent, and the vote has more than 15 minutes left, the
-  box mints the next pool, publishes it (§3.5) and sends it. At most two
-  re-issues.
 - **Alarms:**
   - mailbox use above 20% of its quota (10,000 messages, 32 MiB;
     RELAY-PROTOCOL §7.2);
-  - after close, more than 10% of deposits failing checks 1–4;
+  - after the closing, more than 10% of deposits failing checks 1–4;
   - any conflict.
+
+### 7.4 The escrowed key (binding)
+
+**(Owner decision 2026-10-29.)**
+
+- **At creation** the service seals `ballot_kem`'s secret key to each
+  mirror's escrow key (a VMS suite-2 KEM key named in `mirrors`): the
+  proposal's `escrow` field holds, per mirror, a sealed VMS envelope
+  whose inner plaintext is the key, padded per VAULT-MESSAGING §5.4.
+- **Release:** if the results aren't published by `count_until` + 24 h,
+  a mirror opens its escrow and publishes the secret key with the
+  proposal. Anyone can then open the envelopes of the mix list and count
+  by §7.2.
+- **Before then** the escrow gives a mirror nothing: the only envelopes
+  it could open are in the mix list, which exists only after the
+  closing.
+- **So after the closing nothing re-runs a binding vote:** a fault of
+  the service, such as a table restore or results never published, is
+  recorded as its fault, and the count goes ahead without it.
 
 ## 8. Publication and verification
 
 ### 8.1 Results
 
 - **`results.json`** is a document (§8.5) with:
-  - the proposal, every pool, the roster, any extensions and the
-    closing, each with its signature;
-  - non-binding: `members_of_record`, the record tags, `record_root`,
-    the issuance tags and the declines; binding: the issuances (§5.3);
+  - the proposal, the roster, any extensions and the closing, each with
+    its signature;
+  - non-binding: `members_of_record`, the record tags with their issued
+    marks, `record_root`, and the declines; binding: the issuances
+    (§5.3) and the mix list's hash;
   - the counted ballots, sorted by `vk`, and `ballot_root`;
   - the conflicts, with all their ballots and declines;
   - the tally per choice, the counts, the failures by reason, and the
     count of members removed or suspended during the vote.
 - **Signature:** detached,
   `results_sig = Sign(service IK, "vettid/vote/1/results", proposal_hash ‖ H(results_bytes))`.
-- **Published and anchored** on votes.vettid.org (§3.5), with every
-  pool's bytes.
+- **Published and anchored** on votes.vettid.org (§3.4), and taken up by
+  the mirrors.
 - **Then:** `vote.closed` to every member of record; the RSA private
-  keys are destroyed once the site has accepted the results, and the
-  issuance records deleted. The record secrets stay as §3.2 says.
+  keys and `ballot_kem`'s secret key are destroyed once the site has
+  accepted the results, and the issuance records deleted. The record
+  secrets stay as §3.2 says.
 
 ### 8.2 Merkle trees
 
@@ -793,18 +805,18 @@ proposal it holds with cast state "unknown":
 The check runs on `vote.closed`, and in any case at `count_until` + 1 h.
 Without the results it retries with backoff for 7 days, and raises an
 alarm after `count_until` + 24 h. The app runs pending checks whenever it
-opens.
+opens. A `seed_lost` proposal gets checks 1, 2 and 5 only.
 
 1. **Fetch:** the app fetches the proposal's documents from
-   votes.vettid.org whole, over HTTPS, with no session and no query
-   naming a voting key. The proof is computed in the vault (plan item
-   5.7 adapts).
+   votes.vettid.org and the mirrors whole, over HTTPS, with no session
+   and no query naming a voting key. The proof is computed in the vault
+   (plan item 5.7 adapts).
 2. **The documents:**
    - each signature holds under the key that signed the proposal, and
      each anchor bundle verifies (§8.5 "Rekor profile");
-   - the site shows no alarm for the service;
-   - the proposal, pools, roster and extensions it received equal the
-     published ones, and every published pool is one it holds;
+   - neither the site nor a mirror shows a fork for the service;
+   - the proposal, roster and extensions it received equal the
+     published ones;
    - any site check it deferred (§6.4) now passes;
    - `H(results)` equals `vote.closed`'s, if one came.
 3. **Its standing:**
@@ -824,41 +836,50 @@ opens.
 4. **Its ballot:** if it cast, exactly one counted ballot under its
    `vk`, with its latest `seq`, its stored `cert_sig` and that cast's
    choice, and the inclusion proof reaches `ballot_root`. If it never
-   cast, no ballot under its `vk`. After a restore, §6.6.
-   Binding: each of its mix receipts' hashes is in the mix's forward
-   list; a missing one means the mix dropped it, a present one with no
-   counted ballot means the box did.
+   cast, no ballot under its `vk`.
+   - Binding: the receipt of its last deposit names an envelope in the
+     mix list. If not, the mix dropped it; if it is there and its latest
+     ballot isn't counted, the box did.
 5. **Proposals it never received:** for each proposal of its service on
-   the site that it doesn't hold, it asks for it (§4.1). A refusal, when
-   its connection was active at `record_at`, is evidence of exclusion.
+   the site or a mirror that it doesn't hold, it asks for it (§4.1). A
+   refusal, when its connection was active at `record_at`, is evidence
+   of exclusion.
 6. **Outcome:** the vault shows the member the result. A failure names
-   the check, and the vault keeps the evidence: the documents and
-   bundles it received, the certificate, `blinded`/`blind_sig`,
-   `ballot_sig`, the deposit outcomes and receipts, and any second
-   proposal or pool.
+   the check, and the vault keeps the evidence (§5.1): the documents and
+   bundles it received, signed refusals, the certificate,
+   `blinded`/`blind_sig`, `ballot_sig`, the deposit outcomes and
+   receipts, and any second proposal.
 
 ### 8.4 What an observer checks
 
-From the documents on votes.vettid.org:
-1. **Signatures and anchors:** every signature holds, under the
-   service's identity key on the service list; every document's anchor
-   bundle verifies under a registered anchor key; the site shows no
-   alarm for the service.
-2. **Ballots:** every `cert_sig` holds under `cert_key` for
+From the documents on votes.vettid.org or a mirror:
+1. **Signatures and anchors:** every signature holds under a listed
+   identity key of the service; every document's bundle verifies under a
+   listed anchor key, with its timestamp; no fork is shown for the
+   service.
+2. **Times:** each extension's timestamp is before the closing in force
+   when it was made; each `closes_at` is later than the last; the total
+   is at most 24 h; `count_until = closes_at + 2 h`; the closing names
+   the final `closes_at` and is timestamped at or after it + 1 h; the
+   roster is timestamped before `opens_at`.
+3. **Ballots:** every `cert_sig` holds under `cert_key` for
    `proposal_hash`; every `ballot_sig` under its `vk`; ballot,
    conflict and decline `vk`s are disjoint and each unique; every
    `choice_id` is one of the proposal's.
-3. **Pools** (non-binding): one pool per `pool_seq`, at most four, pool 1
-   the proposal's.
 4. **Issuance:**
-   - non-binding: record and issuance tags are each unique, and
-     `issued ≤ members_of_record`;
-   - binding: every issuance's `record_key` is in the roster, once, and
-     its `certify_sig` verifies.
-5. **Counts:** `ballots + conflicts + declined ≤ issued`. The rest,
-   `unaccounted = issued − ballots − conflicts − declined`, is
-   published: certified members with no counted ballot and no decline.
-   Binding: `forwarded` (the mix's list) ≥ `ballots`.
+   - non-binding: the record tags are unique and number
+     `members_of_record`; `issued` is the number marked;
+   - binding: the roster's `register_sig`s verify and number
+     `members_of_record`; every issuance's `record_key` is in the
+     roster, once, and its `certify_sig` verifies.
+5. **Counts:**
+   - `ballots + conflicts + declined ≤ issued`, and
+     `unaccounted = issued − ballots − conflicts − declined` is
+     published: certified members with no counted ballot and no decline;
+   - binding: `unaccounted` should be 0, since members certify only to
+     cast; the mix list's envelopes number `ballots + conflicts + copies
+     + superseded + dropped`, and opening them with a released escrow
+     gives the same ballots.
 6. **Tally and roots:** the tally and every root recompute.
 
 ### 8.5 Schemas
@@ -867,7 +888,7 @@ Every document is a JCS object (§2). A verifier refuses unknown fields,
 missing fields, and fields of another type. `b64` is standard base64
 with padding; `int` is a JSON integer (VAULT-MESSAGING §5.3); `time` is
 an `int` of Unix seconds; `hash` is the `b64` of 32 bytes; `sig` the
-`b64` of a 64-byte Ed25519 signature.
+`b64` of a 64-byte Ed25519 signature; `url` an https URL string.
 
 **Proposal:**
 
@@ -880,46 +901,40 @@ an `int` of Unix seconds; `hash` is the `b64` of 32 bytes; `sig` the
 | `choices` | array of `{id: string, label: string}` |
 | `quorum` | `{text: string, min_ballots: int}` |
 | `binding` | boolean |
-| `created_at`, `record_at`, `opens_at`, `closes_at`, `count_until` | `time` |
+| `record_at`, `opens_at`, `closes_at`, `count_until` | `time` |
 | `register_until` | `time`, binding only |
 | `cert_key` | `b64` of the SPKI DER (§2) |
-| `ballot_mailbox` | `{relay: string (https URL), mailbox: string}` |
+| `admission` | `{key: b64 (SPKI DER, §2), tokens: int, to: {relay: url, mailbox: string, receipt_key?: b64}}`; `receipt_key` binding only |
 | `ballot_kem` | `b64` of the MLKEM768X25519 public key |
 | `max_casts` | `int` |
-| `pool` | `hash`, non-binding only |
-| `members_of_record` | `int`, non-binding only |
-| `record_root` | `hash`, non-binding only |
-| `admission` | binding only: `{key: b64 (SPKI DER, §2), tokens: int, mix: {relay: string, mailbox: string, receipt_key: b64}}` |
-| `mirrors` | binding only: array of https URL strings, at least one |
+| `members_of_record`, `record_root` | `int`, `hash`; non-binding only |
+| `mirrors` | binding only: array of `{url: url, escrow_key: b64}`, at least one |
+| `escrow` | binding only: array of `b64` sealed envelopes, one per mirror in the same order (§7.4) |
 | `outage_rule`, `statement` | string |
 
 Signature: `Sign(IK, "vettid/vote/1/proposal", H(bytes))`.
-
-**Pool:** `{v: 1, proposal_id, pool_seq: int (≥ 1), iat: time, exp: time, tokens: [string]}`.
-Each token is the relay's token string as issued (RELAY-PROTOCOL §5.6),
-not encoded again. Signature: §3.3.
 
 **Roster** (binding): `{v: 1, proposal_id, members: [{record_key: b64, register_sig: sig}], members_of_record: int, record_root: hash}`,
 `members` sorted by `record_key`. Signature:
 `Sign(IK, "vettid/vote/1/roster", proposal_hash ‖ H(bytes))`.
 
-**Extension:** `{v: 1, proposal_id, n: int (≥ 1), closes_at: time, count_until: time, outage: {from: time, to: time, source: string}, pool_seq?: int}`,
-`pool_seq` naming its pool for non-binding votes. Signature:
-`Sign(IK, "vettid/vote/1/extended", proposal_hash ‖ H(bytes))`.
+**Extension:** `{v: 1, proposal_id, n: int (≥ 1), register_until?: time, opens_at?: time, closes_at: time, count_until: time, outage: {from: time, to: time, source: string}}`.
+Signature: `Sign(IK, "vettid/vote/1/extended", proposal_hash ‖ H(bytes))`.
 
 **Closing:** `{v: 1, proposal_id, closes_at: time}`. Signature:
 `Sign(IK, "vettid/vote/1/closing", proposal_hash ‖ H(bytes))`.
 
-**Mix forward list** (binding): `{v: 1, proposal_id, envelopes: [hash]}`,
-sorted. Signature: `Sign(mix receipt key, "vettid/vote/1/mix-list", proposal_hash ‖ H(bytes))`.
+**Mix list** (binding): `{v: 1, proposal_id, envelopes: [b64]}`, the
+forwarded envelopes, sorted by their hash, each distinct envelope once.
+Signature: `Sign(mix receipt key, "vettid/vote/1/mix-list", proposal_hash ‖ H(bytes))`.
 
 **`record_proof`:** `{index: int, tree_size: int, path: [hash]}`, where
 `index` is the tag's position among the sorted tags and `path` the audit
 path, from the leaf up.
 
 **Deposit body:**
-`{v: 1, proposal_id, vk: b64, cert_prefix: b64, cert_sig: b64, seq: int, choice_id: string, ballot_sig: sig, pool_seq?: int}`.
-An ordinary JSON object (its bytes are not signed), parsed strictly.
+`{v: 1, proposal_id, vk: b64, cert_prefix: b64, cert_sig: b64, seq: int, choice_id: string, ballot_sig: sig}`,
+compact JSON, parsed strictly.
 
 **Results:**
 
@@ -928,42 +943,44 @@ An ordinary JSON object (its bytes are not signed), parsed strictly.
 | `v` | `1` |
 | `proposal_id` | string |
 | `proposal`, `roster`, `closing` | `{doc: b64, sig: sig}`; `roster` binding only |
-| `pools`, `extensions` | arrays of `{doc: b64, sig: sig}`, by `pool_seq` and `n`; `pools` non-binding only |
-| `record_tags`, `issued_tags` | arrays of `hash`, each sorted; non-binding only |
+| `extensions` | array of `{doc: b64, sig: sig}`, by `n` |
+| `record_tags` | non-binding only: array of `{tag: hash, issued: boolean}`, sorted by `tag` |
 | `issuances` | binding only: array of `{record_key: b64, request_hash: hash, certify_sig: sig}`, by `record_key` |
+| `mix_list` | binding only: `hash` of the mix list |
 | `declines` | non-binding only: array of `{vk, cert_prefix, cert_sig, decline_sig}`, by `vk` |
 | `record_root`, `ballot_root` | `hash` |
 | `ballots` | array of `{vk, cert_prefix, cert_sig, seq, choice_id, ballot_sig}`, by `vk` |
 | `conflicts` | array, by `vk`, of `{vk, ballots: [ballot], declines: [decline]}` |
 | `tally` | object: every choice `id` → `int` |
-| `counts` | `{members_of_record, issued, declined, ballots, conflicts, unaccounted, removed, forwarded?}`, all `int` |
-| `dropped` | object: reason → `int`, for every reason of `format`, `proposal`, `late`, `token`, `certificate`, `ballot`, `choice`, `superseded` |
+| `counts` | `{members_of_record, issued, declined, ballots, conflicts, copies, superseded, unaccounted, removed}`, all `int` |
+| `dropped` | object: reason → `int`, for every reason of `format`, `proposal`, `late`, `delivery`, `certificate`, `ballot`, `choice` |
 | `restored` | boolean |
 
 Signature: §8.1.
 
-**Service list** (on votes.vettid.org, maintained by VettID):
-`[{service_id, name, ik: b64, anchor_keys: [{key: b64 (SPKI DER), anchor_cert: sig}]}]`,
-with `service_id` the lower-case hex of `H(ik)[0:16]`.
+**Service list:** `{v: 1, version: int, previous: hash, site_anchor_key: b64, services: [{service_id, name, iks: [b64], anchor_keys: [{key: b64 (SPKI DER), anchor_cert: sig, ik: b64}]}], mixes: [{name, receipt_key: b64, anchor_key: b64}]}`,
+with `service_id` the lower-case hex of `H(first ik)[0:16]` and
+`previous` the hash of the previous version (all-zero for the first).
+Signed and anchored by the site under its anchor key.
 
 **Rekor profile.**
+- **Logs:** the Rekor logs named, by origin, in the Sigstore trusted
+  root pinned in the vault's release config. A bundle from another log
+  is refused, and watchers tail every pinned log.
 - **Entry:** `hashedrekord`, as the pinned Rekor version defines it; the
   digest is SHA-256 of the document bytes; the key is the anchor key as
   PKIX DER; the signature is ASN.1 DER ECDSA.
 - **Bundle:** a Sigstore bundle (v0.3) with the transparency log entry,
-  its inclusion proof and checkpoint.
+  its inclusion proof and checkpoint, and an RFC 3161 timestamp from a
+  timestamp authority in the trusted root.
 - **A verifier checks:** that the entry's body names exactly
-  `H(document)` and the anchor key, and that the anchor key is the
-  proposal's service's (by its `anchor_cert`); the ECDSA signature; the
-  inclusion proof against the checkpoint; and the checkpoint's signature
-  under a log key in the Sigstore trusted root pinned in its release
-  config.
+  `H(document)` and the anchor key, and that the anchor key is on the
+  service list; the ECDSA signature; the inclusion proof against the
+  checkpoint; the checkpoint's signature under the log's key; and the
+  timestamp, which gives the document's time.
 - **Duplicates:** an anchor retried after a lost answer may make a
-  second entry with the same digest. Entries with the same digest are
-  one document, not a fork.
-- **Time:** Rekor's v2 log gives no signed time; the OpenTimestamps
-  proof (binding) does.
-- The Rekor version and the trusted root are pinned in item 5.4, with a
+  second entry with the same digest; it is the same document.
+- The Rekor version and trusted root are pinned in item 5.4, with a
   bundle vector for each document type (§11).
 
 ## 9. Trust boundaries
@@ -973,7 +990,7 @@ with `service_id` the lower-case hex of `H(ik)[0:16]`.
 - **It learns:** who the members of record are; when each vault
   certified (binding: when each member first cast); which members
   declined and their `vk` (non-binding); the ballots and the tally, at
-  close.
+  the closing.
 - **It does not learn,** from the ballot, certificate or token: whose a
   ballot is.
 - **Non-binding votes:** ballots arrive the moment they are cast
@@ -984,11 +1001,10 @@ with `service_id` the lower-case hex of `H(ik)[0:16]`.
     opening (§5.2);
   - other traffic on the connection.
 
-  A dishonest box could also open deposits before close and see a
+  A dishonest box could also open deposits before the closing and see a
   running tally (§7.1). Each non-binding proposal's `statement` says so.
-- **Binding votes:** the box learns nothing from arrival: the mix
-  forwards everything at close, shuffled and with no times, and every
-  voter sent the same number of deposits.
+- **Binding votes:** the box receives one envelope per voter, at the
+  closing, shuffled and with no times, so arrival says nothing to it.
 
 ### 9.2 Operator metadata (D5)
 
@@ -1002,19 +1018,25 @@ box's decryption, that links a ballot to a member.
 | Option | What it closes | Cost |
 |---|---|---|
 | A. State it | Nothing. Each proposal says so. | None. Non-binding votes only. |
-| B. An independent mix | Deposits go to a relay run by an independent party, which forwards them at close shuffled and with no times (§3.4). | An operating agreement, and the relay revision. The mix sees host addresses, not vaults. |
+| B. An independent mix | Deposits go to a relay run by an independent party, which forwards each voter's last envelope at the closing, shuffled and with no times (§3.3). | An operating agreement, and the relay revision. The mix sees host addresses, not vaults. |
 | C. Casting from the phone through an oblivious relay (RFC 9458) | The host sees no ballot traffic. | An OHTTP gateway, app work on both platforms, a third-party OHTTP relay. Phone hand-off times correlate with deposits. |
 | D. The ballot box in an enclave (Phase 7) | The operator's access to decrypted ballots, but not the network link. | As planned. |
 
 **Decided (owner, 2026-10-28): B for binding votes, A until then.**
 
 **What VettID's operator still learns in a binding vote:** which vaults
-deposited to the mix and when: whether, and from when, a member voted.
+deposited to the mix, and when: whether, and from when, a member voted.
 Nothing joins a deposit to a ballot: every voter makes `max_casts`
-deposits (§6.4), each the same size (§6.3), the ballot carries no time
-and a random `seq` (§6.1), and the mix forwards at once in random order
-with no times. The mix alone, colluding with the operator, could join
-them. The mix and its operator are chosen before the first binding vote.
+deposits (§6.4), each the same size (§6.3); the ballot carries no time
+and a random `seq` (§6.1); the box sees only each voter's last envelope,
+forwarded with the others at the closing in random order.
+
+**What the mix could do, colluding:** it sees each `chain_tag`'s
+deposits, their times and the host they came from. With the operator,
+it links a host to a `chain_tag`; with the service, which sees
+certification times (§5.2), it links a voter's first deposit by time.
+Either, with the box's decryption, links the ballot. The mix and its
+operator are chosen before the first binding vote.
 
 ### 9.3 Residual trust
 
@@ -1027,9 +1049,8 @@ them. The mix and its operator are chosen before the first binding vote.
   it can mint for a `vk` of its own, and an issuance to cover it.
   - **Binding:** issuance is the member's signature under their
     registered key (§5.3), and members who don't vote never certify. The
-    room left is phantom roster keys, and certified voters whose ballots
-    went missing, whom §8.3 check 4 alerts.
-  - **Non-binding:** the issuance tag of a member who certified, cast or
+    room left is phantom roster keys.
+  - **Non-binding:** marking issued a member who certified, cast or
     declined is caught by observers or by that member (§8.3 check 3); a
     dropped decline is caught by its member. The room left is
     `unaccounted` (certified members whose vault neither cast nor
@@ -1037,11 +1058,15 @@ them. The mix and its operator are chosen before the first binding vote.
     Each non-binding proposal's `statement` says so.
 - **Withholding:** dropping a real ballot or decline is caught by that
   member (§8.3). In a binding vote the mix's receipts and list tell
-  whether the mix or the box dropped it.
-- **Forks:** every document is anchored under the service's registered
-  anchor key, which anyone can watch (§3.5).
-- **The site:** votes.vettid.org can withhold or delay, not alter
-  (§3.5).
+  whether the mix or the box dropped it, and the escrow (§7.4) lets the
+  count go ahead without the service.
+- **Forks:** every document is anchored under a listed anchor key, which
+  the site, the mirrors and anyone else can watch (§3.4).
+- **The site:** votes.vettid.org can withhold or delay, not alter. In a
+  binding vote the mirror covers withholding.
+- **The certification key:** the vault checks its size and exponent
+  only. A service that made a malformed modulus might weaken blinding;
+  no proof of well-formedness is required.
 - **Detection needs the app:** a member whose app never runs after the
   vote checks nothing.
 
@@ -1056,48 +1081,50 @@ itself, the protocol detects rather than prevents.
 
 | Vector | How it is met, or what remains |
 |---|---|
-| Certification refused or ignored | The vault retries until `closes_at`. A refusal is evidence (§8.3). An outage is covered by §10.2. |
-| Proposal or pool not sent | The vault learns of it on votes.vettid.org and asks (§4.1, §4.2). A refusal is evidence. |
-| Registration refused (binding) | Evidence; the roster shows the key missing (§3.6). |
+| Certification refused or ignored | The vault retries until `closes_at`. A signed refusal is evidence (§8.3). An outage is covered by §10.2. |
+| Proposal not sent | The vault learns of it on votes.vettid.org or a mirror and asks (§4.1). A refusal is evidence. |
+| Registration refused (binding) | A signed refusal is evidence; the roster shows the key missing (§3.5). |
 | Ask gate (VAULT-MESSAGING §10.4.1) | Registering, certifying, depositing and declining are not asks. |
 | Site sign-in blocked | Voting needs no site sign-in. |
-| votes.vettid.org down, or refusing a reader | The vault deposits on the Rekor bundles after 10 minutes, and defers the site checks (§6.4). |
-| Rekor down | The service can't anchor, so it can't open, extend or close a vote; §10.2 covers it. |
-| Ballot mailbox flooded with junk | Pool tokens carry `quota: {msgs: 1, bytes: 4096}`, and the pool is held by members only. Junk is at most one 4 KiB message per token. The box collects continuously and alarms at 20% (§7.3). |
-| Pool exhaustion by a member | **Met only with admission tokens** (§3.4). Re-issue and `max_casts` slow it in a non-binding vote. |
+| votes.vettid.org down, or refusing a reader | The vault deposits on the bundles it holds, and defers the site checks (§6.4). |
+| Rekor or its timestamp authority down | The service can't anchor, so it can't open, extend or close a vote; §10.2 covers it. |
+| Deposits flooded with junk | Every deposit needs an admission token, and each member holds only their own (§3.3). |
 | Relay flood | The relay's per-network limits and WAF (RELAY-PROTOCOL §7.2). Deposits retry. |
 | Service vault, relay, mix or host outage | Deposits wait in the ballot mailbox (14 days) or at the mix. Requests wait on the connection. Beyond the §10.2 bound, the vote is extended. |
 | The member's vault locked, or its host restarted | Casting needs the app and so an unlocked vault. The app reminds the member before close. Binding registration needs the vault unlocked once in its window. |
-| Clock skew at close | The app stops casting two minutes before close; the vault and the box use the same clock (§6.4, §7.1). |
+| Clock skew | The app stops casting two minutes before close; the vault and the box use the receiver's clock (§6.4, §7.1); `not_open` is retried (§5.2). |
 | Removal during the vote | The member's certificate stays valid and their ballot counts. A non-binding member removed after certifying can't decline; the results count removals (§8.1). |
+| The service after close (binding) | The escrow lets anyone count (§7.4). |
 
 ### 10.2 The outage rule and evidence (fixed before opening)
 
 - **What counts:** an outage, shown by the service vault's own health
-  checks or the status page of the relay, the mix, votes.vettid.org or
-  Rekor, longer than 1 hour within the voting window.
-- **Extension:** the service extends `closes_at` and `count_until` by
-  the outage, rounded up to the hour, by extensions totalling at most
-  24 h. Each extension is published and anchored **before the current
-  `closes_at`** (§3.5), then sent as `vote.extended`.
-  - Non-binding: it comes with a new pool, minted against the new close
-    within the relay's lifetime from its own `iat`.
-  - Binding: no pool; the mix learns the new close from the site.
-  - The box has opened nothing (§7.1), so the decision is made without a
-    tally.
+  checks or the status page of the relay, the mix, votes.vettid.org,
+  Rekor or its timestamp authority, longer than 1 hour within the
+  registration window (binding) or the voting window.
+- **Extension:** the service extends `register_until` (with `opens_at`,
+  `closes_at` and `count_until` moving with it), or `closes_at` and
+  `count_until`, by the outage, rounded up to the hour, by extensions
+  totalling at most 24 h. Each extension is anchored and published
+  **before the closing** (§7.1), then sent as `vote.extended`; the relay
+  and the mix learn the new close from the site. The box has opened
+  nothing, so the decision is made without a tally.
 - **An outage at close:** if the service can't publish an extension or
   the closing within 24 h of `closes_at` (Rekor or the site being down),
   the vote is void and held again. The mix forwards nothing until the
   closing is published.
 - **Evidence and reports:** a vault's evidence (§8.3) is shown to the
   member, who can post a report to votes.vettid.org after `count_until`,
-  with no session. A report carries flags only, never a `vk`, a
-  certificate or a time: an outage of 30 minutes or more, certification
-  refused or withheld, decline refused, proposal refused, the site
-  unreachable, and which §8.3 check failed. The site publishes the
-  counts per flag, as information. A binding vote is held again only on
-  evidence that can be checked: a mix receipt missing from the forward
-  list, an anchored fork, or a refusal the service signed.
+  with no session. A report carries flags only: an outage of 30 minutes
+  or more, certification refused or withheld, decline refused, proposal
+  refused, the site or a mirror unreachable, and which §8.3 check
+  failed. It spends the member's report token (§3.3), so there is at
+  most one per certified member and it names no `vk`. The site publishes
+  the counts per flag, as information.
+- **Holding a vote again** (non-binding, before its closing) needs
+  evidence that anyone can check: an anchored fork, or a signed refusal
+  of a member of record. After the closing, nothing re-runs a binding
+  vote (§7.4).
 - **(chosen; not in the spec.)**
 
 ## 11. Test vectors
@@ -1106,22 +1133,22 @@ Produced by the reference implementation (items 5.3 and 5.4) and copied
 by vettid-vault; a copied vector that stops matching is a
 stop-and-report item.
 1. **Derivations:** every §5.1 value from a fixed `proposal_seed` and
-   `proposal_hash`, including `r` and the token values.
+   `proposal_hash`, including `r`, the tokens and `chain_tag`.
 2. **RFC 9474:** the RFC's RSABSSA-SHA384-PSS-Randomized vectors, one
-   over a real `cert_msg` with a fixed key and the derived values, and
-   the exact SPKI DER of a fixed key.
-3. **`ballot_msg` and `ballot_sig`**, a decline, a registration and a
-   certify signature.
+   over a real `cert_msg` and one over a `token_msg` with fixed keys and
+   the derived values, and the exact SPKI DER of a fixed key.
+3. **Signatures:** `ballot_msg` and `ballot_sig`, a decline, a
+   registration, a certify signature, a refusal and a mix receipt.
 4. **The deposit:** a body, its padding, and its sealed envelope with
-   fixed keys and randomness.
+   fixed keys and randomness; an escrow envelope.
 5. **Merkle:** trees of 0, 1, 2, 3, 5 and 8 leaves, and an inclusion
    proof for every leaf of the 5-leaf tree.
 6. **Documents:** each document type's bytes, signature and anchor
    bundle, plus refusals: non-canonical bytes and duplicate names.
 7. **Ballot box:** one deposit each for a bad certificate, a bad ballot
-   signature, an unknown choice, an unknown pool, a late deposit, and
-   repeats (a copy; copies with different signatures; a lower `seq`; a
-   conflict; a ballot and a decline).
+   signature, an unknown choice, a late deposit, and repeats (a copy;
+   copies with different signatures; a lower `seq`; a conflict; a ballot
+   and a decline).
 8. **Ed25519:** every §2 rule: small-order keys, including their
    non-canonical encodings; `y ≥ p`; `x = 0` with the sign bit set; a
    non-canonical `S`; and valid signatures.
@@ -1129,92 +1156,106 @@ stop-and-report item.
 ## 12. Decisions for the owner
 
 Items 1–13 were approved by the owner on 2026-10-28, item 3 as amended
-in 0.4.0. Items 14–17 were decided on 2026-10-29; item 18 is open. Items 6 and 7 change
-in 0.6.0 (marked).
+in 0.4.0. Items 14–20 were decided on 2026-10-29; item 21 is open.
+Items 5, 6, 7 and 9 changed later (marked).
 
 **Departures from the plan:**
 1. **Labels:** `vettid/vote/1/...`, the VMS convention (§2).
 2. **No timestamp in the ballot** (§6.1).
 3. **Ballots are sent the moment they are cast** (owner decision
    2026-10-28). For non-binding votes, arrival time is a stated link
-   (§9.1); the mix removes it for binding votes (§3.4, §9.2).
-4. **A 409 deposits again with another token,** instead of stopping at
-   "probably cast" (§6.4).
-5. **The pool goes over the connection** to every member, identical,
-   and its tokens are not published before the count (§3.3).
+   (§9.1); the mix removes it for binding votes (§3.3, §9.2).
+4. **A lost answer is retried with the same token and bytes,** instead
+   of stopping at "probably cast" (§6.4).
+5. **Changed in 0.7.0:** the shared pool is gone; every vote uses
+   admission tokens (item 19).
 
 **Choices the plan and the specifications leave open:**
 
-6. **Changed in 0.6.0:** a random **proposal seed** per proposal, in the
-   vault's encrypted state and erased after the check, replaces the
-   single vote root, so a later compromise exposes no past vote (§5.1).
+6. **Changed in 0.6.0:** a random **proposal seed** per proposal
+   replaces the single vote root. In 0.7.0 it is also kept out of
+   backups, and the vote state is erased after the check (§5.1).
 7. **Changed in 0.6.0:** blinding values are derived from the proposal
    seed (§5.1).
 8. **The member may cast again until `closes_at`,** up to `max_casts`
    times; the highest `seq` counts (§6.1, §6.2).
-9. **The seal** is the VMS sealed envelope with the deposit body as its
-   inner plaintext (§6.3).
+9. **Changed in 0.5.0:** the seal is the VMS sealed envelope with the
+   deposit body as its inner plaintext (§6.3).
 10. **Publication** waits for the mailbox to drain (§7.1).
-11. **Documents are anchored** in Rekor under a registered anchor key
-    per service (§3.5).
-12. **The outage rule** covers the relay, mix, site and Rekor, with a
-    24-hour cap; reports are information, and only checkable evidence
-    repeats a binding vote (§10.2).
+11. **Documents are anchored** in Rekor under a listed anchor key per
+    service, with a timestamp (§3.4).
+12. **The outage rule** covers the relay, mix, site, Rekor and
+    registration, with a 24-hour cap; reports are information (§10.2).
 13. **JCS documents** are verified as exact canonical bytes, with
     detached signatures (§2).
 
 **Decided 2026-10-29:**
 
 14. **votes.vettid.org** publishes every proposal and its documents, and
-    members learn of proposals there (§3.5).
+    members learn of proposals there (§3.4).
 15. **No automatic abstain.** In a non-binding vote, a vault that didn't
-    vote declines after close (§6.5); in a binding vote, a member who
-    doesn't vote never certifies (§5.2).
+    vote declines after the closing (§6.5); in a binding vote, a member
+    who doesn't vote never certifies (§5.2).
 16. **Results only at close** (§7.1).
-17. **Binding votes:** registration before opening (§3.6), certification
+17. **Binding votes:** registration before opening (§3.5), certification
     at the first cast (§5.2), and exactly `max_casts` deposits per voter
     (§6.4).
 18. **Binding votes need an independent mirror** of votes.vettid.org
-    (§3.5). **To decide:** who runs it.
+    (§3.4).
+19. **Admission tokens for every vote** (§3.3).
+20. **The ballot key is escrowed with the mirror** for binding votes
+    (§7.4).
+
+**Open:**
+
+21. **Who runs the mirror** (§3.4), and who runs the mix (§9.2).
 
 **Decided (owner, 2026-10-28):**
 - **D5:** an independent mix for binding votes; non-binding votes state
   the boundary (§9.2).
-- **D6 and D7:** relay admission tokens (§3.4), a RELAY-PROTOCOL
-  revision. The pool stays the interim mechanism, for non-binding votes
-  only.
+- **D6 and D7:** relay admission tokens (§3.3), a RELAY-PROTOCOL
+  revision; since 0.7.0, for every vote.
 - **D8:** Sigstore Rekor as the anchor, plus OpenTimestamps for binding
-  votes (§3.5).
+  votes (§3.4).
 
 ## Changes
 
+- **0.7.0 (2026-10-29):**
+  - Admission tokens for every vote; the shared pool, its distribution,
+    re-issue and the 500-member cap are gone (§3.3).
+  - The mix forwards only each voter's last envelope, by a per-voter
+    chain tag, and publishes the envelopes; the box sees one envelope per
+    voter (§3.3).
+  - The ballot key is escrowed with the mirror, so nothing re-runs a
+    binding vote after the closing (§7.4).
+  - The issued set is a marked subset of the record tags (§3.2).
+  - The service list is anchored and append-only, and vaults accept only
+    listed anchor keys; mirrors raise alarms and accept uploads from
+    anyone; pending alarms and forks are told apart (§3.4).
+  - Refusals are signed (§4); bundles carry an RFC 3161 timestamp, and
+    logs are pinned (§8.5).
+  - The closing is an hour after `closes_at`, so an outage in the last
+    hour can be covered; extensions may be published until the closing
+    and cover registration (§7.1, §10.2).
+  - Report tokens instead of unauthenticated reports (§10.2).
+  - The seed and vote state are kept out of backups and erased after
+    the check; a restore marks proposals `seed_lost` (§5.1, §6.6).
+  - "Asked" is recorded before sending; `not_open` is retried; declines
+    wait for the closing (§5.2, §6.5).
+  - Scheduled binding deposits, retries with the same bytes, the site
+    wait bounded by the close (§6.4).
+  - HKDF `info` bytes written out; Ed25519 checks by every verifier;
+    header checks at the box; observer checks of times, the roster and
+    copies; schemas updated (§2, §7.2, §8.4, §8.5).
+
 - **0.6.0 (2026-10-29):**
-  - Binding votes: registration of a record key per vault before
-    opening, with a published roster; certification at the first cast,
-    signed by the record key; exactly `max_casts` deposits per voter;
-    mix receipts and a published forward list (§3.4, §3.6, §5.2, §6.4);
-    an independent mirror of votes.vettid.org (§3.5).
-  - Anchoring under one registered, certified anchor key per service,
-    which anyone can watch, instead of a key per proposal; bundles travel
-    with the messages so vaults check offline; a Rekor profile (§3.5,
-    §8.5).
-  - Declines carry the voting key and its certificate; a refused decline
-    is evidence; a key that declined and cast is a conflict; the `cast`
-    refusal is gone (§6.5, §7.2).
-  - Issuance is checked in three states (§8.3).
-  - Pool 1 is in the proposal; a vault holds every published pool before
-    depositing and draws across them (§3.3, §6.4).
-  - The pool is no longer in the ballot (§6.1).
-  - A closing document makes the final close; extensions are published
-    before the current close, add up to 24 h, and cover the mix, the site
-    and Rekor (§7.1, §10.2).
-  - Reports carry no voting key, and only checkable evidence repeats a
-    binding vote (§10.2).
-  - A per-proposal seed replaces the vote root (§5.1); restore handling
-    (§6.6); a table restore voids the vote (§7.1).
-  - Exact Ed25519 checks (§2); `max_casts` for every vote; at least two
-    real choices; quorum counting; the deposit cutoff on one clock; pool
-    parts; schemas for the roster, extension, closing and mix list.
+  - Binding votes: registration and a roster; certification at the first
+    cast; exactly `max_casts` deposits per voter; mix receipts; an
+    independent mirror.
+  - One registered anchor key per service; bundles in the messages; a
+    Rekor profile.
+  - Signed declines with the voting key; three-state issuance checks.
+  - A closing document; a per-proposal seed; exact Ed25519 checks.
 
 - **0.5.0 (2026-10-29):**
   - Proposals, pools, extensions and results published on
@@ -1223,8 +1264,6 @@ in 0.6.0 (marked).
   - The box opens deposits only at close.
   - `seq` random and in the deposit body; the `day` gone.
   - The seal pinned to the VMS sealed envelope with no time inside.
-  - Admission tokens, extensions, conflicts, clock skew, removal during
-    a vote, Ed25519 verification and schemas specified.
 
 - **0.4.1 (2026-10-28):** found while writing the reference
   implementation. The PSS salt is derived too (`pss_salt`), so a retry
@@ -1238,30 +1277,11 @@ in 0.6.0 (marked).
     hasn't cast.
   - For non-binding votes, arrival time is a stated link; the mix
     removes it for binding votes.
-  - Pool tokens are minted at opening, within the relay's lifetime.
 
-- **0.3.0 (2026-10-28):** owner decisions.
-  - D5: an independent mix for binding votes.
-  - D6 and D7: relay admission tokens (§3.4) replace the pool for
-    binding votes.
-  - D8: Rekor, as a Sigstore bundle, plus OpenTimestamps for binding
-    votes.
-
-- **0.2.0 (2026-10-28):**
-  - Every member deposits once, in a shared deposit phase, with abstain
-    by default.
-  - The proposal and pool hashes are in the certificate and the ballot.
-  - Pool tokens carry a 1-message, 4 KiB quota, and the pool is not
-    published during the vote.
-  - Token lifetimes fit the relay's.
-  - Publication waits for the mailbox to drain, and results are
-    anchored outside the service.
-  - Blinding values are derived, and the certification write is
-    conditional.
-  - The deposit answers are complete, with re-signing.
-  - JCS is verified as exact bytes with detached signatures.
-  - The seal pins an anonymous sender.
-  - Eligibility edges are stated.
-  - The outage rule is measured by the vaults.
-  - D5 is re-examined (an independent mix recommended); D6–D8 added.
+- **0.3.0 (2026-10-28):** owner decisions D5–D8.
+- **0.2.0 (2026-10-28):** the deposit phase with abstain by default;
+  proposal and pool hashes in the certificate and the ballot; token
+  quotas; drained publication and an anchor; derived blinding values and
+  a conditional certification write; JCS exact bytes; an anonymous
+  sealed sender; the outage rule.
 - **0.1.0:** first full draft.
