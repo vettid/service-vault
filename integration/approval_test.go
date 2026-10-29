@@ -66,7 +66,7 @@ func TestApprovalsOnDynamoDB(t *testing.T) {
 	answer := func(m *approval.Manager, id, conn string) {
 		t.Helper()
 		e := &peer.Event{ID: id, Type: peer.EventSignInApproved, ConnectionID: conn, RequestID: p.last[conn],
-			Key: make([]byte, 32), Signature: make([]byte, 64), SignedAt: time.Now(), At: time.Now()}
+			Key: make([]byte, 32), Signature: make([]byte, 64), SignedAt: time.Now(), At: time.Now(), Purpose: "approval"}
 		if ok, err := m.Answer(ctx, e); err != nil || !ok {
 			t.Fatalf("answer %v %v", ok, err)
 		}
