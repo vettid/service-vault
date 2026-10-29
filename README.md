@@ -77,6 +77,7 @@ npx cdk deploy \
 | `adminBootstrapEmail` | no | `SV_ADMIN_BOOTSTRAP_EMAIL` (see "Admin approvals"). It is plain text in the task definition and stays in that definition's revisions after a redeploy without it: use an address you don't mind being kept there (a staging test member), or arm the bootstrap with `service-vault admin bootstrap` instead |
 | `adminThreshold` | no (1) | `SV_ADMIN_THRESHOLD` |
 | `approvalTtl` | no (`24h`) | `SV_APPROVAL_TTL` |
+| `approvalAllowNoPurpose` | no | `true` sets `SV_APPROVAL_ALLOW_NO_PURPOSE` (see "Admin approvals"): only while an admin's vault predates purposes |
 | `recordSealMigrate` | no | `true` only for the deploy that upgrades a deployment from before sealing (see "Records at rest") |
 | `recordKeyVersion` | no (1) | `SV_RECORD_KEY_VERSION`, the lowest record key version to use: set it one above the table's to rotate the record key (see "Rotating the record key"). Leaving it out later is fine |
 | `alarmTopicArn` or `alarmEmail` | one of them | Where the alarms go (below). Either an SNS topic that reaches a person, or an address for a topic of the stack's own; confirm that subscription from the email AWS sends. For staging, use vettid.org's vault alerts topic, which emails the admin address: `aws ssm get-parameter --name /vettid-org/staging/vault/alerts-topic-arn` |
@@ -379,6 +380,7 @@ which is retained and never deleted with the stack.
 | `SV_ADMIN_BOOTSTRAP_EMAIL` | env, optional | The connection bound to this email (from an invitation with a verified email) becomes the first admin, once: the bootstrap is one-shot, and the setting is ignored after it (see "Admin approvals") |
 | `SV_ADMIN_THRESHOLD` | env, optional | m: how many distinct admins must approve a governance action (default 1; 1–64) |
 | `SV_APPROVAL_TTL` | env, optional | How long an approval stays open (default `24h`; `10m` to `168h`) |
+| `SV_APPROVAL_ALLOW_NO_PURPOSE` | env, optional | `true` counts approvals signed without a purpose (vaults before VAULT-MESSAGING 0.65.0), marked `no_purpose`; default `false`, which audits them and doesn't count them (§10.4). For a transition only |
 | `SV_RECORD_KEY_VERSION` | env, optional | The lowest record key version to use (default 1; see "Rotating the record key") |
 
 Secret values are never in the repository. The stack generates both: the
@@ -620,6 +622,11 @@ admin's connection.
 - *Outcomes.* `approval.approved` when m admins approved; the application
   applies the action (except `admin_set.*`, applied by the service
   vault). A signature that does not verify is audited and not counted;
+  so is an approval signed without a purpose (a vault before
+  VAULT-MESSAGING 0.65.0: nothing in its signature shows it was an
+  approval, §10.4), with reason `no_purpose`, unless
+  `SV_APPROVAL_ALLOW_NO_PURPOSE=true` (a transition only: it then counts,
+  still marked `no_purpose`);
   a signature by a changed key counts and is reported
   (`key_changed`).
 - *The audit log* (DynamoDB, append-only: each entry written once,

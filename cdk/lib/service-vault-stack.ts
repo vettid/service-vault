@@ -154,6 +154,8 @@ export interface ServiceVaultStackProps extends cdk.StackProps {
   readonly adminThreshold?: number;
   /** How long an approval stays open, a Go duration such as `24h` (SV_APPROVAL_TTL). */
   readonly approvalTtl?: string;
+  /** Count approvals signed without a purpose, from vaults before VAULT-MESSAGING 0.65.0 (SV_APPROVAL_ALLOW_NO_PURPOSE; a transition only). */
+  readonly approvalAllowNoPurpose?: boolean;
   /**
    * Where the alarms go; exactly one is required, so that an alarm always
    * reaches a person: an existing SNS topic (staging: vettid.org's vault
@@ -259,6 +261,7 @@ export class ServiceVaultStack extends cdk.Stack {
     if (props.adminBootstrapEmail) approvalEnv.SV_ADMIN_BOOTSTRAP_EMAIL = props.adminBootstrapEmail;
     if (props.adminThreshold !== undefined) approvalEnv.SV_ADMIN_THRESHOLD = String(props.adminThreshold);
     if (props.approvalTtl) approvalEnv.SV_APPROVAL_TTL = props.approvalTtl;
+    if (props.approvalAllowNoPurpose) approvalEnv.SV_APPROVAL_ALLOW_NO_PURPOSE = 'true';
     const prefix = `vettid-service-vault-${envName}`;
     const exportPrefix = `ServiceVault-${envName}`;
 

@@ -69,6 +69,13 @@ type Manager struct {
 	// TTL is how long an approval stays open (SV_APPROVAL_TTL, default
 	// DefaultTTL).
 	TTL time.Duration
+	// AllowNoPurpose counts an approval signed without a purpose, from a
+	// vault older than VAULT-MESSAGING 0.65.0 (SV_APPROVAL_ALLOW_NO_PURPOSE,
+	// for a transition only). Without it such an answer is audited and not
+	// counted: §10.4 says a challenger SHOULD NOT count it, since nothing
+	// in the signature shows it was an approval rather than a sign-in.
+	// Either way its entry has reason no_purpose.
+	AllowNoPurpose bool
 	// BootstrapKey is the email index key of SV_ADMIN_BOOTSTRAP_EMAIL
 	// ("" for none): while the admin set is empty and no bootstrap has
 	// happened, the connection bound to it becomes the first admin. The
@@ -611,8 +618,9 @@ func (m *Manager) Answer(ctx context.Context, e *peer.Event) (bool, error) {
 	case e.Type == peer.EventSignInDenied:
 		answer = AnswerDenied
 	}
+	noPurpose := answer == AnswerApproved && e.Purpose == ""
 	counted := r.Status == StatusPending && now.Before(r.Exp) && outstanding && slices.Contains(set, e.ConnectionID) &&
-		!r.answered(e.ConnectionID) && answer != AnswerBadSignature
+		!r.answered(e.ConnectionID) && answer != AnswerBadSignature && (!noPurpose || m.AllowNoPurpose)
 	if outstanding {
 		delete(r.Pending, e.ConnectionID)
 	}
@@ -621,6 +629,9 @@ func (m *Manager) Answer(ctx context.Context, e *peer.Event) (bool, error) {
 		RequestID: e.RequestID, Context: e.Context, Answer: answer, Counted: &counted, Key: e.Key, Signature: e.Signature, Purpose: e.Purpose,
 		Nonce: e.Nonce, ServiceIK: e.ServiceIK, MemberIK: e.MemberIK,
 		KeyChanged: answer == AnswerApproved && e.KeyChanged}
+	if noPurpose {
+		ent.Reason = ReasonNoPurpose
+	}
 	if !e.SignedAt.IsZero() {
 		sa := e.SignedAt.UTC()
 		ent.SignedAt = &sa

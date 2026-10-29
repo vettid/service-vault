@@ -63,7 +63,7 @@ func TestApprovalsAgainstAPI(t *testing.T) {
 	}
 	// The admin approves: the fake peer numbered the challenge req1.
 	f.deliver(t, peer.Event{ID: "01JEVENTB", Type: peer.EventSignInApproved, ConnectionID: "c1", RequestID: "req1",
-		Context: "ctx", Key: make([]byte, 32), Signature: make([]byte, 64), SignedAt: time.Now()})
+		Context: "ctx", Key: make([]byte, 32), Signature: make([]byte, 64), SignedAt: time.Now(), Purpose: "approval"})
 	if err := f.tick(ctx); err != nil {
 		t.Fatal(err)
 	}
