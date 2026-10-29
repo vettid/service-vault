@@ -440,7 +440,7 @@ certified members at publication (§8.1), then deletes the records.
   - `ballot_root` (§8.2).
 - **Signature:** detached, `results_sig = Sign(service IK, "vettid/vote/1/results" ‖ 0x00, H(results_bytes))`.
 - **Published** on member.vettid.org, as one file.
-- **Anchored (D8):** the results hash goes into Sigstore's public
+- **Anchored (D8, decided 2026-10-28):** the results hash goes into Sigstore's public
   transparency log, Rekor, outside VettID's control.
   - **The entry** is a `hashedrekord`: `H(results_bytes)`, `results_sig`
     and the service's identity key. No ballot data goes into the log.
@@ -662,8 +662,6 @@ stop-and-report item.
 - **D6 and D7:** relay admission tokens (§3.4), a RELAY-PROTOCOL
   revision. The pool stays the interim mechanism, for non-binding votes
   only.
-
-**Proposed:**
 - **D8:** Sigstore Rekor as the results anchor, as a Sigstore bundle,
   plus OpenTimestamps for binding votes (§8.1).
 
@@ -673,7 +671,8 @@ stop-and-report item.
   - D5: an independent mix for binding votes.
   - D6 and D7: relay admission tokens (§3.4) replace the pool for
     binding votes.
-  - D8 proposed: Rekor, as a Sigstore bundle, plus OpenTimestamps.
+  - D8: Rekor, as a Sigstore bundle, plus OpenTimestamps for binding
+    votes.
 
 - **0.2.0 (2026-10-28):** after review of 0.1.0.
   - Every member deposits once, in a shared deposit phase, with abstain
