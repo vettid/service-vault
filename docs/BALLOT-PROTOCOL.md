@@ -36,7 +36,7 @@ members' signatures, for the organisation.
 |---|---|
 | Eligibility | Only an eligible member (§3.2) can cast a ballot that counts. |
 | One vote | One ballot per member per proposal. It is final. |
-| Pseudonymity | The published results name no member: no name, email, connection or VettID key, and nothing that links one member's rows across proposals. **Not secret:** the service vault, and through it the organisation, knows how each member voted, and keeps that record (owner decision 2026-10-29). In a small electorate, knowing who voted can reveal how. |
+| Pseudonymity | The published results name no member: no name, email, connection or VettID key, and nothing that links one member's rows across proposals. **Not secret:** the service vault, and through it the organisation, knows how each member voted, and keeps that record (owner decision 2026-10-29). In a small electorate, knowing who voted can reveal how. **Members are told this before they vote** (§5). |
 | Transparency | Every proposal, extension and result is signed, published on votes.vettid.org and anchored in Rekor (§3.3). |
 | Verifiability | Anyone can check every ballot's signature, that no tag votes twice, and the tally (§8.4). Each member's vault checks that its own row is what it sent, or empty if it didn't vote (§8.3), and holds a signed receipt. The organisation's record holds each ballot with the member's credential signature, so a disputed row can be settled by an audit (§6). |
 | Availability | No one but the member and the service can stop an eligible member from voting; against the service the protocol detects rather than prevents (§9.2, §10). |
@@ -103,7 +103,7 @@ The proposal is a document (§8.5).
 | `binding` | Whether the organisation treats the result as binding. The protocol is the same either way. |
 | `removed_may_vote` | Whether a member removed or suspended after `record_at` may still vote. |
 | `record_at` | The roster snapshot, at or before creation (§3.2). |
-| `opens_at`, `closes_at` | The voting window: a ballot counts if the relay received it in `[opens_at, closes_at)` (§6). At most 30 days. |
+| `opens_at`, `closes_at` | The voting window: a ballot counts if the relay received it in `[opens_at, closes_at)` (§6). At most 7 days (owner decision). |
 | `eligible`, `record_root` | The number of eligible members and the Merkle root of their tags (§3.2). |
 | `outage_rule` | The rule of §10.2, as text. |
 
@@ -238,6 +238,11 @@ listed anchor key. A second, different proposal under the same
   - `cast_sig = Sign(credential key, "vettid/vote/1/cast\x00", proposal_hash ‖ H(ballot_leaf))`,
     under the member's credential key, which the service already pins
     at sign-in (SERVICE-VAULT.md §5). It is never published.
+- **Disclosure:** before the member approves a ballot, the app shows a
+  fixed sentence, in the app's own words and not the proposal's: *"<the
+  service's name> will see how you vote and keep that record. The
+  published results show only an anonymous code for you."* No proposal
+  can change or leave it out. **(Owner decision 2026-10-29.)**
 - **Casting:** the member chooses in the app, between `opens_at` and
   `closes_at`. The vault signs only with the member's approval inside
   the credential's unlock window (VAULT-MESSAGING §3.5.3); it is not an
@@ -497,7 +502,8 @@ item.
 **Decided 2026-10-29:**
 1. **Pseudonymous, not secret, ballots.** The public sees tags and keys;
    the service knows who voted how, and keeps that record (§1, §6).
-2. **One vote, final** (§5).
+2. **One vote, final** (§5); members are told before voting that the
+   service sees their vote (§5).
 3. **No enclaves, mixes, blind signatures or relay changes.** The
    earlier designs (0.2.0–0.8.0) are superseded.
 4. **votes.vettid.org** publishes proposals and results, anchored in
@@ -538,6 +544,8 @@ item.
   - `removed_may_vote`; the site's signature on the service list;
     message body types; §9.2 lists every known limit.
   - The `vk` uniqueness and `ballots ≤ eligible` checks are gone.
+  - Members are told before voting that the service sees their vote;
+    the window is at most 7 days.
 - **0.9.0 (2026-10-29):** owner decision: pseudonymous signed ballots
   over the member's connection, final; the secret-ballot machinery and
   the relay revision gone.
