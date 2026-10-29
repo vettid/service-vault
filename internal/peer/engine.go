@@ -90,9 +90,13 @@ type Peer struct {
 	challenges map[string]*challenge
 	events     []*Event
 	// lastMsgMS is the relay time of the latest message handled, and
-	// emptyAt the start of the latest collect that found none (Caught).
+	// emptyAt the start of the latest collect that found none, each from a
+	// collect that started once no earlier message could still be leased
+	// (leaseFree: one visibility timeout after the start, or after a
+	// message was left unacked). Caught reads them.
 	lastMsgMS uint64
 	emptyAt   time.Time
+	leaseFree time.Time
 	seq       uint64
 	rates     map[string]*rateWindow
 
@@ -164,6 +168,9 @@ func (p *Peer) Start(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.limits = reg.Limits
+	// An earlier process, or this one before a restart, may have left
+	// messages leased.
+	p.leasedUntil(p.now())
 	if !p.started {
 		if err := p.load(ctx); err != nil {
 			return err
@@ -302,13 +309,16 @@ const MaxBatch = 32
 func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 	started := p.now()
 	msgs, err := p.cfg.Relay.Collect(ctx, wait, MaxBatch)
-	if err != nil {
-		return 0, err
-	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if err != nil {
+		p.leasedUntil(p.now()) // the relay may have leased a batch we never saw
+		return 0, err
+	}
+	// Whether this collect can show that nothing before it is still leased.
+	free := !started.Before(p.leaseFree)
 	if len(msgs) == 0 {
-		if started.After(p.emptyAt) {
+		if free && started.After(p.emptyAt) {
 			p.emptyAt = started
 		}
 		if len(p.outbox) == 0 {
@@ -323,19 +333,26 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 		d, err := p.handleMessage(ctx, m, now)
 		if err != nil {
 			p.discard()
+			p.leasedUntil(p.now())
 			return 0, err
-		}
-		if ms, err := ulidMS(m.MsgID); err == nil && ms > p.lastMsgMS {
-			p.lastMsgMS = ms
 		}
 		if d == ackAfterFlush {
 			p.mark(kindMsg, m.MsgID, []byte{1}, now.Add(DedupeRetention))
 		}
 		if err := p.flush(ctx); err != nil {
+			p.leasedUntil(p.now())
 			return 0, err
 		}
-		if d != noAck {
-			acks = append(acks, m.MsgID)
+		if d == noAck {
+			// It comes back after its lease, and so may the messages it
+			// was before: nothing later shows they were handled.
+			p.leasedUntil(p.now())
+			free = false
+			continue
+		}
+		acks = append(acks, m.MsgID)
+		if ms, err := ulidMS(m.MsgID); err == nil && free && ms > p.lastMsgMS {
+			p.lastMsgMS = ms
 		}
 	}
 	for _, id := range acks {
@@ -345,6 +362,22 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 	err = p.flush(ctx)
 	p.kickEvents()
 	return len(msgs), err
+}
+
+// leaseMargin covers the difference between our clock and the relay's
+// when waiting out a lease.
+const leaseMargin = 5 * time.Second
+
+// leasedUntil notes that a message collected by now may stay leased, and
+// out of every collect, for one visibility timeout (RELAY-PROTOCOL §6.3).
+func (p *Peer) leasedUntil(now time.Time) {
+	vt := time.Duration(p.limits.VisibilityTimeoutSeconds) * time.Second
+	if vt <= 0 {
+		vt = 60 * time.Second
+	}
+	if t := now.Add(vt + leaseMargin); t.After(p.leaseFree) {
+		p.leaseFree = t
+	}
 }
 
 // discard forgets unflushed changes after a store error; the process

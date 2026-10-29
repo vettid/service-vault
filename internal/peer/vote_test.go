@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -17,11 +18,16 @@ type recordVotes struct {
 	mu   sync.Mutex
 	reqs []VoteRequest
 	code string
+	fail error // when set, the next request fails with it (a store error)
 }
 
 func (r *recordVotes) Vote(_ context.Context, req *VoteRequest) (VoteAnswer, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if err := r.fail; err != nil {
+		r.fail = nil
+		return VoteAnswer{}, err
+	}
 	r.reqs = append(r.reqs, *req)
 	return VoteAnswer{Code: r.code, Body: json.RawMessage(`{"ok":1}`)}, nil
 }
@@ -70,6 +76,70 @@ func TestVoteRouted(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("no not_eligible response")
+	}
+}
+
+// A ballot whose handling failed stays leased at the relay, out of every
+// collect: until its lease is over, neither a later message nor an empty
+// collect shows that the messages before the close were all handled
+// (BALLOT-PROTOCOL §7). Nor does anything right after a start.
+func TestCaughtWaitsOutLeases(t *testing.T) {
+	f := newFixture(t)
+	rv := &recordVotes{}
+	f.votes = rv
+	f.p.cfg.Votes = rv
+	m := f.member(10)
+	cid := f.connect(m, "t")
+	if !f.signIn(m, cid) {
+		t.Fatal("sign-in failed")
+	}
+	ctx := context.Background()
+	f.clk.Advance(2 * time.Minute) // past the start's leases
+	f.pump()
+	if !f.p.Caught(f.clk.Now().Add(-time.Second)) {
+		t.Fatal("not caught up with nothing leased")
+	}
+
+	rv.fail = errors.New("store down")
+	m.Send("vote.cast", []byte(`{}`))
+	m.Step()
+	closeAt := f.clk.Now().Add(time.Millisecond)
+	if _, err := f.p.Step(ctx, 0); err == nil {
+		t.Fatal("the failed cast didn't fail the step")
+	}
+	f.clk.Advance(time.Second)
+	m.Send("vote.status", []byte(`{}`)) // a later message, handled
+	f.pump()
+	if len(rv.reqs) != 1 || rv.reqs[0].Type != "vote.status" {
+		t.Fatalf("requests %+v", rv.reqs)
+	}
+	if f.p.Caught(closeAt) {
+		t.Fatal("caught up while the cast is still leased")
+	}
+	f.clk.Advance(30 * time.Second)
+	f.pump()
+	if f.p.Caught(closeAt) {
+		t.Fatal("caught up before the lease is over")
+	}
+	f.clk.Advance(time.Minute)
+	f.pump()
+	if len(rv.reqs) != 2 || rv.reqs[1].Type != "vote.cast" {
+		t.Fatalf("the cast wasn't redelivered: %+v", rv.reqs)
+	}
+	if !f.p.Caught(closeAt) {
+		t.Fatal("not caught up once the cast was handled")
+	}
+
+	// A restart may leave leases behind: not caught up for one timeout.
+	f.start()
+	f.pump()
+	if f.p.Caught(f.clk.Now()) {
+		t.Fatal("caught up right after a start")
+	}
+	f.clk.Advance(2 * time.Minute)
+	f.pump()
+	if !f.p.Caught(f.clk.Now().Add(-time.Second)) {
+		t.Fatal("not caught up a timeout after the start")
 	}
 }
 
