@@ -148,7 +148,7 @@ describe('compute', () => {
     const c = container();
     const env = Object.fromEntries(c.Environment.map((e: any) => [e.Name, e.Value]));
     expect(Object.keys(env).sort()).toEqual(
-      ['AWS_REGION', 'SV_KMS_KEY_ID', 'SV_LISTEN', 'SV_RELAY_URL', 'SV_SERVICE_NAME', 'SV_TABLE', 'SV_TLS_NAME', 'SV_TLS_PIN_PARAM', 'SV_WEBHOOK_URL'],
+      ['AWS_REGION', 'SV_BALLOTS_TABLE', 'SV_KMS_KEY_ID', 'SV_LISTEN', 'SV_RELAY_URL', 'SV_SERVICE_NAME', 'SV_TABLE', 'SV_TLS_NAME', 'SV_TLS_PIN_PARAM', 'SV_WEBHOOK_URL'],
     );
     expect(env.SV_RELAY_URL).toBe('https://relay.vettid.org');
     expect(env.SV_LISTEN).toBe(`:${API_PORT}`);
@@ -183,6 +183,17 @@ describe('compute', () => {
   });
 });
 
+// The main table has the TTL attribute; the ballots' copy has none.
+function mainTableId(): string {
+  const tables = t.findResources('AWS::DynamoDB::Table');
+  return Object.keys(tables).find((k) => tables[k].Properties.TimeToLiveSpecification)!;
+}
+
+function ballotsTableId(): string {
+  const tables = t.findResources('AWS::DynamoDB::Table');
+  return Object.keys(tables).find((k) => !tables[k].Properties.TimeToLiveSpecification)!;
+}
+
 describe('data', () => {
   test('table: pk/sk strings, on-demand, PITR, deletion protection, retained', () => {
     t.hasResource('AWS::DynamoDB::Table', {
@@ -197,6 +208,18 @@ describe('data', () => {
         TimeToLiveSpecification: { AttributeName: 'ttl', Enabled: true },
       }),
     });
+  });
+
+  test('ballots table: its own, write-once by the role, PITR, deletion protection, retained', () => {
+    const tables = t.findResources('AWS::DynamoDB::Table');
+    expect(Object.keys(tables)).toHaveLength(2);
+    const b = tables[ballotsTableId()];
+    expect(b.DeletionPolicy).toBe('Retain');
+    expect(b.Properties.TableName).toBe(`${tables[mainTableId()].Properties.TableName}-ballots`);
+    expect(b.Properties.DeletionProtectionEnabled).toBe(true);
+    expect(b.Properties.PointInTimeRecoverySpecification).toEqual({ PointInTimeRecoveryEnabled: true });
+    const env = JSON.stringify(t.findResources('AWS::ECS::TaskDefinition'));
+    expect(env).toContain('SV_BALLOTS_TABLE');
   });
 
   test('KMS key: symmetric, rotation enabled, retained', () => {
@@ -255,22 +278,25 @@ describe('data', () => {
     expect(JSON.stringify(outputs.ApiUrl.Value)).toContain('https://');
   });
 
-  test('task role: exactly the item calls the daemon makes, on the table itself', () => {
-    const tableId = Object.keys(t.findResources('AWS::DynamoDB::Table'))[0];
+  test('task role: exactly the item calls the daemon makes, on each table', () => {
     const ddb = taskRoleStatements().filter((s) => asList(s.Action).some((a: string) => a.startsWith('dynamodb:')));
-    expect(ddb).toHaveLength(1);
-    expect(asList(ddb[0].Action).sort()).toEqual(['dynamodb:DeleteItem', 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:Query', 'dynamodb:Scan', 'dynamodb:UpdateItem']);
-    expect(asList(ddb[0].Resource)).toEqual([{ 'Fn::GetAtt': [tableId, 'Arn'] }]);
+    expect(ddb).toHaveLength(2);
+    const bySid = Object.fromEntries(ddb.map((s) => [s.Sid, s]));
+    expect(asList(bySid.Table.Action).sort()).toEqual(['dynamodb:DeleteItem', 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:Query', 'dynamodb:Scan', 'dynamodb:UpdateItem']);
+    expect(asList(bySid.Table.Resource)).toEqual([{ 'Fn::GetAtt': [mainTableId(), 'Arn'] }]);
+    // The ballots' copy is write-once: no update, delete or scan.
+    expect(asList(bySid.Ballots.Action).sort()).toEqual(['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:Query']);
+    expect(asList(bySid.Ballots.Resource)).toEqual([{ 'Fn::GetAtt': [ballotsTableId(), 'Arn'] }]);
   });
 
-  test('task role: DynamoDB only on the table; nothing else', () => {
-    const tableId = Object.keys(t.findResources('AWS::DynamoDB::Table'))[0];
+  test('task role: DynamoDB only on the two tables; nothing else', () => {
     for (const s of taskRoleStatements()) {
       const actions = asList(s.Action);
       if (actions.some((a: string) => a.startsWith('kms:') || a.startsWith('ssm:'))) continue;
       expect(actions.every((a: string) => a.startsWith('dynamodb:'))).toBe(true);
       for (const r of asList(s.Resource)) {
-        expect(JSON.stringify(r)).toContain(tableId);
+        const j = JSON.stringify(r);
+        expect(j.includes(mainTableId()) || j.includes(ballotsTableId())).toBe(true);
       }
     }
   });

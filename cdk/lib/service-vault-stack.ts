@@ -23,6 +23,13 @@ export const API_PORT = 8080;
 /** DynamoDB actions of the task role, on the table only. */
 export const TABLE_ACTIONS = ['GetItem', 'PutItem', 'UpdateItem', 'DeleteItem', 'Query', 'Scan'] as const;
 
+/**
+ * The calls the daemon makes on the ballots table: a conditional put, a
+ * get and a query. Nothing can change or delete a ballot once written
+ * (BALLOT-PROTOCOL §6 "Durability").
+ */
+export const BALLOTS_TABLE_ACTIONS = ['GetItem', 'PutItem', 'Query'] as const;
+
 /** The Cloud Map service name: the API is at <name>.<namespace>:API_PORT. */
 export const DISCOVERY_NAME = 'service-vault';
 
@@ -187,6 +194,7 @@ export class ServiceVaultStack extends cdk.Stack {
   readonly securityGroup: ec2.SecurityGroup;
   readonly namespace: servicediscovery.PrivateDnsNamespace;
   readonly table: dynamodb.Table;
+  readonly ballotsTable: dynamodb.Table;
   readonly key: kms.Key;
   readonly service: ecs.FargateService;
 
@@ -302,6 +310,7 @@ export class ServiceVaultStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
+
     // The keystore's envelope key: GenerateDataKey wraps each stored
     // private key's data key, Decrypt unwraps it. Its policy replaces the
     // default (the account root with kms:*, which lets any principal the
@@ -322,6 +331,20 @@ export class ServiceVaultStack extends cdk.Stack {
           }),
         ],
       }),
+    });
+
+    // The write-once copy of accepted ballots, kept apart from the main
+    // table so that a restore of that table can't lose a ballot or let a
+    // second one in. Its items are sealed by the daemon under the record
+    // key, like the main table's records.
+    this.ballotsTable = new dynamodb.Table(this, 'BallotsTable', {
+      tableName: `${prefix}-ballots`,
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      deletionProtection: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
     // Values are never in code: generated here, replaced by the operator
@@ -384,6 +407,13 @@ export class ServiceVaultStack extends cdk.Stack {
     );
     taskDef.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
+        sid: 'Ballots',
+        actions: BALLOTS_TABLE_ACTIONS.map((a) => `dynamodb:${a}`),
+        resources: [this.ballotsTable.tableArn],
+      }),
+    );
+    taskDef.taskRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
         sid: 'KeystoreKey',
         actions: ['kms:GenerateDataKey', 'kms:Decrypt'],
         resources: [this.key.keyArn],
@@ -436,6 +466,7 @@ export class ServiceVaultStack extends cdk.Stack {
       environment: {
         SV_RELAY_URL: relayUrl,
         SV_TABLE: this.table.tableName,
+        SV_BALLOTS_TABLE: this.ballotsTable.tableName,
         SV_KMS_KEY_ID: this.key.keyArn,
         SV_LISTEN: `:${API_PORT}`,
         SV_WEBHOOK_URL: props.webhookUrl,

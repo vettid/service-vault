@@ -41,9 +41,11 @@ import (
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
 	"github.com/vettid/vettid-relay/relayclient"
+	"github.com/vettid/vettid-vault/vms/suite"
 
 	"github.com/vettid/service-vault/internal/api"
 	"github.com/vettid/service-vault/internal/approval"
+	"github.com/vettid/service-vault/internal/ballot"
 	"github.com/vettid/service-vault/internal/connect"
 	"github.com/vettid/service-vault/internal/keystore"
 	"github.com/vettid/service-vault/internal/peer"
@@ -95,8 +97,11 @@ func main() {
 
 // Config is the daemon's configuration (README "Deployment").
 type Config struct {
-	RelayURL      string
-	Table         string
+	RelayURL string
+	Table    string
+	// BallotsTable is the write-once copy of accepted ballots
+	// (BALLOT-PROTOCOL §6); without it, vote requests are unsupported.
+	BallotsTable  string
 	KMSKeyID      string
 	Listen        string
 	WebhookURL    string
@@ -127,7 +132,7 @@ const (
 // configFromEnv reads and checks the SV_* variables.
 func configFromEnv(getenv func(string) string) (*Config, error) {
 	c := &Config{
-		RelayURL: strings.TrimRight(getenv("SV_RELAY_URL"), "/"), Table: getenv("SV_TABLE"), KMSKeyID: getenv("SV_KMS_KEY_ID"),
+		RelayURL: strings.TrimRight(getenv("SV_RELAY_URL"), "/"), Table: getenv("SV_TABLE"), BallotsTable: getenv("SV_BALLOTS_TABLE"), KMSKeyID: getenv("SV_KMS_KEY_ID"),
 		Listen: getenv("SV_LISTEN"), WebhookURL: getenv("SV_WEBHOOK_URL"), ServiceName: getenv("SV_SERVICE_NAME"),
 		TLSName: getenv("SV_TLS_NAME"), TLSPinParam: getenv("SV_TLS_PIN_PARAM"), WebhookSecret: []byte(getenv("SV_WEBHOOK_SECRET")),
 	}
@@ -329,6 +334,13 @@ func serve(args []string) error {
 	svc.Approvals = approvals
 	pc := peer.Config{Keys: keys, Relay: rc, RelayURL: cfg.RelayURL, Profile: cfg.Profile, Store: records,
 		Events: svc, Log: log}
+	if cfg.BallotsTable != "" {
+		pc.Votes = &ballot.Box{
+			Store: &ballot.RecordStore{Records: records, Copy: &ballot.SealedCopy{
+				Inner: &store.Ballots{Client: ac.ddb, Name: cfg.BallotsTable}, Seal: records.Seal, Open: records.Open}},
+			Sign: func(label string, msg []byte) ([]byte, error) { return suite.Sign(keys.IK, label, msg) },
+		}
+	}
 	if restored, err := tbl.Restored(ctx); err != nil {
 		return fmt.Errorf("restore marker: %w", err)
 	} else if restored {

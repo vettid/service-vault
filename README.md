@@ -363,6 +363,7 @@ which is retained and never deleted with the stack.
 |---|---|---|
 | `SV_RELAY_URL` | env | Relay base URL |
 | `SV_TABLE` | env | DynamoDB table name |
+| `SV_BALLOTS_TABLE` | env | The write-once DynamoDB table of accepted ballots (BALLOT-PROTOCOL §6); without it, members' vote requests are answered `unsupported_type` |
 | `SV_KMS_KEY_ID` | env | KMS key ARN for the keystore |
 | `SV_LISTEN` | env | API listen address (`:8080`) |
 | `SV_WEBHOOK_URL` | env | Webhook destination |
