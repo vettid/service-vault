@@ -118,6 +118,15 @@ type Proposals interface {
 	Extend(ctx context.Context, id string, in ballot.ExtensionInput) (*ballot.Extension, error)
 }
 
+// AnchorKey is the service's anchor key, certified by its identity key
+// (BALLOT-PROTOCOL §3.3), for registering on votes.vettid.org.
+type AnchorKey struct {
+	Key      []byte `json:"anchor_key"`  // SubjectPublicKeyInfo, DER
+	Cert     []byte `json:"anchor_cert"` // Sign(IK, "vettid/vote/1/anchor-key\x00", H(anchor_key))
+	IK       []byte `json:"service_ik"`
+	Sigstore string `json:"sigstore"` // the instance anchored in
+}
+
 // ErrNotFound is returned by Invites.Status and SignIns.Status for an
 // unknown id.
 var ErrNotFound = errors.New("api: not found")
@@ -130,6 +139,7 @@ type Server struct {
 	SignIns     SignIns
 	Approvals   Approvals     // nil: the approval routes are not served
 	Proposals   Proposals     // nil: the proposal routes are not served
+	AnchorKey   *AnchorKey    // nil: GET /v1/anchor-key is not served
 	LookupFloor time.Duration // uniform response time for POST /v1/signin; default 1.5 s
 	Log         *slog.Logger
 }
@@ -154,6 +164,9 @@ func (s *Server) Handler() http.Handler {
 		v1.HandleFunc("POST /v1/approvals/{id}/remind", s.remindApproval)
 		v1.HandleFunc("GET /v1/admins", s.admins)
 		v1.HandleFunc("GET /v1/audit", s.audit)
+	}
+	if s.AnchorKey != nil {
+		v1.HandleFunc("GET /v1/anchor-key", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, s.AnchorKey) })
 	}
 	if s.Proposals != nil {
 		v1.HandleFunc("POST /v1/proposals", s.createProposal)

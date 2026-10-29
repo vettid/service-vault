@@ -48,6 +48,19 @@ func TestConfigFromEnv(t *testing.T) {
 		t.Fatalf("defaults %+v", c)
 	}
 	e = goodEnv()
+	e["SV_BALLOTS_TABLE"] = "t-ballots"
+	if _, err := configFromEnv(env(e)); err == nil {
+		t.Fatal("ballots without SV_SIGSTORE")
+	}
+	e["SV_SIGSTORE"] = "staging"
+	if c, err := configFromEnv(env(e)); err != nil || c.Sigstore != "staging" || c.BallotsTable != "t-ballots" {
+		t.Fatalf("ballots %+v %v", c, err)
+	}
+	e["SV_SIGSTORE"] = "public"
+	if _, err := configFromEnv(env(e)); err == nil {
+		t.Fatal("an unknown Sigstore instance")
+	}
+	e = goodEnv()
 	e["SV_RECORD_KEY_VERSION"] = "3"
 	if c, err := configFromEnv(env(e)); err != nil || c.RecordKeyVersion != 3 {
 		t.Fatalf("record key version %+v %v", c, err)

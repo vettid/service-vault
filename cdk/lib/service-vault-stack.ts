@@ -467,6 +467,9 @@ export class ServiceVaultStack extends cdk.Stack {
         SV_RELAY_URL: relayUrl,
         SV_TABLE: this.table.tableName,
         SV_BALLOTS_TABLE: this.ballotsTable.tableName,
+        // Votes anchor in Sigstore's staging log outside production
+        // (BALLOT-PROTOCOL §3.3; owner decision 2026-10-29).
+        SV_SIGSTORE: envName === 'prod' ? 'production' : 'staging',
         SV_KMS_KEY_ID: this.key.keyArn,
         SV_LISTEN: `:${API_PORT}`,
         SV_WEBHOOK_URL: props.webhookUrl,
