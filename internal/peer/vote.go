@@ -138,20 +138,21 @@ func (p *Peer) SendMessage(ctx context.Context, connID, typ string, body json.Ra
 // until one visibility timeout after that process last leased messages,
 // and the evidence must come from a collect started after that.
 func (p *Peer) Caught(ctx context.Context, t time.Time) (bool, error) {
-	data, ok, err := p.cfg.Store.Get(ctx, kindLease, leaseMarkID)
+	marks, err := p.cfg.Store.Load(ctx, kindLease)
 	if err != nil {
 		return false, err
-	}
-	var mark leaseMark
-	if ok {
-		if err := json.Unmarshal(data, &mark); err != nil {
-			return false, fmt.Errorf("peer: lease marker: %w", err)
-		}
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	since := p.leaseFree
-	if ok && mark.Instance != p.instance {
+	for _, r := range marks {
+		if r.ID == p.instance {
+			continue
+		}
+		var mark leaseMark
+		if err := json.Unmarshal(r.Data, &mark); err != nil {
+			return false, fmt.Errorf("peer: lease marker: %w", err)
+		}
 		if end := mark.At.Add(p.visibility() + leaseMargin); end.After(since) {
 			since = end
 		}
@@ -160,6 +161,9 @@ func (p *Peer) Caught(ctx context.Context, t time.Time) (bool, error) {
 	for id, u := range p.unacked {
 		switch {
 		case !now.Before(u.exp):
+			if u.capped && u.ms < tms {
+				p.log().Warn("a message left unacked over the cap no longer holds the count", "msg_id", id)
+			}
 			delete(p.unacked, id)
 		case u.ms < tms:
 			return false, nil

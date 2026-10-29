@@ -6,6 +6,8 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"github.com/vettid/vettid-relay/relayclient"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -186,10 +188,14 @@ func TestCaughtUnackedAndOtherProcess(t *testing.T) {
 	f.clk.Advance(2 * time.Minute) // redelivered and handled
 	f.pump()
 	// Another process leased messages a moment ago.
-	data, _ := json.Marshal(leaseMark{Instance: "another", At: f.clk.Now()})
-	if err := f.store.Apply(context.Background(), []Change{{Kind: kindLease, ID: leaseMarkID, Data: data}}); err != nil {
+	data, _ := json.Marshal(leaseMark{At: f.clk.Now()})
+	if err := f.store.Apply(context.Background(), []Change{{Kind: kindLease, ID: "another", Data: data,
+		Expires: f.clk.Now().Add(2 * time.Minute)}}); err != nil {
 		t.Fatal(err)
 	}
+	// This process leasing a batch meanwhile doesn't hide the other's.
+	m.Send("vote.status", []byte(`{}`))
+	f.pump()
 	if f.caught(closeAt) {
 		t.Fatal("caught up while another process's leases may be out")
 	}
@@ -202,6 +208,35 @@ func TestCaughtUnackedAndOtherProcess(t *testing.T) {
 	f.pump()
 	if !f.caught(closeAt) {
 		t.Fatal("not caught up after another process's leases")
+	}
+}
+
+// A message left unacked holds Caught false at most MaxUnackedWait: a
+// member can't keep a count waiting for the relay's whole TTL.
+func TestCaughtUnackedCap(t *testing.T) {
+	f := newFixture(t)
+	f.clk.Advance(2 * time.Minute)
+	f.pump()
+	closeAt := f.clk.Now()
+	id, err := envelope.NewULID(closeAt.Add(-time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.p.mu.Lock()
+	f.p.leaveUnacked(relayclient.Message{MsgID: id}, f.clk.Now())
+	f.p.mu.Unlock()
+	f.clk.Advance(time.Hour)
+	f.pump()
+	if f.caught(closeAt) {
+		t.Fatal("caught up with a message before the close left unacked")
+	}
+	f.clk.Advance(MaxUnackedWait)
+	f.pump()
+	if !f.caught(closeAt) {
+		t.Fatal("still waiting past the cap")
+	}
+	if !strings.Contains(f.logs.String(), "no longer holds the count") {
+		t.Fatal("the cap wasn't logged")
 	}
 }
 

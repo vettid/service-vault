@@ -302,6 +302,9 @@ var ErrNoEvidence = errors.New("approval: the entry holds no complete signed ans
 
 // Verify checks a signed approval.response entry's signature over the
 // challenge it answered (VAULT-MESSAGING §10.4), from the entry alone.
+// It takes the entry's identity keys as given: an auditor also checks
+// that service_ik is this service's identity key and member_ik the
+// admin connection's.
 func (e *AuditEntry) Verify() error {
 	if e.Type != AuditResponse || len(e.Signature) == 0 || len(e.Key) != ed25519.PublicKeySize || len(e.Nonce) == 0 ||
 		len(e.ServiceIK) != ed25519.PublicKeySize || len(e.MemberIK) != ed25519.PublicKeySize {
