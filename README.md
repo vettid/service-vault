@@ -365,6 +365,7 @@ which is retained and never deleted with the stack.
 | `SV_TABLE` | env | DynamoDB table name |
 | `SV_BALLOTS_TABLE` | env | The write-once DynamoDB table of accepted ballots (BALLOT-PROTOCOL §6); without it, members' vote requests are answered `unsupported_type` |
 | `SV_SIGSTORE` | env | `staging` or `production`: the Sigstore instance votes are anchored in (BALLOT-PROTOCOL §3.3); required with `SV_BALLOTS_TABLE`. The CDK sets `production` for the `prod` stack and `staging` otherwise |
+| `SV_VOTES_URL` | env | votes.vettid.org (or staging's): where proposals, extensions and results are published, each anchored in Rekor first (BALLOT-PROTOCOL §3.3). Without it, creating a proposal answers `publication_not_configured`. The CDK sets it from the `votesUrl` context |
 | `SV_KMS_KEY_ID` | env | KMS key ARN for the keystore |
 | `SV_LISTEN` | env | API listen address (`:8080`) |
 | `SV_WEBHOOK_URL` | env | Webhook destination |
