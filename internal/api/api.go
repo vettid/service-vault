@@ -114,6 +114,8 @@ type Proposals interface {
 	Close(ctx context.Context, id string) (*ballot.ResultsSummary, error)
 	// Results returns a vote's results once counted, or nil.
 	Results(ctx context.Context, id string) (*ballot.PublishedResults, error)
+	// Extend publishes an extension for a relay outage.
+	Extend(ctx context.Context, id string, in ballot.ExtensionInput) (*ballot.Extension, error)
 }
 
 // ErrNotFound is returned by Invites.Status and SignIns.Status for an
@@ -156,6 +158,7 @@ func (s *Server) Handler() http.Handler {
 	if s.Proposals != nil {
 		v1.HandleFunc("POST /v1/proposals", s.createProposal)
 		v1.HandleFunc("GET /v1/proposals/{id}", s.proposalStatus)
+		v1.HandleFunc("POST /v1/proposals/{id}/extend", s.extendProposal)
 		v1.HandleFunc("POST /v1/proposals/{id}/close", s.closeProposal)
 		v1.HandleFunc("GET /v1/proposals/{id}/results", s.proposalResults)
 	}
@@ -456,6 +459,32 @@ func (s *Server) proposalStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found")
 	default:
 		writeJSON(w, http.StatusOK, st)
+	}
+}
+
+// extendProposal serves POST /v1/proposals/{id}/extend (BALLOT-PROTOCOL
+// §10.2): {closes_at, outage: {from, to, source}}.
+func (s *Server) extendProposal(w http.ResponseWriter, r *http.Request) {
+	var b ballot.ExtensionInput
+	if !readJSONMax(w, r, &b, maxBody) {
+		return
+	}
+	e, err := s.Proposals.Extend(r.Context(), r.PathValue("id"), b)
+	var ei *ballot.ErrInput
+	switch {
+	case errors.Is(err, ballot.ErrUnknownProposal):
+		writeError(w, http.StatusNotFound, "not_found")
+	case errors.As(err, &ei):
+		writeError(w, http.StatusBadRequest, "invalid_extension")
+	case errors.Is(err, ballot.ErrTooLate):
+		writeError(w, http.StatusConflict, "too_late")
+	case errors.Is(err, ballot.ErrNoPublisher):
+		writeError(w, http.StatusServiceUnavailable, "publication_not_configured")
+	case err != nil:
+		s.log().Error("extend proposal", "err", err)
+		writeError(w, http.StatusServiceUnavailable, "unavailable")
+	default:
+		writeJSON(w, http.StatusOK, e)
 	}
 }
 
