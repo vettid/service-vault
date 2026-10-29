@@ -35,6 +35,11 @@ var ErrTooLate = errors.New("ballot: the close to extend has passed")
 // Extend publishes an extension and sends vote.extended to every eligible
 // member.
 func (m *Manager) Extend(ctx context.Context, id string, in ExtensionInput) (*vote.Extension, error) {
+	unlock, err := m.lock(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	ep, ok := m.Publisher.(ExtensionPublisher)
 	if m.Publisher == nil || !ok {
 		return nil, ErrNoPublisher

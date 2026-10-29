@@ -10,6 +10,7 @@ import (
 	"github.com/vettid/service-vault/vote"
 	"log/slog"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -52,6 +53,25 @@ type Manager struct {
 	NewID     func(time.Time) (string, error)
 	Now       func() time.Time
 	Log       *slog.Logger
+
+	// locks holds a proposal's lock (a chan struct{} of one) while it is
+	// read, published and saved: Publish, Extend and Close each replace
+	// the whole record, so one mustn't save a copy read before another's
+	// save. One task runs the service vault, so a process lock suffices.
+	locks sync.Map
+}
+
+// lock takes a proposal's lock, waiting at most as long as ctx allows,
+// and returns its release.
+func (m *Manager) lock(ctx context.Context, id string) (func(), error) {
+	v, _ := m.locks.LoadOrStore(id, make(chan struct{}, 1))
+	ch := v.(chan struct{})
+	select {
+	case ch <- struct{}{}:
+		return func() { <-ch }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // ProposalInput is what the application asks for (§3.1); the rest of the
@@ -142,6 +162,11 @@ func (m *Manager) Create(ctx context.Context, in ProposalInput) (*Created, error
 // vote.proposal to every eligible member, and returns how many it sent.
 // A member it couldn't reach asks later (vote.status, §4.2).
 func (m *Manager) Publish(ctx context.Context, id string) (int, error) {
+	unlock, err := m.lock(ctx, id)
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
 	o, err := m.Store.OpenProposal(ctx, id)
 	if err != nil {
 		return 0, err
