@@ -68,14 +68,7 @@ func newBoxFixture(t *testing.T) *boxFixture {
 		ClosesAt: p.ClosesAt, Members: map[string]Member{}}
 	for i, tag := range v.tags {
 		id := "c" + string(rune('0'+i))
-		idx := 0
-		for j := range sorted {
-			if bytes.Equal(sorted[j], tag) {
-				idx = j
-			}
-		}
-		proof, _ := Proof(sorted, idx)
-		f.open.Members[id] = Member{Tag: tag, Secret: digest(string(rune('a' + i))), Index: idx, Proof: proof}
+		f.open.Members[id] = Member{Tag: tag, Secret: digest(string(rune('a' + i)))}
 		f.creds[id] = ed25519.NewKeyFromSeed(digest("credential " + id))
 		f.vks[id] = ed25519.NewKeyFromSeed(digest("vk " + id))
 	}

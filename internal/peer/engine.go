@@ -89,8 +89,12 @@ type Peer struct {
 	outbox     []*outboxEntry
 	challenges map[string]*challenge
 	events     []*Event
-	seq        uint64
-	rates      map[string]*rateWindow
+	// lastMsgMS is the relay time of the latest message handled, and
+	// emptyAt the start of the latest collect that found none (Caught).
+	lastMsgMS uint64
+	emptyAt   time.Time
+	seq       uint64
+	rates     map[string]*rateWindow
 
 	dirty    map[key]struct{}
 	extra    []Change
@@ -296,6 +300,7 @@ const MaxBatch = 32
 // the outbox is drained after the batch. It returns the number of
 // messages collected.
 func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
+	started := p.now()
 	msgs, err := p.cfg.Relay.Collect(ctx, wait, MaxBatch)
 	if err != nil {
 		return 0, err
@@ -303,6 +308,9 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if len(msgs) == 0 {
+		if started.After(p.emptyAt) {
+			p.emptyAt = started
+		}
 		if len(p.outbox) == 0 {
 			return 0, nil
 		}
@@ -316,6 +324,9 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 		if err != nil {
 			p.discard()
 			return 0, err
+		}
+		if ms, err := ulidMS(m.MsgID); err == nil && ms > p.lastMsgMS {
+			p.lastMsgMS = ms
 		}
 		if d == ackAfterFlush {
 			p.mark(kindMsg, m.MsgID, []byte{1}, now.Add(DedupeRetention))

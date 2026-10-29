@@ -36,6 +36,9 @@ type Publisher interface {
 // protocol sends no proposal that isn't published (§3.3).
 var ErrNoPublisher = errors.New("ballot: proposals can't be published here")
 
+// ErrUnknownProposal is a proposal id the service doesn't hold.
+var ErrUnknownProposal = errors.New("ballot: unknown proposal")
+
 // Manager creates and publishes proposals.
 type Manager struct {
 	Store     *RecordStore
@@ -44,6 +47,7 @@ type Manager struct {
 	Roster    Roster
 	Sender    Sender
 	Publisher Publisher
+	Catcher   Catcher
 	NewID     func(time.Time) (string, error)
 	Now       func() time.Time
 	Log       *slog.Logger
@@ -110,17 +114,6 @@ func (m *Manager) Create(ctx context.Context, in ProposalInput) (*Created, error
 		tags = append(tags, tag)
 	}
 	sortTags(tags)
-	index := map[string]int{}
-	for i, t := range tags {
-		index[string(t)] = i
-	}
-	for c, mem := range members {
-		mem.Index = index[string(mem.Tag)]
-		if mem.Proof, err = Proof(tags, mem.Index); err != nil {
-			return nil, err
-		}
-		members[c] = mem
-	}
 	p := &Proposal{V: 1, ProposalID: id, Service: m.IK, Title: in.Title, Text: in.Text, Choices: choices,
 		Quorum: in.Quorum, Binding: in.Binding, RemovedMayVote: in.RemovedMayVote,
 		RecordAt: now.Unix(), OpensAt: in.OpensAt, ClosesAt: in.ClosesAt,
@@ -153,7 +146,7 @@ func (m *Manager) Publish(ctx context.Context, id string) (int, error) {
 		return 0, err
 	}
 	if o == nil {
-		return 0, fmt.Errorf("ballot: no proposal %s", id)
+		return 0, ErrUnknownProposal
 	}
 	if o.Bundle == nil {
 		if o.Bundle, err = m.Publisher.PublishProposal(ctx, id, o.Doc, o.Sig); err != nil {
@@ -167,6 +160,7 @@ func (m *Manager) Publish(ctx context.Context, id string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	tags := o.Tags()
 	conns := make([]string, 0, len(o.Members))
 	for c := range o.Members {
 		conns = append(conns, c)
@@ -175,8 +169,12 @@ func (m *Manager) Publish(ctx context.Context, id string) (int, error) {
 	sent := 0
 	for _, c := range conns {
 		mem := o.Members[c]
+		proof, err := o.proofOf(tags, mem.Tag)
+		if err != nil {
+			return sent, err
+		}
 		body, err := json.Marshal(proposalBody{Proposal: o.Doc, ProposalSig: o.Sig, Bundle: o.Bundle, RecordSecret: mem.Secret,
-			RecordProof: recordProof{Index: mem.Index, TreeSize: p.Eligible, Path: nonNil(mem.Proof)}})
+			RecordProof: proof})
 		if err != nil {
 			return sent, err
 		}

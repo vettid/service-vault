@@ -110,6 +110,10 @@ type Proposals interface {
 	Create(ctx context.Context, in ballot.ProposalInput) (*ballot.Created, error)
 	// Status reports a proposal, or nil for an unknown id.
 	Status(ctx context.Context, id string) (*ballot.ProposalStatus, error)
+	// Close counts a vote and publishes its results, or reports them.
+	Close(ctx context.Context, id string) (*ballot.ResultsSummary, error)
+	// Results returns a vote's results once counted, or nil.
+	Results(ctx context.Context, id string) (*ballot.PublishedResults, error)
 }
 
 // ErrNotFound is returned by Invites.Status and SignIns.Status for an
@@ -152,6 +156,8 @@ func (s *Server) Handler() http.Handler {
 	if s.Proposals != nil {
 		v1.HandleFunc("POST /v1/proposals", s.createProposal)
 		v1.HandleFunc("GET /v1/proposals/{id}", s.proposalStatus)
+		v1.HandleFunc("POST /v1/proposals/{id}/close", s.closeProposal)
+		v1.HandleFunc("GET /v1/proposals/{id}/results", s.proposalResults)
 	}
 	mux.Handle("/v1/", s.auth(v1))
 	return mux
@@ -450,6 +456,43 @@ func (s *Server) proposalStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found")
 	default:
 		writeJSON(w, http.StatusOK, st)
+	}
+}
+
+// closeProposal serves POST /v1/proposals/{id}/close (BALLOT-PROTOCOL
+// §7): the count and its publication, once the vote has closed and the
+// relay's messages from before the close are all in.
+func (s *Server) closeProposal(w http.ResponseWriter, r *http.Request) {
+	sum, err := s.Proposals.Close(r.Context(), r.PathValue("id"))
+	switch {
+	case errors.Is(err, ballot.ErrUnknownProposal):
+		writeError(w, http.StatusNotFound, "not_found")
+	case errors.Is(err, ballot.ErrNotClosed):
+		writeError(w, http.StatusConflict, "not_closed")
+	case errors.Is(err, ballot.ErrNotCaught):
+		writeError(w, http.StatusServiceUnavailable, "collecting")
+	case errors.Is(err, ballot.ErrNoPublisher):
+		writeError(w, http.StatusServiceUnavailable, "publication_not_configured")
+	case err != nil:
+		s.log().Error("close proposal", "err", err)
+		writeError(w, http.StatusServiceUnavailable, "unavailable")
+	default:
+		writeJSON(w, http.StatusOK, sum)
+	}
+}
+
+// proposalResults serves GET /v1/proposals/{id}/results: the published
+// results, their signature and the rows, as votes.vettid.org has them.
+func (s *Server) proposalResults(w http.ResponseWriter, r *http.Request) {
+	pr, err := s.Proposals.Results(r.Context(), r.PathValue("id"))
+	switch {
+	case err != nil:
+		s.log().Error("proposal results", "err", err)
+		writeError(w, http.StatusServiceUnavailable, "unavailable")
+	case pr == nil || pr.Bundle == nil:
+		writeError(w, http.StatusNotFound, "not_found")
+	default:
+		writeJSON(w, http.StatusOK, map[string]any{"results": string(pr.Results), "results_sig": pr.Sig, "rows": string(pr.Rows), "bundle": pr.Bundle})
 	}
 }
 

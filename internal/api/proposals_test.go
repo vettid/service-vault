@@ -28,6 +28,25 @@ func (f *fakeProposals) Status(_ context.Context, id string) (*ballot.ProposalSt
 	return &ballot.ProposalStatus{ProposalID: id, Eligible: 3, Published: true}, nil
 }
 
+func (f *fakeProposals) Close(_ context.Context, id string) (*ballot.ResultsSummary, error) {
+	switch id {
+	case "open":
+		return nil, ballot.ErrNotClosed
+	case "busy":
+		return nil, ballot.ErrNotCaught
+	case "nope":
+		return nil, ballot.ErrUnknownProposal
+	}
+	return &ballot.ResultsSummary{ProposalID: id, Tally: map[string]int64{"yes": 2}}, nil
+}
+
+func (f *fakeProposals) Results(_ context.Context, id string) (*ballot.PublishedResults, error) {
+	if id != "done" {
+		return nil, nil
+	}
+	return &ballot.PublishedResults{Results: []byte(`{"v":1}`), Sig: []byte{1}, Rows: []byte(`{"rows":[]}`), Bundle: []byte(`{}`)}, nil
+}
+
 func TestProposalRoutes(t *testing.T) {
 	s, _, _ := newServer(t)
 	if rec, _ := do(t, s.Handler(), "POST", "/v1/proposals", apiKey, `{}`); rec.Code != 404 {
@@ -61,6 +80,17 @@ func TestProposalRoutes(t *testing.T) {
 		t.Fatalf("%d %v", rec.Code, m)
 	}
 	if rec, _ := do(t, h, "GET", "/v1/proposals/01JBQZ0000000000000000000B", apiKey, ""); rec.Code != 404 {
+		t.Fatalf("%d", rec.Code)
+	}
+	for id, want := range map[string]int{"done": 200, "open": 409, "busy": 503, "nope": 404} {
+		if rec, m := do(t, h, "POST", "/v1/proposals/"+id+"/close", apiKey, ""); rec.Code != want {
+			t.Errorf("close %s: %d %v", id, rec.Code, m)
+		}
+	}
+	if rec, m := do(t, h, "GET", "/v1/proposals/done/results", apiKey, ""); rec.Code != 200 || m["results"] != `{"v":1}` {
+		t.Fatalf("%d %v", rec.Code, m)
+	}
+	if rec, _ := do(t, h, "GET", "/v1/proposals/open/results", apiKey, ""); rec.Code != 404 {
 		t.Fatalf("%d", rec.Code)
 	}
 }

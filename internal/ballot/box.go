@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"strings"
 
 	"github.com/vettid/service-vault/internal/peer"
@@ -36,12 +37,12 @@ const (
 	CodeUnknownProposal = "unknown_proposal"
 )
 
-// Member is an eligible connection's tag for one proposal (§3.2).
+// Member is an eligible connection's tag for one proposal (§3.2). Its
+// proof to record_root is computed from all the tags when it is sent,
+// which keeps the record small.
 type Member struct {
-	Tag    []byte   `json:"tag"`
-	Secret []byte   `json:"secret"`
-	Index  int      `json:"index"` // among the sorted tags
-	Proof  [][]byte `json:"proof"` // to record_root
+	Tag    []byte `json:"tag"`
+	Secret []byte `json:"secret"`
 }
 
 // OpenProposal is what the box holds of a proposal while it runs.
@@ -54,10 +55,34 @@ type OpenProposal struct {
 	ClosesAt int64 `json:"closes_at"`
 	// Members are the eligible connections, by connection id.
 	Members map[string]Member `json:"members"`
-	// Published is set once the results are published (§7).
+	// Extensions are the published extensions, in order (§10.2).
+	Extensions []Signed `json:"extensions,omitempty"`
+	// Published is set once collection ended and the results are being
+	// published (§7): a cast handled after it is late.
 	Published bool `json:"published"`
 
 	p *Proposal
+}
+
+// Tags returns every eligible tag, sorted.
+func (o *OpenProposal) Tags() [][]byte {
+	tags := make([][]byte, 0, len(o.Members))
+	for _, m := range o.Members {
+		tags = append(tags, m.Tag)
+	}
+	sortTags(tags)
+	return tags
+}
+
+// proofOf is a tag's record_proof (§8.5).
+func (o *OpenProposal) proofOf(tags [][]byte, tag []byte) (recordProof, error) {
+	for i, t := range tags {
+		if bytes.Equal(t, tag) {
+			path, err := Proof(tags, i)
+			return recordProof{Index: i, TreeSize: int64(len(tags)), Path: nonNil(path)}, err
+		}
+	}
+	return recordProof{}, errors.New("ballot: tag not among the proposal's")
 }
 
 // Parsed returns the proposal document.
@@ -370,17 +395,18 @@ func (b *Box) status(ctx context.Context, r *peer.VoteRequest) (peer.VoteAnswer,
 	if err != nil {
 		return peer.VoteAnswer{}, err
 	}
+	proof, err := o.proofOf(o.Tags(), m.Tag)
+	if err != nil {
+		return peer.VoteAnswer{}, err
+	}
 	out := statusBody{ProposalID: p.ProposalID, Proposal: o.Doc, ProposalSig: o.Sig, Bundle: o.Bundle,
-		RecordSecret: m.Secret, RecordProof: recordProof{Index: m.Index, TreeSize: p.Eligible, Path: m.Proof}}
+		RecordSecret: m.Secret, RecordProof: proof}
 	var leaf []byte
 	if rec != nil {
 		if leaf, err = rec.Ballot.Leaf(); err != nil {
 			return peer.VoteAnswer{}, err
 		}
 		out.Ballot, out.MsgMS, out.ReceiptSig = toRowBallot(&rec.Ballot), rec.MsgMS, rec.ReceiptSig
-	}
-	if out.RecordProof.Path == nil {
-		out.RecordProof.Path = [][]byte{}
 	}
 	smsg, err := StatusMsg(p.ProposalID, m.Tag, leaf)
 	if err != nil {
