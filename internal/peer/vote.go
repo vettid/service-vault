@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -130,8 +131,39 @@ func (p *Peer) SendMessage(ctx context.Context, connID, typ string, body json.Ra
 // message was handled, or a collect that started after t found nothing,
 // in a collect that started when no earlier message could still be
 // leased (BALLOT-PROTOCOL §7).
-func (p *Peer) Caught(t time.Time) bool {
+//
+// A message this process left unacked holds it false while it is before
+// t (until it is handled, or the relay's TTL drops it); one after t
+// doesn't. Another process's leases (the lease marker) hold it false
+// until one visibility timeout after that process last leased messages,
+// and the evidence must come from a collect started after that.
+func (p *Peer) Caught(ctx context.Context, t time.Time) (bool, error) {
+	data, ok, err := p.cfg.Store.Get(ctx, kindLease, leaseMarkID)
+	if err != nil {
+		return false, err
+	}
+	var mark leaseMark
+	if ok {
+		if err := json.Unmarshal(data, &mark); err != nil {
+			return false, fmt.Errorf("peer: lease marker: %w", err)
+		}
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.lastMsgMS >= uint64(t.UnixMilli()) || !p.emptyAt.Before(t)
+	since := p.leaseFree
+	if ok && mark.Instance != p.instance {
+		if end := mark.At.Add(p.visibility() + leaseMargin); end.After(since) {
+			since = end
+		}
+	}
+	now, tms := p.now(), uint64(t.UnixMilli())
+	for id, u := range p.unacked {
+		switch {
+		case !now.Before(u.exp):
+			delete(p.unacked, id)
+		case u.ms < tms:
+			return false, nil
+		}
+	}
+	return p.lastMsgMS >= tms && !p.lastMsgAt.Before(since) || !p.emptyAt.Before(t) && !p.emptyAt.Before(since), nil
 }

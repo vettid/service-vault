@@ -25,7 +25,7 @@ const CollectMargin = time.Minute
 // Catcher reports whether every message the relay received before t has
 // been handled (peer.Peer.Caught).
 type Catcher interface {
-	Caught(t time.Time) bool
+	Caught(ctx context.Context, t time.Time) (bool, error)
 }
 
 // ResultsPublisher anchors and publishes the results (§3.3), and returns
@@ -84,7 +84,11 @@ func (m *Manager) Close(ctx context.Context, id string) (*ResultsSummary, error)
 		if m.Now().Before(end) {
 			return nil, ErrNotClosed
 		}
-		if !m.Catcher.Caught(end) {
+		caught, err := m.Catcher.Caught(ctx, end)
+		if err != nil {
+			return nil, err
+		}
+		if !caught {
 			return nil, ErrNotCaught
 		}
 		// From here a cast is late (§4.2).
