@@ -29,6 +29,13 @@ type Store interface {
 	Apply(ctx context.Context, changes []Change) error
 }
 
+// RecordGetter is a Store that can return one record with its version,
+// for a read-modify-write under IfVersion.
+type RecordGetter interface {
+	// GetRecord returns one record if it exists and has not expired.
+	GetRecord(ctx context.Context, kind, id string) (Record, bool, error)
+}
+
 // Record is one stored record.
 type Record struct {
 	Kind    string
@@ -106,6 +113,18 @@ func (s *MemStore) Get(_ context.Context, kind, id string) ([]byte, bool, error)
 		return nil, false, nil
 	}
 	return append([]byte(nil), r.Data...), true, nil
+}
+
+// GetRecord implements RecordGetter.
+func (s *MemStore) GetRecord(_ context.Context, kind, id string) (Record, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.m[kind][id]
+	if !ok || !s.live(r) {
+		return Record{}, false, nil
+	}
+	r.Data = append([]byte(nil), r.Data...)
+	return r, true, nil
 }
 
 // Apply implements Store.

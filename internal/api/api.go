@@ -495,6 +495,8 @@ func (s *Server) publishProposal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found")
 	case errors.Is(err, ballot.ErrNoPublisher):
 		writeError(w, http.StatusServiceUnavailable, "publication_not_configured")
+	case errors.Is(err, ballot.ErrProposalChanged):
+		writeError(w, http.StatusConflict, "conflict") // another task saved it: retry
 	case err != nil:
 		s.log().Error("publish proposal", "err", err)
 		writeError(w, http.StatusServiceUnavailable, "unavailable")
@@ -521,6 +523,8 @@ func (s *Server) extendProposal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "too_late")
 	case errors.Is(err, ballot.ErrNoPublisher):
 		writeError(w, http.StatusServiceUnavailable, "publication_not_configured")
+	case errors.Is(err, ballot.ErrProposalChanged):
+		writeError(w, http.StatusConflict, "conflict") // another task saved it: retry
 	case err != nil:
 		s.log().Error("extend proposal", "err", err)
 		writeError(w, http.StatusServiceUnavailable, "unavailable")
@@ -543,6 +547,8 @@ func (s *Server) closeProposal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "collecting")
 	case errors.Is(err, ballot.ErrNoPublisher):
 		writeError(w, http.StatusServiceUnavailable, "publication_not_configured")
+	case errors.Is(err, ballot.ErrProposalChanged):
+		writeError(w, http.StatusConflict, "conflict") // another task saved it: retry
 	case err != nil:
 		s.log().Error("close proposal", "err", err)
 		writeError(w, http.StatusServiceUnavailable, "unavailable")
