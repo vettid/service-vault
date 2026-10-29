@@ -33,7 +33,9 @@ service vault reaches members only through their vaults over the relay.
 | `internal/signin` | Uniform-response lookup, `connection.authenticate` challenges, match codes |
 | `internal/approval` | Admin approvals, configurable m-of-n |
 | `internal/contract` | Offers, acceptance, completions (Phase 3) |
-| `internal/ballot` | Certification, ballot box, publication (Phase 5) |
+| `vote` | The ballot protocol's encodings, documents, Merkle trees and checks, with no messaging dependency: shared with votes.vettid.org |
+| `internal/ballot` | The ballot box, proposals, counting and publication (Phase 5) |
+| `internal/anchor` | Anchoring documents in Rekor (Phase 5) |
 | `internal/keystore` | KMS envelope; Ed25519, suite-2 KEM, RSA for blind signing |
 | `internal/store` | DynamoDB: connections, pending challenges, audit |
 | `internal/webhook` | HMAC over `timestamp.body`; the outbox: in order, retried with backoff, dropped at 24 h |

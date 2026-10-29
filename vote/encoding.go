@@ -1,7 +1,9 @@
-// Package ballot is the service vault's side of the vote
-// (docs/BALLOT-PROTOCOL.md): the signed encodings, the Merkle trees, the
-// cast handling and the results.
-package ballot
+// Package vote is BALLOT-PROTOCOL's encodings and checks, with no
+// dependency on the service vault's messaging: the signed strings, the
+// Ed25519 rules, JCS, the documents, the Merkle trees, building the
+// results and the observer's check. The service vault's ballot box
+// (internal/ballot) and votes.vettid.org both use it.
+package vote
 
 import (
 	"crypto/sha256"

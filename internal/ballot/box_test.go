@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/vettid/service-vault/vote"
 	"sync"
 	"testing"
 
@@ -48,10 +49,10 @@ func (s *memStore) PutBallot(_ context.Context, id string, rec *BallotRecord) (*
 // and each member's keys.
 type boxFixture struct {
 	t     *testing.T
-	v     *vote
+	v     *testVote
 	box   *Box
 	store *memStore
-	p     *Proposal
+	p     *vote.Proposal
 	open  *OpenProposal
 	creds map[string]ed25519.PrivateKey
 	vks   map[string]ed25519.PrivateKey
@@ -59,12 +60,12 @@ type boxFixture struct {
 
 func newBoxFixture(t *testing.T) *boxFixture {
 	t.Helper()
-	v := newVote(t, 3, 0)
-	p, _ := ParseProposal(v.propDoc)
+	v := newTestVote(t, 3)
+	p, _ := vote.ParseProposal(v.propDoc)
 	sorted := append([][]byte{}, v.tags...)
 	sortTags(sorted)
 	f := &boxFixture{t: t, v: v, p: p, creds: map[string]ed25519.PrivateKey{}, vks: map[string]ed25519.PrivateKey{}}
-	f.open = &OpenProposal{Doc: v.propDoc, Sig: v.sign(t, LabelProposal, ProposalSigMsg(v.propDoc)),
+	f.open = &OpenProposal{Doc: v.propDoc, Sig: v.sign(t, vote.LabelProposal, vote.ProposalSigMsg(v.propDoc)),
 		ClosesAt: p.ClosesAt, Members: map[string]Member{}}
 	for i, tag := range v.tags {
 		id := "c" + string(rune('0'+i))
@@ -84,12 +85,12 @@ func (f *boxFixture) castBody(conn, choice string) (map[string]string, []byte) {
 	f.t.Helper()
 	m := f.open.Members[conn]
 	vk := f.vks[conn]
-	b := Ballot{RecordTag: m.Tag, VK: vk.Public().(ed25519.PublicKey), ChoiceID: choice}
+	b := vote.Ballot{RecordTag: m.Tag, VK: vk.Public().(ed25519.PublicKey), ChoiceID: choice}
 	msg, _ := b.Msg(f.v.ph)
-	b.BallotSig, _ = suite.Sign(vk, LabelBallot, msg)
+	b.BallotSig, _ = suite.Sign(vk, vote.LabelBallot, msg)
 	leaf, _ := b.Leaf()
-	cmsg, _ := CastMsg(f.v.ph, leaf)
-	csig, _ := suite.Sign(f.creds[conn], LabelCast, cmsg)
+	cmsg, _ := vote.CastMsg(f.v.ph, leaf)
+	csig, _ := suite.Sign(f.creds[conn], vote.LabelCast, cmsg)
 	e := base64.StdEncoding.EncodeToString
 	return map[string]string{"proposal_id": f.p.ProposalID, "record_tag": e(m.Tag), "vk": e(b.VK),
 		"choice_id": choice, "ballot_sig": e(b.BallotSig), "cast_sig": e(csig)}, leaf
@@ -150,8 +151,8 @@ func (f *boxFixture) checkRefusal(a peer.VoteAnswer, conn, code string, tag, req
 	if !bytes.Equal(x.Connection, c[:]) || !bytes.Equal(x.RecordTag, tag) {
 		f.t.Fatalf("%s: refusal names another connection or tag", code)
 	}
-	msg, _ := RefusalMsg(f.p.ProposalID, c[:], tag, TypeCast, code, x.MsgMS, reqHash)
-	if Verify(f.ik(), LabelRefusal, msg, x.RefusalSig) != nil {
+	msg, _ := vote.RefusalMsg(f.p.ProposalID, c[:], tag, TypeCast, code, x.MsgMS, reqHash)
+	if vote.Verify(f.ik(), vote.LabelRefusal, msg, x.RefusalSig) != nil {
 		f.t.Fatalf("%s: refusal signature", code)
 	}
 }
@@ -164,12 +165,12 @@ func TestCastAndReceipt(t *testing.T) {
 		t.Fatalf("refused: %s", a.Code)
 	}
 	x := parseAnswer(t, a)
-	rmsg, _ := ReceiptMsg(f.v.ph, leaf, f.during())
-	if x.MsgMS != f.during() || Verify(f.ik(), LabelReceipt, rmsg, x.ReceiptSig) != nil {
+	rmsg, _ := vote.ReceiptMsg(f.v.ph, leaf, f.during())
+	if x.MsgMS != f.during() || vote.Verify(f.ik(), vote.LabelReceipt, rmsg, x.ReceiptSig) != nil {
 		t.Fatal("receipt doesn't verify")
 	}
 	rec, _ := f.store.Ballot(context.Background(), f.p.ProposalID, f.open.Members["c0"].Tag)
-	if rec == nil || rec.ConnectionID != "c0" || len(rec.CastSig) != SigLen {
+	if rec == nil || rec.ConnectionID != "c0" || len(rec.CastSig) != vote.SigLen {
 		t.Fatal("the record lacks the connection or the credential signature")
 	}
 	// The same bytes again, even after the close, get the same receipt.
@@ -274,7 +275,7 @@ func TestStatus(t *testing.T) {
 		if !bytes.Equal(x.Proposal, f.v.propDoc) || !bytes.Equal(x.Secret, m.Secret) {
 			t.Fatal("status lacks the proposal or the tag's secret")
 		}
-		if !VerifyProof(f.p.RecordRoot, m.Tag, x.RecordProof.Index, int(x.RecordProof.TreeSize), x.RecordProof.Path) {
+		if !vote.VerifyProof(f.p.RecordRoot, m.Tag, x.RecordProof.Index, int(x.RecordProof.TreeSize), x.RecordProof.Path) {
 			t.Fatal("record proof")
 		}
 		var leaf []byte
@@ -282,12 +283,12 @@ func TestStatus(t *testing.T) {
 			if x.Ballot == nil {
 				t.Fatal("no ballot")
 			}
-			leaf, _ = (&Ballot{RecordTag: m.Tag, VK: x.Ballot.VK, ChoiceID: x.Ballot.ChoiceID, BallotSig: x.Ballot.BallotSig}).Leaf()
+			leaf, _ = (&vote.Ballot{RecordTag: m.Tag, VK: x.Ballot.VK, ChoiceID: x.Ballot.ChoiceID, BallotSig: x.Ballot.BallotSig}).Leaf()
 		} else if x.Ballot != nil {
 			t.Fatal("a ballot before any cast")
 		}
-		smsg, _ := StatusMsg(f.p.ProposalID, m.Tag, leaf)
-		if Verify(f.ik(), LabelStatus, smsg, x.StatusSig) != nil {
+		smsg, _ := vote.StatusMsg(f.p.ProposalID, m.Tag, leaf)
+		if vote.Verify(f.ik(), vote.LabelStatus, smsg, x.StatusSig) != nil {
 			t.Fatal("status signature")
 		}
 		return x
@@ -295,7 +296,7 @@ func TestStatus(t *testing.T) {
 	check(f.send("c0", TypeStatus, q, f.during(), true), false)
 	body, _ := f.castBody("c0", "abstain")
 	f.send("c0", TypeCast, body, f.during(), true)
-	if x := check(f.send("c0", TypeStatus, q, f.during(), true), true); x.Ballot.ChoiceID != AbstainID {
+	if x := check(f.send("c0", TypeStatus, q, f.during(), true), true); x.Ballot.ChoiceID != vote.AbstainID {
 		t.Fatal("status names another ballot")
 	}
 	if a := f.send("x9", TypeStatus, q, f.during(), true); a.Code != CodeNotEligible {

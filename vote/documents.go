@@ -1,4 +1,4 @@
-package ballot
+package vote
 
 import (
 	"encoding/json"

@@ -59,6 +59,7 @@ import (
 	"github.com/vettid/service-vault/internal/tlsid"
 	"github.com/vettid/service-vault/internal/webhook"
 	sdkwebhook "github.com/vettid/service-vault/sdk/go/webhook"
+	"github.com/vettid/service-vault/vote"
 )
 
 // version is set at build time with -ldflags '-X main.version=...'.
@@ -378,7 +379,7 @@ func serve(args []string) error {
 			return err
 		}
 		h := sha256.Sum256(spki)
-		cert, err := signIK(ballot.LabelAnchorKey, h[:])
+		cert, err := signIK(vote.LabelAnchorKey, h[:])
 		if err != nil {
 			return err
 		}

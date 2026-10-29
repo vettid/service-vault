@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/vettid/service-vault/vote"
 	"time"
 
 	"github.com/vettid/service-vault/internal/peer"
@@ -52,7 +53,7 @@ type ResultsSummary struct {
 	ProposalID  string           `json:"proposal_id"`
 	ResultsHash []byte           `json:"results_hash"`
 	Tally       map[string]int64 `json:"tally"`
-	Counts      Counts           `json:"counts"`
+	Counts      vote.Counts      `json:"counts"`
 }
 
 // Close counts a vote and publishes its results, or reports them if they
@@ -101,7 +102,7 @@ func (m *Manager) Close(ctx context.Context, id string) (*ResultsSummary, error)
 		}
 		m.announce(ctx, o, pr)
 	}
-	res, err := ParseResults(pr.Results)
+	res, err := vote.ParseResults(pr.Results)
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +120,7 @@ func (m *Manager) count(ctx context.Context, o *OpenProposal) (*PublishedResults
 	if err != nil {
 		return nil, err
 	}
-	ballots := map[string]Ballot{}
+	ballots := map[string]vote.Ballot{}
 	for _, it := range items {
 		r, err := decodeBallot(it.Data)
 		if err != nil {
@@ -137,17 +138,17 @@ func (m *Manager) count(ctx context.Context, o *OpenProposal) (*PublishedResults
 			removed++
 		}
 	}
-	c := &Count{Proposal: Signed{Doc: o.Doc, Sig: o.Sig}, Extensions: o.Extensions, Tags: o.Tags(), Ballots: ballots, Removed: removed}
+	c := &vote.Count{Proposal: vote.Signed{Doc: o.Doc, Sig: o.Sig}, Extensions: o.Extensions, Tags: o.Tags(), Ballots: ballots, Removed: removed}
 	rows, results, err := c.Build()
 	if err != nil {
 		return nil, err
 	}
-	msg, _ := DocSigMsg(sum(o.Doc), results)
-	sig, err := m.Sign(LabelResults, msg)
+	msg, _ := vote.DocSigMsg(sum(o.Doc), results)
+	sig, err := m.Sign(vote.LabelResults, msg)
 	if err != nil {
 		return nil, err
 	}
-	if _, _, err := Check(m.IK, results, sig, rows); err != nil {
+	if _, _, err := vote.Check(m.IK, results, sig, rows); err != nil {
 		return nil, fmt.Errorf("ballot: the results don't pass the observer's check: %w", err)
 	}
 	pr := &PublishedResults{Results: results, Sig: sig, Rows: rows}

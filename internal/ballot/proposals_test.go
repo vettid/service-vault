@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"github.com/vettid/service-vault/vote"
 	"testing"
 	"time"
 
@@ -64,8 +65,8 @@ func newManager(t *testing.T) (*Manager, *fakeSender, *fakePublisher) {
 
 func input() ProposalInput {
 	return ProposalInput{Title: "Adopt the 2027 budget", Text: "As circulated.",
-		Choices: []Choice{{ID: "yes", Label: "Yes"}, {ID: "no", Label: "No"}},
-		Quorum:  Quorum{Text: "A third", MinBallots: 1}, OpensAt: 1793520000, ClosesAt: 1793520000 + 86400,
+		Choices: []vote.Choice{{ID: "yes", Label: "Yes"}, {ID: "no", Label: "No"}},
+		Quorum:  vote.Quorum{Text: "A third", MinBallots: 1}, OpensAt: 1793520000, ClosesAt: 1793520000 + 86400,
 		OutageRule: "Extended by a relay outage over 1 hour, 24 h at most."}
 }
 
@@ -93,18 +94,18 @@ func TestCreateProposal(t *testing.T) {
 		if x.typ != TypeProposal || json.Unmarshal(x.body, &b) != nil {
 			t.Fatalf("sent %s", x.typ)
 		}
-		p, err := ParseProposal(b.Proposal)
+		p, err := vote.ParseProposal(b.Proposal)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if Verify(m.IK, LabelProposal, ProposalSigMsg(b.Proposal), b.ProposalSig) != nil || !bytes.Equal(sum(b.Proposal), c.ProposalHash) {
+		if vote.Verify(m.IK, vote.LabelProposal, vote.ProposalSigMsg(b.Proposal), b.ProposalSig) != nil || !bytes.Equal(sum(b.Proposal), c.ProposalHash) {
 			t.Fatal("proposal signature")
 		}
-		if !p.HasChoice(AbstainID) || p.Eligible != 3 || p.RecordAt != 1793500000 || len(b.Bundle) == 0 {
+		if !p.HasChoice(vote.AbstainID) || p.Eligible != 3 || p.RecordAt != 1793500000 || len(b.Bundle) == 0 {
 			t.Fatalf("proposal %+v", p)
 		}
-		tag, _ := RecordTag(p.ProposalID, b.RecordSecret)
-		if !VerifyProof(p.RecordRoot, tag, b.RecordProof.Index, int(b.RecordProof.TreeSize), b.RecordProof.Path) {
+		tag, _ := vote.RecordTag(p.ProposalID, b.RecordSecret)
+		if !vote.VerifyProof(p.RecordRoot, tag, b.RecordProof.Index, int(b.RecordProof.TreeSize), b.RecordProof.Path) {
 			t.Fatalf("%s: record proof", x.conn)
 		}
 		tags[string(tag)] = true
@@ -122,12 +123,12 @@ func TestCreateProposal(t *testing.T) {
 	mem := o.Members["c0"]
 	vk := ed25519.NewKeyFromSeed(digest("vk"))
 	cred := ed25519.NewKeyFromSeed(digest("cred"))
-	bal := Ballot{RecordTag: mem.Tag, VK: vk.Public().(ed25519.PublicKey), ChoiceID: "no"}
+	bal := vote.Ballot{RecordTag: mem.Tag, VK: vk.Public().(ed25519.PublicKey), ChoiceID: "no"}
 	msg, _ := bal.Msg(c.ProposalHash)
-	bal.BallotSig, _ = suite.Sign(vk, LabelBallot, msg)
+	bal.BallotSig, _ = suite.Sign(vk, vote.LabelBallot, msg)
 	leaf, _ := bal.Leaf()
-	cmsg, _ := CastMsg(c.ProposalHash, leaf)
-	csig, _ := suite.Sign(cred, LabelCast, cmsg)
+	cmsg, _ := vote.CastMsg(c.ProposalHash, leaf)
+	csig, _ := suite.Sign(cred, vote.LabelCast, cmsg)
 	body, _ := json.Marshal(map[string][]byte{"record_tag": bal.RecordTag, "vk": bal.VK, "ballot_sig": bal.BallotSig, "cast_sig": csig})
 	var asMap map[string]any
 	_ = json.Unmarshal(body, &asMap)
@@ -144,7 +145,7 @@ func TestCreateRefusals(t *testing.T) {
 	ctx := context.Background()
 	m, s, pub := newManager(t)
 	bad := input()
-	bad.ClosesAt = bad.OpensAt + MaxWindow + 1
+	bad.ClosesAt = bad.OpensAt + vote.MaxWindow + 1
 	var ei *ErrInput
 	if _, err := m.Create(ctx, bad); !errors.As(err, &ei) {
 		t.Fatalf("a window over 7 days: %v", err)
@@ -199,12 +200,12 @@ func castFor(t *testing.T, m *Manager, id, conn, choice string, ms uint64) strin
 	ph := sum(o.Doc)
 	vk := ed25519.NewKeyFromSeed(digest("vk " + conn))
 	cred := ed25519.NewKeyFromSeed(digest("cred " + conn))
-	bal := Ballot{RecordTag: o.Members[conn].Tag, VK: vk.Public().(ed25519.PublicKey), ChoiceID: choice}
+	bal := vote.Ballot{RecordTag: o.Members[conn].Tag, VK: vk.Public().(ed25519.PublicKey), ChoiceID: choice}
 	msg, _ := bal.Msg(ph)
-	bal.BallotSig, _ = suite.Sign(vk, LabelBallot, msg)
+	bal.BallotSig, _ = suite.Sign(vk, vote.LabelBallot, msg)
 	leaf, _ := bal.Leaf()
-	cmsg, _ := CastMsg(ph, leaf)
-	csig, _ := suite.Sign(cred, LabelCast, cmsg)
+	cmsg, _ := vote.CastMsg(ph, leaf)
+	csig, _ := suite.Sign(cred, vote.LabelCast, cmsg)
 	body, _ := json.Marshal(map[string]any{"proposal_id": id, "record_tag": bal.RecordTag, "vk": bal.VK, "choice_id": choice,
 		"ballot_sig": bal.BallotSig, "cast_sig": csig})
 	a, err := (&Box{Store: m.Store, Sign: m.Sign}).Vote(ctx, &peer.VoteRequest{ConnectionID: conn, PeerIK: m.IK,
@@ -252,7 +253,7 @@ func TestClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sum1.Counts.Ballots != 2 || sum1.Counts.Eligible != 3 || sum1.Tally["yes"] != 1 || sum1.Tally["no"] != 1 || sum1.Tally[AbstainID] != 0 {
+	if sum1.Counts.Ballots != 2 || sum1.Counts.Eligible != 3 || sum1.Tally["yes"] != 1 || sum1.Tally["no"] != 1 || sum1.Tally[vote.AbstainID] != 0 {
 		t.Fatalf("summary %+v", sum1)
 	}
 	closed := 0
@@ -265,7 +266,7 @@ func TestClose(t *testing.T) {
 		t.Fatalf("vote.closed sent %d times", closed)
 	}
 	pr, _ := m.Results(ctx, c.ProposalID)
-	if _, _, err := Check(m.IK, pr.Results, pr.Sig, pr.Rows); err != nil || pr.Bundle == nil {
+	if _, _, err := vote.Check(m.IK, pr.Results, pr.Sig, pr.Rows); err != nil || pr.Bundle == nil {
 		t.Fatalf("published results: %v", err)
 	}
 	// Again: the same results, announced once.
@@ -295,13 +296,13 @@ func TestExtend(t *testing.T) {
 	in := input()
 	clock := time.Unix(in.ClosesAt-600, 0)
 	m.Now = func() time.Time { return clock }
-	outage := Outage{From: in.ClosesAt - 7200, To: in.ClosesAt - 7200 + 5400, Source: "https://status.vettid.org/"} // 1.5 h
+	outage := vote.Outage{From: in.ClosesAt - 7200, To: in.ClosesAt - 7200 + 5400, Source: "https://status.vettid.org/"} // 1.5 h
 	var ei *ErrInput
 	for name, x := range map[string]ExtensionInput{
-		"short outage":   {ClosesAt: in.ClosesAt + 3600, Outage: Outage{From: outage.From, To: outage.From + 3600, Source: outage.Source}},
+		"short outage":   {ClosesAt: in.ClosesAt + 3600, Outage: vote.Outage{From: outage.From, To: outage.From + 3600, Source: outage.Source}},
 		"too long":       {ClosesAt: in.ClosesAt + 3*3600, Outage: outage},
 		"not later":      {ClosesAt: in.ClosesAt, Outage: outage},
-		"outside window": {ClosesAt: in.ClosesAt + 3600, Outage: Outage{From: in.OpensAt - 7200, To: in.OpensAt - 1800, Source: "x"}},
+		"outside window": {ClosesAt: in.ClosesAt + 3600, Outage: vote.Outage{From: in.OpensAt - 7200, To: in.OpensAt - 1800, Source: "x"}},
 	} {
 		if _, err := m.Extend(ctx, c.ProposalID, x); !errors.As(err, &ei) {
 			t.Errorf("%s: %v", name, err)
@@ -329,7 +330,7 @@ func TestExtend(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	pr, _ := m.Results(ctx, c.ProposalID)
-	_, res, err := Check(m.IK, pr.Results, pr.Sig, pr.Rows)
+	_, res, err := vote.Check(m.IK, pr.Results, pr.Sig, pr.Rows)
 	if err != nil || len(res.Extensions) != 1 {
 		t.Fatalf("results with the extension: %v", err)
 	}
