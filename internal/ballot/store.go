@@ -18,6 +18,10 @@ const (
 	KindBallot   = "vote_ballot"   // id: proposal_id "|" hex(record_tag)
 )
 
+// Kinds lists the record kinds the ballot box stores, for a migration
+// that must touch them all (internal/sealstore).
+func Kinds() []string { return []string{KindProposal, KindBallot, KindResults} }
+
 // Copy is the write-once store of accepted ballots outside the record
 // store's table (BALLOT-PROTOCOL §6 "Durability"): one item per tag,
 // which can be written once and never changed or deleted, so a restore of
