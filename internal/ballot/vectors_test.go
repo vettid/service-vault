@@ -54,8 +54,22 @@ type vectors struct {
 			Sig         string `json:"sig"`
 		} `json:"refusal"`
 	} `json:"service"`
-	Merkle  []merkleVector `json:"merkle"`
-	Ed25519 []sigVector    `json:"ed25519"`
+	Merkle    []merkleVector `json:"merkle"`
+	Ed25519   []sigVector    `json:"ed25519"`
+	Documents docVectors     `json:"documents"`
+}
+
+// docVectors is §11 item 3: a vote of three members, two of whom voted,
+// with one extension, as the service vault builds and signs it.
+type docVectors struct {
+	ServiceSeed  string `json:"service_seed"`
+	Proposal     string `json:"proposal"`
+	ProposalSig  string `json:"proposal_sig"`
+	Extension    string `json:"extension"`
+	ExtensionSig string `json:"extension_sig"`
+	Rows         string `json:"rows"`
+	Results      string `json:"results"`
+	ResultsSig   string `json:"results_sig"`
 }
 
 type merkleVector struct {
@@ -147,6 +161,7 @@ func makeVectors(t *testing.T) *vectors {
 		v.Merkle = append(v.Merkle, mv)
 	}
 	v.Ed25519 = sigVectors(t, sk, msg)
+	v.Documents = makeDocVectors(t)
 	return &v
 }
 
@@ -353,5 +368,27 @@ func TestEncodingBounds(t *testing.T) {
 	}
 	if _, err := StatusMsg("01JBQZ0000000000000000000A", tag[:5], nil); err == nil {
 		t.Fatal("short tag accepted")
+	}
+}
+
+func makeDocVectors(t *testing.T) docVectors {
+	t.Helper()
+	v := newVote(t, 3, 2)
+	p, err := ParseProposal(v.propDoc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ext, err := EncodeExtension(&Extension{V: 1, ProposalID: p.ProposalID, N: 1, ClosesAt: p.ClosesAt + 7200,
+		Outage: Outage{From: p.ClosesAt - 5400, To: p.ClosesAt - 1800, Source: "https://status.vettid.org/"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := DocSigMsg(v.ph, ext)
+	rows, results, sig := v.count(t, ext)
+	return docVectors{
+		ServiceSeed: h(digest("service ik")),
+		Proposal:    string(v.propDoc), ProposalSig: h(v.sign(t, LabelProposal, ProposalSigMsg(v.propDoc))),
+		Extension: string(ext), ExtensionSig: h(v.sign(t, LabelExtended, m)),
+		Rows: string(rows), Results: string(results), ResultsSig: h(sig),
 	}
 }
