@@ -97,7 +97,7 @@ func TestCaughtWaitsOutLeases(t *testing.T) {
 	ctx := context.Background()
 	f.clk.Advance(2 * time.Minute) // past the start's leases
 	f.pump()
-	if !f.p.Caught(f.clk.Now().Add(-time.Second)) {
+	if !f.caught(f.clk.Now().Add(-time.Second)) {
 		t.Fatal("not caught up with nothing leased")
 	}
 
@@ -114,12 +114,12 @@ func TestCaughtWaitsOutLeases(t *testing.T) {
 	if len(rv.reqs) != 1 || rv.reqs[0].Type != "vote.status" {
 		t.Fatalf("requests %+v", rv.reqs)
 	}
-	if f.p.Caught(closeAt) {
+	if f.caught(closeAt) {
 		t.Fatal("caught up while the cast is still leased")
 	}
 	f.clk.Advance(30 * time.Second)
 	f.pump()
-	if f.p.Caught(closeAt) {
+	if f.caught(closeAt) {
 		t.Fatal("caught up before the lease is over")
 	}
 	f.clk.Advance(time.Minute)
@@ -127,20 +127,81 @@ func TestCaughtWaitsOutLeases(t *testing.T) {
 	if len(rv.reqs) != 2 || rv.reqs[1].Type != "vote.cast" {
 		t.Fatalf("the cast wasn't redelivered: %+v", rv.reqs)
 	}
-	if !f.p.Caught(closeAt) {
+	if !f.caught(closeAt) {
 		t.Fatal("not caught up once the cast was handled")
 	}
 
 	// A restart may leave leases behind: not caught up for one timeout.
 	f.start()
 	f.pump()
-	if f.p.Caught(f.clk.Now()) {
+	if f.caught(f.clk.Now()) {
 		t.Fatal("caught up right after a start")
 	}
 	f.clk.Advance(2 * time.Minute)
 	f.pump()
-	if !f.p.Caught(f.clk.Now().Add(-time.Second)) {
+	if !f.caught(f.clk.Now().Add(-time.Second)) {
 		t.Fatal("not caught up a timeout after the start")
+	}
+}
+
+func (f *fixture) caught(t time.Time) bool {
+	f.t.Helper()
+	ok, err := f.p.Caught(context.Background(), t)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return ok
+}
+
+// A message left unacked holds Caught false only for a time after it: a
+// member can't stall a close with a message it keeps coming back with.
+// Another process's leases hold it false until they are over.
+func TestCaughtUnackedAndOtherProcess(t *testing.T) {
+	f := newFixture(t)
+	rv := &recordVotes{}
+	f.votes = rv
+	f.p.cfg.Votes = rv
+	m := f.member(10)
+	cid := f.connect(m, "t")
+	if !f.signIn(m, cid) {
+		t.Fatal("sign-in failed")
+	}
+	f.clk.Advance(2 * time.Minute)
+	f.pump()
+	closeAt := f.clk.Now()
+	f.clk.Advance(time.Second)
+	// After the close, a message left unacked again and again.
+	rv.fail = errors.New("store down")
+	m.Send("vote.status", []byte(`{}`))
+	m.Step()
+	if _, err := f.p.Step(context.Background(), 0); err == nil {
+		t.Fatal("the failed message didn't fail the step")
+	}
+	f.clk.Advance(time.Second) // it is still leased
+	m.Send("vote.status", []byte(`{}`))
+	f.pump()
+	if !f.caught(closeAt) {
+		t.Fatal("a message after the close, still leased, held Caught false")
+	}
+	f.clk.Advance(2 * time.Minute) // redelivered and handled
+	f.pump()
+	// Another process leased messages a moment ago.
+	data, _ := json.Marshal(leaseMark{Instance: "another", At: f.clk.Now()})
+	if err := f.store.Apply(context.Background(), []Change{{Kind: kindLease, ID: leaseMarkID, Data: data}}); err != nil {
+		t.Fatal(err)
+	}
+	if f.caught(closeAt) {
+		t.Fatal("caught up while another process's leases may be out")
+	}
+	f.clk.Advance(30 * time.Second)
+	f.pump()
+	if f.caught(closeAt) {
+		t.Fatal("caught up before another process's leases are over")
+	}
+	f.clk.Advance(time.Minute)
+	f.pump()
+	if !f.caught(closeAt) {
+		t.Fatal("not caught up after another process's leases")
 	}
 }
 

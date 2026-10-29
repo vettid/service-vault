@@ -3,6 +3,9 @@ package peer
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -89,14 +92,21 @@ type Peer struct {
 	outbox     []*outboxEntry
 	challenges map[string]*challenge
 	events     []*Event
-	// lastMsgMS is the relay time of the latest message handled, and
-	// emptyAt the start of the latest collect that found none, each from a
-	// collect that started once no earlier message could still be leased
-	// (leaseFree: one visibility timeout after the start, or after a
-	// message was left unacked). Caught reads them.
+	// What Caught reads. lastMsgMS is the relay time of the latest message
+	// handled (lastMsgAt the start of its collect) and emptyAt the start
+	// of the latest collect that found none, each from a collect that
+	// started at or after leaseFree, before which this process can't know
+	// what is leased (one visibility timeout after its start or a failed
+	// collect). unacked holds the messages it collected and left unacked,
+	// by msg_id: they come back, and until then a message before them is
+	// not shown handled. instance names this process in the lease marker,
+	// which tells another process when this one last leased messages.
 	lastMsgMS uint64
+	lastMsgAt time.Time
 	emptyAt   time.Time
 	leaseFree time.Time
+	unacked   map[string]unacked
+	instance  string
 	seq       uint64
 	rates     map[string]*rateWindow
 
@@ -126,7 +136,11 @@ func New(cfg Config) (*Peer, error) {
 	if cfg.PollWait <= 0 || cfg.PollWait > 25*time.Second {
 		cfg.PollWait = 25 * time.Second
 	}
-	return &Peer{cfg: cfg,
+	inst := make([]byte, 16)
+	if _, err := rand.Read(inst); err != nil {
+		return nil, err
+	}
+	return &Peer{cfg: cfg, instance: hex.EncodeToString(inst),
 		conns: map[string]*Connection{}, invites: map[string]*InviteRecord{}, awaiting: map[string]*awaiting{},
 		requests: map[string]*request{}, outgoing: map[string]*outgoing{}, issued: map[string]*IssuedToken{},
 		challenges: map[string]*challenge{}, rates: map[string]*rateWindow{},
@@ -315,6 +329,14 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 		p.leasedUntil(p.now()) // the relay may have leased a batch we never saw
 		return 0, err
 	}
+	if len(msgs) > 0 {
+		if err := p.markLeased(ctx, p.now()); err != nil {
+			for _, m := range msgs {
+				p.leaveUnacked(m, p.now())
+			}
+			return 0, err
+		}
+	}
 	// Whether this collect can show that nothing before it is still leased.
 	free := !started.Before(p.leaseFree)
 	if len(msgs) == 0 {
@@ -329,39 +351,85 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 	now := p.now()
 	p.housekeeping(now)
 	var acks []string
+	// On a store error none of the batch is acked: all of it comes back.
+	failed := func(err error) (int, error) {
+		for _, m := range msgs {
+			p.leaveUnacked(m, now)
+		}
+		return 0, err
+	}
 	for _, m := range msgs {
 		d, err := p.handleMessage(ctx, m, now)
 		if err != nil {
 			p.discard()
-			p.leasedUntil(p.now())
-			return 0, err
+			return failed(err)
 		}
 		if d == ackAfterFlush {
 			p.mark(kindMsg, m.MsgID, []byte{1}, now.Add(DedupeRetention))
 		}
 		if err := p.flush(ctx); err != nil {
-			p.leasedUntil(p.now())
-			return 0, err
+			return failed(err)
 		}
 		if d == noAck {
-			// It comes back after its lease, and so may the messages it
-			// was before: nothing later shows they were handled.
-			p.leasedUntil(p.now())
-			free = false
+			p.leaveUnacked(m, now) // it comes back after its lease
 			continue
 		}
 		acks = append(acks, m.MsgID)
 		if ms, err := ulidMS(m.MsgID); err == nil && free && ms > p.lastMsgMS {
-			p.lastMsgMS = ms
+			p.lastMsgMS, p.lastMsgAt = ms, started
 		}
 	}
 	for _, id := range acks {
+		delete(p.unacked, id)
 		_ = p.cfg.Relay.Ack(ctx, id) // a lost ack means a redelivery, which dedupe absorbs
 	}
 	p.drainOutbox(ctx)
 	err = p.flush(ctx)
 	p.kickEvents()
 	return len(msgs), err
+}
+
+// unacked is a message left unacked: its relay time, and when the relay
+// drops it unhandled (its TTL).
+type unacked struct {
+	ms  uint64
+	exp time.Time
+}
+
+// leaveUnacked notes a collected message that was not acked.
+func (p *Peer) leaveUnacked(m relayclient.Message, now time.Time) {
+	ms, err := ulidMS(m.MsgID)
+	if err != nil {
+		return // never shown handled by a later message's time either
+	}
+	ttl := time.Duration(p.limits.MessageTTLSeconds) * time.Second
+	if ttl <= 0 {
+		ttl = 7 * 24 * time.Hour
+	}
+	if p.unacked == nil {
+		p.unacked = map[string]unacked{}
+	}
+	p.unacked[m.MsgID] = unacked{ms: ms, exp: time.UnixMilli(int64(ms)).Add(ttl + leaseMargin)}
+}
+
+// leaseMark is the lease marker's record: the process that last leased
+// messages, and when.
+type leaseMark struct {
+	Instance string    `json:"instance"`
+	At       time.Time `json:"at"`
+}
+
+const leaseMarkID = "last"
+
+// markLeased writes the lease marker before a batch is handled, so that
+// another process (a deploy's overlap, a Spot replacement) waits out the
+// leases this one may leave behind.
+func (p *Peer) markLeased(ctx context.Context, at time.Time) error {
+	data, err := json.Marshal(leaseMark{Instance: p.instance, At: at.UTC()})
+	if err != nil {
+		return err
+	}
+	return p.cfg.Store.Apply(ctx, []Change{{Kind: kindLease, ID: leaseMarkID, Data: data}})
 }
 
 // leaseMargin covers the difference between our clock and the relay's
@@ -371,13 +439,17 @@ const leaseMargin = 5 * time.Second
 // leasedUntil notes that a message collected by now may stay leased, and
 // out of every collect, for one visibility timeout (RELAY-PROTOCOL §6.3).
 func (p *Peer) leasedUntil(now time.Time) {
-	vt := time.Duration(p.limits.VisibilityTimeoutSeconds) * time.Second
-	if vt <= 0 {
-		vt = 60 * time.Second
-	}
-	if t := now.Add(vt + leaseMargin); t.After(p.leaseFree) {
+	if t := now.Add(p.visibility() + leaseMargin); t.After(p.leaseFree) {
 		p.leaseFree = t
 	}
+}
+
+// visibility is the relay's visibility timeout (§6.1 limits).
+func (p *Peer) visibility() time.Duration {
+	if vt := time.Duration(p.limits.VisibilityTimeoutSeconds) * time.Second; vt > 0 {
+		return vt
+	}
+	return 60 * time.Second
 }
 
 // discard forgets unflushed changes after a store error; the process
