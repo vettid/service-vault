@@ -28,14 +28,16 @@ func rowLeaves(rows []Row) ([][]byte, error) {
 }
 
 // Count is what the results are built from: the signed proposal and
-// extensions, every eligible tag, the accepted ballots by tag, and the
-// number of members removed or suspended during the vote.
+// extensions, every eligible tag, the accepted ballots by tag, the
+// number of members removed or suspended during the vote, and the number
+// of messages from before the close the count went ahead without.
 type Count struct {
 	Proposal   Signed
 	Extensions []Signed
 	Tags       [][]byte
 	Ballots    map[string]Ballot // by string(record_tag)
 	Removed    int64
+	Unhandled  int64
 }
 
 // Build makes the rows and results documents (§7). It refuses a ballot
@@ -89,7 +91,7 @@ func (c *Count) Build() (rowsBytes, resultsBytes []byte, err error) {
 	resultsBytes, err = EncodeResults(&Results{
 		V: 1, ProposalID: p.ProposalID, Proposal: c.Proposal, Extensions: exts,
 		RowsHash: sum(rowsBytes), RowsRoot: Root(leaves), Tally: tally,
-		Counts: Counts{Eligible: int64(len(c.Tags)), Ballots: n, Removed: c.Removed},
+		Counts: Counts{Eligible: int64(len(c.Tags)), Ballots: n, Removed: c.Removed, Unhandled: c.Unhandled},
 	})
 	return rowsBytes, resultsBytes, err
 }

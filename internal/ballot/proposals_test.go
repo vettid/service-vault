@@ -195,9 +195,14 @@ func (p *fakePublisher) PublishResults(_ context.Context, id string, results, si
 	return json.RawMessage(`{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}`), nil
 }
 
-type fakeCatcher struct{ caught bool }
+type fakeCatcher struct {
+	caught    bool
+	unhandled int64
+}
 
-func (c *fakeCatcher) Caught(context.Context, time.Time) (bool, error) { return c.caught, nil }
+func (c *fakeCatcher) Caught(context.Context, time.Time) (bool, int64, error) {
+	return c.caught, c.unhandled, nil
+}
 
 // castFor votes for a member of a created proposal through the box.
 func castFor(t *testing.T, m *Manager, id, conn, choice string, ms uint64) string {
@@ -245,7 +250,7 @@ func TestClose(t *testing.T) {
 	if _, err := m.Close(ctx, c.ProposalID); !errors.Is(err, ErrNotCaught) {
 		t.Fatalf("before the relay is caught up: %v", err)
 	}
-	ct.caught = true
+	ct.caught, ct.unhandled = true, 2
 	pub.fail = true
 	if _, err := m.Close(ctx, c.ProposalID); err == nil {
 		t.Fatal("closed while Rekor is down")
@@ -259,6 +264,9 @@ func TestClose(t *testing.T) {
 	sum1, err := m.Close(ctx, c.ProposalID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if sum1.Counts.Unhandled != 2 {
+		t.Fatalf("unhandled %d", sum1.Counts.Unhandled)
 	}
 	if sum1.Counts.Ballots != 2 || sum1.Counts.Eligible != 3 || sum1.Tally["yes"] != 1 || sum1.Tally["no"] != 1 || sum1.Tally[vote.AbstainID] != 0 {
 		t.Fatalf("summary %+v", sum1)
