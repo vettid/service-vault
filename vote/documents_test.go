@@ -3,6 +3,7 @@ package vote
 import (
 	"bytes"
 	"crypto/ed25519"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -90,6 +91,18 @@ func TestProposalRoundTrip(t *testing.T) {
 		"short service":  func(p *Proposal) { p.Service = p.Service[:31] },
 		"version":        func(p *Proposal) { p.V = 2 },
 		"negative quota": func(p *Proposal) { p.Quorum.MinBallots = -1 },
+		"no eligible":    func(p *Proposal) { p.Eligible = 0 },
+		"long title":     func(p *Proposal) { p.Title = strings.Repeat("x", 201) },
+		"long text":      func(p *Proposal) { p.Text = strings.Repeat("x", 16<<10+1) },
+		"empty label":    func(p *Proposal) { p.Choices[0].Label = "" },
+		"long label":     func(p *Proposal) { p.Choices[0].Label = strings.Repeat("x", 201) },
+		"label encoding": func(p *Proposal) { p.Choices[0].Label = "\xff" },
+		"long quorum":    func(p *Proposal) { p.Quorum.Text = strings.Repeat("x", 1025) },
+		"long outage":    func(p *Proposal) { p.OutageRule = strings.Repeat("x", 1025) },
+		"18 choices":     func(p *Proposal) { p.Choices = manyChoices(18) },
+		// Each control character takes six bytes encoded: within every
+		// field bound, over the document's.
+		"large document": func(p *Proposal) { p.Text = strings.Repeat("\x01", 16<<10) },
 	} {
 		q := *testProposal(t, ik, [][]byte{digest("t1")})
 		q.Choices = append([]Choice{}, q.Choices...)
@@ -98,6 +111,50 @@ func TestProposalRoundTrip(t *testing.T) {
 			t.Errorf("%s accepted", name)
 		}
 	}
+}
+
+// The largest of each bound is accepted (§3.1).
+func TestProposalBounds(t *testing.T) {
+	ik := ed25519.NewKeyFromSeed(digest("ik")).Public().(ed25519.PublicKey)
+	p := testProposal(t, ik, [][]byte{digest("t1")})
+	p.Title = strings.Repeat("t", 200)
+	p.Text = strings.Repeat("x", 16<<10)
+	p.Choices = manyChoices(17)
+	for i := range p.Choices {
+		p.Choices[i].Label = strings.Repeat("l", 200)
+	}
+	p.Quorum = Quorum{Text: strings.Repeat("q", 1024)}
+	p.OutageRule = strings.Repeat("o", 1024)
+	b, err := EncodeProposal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseProposal(b); err != nil {
+		t.Fatal(err)
+	}
+	p.Quorum.Text = ""
+	if _, err := EncodeProposal(p); err != nil {
+		t.Fatalf("empty quorum text: %v", err)
+	}
+	// Canonical, every field in bounds, over 64 KiB.
+	p.Text = strings.Repeat("\x01", 16<<10)
+	big, err := encodeCanonical(p)
+	if err != nil || len(big) <= MaxProposal {
+		t.Fatalf("%d bytes, %v", len(big), err)
+	}
+	if _, err := ParseProposal(big); err == nil {
+		t.Fatal("a document over 64 KiB parsed")
+	}
+}
+
+// manyChoices is n choices, the last abstain.
+func manyChoices(n int) []Choice {
+	out := make([]Choice, n)
+	for i := range out {
+		out[i] = Choice{ID: fmt.Sprintf("c%d", i), Label: "C"}
+	}
+	out[n-1] = Choice{ID: AbstainID, Label: "Abstain"}
+	return out
 }
 
 // unpad strips the padding of the proposal's service key, a form

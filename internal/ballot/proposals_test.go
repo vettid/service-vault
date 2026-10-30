@@ -153,6 +153,12 @@ func TestCreateRefusals(t *testing.T) {
 	if _, err := m.Create(ctx, bad); !errors.As(err, &ei) {
 		t.Fatalf("a window over 7 days: %v", err)
 	}
+	roster := m.Roster
+	m.Roster = fakeRoster{}
+	if _, err := m.Create(ctx, input()); !errors.As(err, &ei) {
+		t.Fatalf("no eligible members: %v", err)
+	}
+	m.Roster = roster
 	m.Publisher = nil
 	if _, err := m.Create(ctx, input()); !errors.Is(err, ErrNoPublisher) {
 		t.Fatalf("no publisher: %v", err)
