@@ -101,15 +101,16 @@ type Peer struct {
 	// by msg_id: they come back, and until then a message before them is
 	// not shown handled. instance names this process in the lease marker,
 	// which tells another process when this one last leased messages.
-	lastMsgMS uint64
-	lastMsgAt time.Time
-	emptyAt   time.Time
-	leaseFree time.Time
-	unacked   map[string]unacked
-	gaveUp    map[string]unacked // stopped waiting for (cap or TTL), not handled since
-	instance  string
-	seq       uint64
-	rates     map[string]*rateWindow
+	lastMsgMS  uint64
+	lastMsgAt  time.Time
+	emptyAt    time.Time
+	leaseFree  time.Time
+	unacked    map[string]unacked
+	gaveUp     map[string]unacked  // stopped waiting for (cap or TTL), not handled since
+	unackedNew map[string]struct{} // left unacked here, not yet stored (writeUnacked)
+	instance   string
+	seq        uint64
+	rates      map[string]*rateWindow
 
 	dirty    map[key]struct{}
 	extra    []Change
@@ -188,6 +189,9 @@ func (p *Peer) Start(ctx context.Context) error {
 	p.leasedUntil(p.now())
 	if !p.started {
 		if err := p.load(ctx); err != nil {
+			return err
+		}
+		if err := p.loadUnacked(ctx); err != nil {
 			return err
 		}
 		p.started = true
@@ -368,6 +372,9 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 		if d == ackAfterFlush {
 			p.mark(kindMsg, m.MsgID, []byte{1}, now.Add(DedupeRetention))
 		}
+		if d != noAck {
+			p.handledUnacked(m.MsgID)
+		}
 		if err := p.flush(ctx); err != nil {
 			return failed(err)
 		}
@@ -383,8 +390,10 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 	for _, id := range acks {
 		delete(p.unacked, id)
 		delete(p.gaveUp, id)
+		delete(p.unackedNew, id)
 		_ = p.cfg.Relay.Ack(ctx, id) // a lost ack means a redelivery, which dedupe absorbs
 	}
+	p.writeUnacked(ctx)
 	p.drainOutbox(ctx)
 	err = p.flush(ctx)
 	p.kickEvents()
@@ -395,10 +404,12 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 // holding Caught: when the relay drops it unhandled (its TTL), or
 // MaxUnackedWait after it was first left, whichever is sooner.
 type unacked struct {
-	ms     uint64
-	exp    time.Time
-	ttl    time.Time // when the relay drops it
-	capped bool      // exp is the cap, not the TTL
+	ms      uint64
+	first   time.Time // when it was first left unacked
+	exp     time.Time
+	ttl     time.Time // when the relay drops it
+	capped  bool      // exp is the cap, not the TTL
+	version uint64    // the stored record's version (0: not stored)
 }
 
 // MaxUnackedWait caps how long one message left unacked holds Caught
@@ -422,10 +433,6 @@ func (p *Peer) leaveUnacked(m relayclient.Message, now time.Time) {
 	if err != nil {
 		return // never shown handled by a later message's time either
 	}
-	ttl := time.Duration(p.limits.MessageTTLSeconds) * time.Second
-	if ttl <= 0 {
-		ttl = 14 * 24 * time.Hour // the relay's default (RELAY-PROTOCOL §6.1)
-	}
 	if p.unacked == nil {
 		p.unacked = map[string]unacked{}
 	}
@@ -435,12 +442,38 @@ func (p *Peer) leaveUnacked(m relayclient.Message, now time.Time) {
 	if _, ok := p.gaveUp[m.MsgID]; ok {
 		return // given up on: a redelivery doesn't start a new wait
 	}
+	p.unacked[m.MsgID] = p.unackedEntry(ms, now)
+	if p.unackedNew == nil {
+		p.unackedNew = map[string]struct{}{}
+	}
+	p.unackedNew[m.MsgID] = struct{}{}
+}
+
+// unackedEntry is a message with relay time ms first left unacked at
+// first: it holds Caught until the relay drops it or MaxUnackedWait
+// after first, whichever is sooner.
+func (p *Peer) unackedEntry(ms uint64, first time.Time) unacked {
+	ttl := time.Duration(p.limits.MessageTTLSeconds) * time.Second
+	if ttl <= 0 {
+		ttl = 14 * 24 * time.Hour // the relay's default (RELAY-PROTOCOL §6.1)
+	}
 	drop := time.UnixMilli(int64(ms)).Add(ttl + leaseMargin)
-	u := unacked{ms: ms, exp: drop, ttl: drop}
-	if c := now.Add(MaxUnackedWait); c.Before(u.exp) {
+	u := unacked{ms: ms, first: first, exp: drop, ttl: drop}
+	if c := first.Add(MaxUnackedWait); c.Before(u.exp) {
 		u.exp, u.capped = c, true
 	}
-	p.unacked[m.MsgID] = u
+	return u
+}
+
+// gaveUpUntil is how long a message given up on is remembered: gaveUpKeep
+// after its relay time, and MaxUnackedWait past the relay's TTL with a
+// longer TTL, so it is still known while it may be redelivered.
+func gaveUpUntil(u unacked) time.Time {
+	exp := time.UnixMilli(int64(u.ms)).Add(gaveUpKeep)
+	if t := u.ttl.Add(MaxUnackedWait); t.After(exp) {
+		exp = t
+	}
+	return exp
 }
 
 // leaseMark is a process's lease marker: when it last leased messages.

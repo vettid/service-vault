@@ -132,9 +132,9 @@ func (p *Peer) SendMessage(ctx context.Context, connID, typ string, body json.Ra
 // in a collect that started when no earlier message could still be
 // leased (BALLOT-PROTOCOL §7).
 //
-// A message this process left unacked holds it false while it is before
-// t, until it is handled, the relay's TTL drops it, or MaxUnackedWait
-// passes. unhandled counts the messages it stopped waiting for (at the
+// A message left unacked (by this process or another, stored: unacked.go)
+// holds it false while it is before t, until it is handled, the relay's
+// TTL drops it, or MaxUnackedWait passes. unhandled counts the messages it stopped waiting for (at the
 // cap or the TTL) whose relay time is in [from, until): the results
 // report those of the voting window (§7). Another process's leases (its
 // lease marker) hold it false until one visibility timeout after it last
@@ -147,6 +147,11 @@ func (p *Peer) Caught(ctx context.Context, t, from, until time.Time) (caught boo
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// The stored set is every process's, across restarts (unacked.go).
+	p.writeUnacked(ctx)
+	if err := p.loadUnacked(ctx); err != nil {
+		return false, 0, err
+	}
 	since := p.leaseFree
 	for _, r := range marks {
 		if r.ID == p.instance {
@@ -172,13 +177,13 @@ func (p *Peer) Caught(ctx context.Context, t, from, until time.Time) (caught boo
 			} else {
 				p.log().Warn("a message left unacked was dropped by the relay unhandled", "msg_id", id)
 			}
+			if err := p.storeGaveUp(ctx, id, u); err != nil {
+				return false, 0, err
+			}
 			if p.gaveUp == nil {
 				p.gaveUp = map[string]unacked{}
 			}
-			u.exp = time.UnixMilli(int64(u.ms)).Add(gaveUpKeep)
-			if t := u.ttl.Add(MaxUnackedWait); t.After(u.exp) {
-				u.exp = t // a longer relay TTL: still kept past its redeliveries
-			}
+			u.exp = gaveUpUntil(u)
 			p.gaveUp[id] = u
 			delete(p.unacked, id)
 		case u.ms < tms:
