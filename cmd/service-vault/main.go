@@ -797,9 +797,11 @@ func newSecretsIfFresh(ctx context.Context, anyRecord func(context.Context) ([]b
 // key-check item (an HMAC under the key, written once), so a key that
 // isn't the one its ballots are under is found at the start. A copy
 // holding ballots under a lost key can't be read, so no new key is made
-// while proposals exist or the copy has a key check; such a start, or a
-// key that doesn't match the check, is errCopyKey, and the daemon runs
-// with ballots off rather than not at all.
+// while proposals exist or the copy has a key check or any ballot; a copy
+// from before the check gets its first check only under a key that opens
+// one of its ballots. Such a start, or a key that doesn't match the
+// check, is errCopyKey, and the daemon runs with ballots off rather than
+// not at all.
 func ballotCopySeal(ctx context.Context, kc keystore.KMS, keyID string, blobs keystore.Blobs, records peer.Store, cp scannableCopy) (*sealstore.Store, error) {
 	rk, err := keystore.LoadOrCreate(ctx, kc, keyID, blobs, keystore.BallotCopyKeyName, func() (*sealstore.RecordKey, error) {
 		props, err := records.Load(ctx, ballot.KindProposal)
