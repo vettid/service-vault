@@ -200,7 +200,7 @@ type fakeCatcher struct {
 	unhandled int64
 }
 
-func (c *fakeCatcher) Caught(context.Context, time.Time) (bool, int64, error) {
+func (c *fakeCatcher) Caught(context.Context, time.Time, time.Time, time.Time) (bool, int64, error) {
 	return c.caught, c.unhandled, nil
 }
 

@@ -134,11 +134,13 @@ func (p *Peer) SendMessage(ctx context.Context, connID, typ string, body json.Ra
 //
 // A message this process left unacked holds it false while it is before
 // t, until it is handled, the relay's TTL drops it, or MaxUnackedWait
-// passes; unhandled counts those before t it stopped waiting for, which
-// the results report (§7). Another process's leases (its lease marker)
-// hold it false until one visibility timeout after it last leased
-// messages, and the evidence must come from a collect started after.
-func (p *Peer) Caught(ctx context.Context, t time.Time) (caught bool, unhandled int64, err error) {
+// passes. unhandled counts the messages it stopped waiting for (at the
+// cap or the TTL) whose relay time is in [from, until): the results
+// report those of the voting window (§7). Another process's leases (its
+// lease marker) hold it false until one visibility timeout after it last
+// leased messages, and the evidence must come from a collect started
+// after.
+func (p *Peer) Caught(ctx context.Context, t, from, until time.Time) (caught bool, unhandled int64, err error) {
 	marks, err := p.cfg.Store.Load(ctx, kindLease)
 	if err != nil {
 		return false, 0, err
@@ -159,31 +161,38 @@ func (p *Peer) Caught(ctx context.Context, t time.Time) (caught bool, unhandled 
 		}
 	}
 	now, tms := p.now(), uint64(t.UnixMilli())
+	held := false
 	for id, u := range p.unacked {
 		switch {
-		case u.capped && !now.Before(u.exp):
-			if u.ms < tms {
+		case !now.Before(u.exp):
+			// Past the cap, or dropped by the relay unhandled: either
+			// way the count goes ahead without it.
+			if u.capped {
 				p.log().Warn("a message left unacked over the cap no longer holds the count", "msg_id", id)
+			} else {
+				p.log().Warn("a message left unacked was dropped by the relay unhandled", "msg_id", id)
 			}
 			if p.gaveUp == nil {
 				p.gaveUp = map[string]unacked{}
 			}
-			u.exp = u.ttl // kept until the relay drops it
+			u.exp = time.UnixMilli(int64(u.ms)).Add(gaveUpKeep)
 			p.gaveUp[id] = u
 			delete(p.unacked, id)
-		case !now.Before(u.exp):
-			delete(p.unacked, id)
 		case u.ms < tms:
-			return false, 0, nil
+			held = true
 		}
 	}
+	fms, ums := uint64(from.UnixMilli()), uint64(until.UnixMilli())
 	for id, u := range p.gaveUp {
 		switch {
 		case !now.Before(u.exp):
 			delete(p.gaveUp, id)
-		case u.ms < tms:
+		case fms <= u.ms && u.ms < ums:
 			unhandled++
 		}
+	}
+	if held {
+		return false, unhandled, nil
 	}
 	caught = p.lastMsgMS >= tms && !p.lastMsgAt.Before(since) || !p.emptyAt.Before(t) && !p.emptyAt.Before(since)
 	return caught, unhandled, nil

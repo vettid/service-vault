@@ -106,7 +106,7 @@ type Peer struct {
 	emptyAt   time.Time
 	leaseFree time.Time
 	unacked   map[string]unacked
-	gaveUp    map[string]unacked // left unacked past MaxUnackedWait, not handled since
+	gaveUp    map[string]unacked // stopped waiting for (cap or TTL), not handled since
 	instance  string
 	seq       uint64
 	rates     map[string]*rateWindow
@@ -405,8 +405,15 @@ type unacked struct {
 // false. A member can keep a message coming back (a new-epoch message
 // before hs.fin, a withheld connection.approved); past the cap it no
 // longer delays a count, and the peer logs that it stopped waiting
-// (chosen; not in the spec).
+// (BALLOT-PROTOCOL §7).
 const MaxUnackedWait = 24 * time.Hour
+
+// gaveUpKeep is how long after its relay time a message the peer stopped
+// waiting for is remembered for counts.unhandled: past the relay's TTL
+// (the message is gone, but the count went ahead without it), and past
+// the longest window with its extensions, so a close of any window it
+// falls in sees it.
+const gaveUpKeep = 30 * 24 * time.Hour
 
 // leaveUnacked notes a collected message that was not acked.
 func (p *Peer) leaveUnacked(m relayclient.Message, now time.Time) {
@@ -423,6 +430,9 @@ func (p *Peer) leaveUnacked(m relayclient.Message, now time.Time) {
 	}
 	if _, ok := p.unacked[m.MsgID]; ok {
 		return // the cap counts from the first time
+	}
+	if _, ok := p.gaveUp[m.MsgID]; ok {
+		return // given up on: a redelivery doesn't start a new wait
 	}
 	drop := time.UnixMilli(int64(ms)).Add(ttl + leaseMargin)
 	u := unacked{ms: ms, exp: drop, ttl: drop}

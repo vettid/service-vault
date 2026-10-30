@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.11.0 (2026-10-30)
+**Status:** 0.11.1 (2026-10-30)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -320,11 +320,14 @@ listed anchor key. A second, different proposal under the same
   after that gets `late`.
 - **A message left unacked** (one the service couldn't handle yet, and
   the relay hands out again) holds the count at most 24 hours from when
-  it was first left (owner decision 2026-10-30); past that the count
-  goes ahead without it. `counts.unhandled` says how many messages from
-  before the close the count went ahead without: each may have held a
-  ballot that doesn't count, so a non-zero value is for observers to
-  weigh.
+  it was first left (owner decision 2026-10-30), however often it comes
+  back; past that, or once the relay drops it unhandled (its TTL), the
+  count goes ahead without it. `counts.unhandled` says how many such
+  messages the relay received in `[opens_at, closes_at)`, with
+  `closes_at` after any extensions: each may have held a ballot that
+  doesn't count, so a non-zero value is for observers to weigh. A
+  message in the minute after `closes_at` is left out: a cast in it is
+  late anyway.
 - **The results** are two parts (§8.5):
   - **`rows.json`:** every tag, sorted, with its ballot
     `{vk, choice_id, ballot_sig}` or `null`;
@@ -332,8 +335,8 @@ listed anchor key. A second, different proposal under the same
     signatures, `rows_hash = H(rows bytes)`, `rows_root` (the Merkle
     root over the row leaves, §8.2), the tally per choice, and the
     counts: `eligible`, `ballots`, `removed` (members removed or
-    suspended after `record_at`), and `unhandled` (messages from before
-    the close the count went ahead without, above).
+    suspended after `record_at`), and `unhandled` (messages of the
+    window the count went ahead without, above).
 - **Signature:** `results_sig = Sign(service IK, "vettid/vote/1/results\x00", proposal_hash ‖ H(results_bytes))`.
 - **Published** on votes.vettid.org, both parts, with `results.json`
   anchored (§3.3); announced in `vote.closed`.
@@ -548,6 +551,10 @@ item.
 
 ## Changes
 
+- **0.11.1 (2026-10-30):** `counts.unhandled` covers the window
+  `[opens_at, closes_at)` and includes messages the relay dropped
+  unhandled; a message's 24-hour wait doesn't restart when it comes
+  back. No change to the documents or the vectors.
 - **0.11.0 (2026-10-30):** the results' counts gain `unhandled`: how
   many messages from before the close the count went ahead without,
   after waiting 24 hours for a message left unacked (owner decision

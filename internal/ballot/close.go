@@ -25,9 +25,9 @@ const CollectMargin = time.Minute
 // Catcher reports whether every message the relay received before t has
 // been handled (peer.Peer.Caught).
 type Catcher interface {
-	// Caught also returns how many messages from before t it stopped
-	// waiting for (counts.unhandled, §7).
-	Caught(ctx context.Context, t time.Time) (caught bool, unhandled int64, err error)
+	// Caught also returns how many messages with a relay time in
+	// [from, until) it stopped waiting for (counts.unhandled, §7).
+	Caught(ctx context.Context, t, from, until time.Time) (caught bool, unhandled int64, err error)
 }
 
 // ResultsPublisher anchors and publishes the results (§3.3), and returns
@@ -86,7 +86,13 @@ func (m *Manager) Close(ctx context.Context, id string) (*ResultsSummary, error)
 		if m.Now().Before(end) {
 			return nil, ErrNotClosed
 		}
-		caught, unhandled, err := m.Catcher.Caught(ctx, end)
+		p, err := o.Parsed()
+		if err != nil {
+			return nil, err
+		}
+		// unhandled counts the window's messages: one in the last minute
+		// would be a late cast.
+		caught, unhandled, err := m.Catcher.Caught(ctx, end, time.Unix(p.OpensAt, 0), time.Unix(o.ClosesAt, 0))
 		if err != nil {
 			return nil, err
 		}

@@ -148,7 +148,7 @@ func TestCaughtWaitsOutLeases(t *testing.T) {
 
 func (f *fixture) caught(t time.Time) bool {
 	f.t.Helper()
-	ok, _, err := f.p.Caught(context.Background(), t)
+	ok, _, err := f.p.Caught(context.Background(), t, time.Time{}, t)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -238,12 +238,112 @@ func TestCaughtUnackedCap(t *testing.T) {
 	if !strings.Contains(f.logs.String(), "no longer holds the count") {
 		t.Fatal("the cap wasn't logged")
 	}
-	if _, n, _ := f.p.Caught(context.Background(), closeAt); n != 1 {
+	if n := f.unhandled(closeAt, closeAt.Add(-time.Hour), closeAt); n != 1 {
 		t.Fatalf("unhandled %d, want the one given up on", n)
 	}
-	if _, n, _ := f.p.Caught(context.Background(), closeAt.Add(-time.Hour)); n != 0 {
-		t.Fatalf("unhandled %d before an earlier close", n)
+	if n := f.unhandled(closeAt, closeAt.Add(-2*time.Hour), closeAt.Add(-time.Hour)); n != 0 {
+		t.Fatalf("unhandled %d outside the window", n)
 	}
+
+	// Its redelivery doesn't start a new wait.
+	f.leave(id)
+	if !f.caught(closeAt) {
+		t.Fatal("a redelivery after the cap holds the count again")
+	}
+	// It stays counted past the relay's TTL, which drops it unhandled.
+	f.clk.Advance(15 * 24 * time.Hour)
+	f.pump()
+	if n := f.unhandled(closeAt, closeAt.Add(-time.Hour), closeAt); n != 1 {
+		t.Fatalf("unhandled %d past the TTL, want 1", n)
+	}
+	f.clk.Advance(gaveUpKeep)
+	f.pump()
+	if n := f.unhandled(closeAt, closeAt.Add(-time.Hour), closeAt); n != 0 {
+		t.Fatalf("unhandled %d long after, want it forgotten", n)
+	}
+}
+
+// Two overlapping messages left unacked each wait MaxUnackedWait from
+// when they were first left, whatever order Caught visits them in.
+func TestCaughtUnackedOverlap(t *testing.T) {
+	for run := 0; run < 20; run++ {
+		f := newFixture(t)
+		f.clk.Advance(2 * time.Minute)
+		f.pump()
+		closeAt := f.clk.Now()
+		a := f.ulid(closeAt.Add(-2 * time.Second))
+		b := f.ulid(closeAt.Add(-time.Second))
+		f.leave(a)
+		f.clk.Advance(12 * time.Hour)
+		f.leave(b)
+		for h := 0; h < 30; h++ {
+			f.clk.Advance(time.Hour)
+			f.leave(a) // redelivered, also after its cap
+			f.leave(b)
+			f.pump()
+			// a is capped 24 h after it was first left, b 24 h after; the
+			// count waits for the later cap, 36 h after a.
+			if got, want := f.caught(closeAt), h+1 >= 24; got != want {
+				t.Fatalf("run %d, %d h after b: caught %v, want %v", run, h+1, got, want)
+			}
+		}
+		if n := f.unhandled(closeAt, closeAt.Add(-time.Hour), closeAt); n != 2 {
+			t.Fatalf("unhandled %d, want 2", n)
+		}
+	}
+}
+
+// A message left unacked that the relay drops before the cap still
+// counts as unhandled.
+func TestCaughtUnackedTTL(t *testing.T) {
+	f := newFixture(t)
+	f.clk.Advance(2 * time.Minute)
+	f.pump()
+	closeAt := f.clk.Now()
+	ttl := time.Duration(f.p.limits.MessageTTLSeconds) * time.Second
+	if ttl <= 0 {
+		ttl = 14 * 24 * time.Hour
+	}
+	// First left an hour before the relay drops it.
+	id := f.ulid(closeAt.Add(-time.Second))
+	f.clk.Advance(ttl - time.Hour)
+	f.pump()
+	f.leave(id)
+	if f.caught(closeAt) {
+		t.Fatal("caught up with a message before the close left unacked")
+	}
+	f.clk.Advance(2 * time.Hour)
+	f.pump()
+	if !f.caught(closeAt) {
+		t.Fatal("still waiting after the relay dropped it")
+	}
+	if n := f.unhandled(closeAt, closeAt.Add(-time.Hour), closeAt); n != 1 {
+		t.Fatalf("unhandled %d, want the dropped one", n)
+	}
+}
+
+func (f *fixture) ulid(at time.Time) string {
+	f.t.Helper()
+	id, err := envelope.NewULID(at)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return id
+}
+
+func (f *fixture) leave(id string) {
+	f.p.mu.Lock()
+	f.p.leaveUnacked(relayclient.Message{MsgID: id}, f.clk.Now())
+	f.p.mu.Unlock()
+}
+
+func (f *fixture) unhandled(t, from, until time.Time) int64 {
+	f.t.Helper()
+	_, n, err := f.p.Caught(context.Background(), t, from, until)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return n
 }
 
 // Without Config.Votes, a vote.* request is unsupported_type.
