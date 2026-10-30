@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -81,15 +82,28 @@ func ulidMS(id string) (uint64, error) {
 	return ms, nil
 }
 
-// Eligible lists the active connections (ballot.Roster). Every active
-// connection counts until VAULT-MESSAGING says how a vault advertises the
-// vote feature (BALLOT-PROTOCOL §3.2, plan item 5.1).
+// FeatureVote is the profile feature of a vault that can vote
+// (VAULT-MESSAGING §10.19.1).
+const FeatureVote = "vote"
+
+// Eligible lists the active connections whose last profile.update
+// advertised the vote feature (ballot.Roster; BALLOT-PROTOCOL §3.2,
+// VAULT-MESSAGING §10.19.1).
 func (p *Peer) Eligible() []string {
+	return p.activeIf(func(c *Connection) bool { return slices.Contains(c.Features, FeatureVote) })
+}
+
+// Active lists the active connections (ballot.Roster).
+func (p *Peer) Active() []string {
+	return p.activeIf(func(*Connection) bool { return true })
+}
+
+func (p *Peer) activeIf(keep func(*Connection) bool) []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	out := make([]string, 0, len(p.conns))
 	for id, c := range p.conns {
-		if c.State == StateActive {
+		if c.State == StateActive && keep(c) {
 			out = append(out, id)
 		}
 	}

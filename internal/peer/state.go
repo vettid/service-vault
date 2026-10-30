@@ -85,6 +85,9 @@ type Connection struct {
 
 	// ProfileVersion is the last profile.update version kept (§10.8).
 	ProfileVersion uint64 `json:"profile_version,omitempty"`
+	// Features are the optional features the member's vault advertised in
+	// that profile.update (§10.8, 0.81.0), such as "vote".
+	Features []string `json:"features,omitempty"`
 
 	Standing  HeldToken `json:"standing"`
 	Reconnect HeldToken `json:"reconnect"`
