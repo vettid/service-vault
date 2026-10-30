@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/vettid/service-vault/internal/peer"
 )
@@ -49,6 +50,12 @@ type RecordStore struct {
 var _ BoxStore = (*RecordStore)(nil)
 
 func ballotID(proposalID string, tag []byte) string {
+	return BallotID(proposalID, tag)
+}
+
+// BallotID is a ballot's id in the copy and the record store: what its
+// seal is bound to.
+func BallotID(proposalID string, tag []byte) string {
 	return proposalID + "|" + hex.EncodeToString(tag)
 }
 
@@ -227,6 +234,17 @@ func (m *MemCopy) PutOnce(_ context.Context, proposalID string, tag, data []byte
 	}
 	m.items[k] = CopyItem{Tag: append([]byte(nil), tag...), Data: append([]byte(nil), data...)}
 	return data, nil
+}
+
+// Any returns one stored ballot of any proposal but skip, if there is
+// one (store.Ballots.Any).
+func (m *MemCopy) Any(_ context.Context, skip string) (string, CopyItem, bool, error) {
+	for k, v := range m.items {
+		if pid, _, _ := strings.Cut(k, "|"); pid != skip {
+			return pid, v, true, nil
+		}
+	}
+	return "", CopyItem{}, false, nil
 }
 
 // List implements Copy.
