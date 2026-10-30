@@ -603,3 +603,52 @@ func TestCaughtUnackedGaveUpBeforeStored(t *testing.T) {
 		t.Fatal("a redelivery started a new wait")
 	}
 }
+
+// Giving up on a stored message marks its record given up on; one that
+// another process handled meanwhile (its record deleted) is neither
+// written back nor counted.
+func TestCaughtUnackedGaveUpStored(t *testing.T) {
+	f := newFixture(t)
+	f.clk.Advance(2 * time.Minute)
+	f.pump()
+	closeAt := f.clk.Now()
+	kept, handled := f.ulid(closeAt.Add(-2*time.Second)), f.ulid(closeAt.Add(-time.Second))
+	f.leave(kept)
+	f.leave(handled)
+	f.caught(closeAt) // stores both
+	stored := func() map[string]unackedRec {
+		t.Helper()
+		recs, err := f.store.Load(context.Background(), kindUnacked)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]unackedRec{}
+		for _, r := range recs {
+			var rec unackedRec
+			if err := json.Unmarshal(r.Data, &rec); err != nil {
+				t.Fatal(err)
+			}
+			out[r.ID] = rec
+		}
+		return out
+	}
+	if s := stored(); len(s) != 2 || s[kept].GaveUp || s[handled].GaveUp {
+		t.Fatalf("stored %+v, want both, not given up on", s)
+	}
+	// Another process handles one: its record goes.
+	if err := f.store.Apply(context.Background(), []Change{{Kind: kindUnacked, ID: handled}}); err != nil {
+		t.Fatal(err)
+	}
+	f.clk.Advance(MaxUnackedWait + time.Minute)
+	f.pump()
+	if !f.caught(closeAt) {
+		t.Fatal("still waiting past the cap")
+	}
+	s := stored()
+	if len(s) != 1 || !s[kept].GaveUp {
+		t.Fatalf("stored %+v, want only the kept one, given up on", s)
+	}
+	if n := f.unhandled(closeAt, closeAt.Add(-time.Hour), closeAt); n != 1 {
+		t.Fatalf("unhandled %d, want the kept one", n)
+	}
+}
