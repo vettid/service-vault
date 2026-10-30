@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.12.2 (2026-10-30)
+**Status:** 0.12.3 (2026-10-30)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -533,8 +533,11 @@ item.
 2. Merkle: trees of 0, 1, 2, 3, 5 and 8 leaves, and an inclusion proof
    for every leaf of the 5-leaf tree.
 3. Documents: a proposal, an extension, rows and results, with their
-   signatures and anchor bundles; refusals of non-canonical bytes and
-   duplicate names.
+   signatures; refusals of non-canonical bytes and duplicate names. An
+   anchor bundle can't be made from fixed seeds, so its vector
+   (`vote/testdata/anchor-vector.json`) is a proposal captured from the
+   staging site with its bundle, its anchor key and certificate, and the
+   Sigstore staging trusted root it verifies under.
 4. Ed25519: every §2 rule: small-order keys and `R`, including
    non-canonical encodings; mixed-order keys; `y ≥ p`; `x = 0` with the
    sign bit set; a non-canonical `S`; valid signatures.
@@ -568,6 +571,8 @@ item.
 
 ## Changes
 
+- **0.12.3 (2026-10-30):** §11 adds the anchor-bundle vector, captured
+  from staging. No change to the documents or the other vectors.
 - **0.12.2 (2026-10-30):** §3.2 names how a vault advertises the vote
   feature (VAULT-MESSAGING 0.81.0 `features`). No change to the
   documents or the vectors.
