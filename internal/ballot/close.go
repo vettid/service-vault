@@ -25,7 +25,9 @@ const CollectMargin = time.Minute
 // Catcher reports whether every message the relay received before t has
 // been handled (peer.Peer.Caught).
 type Catcher interface {
-	Caught(ctx context.Context, t time.Time) (bool, error)
+	// Caught also returns how many messages from before t it stopped
+	// waiting for (counts.unhandled, §7).
+	Caught(ctx context.Context, t time.Time) (caught bool, unhandled int64, err error)
 }
 
 // ResultsPublisher anchors and publishes the results (§3.3), and returns
@@ -84,7 +86,7 @@ func (m *Manager) Close(ctx context.Context, id string) (*ResultsSummary, error)
 		if m.Now().Before(end) {
 			return nil, ErrNotClosed
 		}
-		caught, err := m.Catcher.Caught(ctx, end)
+		caught, unhandled, err := m.Catcher.Caught(ctx, end)
 		if err != nil {
 			return nil, err
 		}
@@ -98,7 +100,7 @@ func (m *Manager) Close(ctx context.Context, id string) (*ResultsSummary, error)
 				return nil, err
 			}
 		}
-		if pr, err = m.count(ctx, o); err != nil {
+		if pr, err = m.count(ctx, o, unhandled); err != nil {
 			return nil, err
 		}
 	}
@@ -120,7 +122,7 @@ func (m *Manager) Close(ctx context.Context, id string) (*ResultsSummary, error)
 
 // count builds and signs the results from the copy's ballots, checks them
 // as an observer would, and stores them.
-func (m *Manager) count(ctx context.Context, o *OpenProposal) (*PublishedResults, error) {
+func (m *Manager) count(ctx context.Context, o *OpenProposal, unhandled int64) (*PublishedResults, error) {
 	p, err := o.Parsed()
 	if err != nil {
 		return nil, err
@@ -147,7 +149,8 @@ func (m *Manager) count(ctx context.Context, o *OpenProposal) (*PublishedResults
 			removed++
 		}
 	}
-	c := &vote.Count{Proposal: vote.Signed{Doc: o.Doc, Sig: o.Sig}, Extensions: o.Extensions, Tags: o.Tags(), Ballots: ballots, Removed: removed}
+	c := &vote.Count{Proposal: vote.Signed{Doc: o.Doc, Sig: o.Sig}, Extensions: o.Extensions, Tags: o.Tags(), Ballots: ballots, Removed: removed,
+		Unhandled: unhandled}
 	rows, results, err := c.Build()
 	if err != nil {
 		return nil, err

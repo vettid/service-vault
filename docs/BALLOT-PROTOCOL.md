@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.10.1 (2026-10-29)
+**Status:** 0.11.0 (2026-10-30)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -318,14 +318,22 @@ listed anchor key. A second, different proposal under the same
   whose `msg_ms` is at least `closes_at` + 1 min, with no earlier one
   still leased, it has every ballot of the window. A `vote.cast` handled
   after that gets `late`.
+- **A message left unacked** (one the service couldn't handle yet, and
+  the relay hands out again) holds the count at most 24 hours from when
+  it was first left (owner decision 2026-10-30); past that the count
+  goes ahead without it. `counts.unhandled` says how many messages from
+  before the close the count went ahead without: each may have held a
+  ballot that doesn't count, so a non-zero value is for observers to
+  weigh.
 - **The results** are two parts (§8.5):
   - **`rows.json`:** every tag, sorted, with its ballot
     `{vk, choice_id, ballot_sig}` or `null`;
   - **`results.json`:** the proposal and any extensions with their
     signatures, `rows_hash = H(rows bytes)`, `rows_root` (the Merkle
     root over the row leaves, §8.2), the tally per choice, and the
-    counts: `eligible`, `ballots`, and `removed` (members removed or
-    suspended after `record_at`).
+    counts: `eligible`, `ballots`, `removed` (members removed or
+    suspended after `record_at`), and `unhandled` (messages from before
+    the close the count went ahead without, above).
 - **Signature:** `results_sig = Sign(service IK, "vettid/vote/1/results\x00", proposal_hash ‖ H(results_bytes))`.
 - **Published** on votes.vettid.org, both parts, with `results.json`
   anchored (§3.3); announced in `vote.closed`.
@@ -402,7 +410,7 @@ SubjectPublicKeyInfo; `?` marks a field present only where stated.
   signature `Sign(IK, "vettid/vote/1/extended\x00", proposal_hash ‖ H(bytes))`.
 - **Rows:** `{v: 1, proposal_id, rows: [{record_tag: hash, ballot: {vk: b64, choice_id: string, ballot_sig: sig} | null}]}`,
   `rows` sorted by `record_tag`.
-- **Results:** `{v: 1, proposal_id, proposal: {doc: b64, sig: sig}, extensions: [{doc: b64, sig: sig}], rows_hash: hash, rows_root: hash, tally: {<choice id>: int}, counts: {eligible: int, ballots: int, removed: int}}`,
+- **Results:** `{v: 1, proposal_id, proposal: {doc: b64, sig: sig}, extensions: [{doc: b64, sig: sig}], rows_hash: hash, rows_root: hash, tally: {<choice id>: int}, counts: {eligible: int, ballots: int, removed: int, unhandled: int}}`,
   `tally` naming every choice.
 - **`record_proof`, row proofs:** `{index: int, tree_size: int, path: [hash]}`,
   the audit path from the leaf up.
@@ -452,6 +460,10 @@ SubjectPublicKeyInfo; `?` marks a field present only where stated.
   it answers, so it can stay silent. The member's vault retries and
   asks `vote.status`; silence proves nothing to a third party, but a
   ballot with a receipt that the results lack does.
+- **A member holding up the count:** a member can keep a message coming
+  back unhandled. The count waits for it 24 hours at most, then goes
+  ahead and says so (`counts.unhandled`); if that message was a ballot
+  cast in time, it doesn't count.
 - **Delays by VettID's relay:** the relay could hold or drop one
   member's messages. The window counts by the relay's own time, so a
   held ballot still counts; a dropped one is retried.
@@ -536,6 +548,10 @@ item.
 
 ## Changes
 
+- **0.11.0 (2026-10-30):** the results' counts gain `unhandled`: how
+  many messages from before the close the count went ahead without,
+  after waiting 24 hours for a message left unacked (owner decision
+  2026-10-30). The vectors change with it (the results document).
 - **0.10.1 (2026-10-29):** a member must have signed in once before
   voting (`not_signed_in`): a credential key named by the ballot itself
   proved nothing, since the service could make up both the key and the

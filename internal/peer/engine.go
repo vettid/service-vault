@@ -106,6 +106,7 @@ type Peer struct {
 	emptyAt   time.Time
 	leaseFree time.Time
 	unacked   map[string]unacked
+	gaveUp    map[string]unacked // left unacked past MaxUnackedWait, not handled since
 	instance  string
 	seq       uint64
 	rates     map[string]*rateWindow
@@ -381,6 +382,7 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 	}
 	for _, id := range acks {
 		delete(p.unacked, id)
+		delete(p.gaveUp, id)
 		_ = p.cfg.Relay.Ack(ctx, id) // a lost ack means a redelivery, which dedupe absorbs
 	}
 	p.drainOutbox(ctx)
@@ -395,7 +397,8 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 type unacked struct {
 	ms     uint64
 	exp    time.Time
-	capped bool // exp is the cap, not the TTL
+	ttl    time.Time // when the relay drops it
+	capped bool      // exp is the cap, not the TTL
 }
 
 // MaxUnackedWait caps how long one message left unacked holds Caught
@@ -421,7 +424,8 @@ func (p *Peer) leaveUnacked(m relayclient.Message, now time.Time) {
 	if _, ok := p.unacked[m.MsgID]; ok {
 		return // the cap counts from the first time
 	}
-	u := unacked{ms: ms, exp: time.UnixMilli(int64(ms)).Add(ttl + leaseMargin)}
+	drop := time.UnixMilli(int64(ms)).Add(ttl + leaseMargin)
+	u := unacked{ms: ms, exp: drop, ttl: drop}
 	if c := now.Add(MaxUnackedWait); c.Before(u.exp) {
 		u.exp, u.capped = c, true
 	}

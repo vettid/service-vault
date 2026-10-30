@@ -148,7 +148,7 @@ func TestCaughtWaitsOutLeases(t *testing.T) {
 
 func (f *fixture) caught(t time.Time) bool {
 	f.t.Helper()
-	ok, err := f.p.Caught(context.Background(), t)
+	ok, _, err := f.p.Caught(context.Background(), t)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -237,6 +237,12 @@ func TestCaughtUnackedCap(t *testing.T) {
 	}
 	if !strings.Contains(f.logs.String(), "no longer holds the count") {
 		t.Fatal("the cap wasn't logged")
+	}
+	if _, n, _ := f.p.Caught(context.Background(), closeAt); n != 1 {
+		t.Fatalf("unhandled %d, want the one given up on", n)
+	}
+	if _, n, _ := f.p.Caught(context.Background(), closeAt.Add(-time.Hour)); n != 0 {
+		t.Fatalf("unhandled %d before an earlier close", n)
 	}
 }
 

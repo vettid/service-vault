@@ -100,6 +100,11 @@ type Counts struct {
 	Eligible int64 `json:"eligible"`
 	Ballots  int64 `json:"ballots"`
 	Removed  int64 `json:"removed"`
+	// Unhandled is how many messages the relay received before the close
+	// were still unhandled when the count went ahead without them, past
+	// the wait for a message left unacked (§7): any may have held a
+	// ballot that doesn't count.
+	Unhandled int64 `json:"unhandled"`
 }
 
 // Results is the results document (§7, §8.5).
@@ -140,7 +145,7 @@ var (
 		"v": nil, "proposal_id": nil, "proposal": signedSchema,
 		"extensions": []any{signedSchema}, "rows_hash": nil, "rows_root": nil,
 		"tally":  "map",
-		"counts": schema{"eligible": nil, "ballots": nil, "removed": nil},
+		"counts": schema{"eligible": nil, "ballots": nil, "removed": nil, "unhandled": nil},
 	}
 )
 
@@ -391,7 +396,8 @@ func ParseResults(data []byte) (*Results, error) {
 
 func (r *Results) validate() error {
 	if r.V != 1 || !ValidProposalID(r.ProposalID) || len(r.RowsHash) != HashLen || len(r.RowsRoot) != HashLen ||
-		len(r.Proposal.Sig) != SigLen || r.Tally == nil || r.Extensions == nil {
+		len(r.Proposal.Sig) != SigLen || r.Tally == nil || r.Extensions == nil ||
+		r.Counts.Removed < 0 || r.Counts.Unhandled < 0 {
 		return fmt.Errorf("ballot: results fields")
 	}
 	for _, e := range r.Extensions {
