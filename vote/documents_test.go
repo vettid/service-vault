@@ -332,3 +332,44 @@ func indexOf(t *testing.T, rowsBytes, tag []byte) int {
 	t.Fatal("tag not found")
 	return -1
 }
+
+// An extension's outage is from < to, with a source of 1–1,024 bytes of
+// UTF-8; the document is at most 65,536 bytes (§8.5).
+func TestExtensionBounds(t *testing.T) {
+	ok := Extension{V: 1, ProposalID: "01JB2Z6V9K3M4N5P6Q7R8S9T0V", N: 1, ClosesAt: 1800000000,
+		Outage: Outage{From: 1799990000, To: 1799995400, Source: strings.Repeat("x", MaxOutageSource)}}
+	doc, err := EncodeExtension(&ok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseExtension(doc); err != nil {
+		t.Fatal(err)
+	}
+	for name, f := range map[string]func(e *Extension){
+		"from = to":    func(e *Extension) { e.Outage.To = e.Outage.From },
+		"from > to":    func(e *Extension) { e.Outage.To = e.Outage.From - 1 },
+		"no source":    func(e *Extension) { e.Outage.Source = "" },
+		"long source":  func(e *Extension) { e.Outage.Source += "x" },
+		"bad encoding": func(e *Extension) { e.Outage.Source = "\xff" },
+		"n 0":          func(e *Extension) { e.N = 0 },
+	} {
+		e := ok
+		f(&e)
+		if _, err := EncodeExtension(&e); err == nil {
+			t.Errorf("%s: encoded", name)
+		}
+		if name == "bad encoding" {
+			continue // JSON can't carry it: Marshal writes U+FFFD
+		}
+		b, err := encodeCanonical(&e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ParseExtension(b); err == nil {
+			t.Errorf("%s: parsed", name)
+		}
+	}
+	if _, err := ParseExtension(make([]byte, MaxExtensionDoc+1)); err == nil || !strings.Contains(err.Error(), "size") {
+		t.Fatalf("oversized: %v", err)
+	}
+}
