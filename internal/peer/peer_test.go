@@ -740,6 +740,54 @@ func TestStoreConflictStops(t *testing.T) {
 	}
 }
 
+// A cancelled challenge is withdrawn from the member's vault, with the
+// challenge's exp; one past its exp is not (VAULT-MESSAGING 0.80.0 §10.4).
+func TestCancelChallengeWithdraws(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "tag")
+	ctx := context.Background()
+
+	id, err := f.p.AuthenticateSignIn(ctx, cid, "Sign in", "42", 2*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.pump()
+	exp := m.Received(peerwire.TypeConnAuthChallenge)[0].Exp
+	if ok, err := f.p.CancelChallenge(ctx, id); !ok || err != nil {
+		t.Fatalf("cancel: %v %v", ok, err)
+	}
+	f.pump()
+	w := m.Received(peerwire.TypeConnAuthWithdraw)
+	if len(w) != 1 {
+		t.Fatalf("%d withdraws", len(w))
+	}
+	if got, ok := peerwire.ParseConnAuthWithdraw(w[0].Body); !ok || got != id || !w[0].Exp.Equal(exp) {
+		t.Fatalf("withdraw %q %v, exp %v want %v", got, ok, w[0].Exp, exp)
+	}
+	// Cancelled again: nothing pending, nothing sent.
+	f.p.CancelChallenge(ctx, id)
+	f.pump()
+	if n := len(m.Received(peerwire.TypeConnAuthWithdraw)); n != 1 {
+		t.Fatalf("%d withdraws after a second cancel", n)
+	}
+
+	// Past its exp, before housekeeping expires it: forgotten, not withdrawn.
+	id2, err := f.p.Authenticate(ctx, cid, "x", peerwire.PurposeApproval, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.pump()
+	f.clk.Advance(time.Minute)
+	if ok, err := f.p.CancelChallenge(ctx, id2); !ok || err != nil {
+		t.Fatalf("cancel: %v %v", ok, err)
+	}
+	f.pump()
+	if n := len(m.Received(peerwire.TypeConnAuthWithdraw)); n != 1 {
+		t.Fatalf("%d withdraws for an expired challenge", n)
+	}
+}
+
 func TestCancelChallengeAndDenyEnds(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
