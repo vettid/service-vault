@@ -25,6 +25,7 @@ var (
 	ErrLimit      = errors.New("peer: too many pending challenges")
 	ErrContext    = errors.New("peer: challenge context too long")
 	ErrPurpose    = errors.New("peer: unknown challenge purpose")
+	ErrMatchCode  = errors.New("peer: a match code is 2 or 3 digits")
 )
 
 // Authenticate sends a connection.authenticate.challenge with context
@@ -35,6 +36,33 @@ var (
 // arrives as an event with the returned request id: signin.approved,
 // signin.denied or signin.expired.
 func (p *Peer) Authenticate(ctx context.Context, connID, ctxt, purpose string, ttl time.Duration) (string, error) {
+	return p.authenticate(ctx, connID, ctxt, purpose, "", ttl)
+}
+
+// AuthenticateSignIn sends a sign-in challenge (purpose signin) that
+// carries matchCode, the code the sign-in screen shows (VAULT-MESSAGING
+// 0.79.0 §10.4: 2 or 3 ASCII digits, display only, not signed).
+func (p *Peer) AuthenticateSignIn(ctx context.Context, connID, ctxt, matchCode string, ttl time.Duration) (string, error) {
+	if !validMatchCode(matchCode) {
+		return "", ErrMatchCode
+	}
+	return p.authenticate(ctx, connID, ctxt, peerwire.PurposeSignIn, matchCode, ttl)
+}
+
+// validMatchCode: exactly 2 or 3 ASCII digits.
+func validMatchCode(s string) bool {
+	if len(s) < 2 || len(s) > 3 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func (p *Peer) authenticate(ctx context.Context, connID, ctxt, purpose, matchCode string, ttl time.Duration) (string, error) {
 	if len(ctxt) > peerwire.ConnAuthMaxContext {
 		return "", ErrContext
 	}
@@ -68,6 +96,9 @@ func (p *Peer) Authenticate(ctx context.Context, connID, ctxt, purpose string, t
 		return "", err
 	}
 	wc.Purpose = purpose
+	// TODO(VAULT-MESSAGING 0.79.0): wc.MatchCode = matchCode, once
+	// vettid-vault's peerwire.ConnAuthChallenge has the field; until then
+	// the code goes in the stored challenge only.
 	exp := now.Add(ttl).UTC().Truncate(time.Millisecond)
 	if p.sendInnerExp(c, peerwire.TypeConnAuthChallenge, wc.Marshal(), exp, now) == "" {
 		if c.State == StateActive && p.outboxFor(c.ID) >= MaxOutboxPerConn {
@@ -75,7 +106,8 @@ func (p *Peer) Authenticate(ctx context.Context, connID, ctxt, purpose string, t
 		}
 		return "", ErrNotFound
 	}
-	p.challenges[wc.RequestID] = &challenge{ID: wc.RequestID, ConnID: connID, Nonce: wc.Nonce, Context: ctxt, Purpose: purpose, Exp: exp}
+	p.challenges[wc.RequestID] = &challenge{ID: wc.RequestID, ConnID: connID, Nonce: wc.Nonce, Context: ctxt, Purpose: purpose,
+		MatchCode: matchCode, Exp: exp}
 	p.markDirty(kindAuth, wc.RequestID)
 	if err := p.flushAndDrain(ctx); err != nil {
 		return "", err
@@ -114,6 +146,8 @@ func (p *Peer) sendInnerExp(c *Connection, typ string, body []byte, exp, now tim
 	return p.sendInner(c, in, now)
 }
 
+// wire is the challenge as sent. TODO(VAULT-MESSAGING 0.79.0): with
+// MatchCode: ch.MatchCode, once peerwire.ConnAuthChallenge has it.
 func (ch *challenge) wire() *peerwire.ConnAuthChallenge {
 	return &peerwire.ConnAuthChallenge{RequestID: ch.ID, Nonce: ch.Nonce, Context: ch.Context, Purpose: ch.Purpose}
 }
