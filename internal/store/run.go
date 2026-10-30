@@ -251,3 +251,32 @@ func (t *Table) ClearRestored(ctx context.Context) error {
 	_, err := t.Client.DeleteItem(ctx, &dynamodb.DeleteItemInput{TableName: aws.String(t.Name), Key: key(pkRestored, skOne)})
 	return err
 }
+
+// The ballots' rebuild marker: pk "run#ballots_rebuild", written at a
+// start after a restore while ballots are off (the copy's key is
+// missing), so that the restore marker can go once the reconnects are
+// sent and the ballots the restore lost are still put back from the
+// copy once ballots are on again. The start that rebuilds deletes it.
+const pkBallotsRebuild = "run#ballots_rebuild"
+
+// MarkBallotsRebuild records that the ballots wait for a rebuild.
+func (t *Table) MarkBallotsRebuild(ctx context.Context, now time.Time) error {
+	item := key(pkBallotsRebuild, skOne)
+	item[attrAt] = &types.AttributeValueMemberN{Value: strconv.FormatInt(now.Unix(), 10)}
+	_, err := t.Client.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String(t.Name), Item: item})
+	return err
+}
+
+// BallotsRebuild reports whether the ballots' rebuild marker is present.
+func (t *Table) BallotsRebuild(ctx context.Context) (bool, error) {
+	out, err := t.Client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(t.Name), Key: key(pkBallotsRebuild, skOne), ConsistentRead: aws.Bool(true),
+	})
+	return err == nil && out.Item != nil, err
+}
+
+// ClearBallotsRebuild deletes the ballots' rebuild marker.
+func (t *Table) ClearBallotsRebuild(ctx context.Context) error {
+	_, err := t.Client.DeleteItem(ctx, &dynamodb.DeleteItemInput{TableName: aws.String(t.Name), Key: key(pkBallotsRebuild, skOne)})
+	return err
+}

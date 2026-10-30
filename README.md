@@ -98,7 +98,9 @@ destination.
   while proposals or copied ballots exist, or isn't the key the copy's
   ballots are under (the copy holds a key check). The daemon runs with
   votes off, so sign-ins and approvals go on; restore the keystore item
-  from a backup of the table.
+  from a backup of the table. After a table restore with votes off, the
+  ballots the restore lost are put back from the copy at the first start
+  with votes on (marker `run#ballots_rebuild`).
 - `admins_short`: an admin's connection was removed (severed, or
   replaced by a new connection) and fewer admins than m remain, so no
   approval can pass (see "Recovering admins" under "Admin approvals").
