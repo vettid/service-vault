@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.11.1 (2026-10-30)
+**Status:** 0.12.0 (2026-10-30)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -97,15 +97,20 @@ The proposal is a document (§8.5).
 |---|---|
 | `proposal_id` | A ULID. |
 | `service` | The service identity key that signs it. |
-| `title`, `text` | UTF-8; `title` ≤ 200 bytes, `text` ≤ 16 KiB. |
-| `choices` | 3–17 entries `{id, label}`, in display order, with `id` matching `[a-z0-9-]{1,32}` and unique: at least two real choices, and `abstain`, reserved and always present, for a member who wants to be counted without choosing. |
-| `quorum` | The quorum rule, as text, and the number of ballots it needs. `abstain` counts toward it. |
+| `title`, `text` | UTF-8; `title` 1–200 bytes, `text` at most 16,384 bytes. |
+| `choices` | 3–17 entries `{id, label}`, in display order, with `id` matching `[a-z0-9-]{1,32}` and unique and `label` UTF-8 of 1–200 bytes: at least two real choices (16 at most), and `abstain`, reserved and always present, for a member who wants to be counted without choosing. |
+| `quorum` | The quorum rule, as text (UTF-8, at most 1,024 bytes, may be empty), and the number of ballots it needs (`min_ballots`, at least 0). `abstain` counts toward it. |
 | `binding` | Whether the organisation treats the result as binding. The protocol is the same either way. |
 | `removed_may_vote` | Whether a member removed or suspended after `record_at` may still vote. |
 | `record_at` | The roster snapshot, at or before creation (§3.2). |
 | `opens_at`, `closes_at` | The voting window: a ballot counts if the relay received it in `[opens_at, closes_at)` (§6). At most 7 days (owner decision). |
-| `eligible`, `record_root` | The number of eligible members and the Merkle root of their tags (§3.2). |
-| `outage_rule` | The rule of §10.2, as text. |
+| `eligible`, `record_root` | The number of eligible members, at least 1, and the Merkle root of their tags (§3.2). |
+| `outage_rule` | The rule of §10.2, as text (UTF-8, at most 1,024 bytes). |
+
+The proposal document is at most 65,536 bytes. Member vaults apply the
+same bounds: the service refuses a proposal outside them before signing
+it, the site refuses to publish one, and a member's vault refuses one it
+receives.
 
 - **Signature:** `proposal_sig = Sign(service IK, "vettid/vote/1/proposal\x00", H(proposal_bytes))`.
 - **Hash:** `proposal_hash = H(proposal_bytes)` binds every ballot to
@@ -551,6 +556,10 @@ item.
 
 ## Changes
 
+- **0.12.0 (2026-10-30):** the proposal's bounds are the same as a
+  member vault's (§3.1): each choice label 1–200 bytes, `quorum.text`
+  and `outage_rule` at most 1,024 bytes each, `eligible` at least 1, and
+  the document at most 65,536 bytes. No change to the vectors.
 - **0.11.1 (2026-10-30):** `counts.unhandled` covers the window
   `[opens_at, closes_at)` and includes messages the relay dropped
   unhandled; a message's 24-hour wait doesn't restart when it comes

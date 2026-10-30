@@ -16,6 +16,9 @@ import (
 // owner decision).
 const MaxWindow = 7 * 24 * 3600
 
+// MaxProposal is the largest proposal document, in bytes (§3.1).
+const MaxProposal = 64 << 10
+
 // MaxExtension is the most that extensions may add, in total (§10.2).
 const MaxExtension = 24 * 3600
 
@@ -242,11 +245,21 @@ func EncodeProposal(p *Proposal) ([]byte, error) {
 	if err := p.Validate(); err != nil {
 		return nil, err
 	}
-	return encodeCanonical(p)
+	doc, err := encodeCanonical(p)
+	if err != nil {
+		return nil, err
+	}
+	if len(doc) > MaxProposal {
+		return nil, fmt.Errorf("ballot: proposal size")
+	}
+	return doc, nil
 }
 
 // ParseProposal parses and validates a proposal's exact bytes.
 func ParseProposal(data []byte) (*Proposal, error) {
+	if len(data) > MaxProposal {
+		return nil, fmt.Errorf("ballot: proposal size")
+	}
 	var p Proposal
 	if err := parseDoc(data, proposalSchema, &p); err != nil {
 		return nil, err
@@ -273,16 +286,18 @@ func (p *Proposal) Validate() error {
 		return bad("text")
 	case len(p.Choices) < 3 || len(p.Choices) > 17:
 		return bad("number of choices")
-	case p.Quorum.MinBallots < 0:
+	case p.Quorum.MinBallots < 0 || len(p.Quorum.Text) > 1024:
 		return bad("quorum")
+	case len(p.OutageRule) > 1024:
+		return bad("outage rule")
 	case p.RecordAt > p.OpensAt || p.OpensAt >= p.ClosesAt || p.ClosesAt-p.OpensAt > MaxWindow:
 		return bad("times")
-	case p.Eligible < 0 || len(p.RecordRoot) != HashLen:
+	case p.Eligible < 1 || len(p.RecordRoot) != HashLen:
 		return bad("record")
 	}
 	seen, abstain := map[string]bool{}, false
 	for _, c := range p.Choices {
-		if !ValidChoiceID(c.ID) || seen[c.ID] || c.Label == "" {
+		if !ValidChoiceID(c.ID) || seen[c.ID] || c.Label == "" || len(c.Label) > 200 {
 			return bad("choice")
 		}
 		seen[c.ID] = true
@@ -291,7 +306,11 @@ func (p *Proposal) Validate() error {
 	if !abstain {
 		return bad("without abstain")
 	}
-	for _, s := range []string{p.Title, p.Text, p.Quorum.Text, p.OutageRule} {
+	strs := []string{p.Title, p.Text, p.Quorum.Text, p.OutageRule}
+	for _, c := range p.Choices {
+		strs = append(strs, c.Label)
+	}
+	for _, s := range strs {
 		if !utf8.ValidString(s) {
 			return bad("text encoding")
 		}
