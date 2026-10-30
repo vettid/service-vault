@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.12.4 (2026-10-30)
+**Status:** 0.12.5 (2026-10-30)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -157,9 +157,13 @@ design: vettid/votes, docs/VOTES-SITE.md).
   every earlier `service_id` is still listed, with every identity key
   it had (by bytes) and every anchor key it had (by `key`); these are
   only ever added to. A `name` may change and services may be added.
-  A list has at most 64 services, each with at most 16 `iks` and 16
-  `anchor_keys` and a `name` of 1–100 bytes of UTF-8, and
-  `services.json` is at most 262,144 bytes. (chosen; not in the spec)
+  Since the list only grows, it has no limit on the number of services
+  or keys: each `name` is 1–100 bytes of UTF-8, and `services.json` is
+  at most 4,194,304 bytes, which holds thousands of services. A vault
+  that is given a list over its cap, or one it can't otherwise take,
+  keeps the last list it verified and goes on with the services that
+  list names; that is not an error, and a later release can raise the
+  cap. (chosen; not in the spec)
   - A vault accepts a proposal's `service` only if it is its own
     connection's identity key (current, or a past one learned through
     `identity.rotate`). The list only adds which anchor keys that
@@ -589,6 +593,11 @@ item.
 
 ## Changes
 
+- **0.12.5 (2026-10-30):** §3.3: the service list has no limit on the
+  number of services or keys (a list that only grows would have kept
+  them forever), only a cap of 4,194,304 bytes; a vault given a list it
+  can't take keeps the last one it verified. Replaces 0.12.4's bounds.
+  No change to the vectors.
 - **0.12.4 (2026-10-30):** spelled out with the member vault's
   checks (VAULT-MESSAGING §10.19): `record_at` at or before `opens_at`
   (§3.1); an extension's outage has `from` before `to` and a `source`
