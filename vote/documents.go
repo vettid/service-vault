@@ -100,10 +100,11 @@ type Counts struct {
 	Eligible int64 `json:"eligible"`
 	Ballots  int64 `json:"ballots"`
 	Removed  int64 `json:"removed"`
-	// Unhandled is how many messages the relay received before the close
-	// were still unhandled when the count went ahead without them, past
-	// the wait for a message left unacked (§7): any may have held a
-	// ballot that doesn't count.
+	// Unhandled is how many messages the relay received in the window
+	// [opens_at, closes_at) were still unhandled when the count went
+	// ahead without them, past the wait for a message left unacked or
+	// dropped by the relay (§7): any may have held a ballot that doesn't
+	// count.
 	Unhandled int64 `json:"unhandled"`
 }
 
