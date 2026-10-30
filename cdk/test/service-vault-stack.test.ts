@@ -287,7 +287,7 @@ describe('data', () => {
     expect(asList(bySid.Table.Action).sort()).toEqual(['dynamodb:DeleteItem', 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:Query', 'dynamodb:Scan', 'dynamodb:UpdateItem']);
     expect(asList(bySid.Table.Resource)).toEqual([{ 'Fn::GetAtt': [mainTableId(), 'Arn'] }]);
     // The ballots' copy is write-once: no update, delete or scan.
-    expect(asList(bySid.Ballots.Action).sort()).toEqual(['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:Query']);
+    expect(asList(bySid.Ballots.Action).sort()).toEqual(['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:Query', 'dynamodb:Scan']);
     expect(asList(bySid.Ballots.Resource)).toEqual([{ 'Fn::GetAtt': [ballotsTableId(), 'Arn'] }]);
   });
 

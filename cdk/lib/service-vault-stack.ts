@@ -25,10 +25,11 @@ export const TABLE_ACTIONS = ['GetItem', 'PutItem', 'UpdateItem', 'DeleteItem', 
 
 /**
  * The calls the daemon makes on the ballots table: a conditional put, a
- * get and a query: no update and no delete (BALLOT-PROTOCOL §6
- * "Durability"). IAM can't require the put's condition; the daemon sets it.
+ * get, a query and a scan (the start's key check looks for any ballot):
+ * no update and no delete (BALLOT-PROTOCOL §6 "Durability"). IAM can't
+ * require the put's condition; the daemon sets it.
  */
-export const BALLOTS_TABLE_ACTIONS = ['GetItem', 'PutItem', 'Query'] as const;
+export const BALLOTS_TABLE_ACTIONS = ['GetItem', 'PutItem', 'Query', 'Scan'] as const;
 
 /** The Cloud Map service name: the API is at <name>.<namespace>:API_PORT. */
 export const DISCOVERY_NAME = 'service-vault';

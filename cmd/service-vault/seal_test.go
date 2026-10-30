@@ -358,3 +358,65 @@ func TestBallotCopyKeyCheck(t *testing.T) {
 		t.Fatalf("the key restored: %v", err)
 	}
 }
+
+// A copy from before the key check holds ballots but no check: a lost
+// key isn't made again over it, and the first check is written only
+// under a key that opens its ballots.
+func TestBallotCopyKeyCheckOverOlderCopy(t *testing.T) {
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	blobs, inner := &memBlobs{m: map[string][]byte{}}, peer.NewMemStore()
+	st, err := sealedStore(ctx, plainKMS{}, "k", blobs, inner, nil, memAnyRecord(inner), true, 1, false, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A ballot sealed under this keystore's copy key, in a copy without
+	// a check.
+	cs, err := ballotCopySeal(ctx, plainKMS{}, "k", blobs, st, &ballot.MemCopy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tag := []byte{0xaa}
+	sealed, err := cs.Seal(ballot.KindBallot, ballot.BallotID("p", tag), []byte(`{"ballot":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	older := func() *ballot.MemCopy {
+		cp := &ballot.MemCopy{}
+		if _, err := cp.PutOnce(ctx, "p", tag, sealed); err != nil {
+			t.Fatal(err)
+		}
+		return cp
+	}
+	var ck *errCopyKey
+
+	// Another key: it doesn't open the ballot, and no check is written.
+	other := &memBlobs{m: map[string][]byte{}}
+	if _, err := ballotCopySeal(ctx, plainKMS{}, "k", other, st, &ballot.MemCopy{}); err != nil {
+		t.Fatal(err)
+	}
+	cp := older()
+	if _, err := ballotCopySeal(ctx, plainKMS{}, "k", other, st, cp); !errors.As(err, &ck) {
+		t.Fatalf("a check under another key over older ballots: %v", err)
+	}
+	if checks, _ := cp.List(ctx, copyKeyCheckID); len(checks) != 0 {
+		t.Fatal("a check was written under a key that doesn't open the ballots")
+	}
+
+	// No key and no proposals: none is made over the ballots.
+	none := &memBlobs{m: map[string][]byte{}}
+	if _, err := ballotCopySeal(ctx, plainKMS{}, "k", none, st, cp); !errors.As(err, &ck) {
+		t.Fatalf("a new key over older ballots: %v", err)
+	}
+	if _, ok := none.m[keystore.BallotCopyKeyName]; ok {
+		t.Fatal("a key was made over older ballots")
+	}
+
+	// The right key opens it: the check is written.
+	if _, err := ballotCopySeal(ctx, plainKMS{}, "k", blobs, st, cp); err != nil {
+		t.Fatalf("the key the ballots are under: %v", err)
+	}
+	if checks, _ := cp.List(ctx, copyKeyCheckID); len(checks) != 1 {
+		t.Fatal("no check after the right key")
+	}
+}
