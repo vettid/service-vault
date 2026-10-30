@@ -47,11 +47,18 @@ func (p *Peer) loadUnacked(ctx context.Context) error {
 		}
 	}
 	for id := range p.unackedNew {
-		if _, ok := gaveUp[id]; ok {
+		_, storedA := unacked[id]
+		_, storedG := gaveUp[id]
+		switch {
+		case storedG:
 			delete(p.unackedNew, id)
-		} else if u, ok := p.unacked[id]; ok {
-			if _, stored := unacked[id]; !stored {
+		case storedA:
+			// Stored by another process first: its time stands.
+		default:
+			if u, ok := p.unacked[id]; ok {
 				unacked[id] = u
+			} else if u, ok := p.gaveUp[id]; ok {
+				gaveUp[id] = u // given up on before it was stored
 			}
 		}
 	}
@@ -60,17 +67,22 @@ func (p *Peer) loadUnacked(ctx context.Context) error {
 }
 
 // writeUnacked stores the messages this process left unacked since the
-// last call. One another process stored first keeps that one's time. A
-// failed write is retried at the next call; until then a restart would
-// start that message's wait again.
+// last call, given up on already if the count went ahead without one
+// before it was stored. One another process stored first keeps that
+// one's time. A failed write is retried at the next call; until then a
+// restart would start that message's wait again.
 func (p *Peer) writeUnacked(ctx context.Context) {
 	for id := range p.unackedNew {
 		u, ok := p.unacked[id]
+		g, gave := p.gaveUp[id]
+		if gave {
+			u, ok = g, true
+		}
 		if !ok {
-			delete(p.unackedNew, id)
+			delete(p.unackedNew, id) // handled
 			continue
 		}
-		data, _ := json.Marshal(unackedRec{MS: u.ms, First: u.first.UnixMilli()})
+		data, _ := json.Marshal(unackedRec{MS: u.ms, First: u.first.UnixMilli(), GaveUp: gave})
 		err := p.cfg.Store.Apply(ctx, []Change{{Kind: kindUnacked, ID: id, Data: data, Expires: gaveUpUntil(u), IfAbsent: true}})
 		if err != nil && !errors.Is(err, ErrConflict) {
 			p.log().Warn("a message left unacked not stored", "msg_id", id, "err", err.Error())
@@ -85,7 +97,7 @@ func (p *Peer) writeUnacked(ctx context.Context) {
 // first) is left as it is.
 func (p *Peer) storeGaveUp(ctx context.Context, id string, u unacked) error {
 	if u.version == 0 {
-		return nil // not stored yet: writeUnacked failed; kept in memory
+		return nil // not stored yet: writeUnacked stores it given up on
 	}
 	data, _ := json.Marshal(unackedRec{MS: u.ms, First: u.first.UnixMilli(), GaveUp: true})
 	err := p.cfg.Store.Apply(ctx, []Change{{Kind: kindUnacked, ID: id, Data: data, Expires: gaveUpUntil(u), IfVersion: u.version}})
@@ -100,7 +112,13 @@ func (p *Peer) storeGaveUp(ctx context.Context, id string, u unacked) error {
 func (p *Peer) handledUnacked(id string) {
 	_, a := p.unacked[id]
 	_, g := p.gaveUp[id]
-	if a || g {
-		p.extra = append(p.extra, Change{Kind: kindUnacked, ID: id})
+	if !a && !g {
+		return
 	}
+	for _, c := range p.extra {
+		if c.Kind == kindUnacked && c.ID == id {
+			return // a redelivery before a flush: one change per item
+		}
+	}
+	p.extra = append(p.extra, Change{Kind: kindUnacked, ID: id})
 }

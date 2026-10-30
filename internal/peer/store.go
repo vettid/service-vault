@@ -3,6 +3,7 @@ package peer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -131,6 +132,15 @@ func (s *MemStore) GetRecord(_ context.Context, kind, id string) (Record, bool, 
 func (s *MemStore) Apply(_ context.Context, changes []Change) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	seen := map[[2]string]bool{}
+	for _, c := range changes {
+		// As a DynamoDB transaction: one operation per item.
+		if k := [2]string{c.Kind, c.ID}; seen[k] {
+			return fmt.Errorf("peer: two changes to %s/%s in one apply", c.Kind, c.ID)
+		} else {
+			seen[k] = true
+		}
+	}
 	for _, c := range changes {
 		r, ok := s.m[c.Kind][c.ID]
 		ok = ok && s.live(r)
