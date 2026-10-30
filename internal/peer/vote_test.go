@@ -6,12 +6,14 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
-	"github.com/vettid/vettid-relay/relayclient"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/vettid/service-vault/internal/peer/peertest"
+	"github.com/vettid/vettid-relay/relayclient"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/peerwire"
 )
@@ -368,6 +370,45 @@ func TestULIDMS(t *testing.T) {
 	if _, err := ulidMS("not a ulid"); err == nil {
 		t.Fatal("accepted")
 	}
+}
+
+// Eligible counts a connection by its last profile.update's features
+// (VAULT-MESSAGING §10.19.1); Active lists every active one.
+func TestEligibleByFeature(t *testing.T) {
+	f := newFixture(t)
+	a := f.member(10)
+	ca := f.connect(a, "a")
+	b := f.member(20)
+	b.Features = nil // a vault before release 25
+	cb := f.connect(b, "b")
+	check := func(step string, want ...string) {
+		t.Helper()
+		got := f.p.Eligible()
+		if !slices.Equal(got, want) {
+			t.Fatalf("%s: Eligible = %v, want %v", step, got, want)
+		}
+		if act := f.p.Active(); len(act) != 2 {
+			t.Fatalf("%s: Active = %v", step, act)
+		}
+	}
+	check("connected", ca)
+	f.start() // kept across a restart
+	check("restarted", ca)
+	profile := func(m *peertest.Member, v uint64, features ...string) {
+		m.Features = features
+		m.Send(peerwire.TypeProfileUpdate, m.ProfileBody(v))
+		f.pump()
+	}
+	profile(a, 2)
+	check("a's update without features")
+	profile(a, 3, "vote", "calls")
+	check("not sorted: none")
+	profile(a, 4, "Vote")
+	check("not a name: none")
+	profile(b, 2, "calls", "vote")
+	check("b now votes", cb)
+	profile(b, 2)
+	check("an old version changes nothing", cb)
 }
 
 // Eligible lists the active connections, and SendMessage reaches one.

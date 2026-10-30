@@ -285,6 +285,9 @@ type Member struct {
 	Active    bool
 	FirstName string
 	LastName  string
+	// Features are what its profile.update advertises (§10.8): "vote"
+	// unless a test clears it before the connection is active.
+	Features []string
 
 	rekey    *handshake.Initiator
 	recon    *handshake.Initiator
@@ -320,7 +323,8 @@ func NewMember(t testing.TB, w *World, seed byte) *Member {
 	}
 	rk := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed + 2}, 32))
 	m := &Member{t: t, clk: w.clk, IK: ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed}, 32)), kem: kem, rk: rk,
-		Cred: ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed + 3}, 32)), FirstName: "Nora", LastName: "Member"}
+		Cred: ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed + 3}, 32)), FirstName: "Nora", LastName: "Member",
+		Features: []string{"vote"}}
 	m.R = w.View(rk)
 	if _, err := m.R.Register(context.Background()); err != nil {
 		t.Fatal(err)
@@ -556,7 +560,26 @@ func (m *Member) maybeActivate() {
 	m.activate(m.ReqEp, now)
 	m.ReqEp, m.Active = nil, true
 	// The Member vault's profile at activation (§10.8).
-	m.Send(peerwire.TypeProfileUpdate, peerwire.ProfileUpdateBody(1, m.FirstName, m.LastName, m.IK.Public().(ed25519.PublicKey), nil))
+	m.Send(peerwire.TypeProfileUpdate, m.ProfileBody(1))
+}
+
+// ProfileBody is the member vault's profile.update at version, with its
+// Features (§10.8).
+func (m *Member) ProfileBody(version uint64) []byte {
+	body := peerwire.ProfileUpdateBody(version, m.FirstName, m.LastName, m.IK.Public().(ed25519.PublicKey), nil)
+	if len(m.Features) == 0 {
+		return body
+	}
+	var o map[string]json.RawMessage
+	if err := json.Unmarshal(body, &o); err != nil {
+		m.t.Fatal(err)
+	}
+	o["features"], _ = json.Marshal(m.Features)
+	out, err := json.Marshal(o)
+	if err != nil {
+		m.t.Fatal(err)
+	}
+	return out
 }
 
 func (m *Member) NewID() string {

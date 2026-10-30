@@ -432,7 +432,7 @@ billed.
 | `POST /v1/approvals/{id}/remind` | `{approval_id, reminded: [connection_id]}`: the challenge again to the admins who have not answered; `too_soon` (429) within 10 minutes of the last, `not_pending` (409) once settled |
 | `GET /v1/admins` | `{admins: [connection_id], threshold}` |
 | `GET /v1/audit?since=&limit=` | `{entries: [...], next?}`: the audit log after entry `since`, oldest first, `limit` 1–100 (default 100); pass `next` as `since` for the next page |
-| `POST /v1/proposals` `{title, text, choices, quorum, binding, removed_may_vote, opens_at, closes_at, outage_rule}` | `201 {proposal_id, proposal_hash, eligible, sent}`: the proposal is made from the active connections at this moment, published and sent to each (BALLOT-PROTOCOL §3); `abstain` is added to the choices if they lack it. `invalid_proposal` (400); `publication_not_configured` (503) until publication is configured; `503 {error: not_published, proposal_id}` when it was kept but its publication failed (retry with `/publish`). Served with `SV_BALLOTS_TABLE` |
+| `POST /v1/proposals` `{title, text, choices, quorum, binding, removed_may_vote, opens_at, closes_at, outage_rule}` | `201 {proposal_id, proposal_hash, eligible, sent}`: the proposal is made from the active connections at this moment whose vault advertised the vote feature (BALLOT-PROTOCOL §3.2), published and sent to each (BALLOT-PROTOCOL §3); `abstain` is added to the choices if they lack it. `invalid_proposal` (400) for one outside the bounds of BALLOT-PROTOCOL §3.1 (member vaults refuse those) or with no such connection; `publication_not_configured` (503) until publication is configured; `503 {error: not_published, proposal_id}` when it was kept but its publication failed (retry with `/publish`). Served with `SV_BALLOTS_TABLE` |
 | `GET /v1/proposals/{id}` | `{proposal_id, proposal, proposal_hash, eligible, opens_at, closes_at, published}`: nothing that counts ballots before the results |
 | `POST /v1/proposals/{id}/publish` | `{sent}`: publishes a proposal whose publication failed, and sends it again to each eligible member. A proposal not published is no member's: a cast on it is `not_eligible`, `vote.status` `unknown_proposal`. `not_found` (404) |
 | `POST /v1/proposals/{id}/extend` `{closes_at, outage: {from, to, source}}` | The extension (BALLOT-PROTOCOL §10.2), published and sent to each member: for a relay outage of over an hour within the window, by its length rounded up to the hour, 24 h in all at most. `invalid_extension` (400), `too_late` (409) once the close has passed |
@@ -802,6 +802,9 @@ svctl approve -action vote.open -summary "Open the vote" -payload '{"proposal":7
 svctl remind <approval id>
 svctl admins
 svctl audit [-since <entry id>] [-limit 100]
+svctl anchor-key
+svctl proposal create -in proposal.json
+svctl proposal status|publish|close|results <proposal id>
 svctl health
 ```
 
@@ -820,6 +823,12 @@ svctl health
   its outcome (the approving admins, `reason`, `applied`).
 - `audit` prints one JSON entry per line; when there are more, stderr
   says which `-since` gives the next page.
+- `anchor-key` and `proposal` print the API's JSON answers (see
+  "Votes"). `proposal create` posts the file as the proposal input and
+  is never retried (a retry would make a second proposal); a proposal
+  kept but not published (`503 not_published`) is named on stderr, with
+  the `proposal publish` command that retries it. `proposal close`
+  answers `collecting` until the relay's messages are in: run it again.
 - `-wait 0` creates without following. Exit status: 0 done (connected,
   approved), 3 another outcome (declined, denied, expired), 1 an error or
   stopped waiting, 2 a usage or configuration error.

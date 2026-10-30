@@ -18,6 +18,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -54,6 +55,11 @@ commands:
   remind ID                        challenge again the admins who have not answered
   admins                           print the admin set and the threshold
   audit [-since ID] [-limit N]     print a page of the audit log, one JSON entry per line
+  anchor-key                       print GET /v1/anchor-key (for the votes site's service list)
+  proposal create -in FILE         create a proposal from its JSON input; print the answer
+  proposal status|publish|close|results ID
+                                   a proposal's status; retry its publication; count and
+                                   publish its results; print them
   health                           check GET /health
 
 environment:
@@ -134,6 +140,7 @@ func run(ctx context.Context, args []string, getenv env, stdout, stderr io.Write
 	commands := map[string]func(*cli, context.Context, []string) error{
 		"invite": (*cli).invite, "signin": (*cli).signin, "approve": (*cli).approve, "remind": (*cli).remind,
 		"admins": (*cli).admins, "audit": (*cli).audit, "health": (*cli).health,
+		"anchor-key": (*cli).anchorKey, "proposal": (*cli).proposal,
 	}
 	f, ok := commands[cmd]
 	if !ok {
@@ -433,6 +440,82 @@ func (c *cli) audit(ctx context.Context, args []string) error {
 		fmt.Fprintf(c.err, "more: svctl audit -since %s\n", p.Next)
 	}
 	return nil
+}
+
+func (c *cli) anchorKey(ctx context.Context, args []string) error {
+	if err := c.flags(flag.NewFlagSet("anchor-key", flag.ContinueOnError), args, 0); err != nil {
+		return err
+	}
+	b, err := c.c.AnchorKey(ctx)
+	if err != nil {
+		return err
+	}
+	return c.printJSON(b)
+}
+
+// proposal runs one proposal subcommand and prints the API's answer.
+func (c *cli) proposal(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		return usageError{errors.New("want a subcommand: create, status, publish, close or results")}
+	}
+	sub, args := args[0], args[1:]
+	var b json.RawMessage
+	var err error
+	switch sub {
+	case "create":
+		fs := flag.NewFlagSet("proposal create", flag.ContinueOnError)
+		in := fs.String("in", "", "the proposal input, a JSON file")
+		if err := c.flags(fs, args, 0); err != nil {
+			return err
+		}
+		if *in == "" {
+			return usageError{errors.New("-in is required")}
+		}
+		raw, rerr := os.ReadFile(*in)
+		if rerr != nil {
+			return rerr
+		}
+		if !json.Valid(raw) {
+			return usageError{fmt.Errorf("%s: not JSON", *in)}
+		}
+		b, err = c.c.CreateProposal(ctx, raw)
+		var ae *servicevault.APIError
+		if errors.As(err, &ae) && ae.ProposalID != "" {
+			fmt.Fprintf(c.err, "proposal %s is kept but not published: retry with svctl proposal publish %s\n", ae.ProposalID, ae.ProposalID)
+		}
+	case "status", "publish", "close", "results":
+		if err := c.flags(flag.NewFlagSet("proposal "+sub, flag.ContinueOnError), args, 1); err != nil {
+			return err
+		}
+		id := args[len(args)-1]
+		switch sub {
+		case "status":
+			b, err = c.c.Proposal(ctx, id)
+		case "publish":
+			b, err = c.c.PublishProposal(ctx, id)
+		case "close":
+			b, err = c.c.CloseProposal(ctx, id)
+		default:
+			b, err = c.c.ProposalResults(ctx, id)
+		}
+	default:
+		return usageError{fmt.Errorf("unknown subcommand %q", sub)}
+	}
+	if err != nil {
+		return err
+	}
+	return c.printJSON(b)
+}
+
+// printJSON prints an answer indented.
+func (c *cli) printJSON(b json.RawMessage) error {
+	var buf bytes.Buffer
+	if err := json.Indent(&buf, b, "", "  "); err != nil {
+		return err
+	}
+	buf.WriteByte('\n')
+	_, err := c.out.Write(buf.Bytes())
+	return err
 }
 
 func (c *cli) health(ctx context.Context, args []string) error {

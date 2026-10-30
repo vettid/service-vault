@@ -18,6 +18,7 @@ import (
 type fakeRoster []string
 
 func (r fakeRoster) Eligible() []string { return append([]string{}, r...) }
+func (r fakeRoster) Active() []string   { return append([]string{}, r...) }
 
 type sent struct {
 	conn, typ string
@@ -153,6 +154,12 @@ func TestCreateRefusals(t *testing.T) {
 	if _, err := m.Create(ctx, bad); !errors.As(err, &ei) {
 		t.Fatalf("a window over 7 days: %v", err)
 	}
+	roster := m.Roster
+	m.Roster = fakeRoster{}
+	if _, err := m.Create(ctx, input()); !errors.As(err, &ei) {
+		t.Fatalf("no eligible members: %v", err)
+	}
+	m.Roster = roster
 	m.Publisher = nil
 	if _, err := m.Create(ctx, input()); !errors.Is(err, ErrNoPublisher) {
 		t.Fatalf("no publisher: %v", err)

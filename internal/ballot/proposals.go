@@ -17,10 +17,14 @@ import (
 // Proposals (BALLOT-PROTOCOL §3, §4.1): creating a proposal from the
 // roster, publishing it, and sending it to every eligible member.
 
-// Roster lists the connections eligible at this moment (§3.2): active,
-// and with a vault that takes votes.
+// Roster lists the connections at this moment.
 type Roster interface {
+	// Eligible lists those eligible (§3.2): active, and with a vault
+	// that takes votes.
 	Eligible() []string
+	// Active lists the active ones, whether or not their vault takes
+	// votes: a member not among them is removed or suspended (§10.1).
+	Active() []string
 }
 
 // Sender sends a message to a member's vault over its connection.
@@ -119,6 +123,11 @@ func (m *Manager) Create(ctx context.Context, in ProposalInput) (*Created, error
 		choices = append(choices, vote.Choice{ID: vote.AbstainID, Label: "Abstain"})
 	}
 	conns := m.Roster.Eligible()
+	if len(conns) == 0 {
+		// A member's vault refuses a proposal with no eligible member
+		// (§3.1), and none would get it.
+		return nil, &ErrInput{errors.New("ballot: no eligible members")}
+	}
 	sort.Strings(conns)
 	members := map[string]Member{}
 	tags := make([][]byte, 0, len(conns))

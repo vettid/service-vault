@@ -146,7 +146,7 @@ func (m *Manager) count(ctx context.Context, o *OpenProposal, unhandled int64) (
 		ballots[string(r.Ballot.RecordTag)] = r.Ballot
 	}
 	active := map[string]bool{}
-	for _, c := range m.Roster.Eligible() {
+	for _, c := range m.Roster.Active() {
 		active[c] = true
 	}
 	var removed int64

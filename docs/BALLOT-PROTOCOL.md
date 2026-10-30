@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.11.1 (2026-10-30)
+**Status:** 0.12.3 (2026-10-30)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -97,15 +97,20 @@ The proposal is a document (§8.5).
 |---|---|
 | `proposal_id` | A ULID. |
 | `service` | The service identity key that signs it. |
-| `title`, `text` | UTF-8; `title` ≤ 200 bytes, `text` ≤ 16 KiB. |
-| `choices` | 3–17 entries `{id, label}`, in display order, with `id` matching `[a-z0-9-]{1,32}` and unique: at least two real choices, and `abstain`, reserved and always present, for a member who wants to be counted without choosing. |
-| `quorum` | The quorum rule, as text, and the number of ballots it needs. `abstain` counts toward it. |
+| `title`, `text` | UTF-8; `title` 1–200 bytes, `text` at most 16,384 bytes. |
+| `choices` | 3–17 entries `{id, label}`, in display order, with `id` matching `[a-z0-9-]{1,32}` and unique and `label` UTF-8 of 1–200 bytes: at least two real choices (16 at most), and `abstain`, reserved and always present, for a member who wants to be counted without choosing. |
+| `quorum` | The quorum rule, as text (UTF-8, at most 1,024 bytes, may be empty), and the number of ballots it needs (`min_ballots`, at least 0). `abstain` counts toward it. |
 | `binding` | Whether the organisation treats the result as binding. The protocol is the same either way. |
 | `removed_may_vote` | Whether a member removed or suspended after `record_at` may still vote. |
 | `record_at` | The roster snapshot, at or before creation (§3.2). |
 | `opens_at`, `closes_at` | The voting window: a ballot counts if the relay received it in `[opens_at, closes_at)` (§6). At most 7 days (owner decision). |
-| `eligible`, `record_root` | The number of eligible members and the Merkle root of their tags (§3.2). |
-| `outage_rule` | The rule of §10.2, as text. |
+| `eligible`, `record_root` | The number of eligible members, at least 1, and the Merkle root of their tags (§3.2). |
+| `outage_rule` | The rule of §10.2, as text (UTF-8, at most 1,024 bytes). |
+
+The proposal document is at most 65,536 bytes. Member vaults apply the
+same bounds: the service refuses a proposal outside them before signing
+it, the site refuses to publish one, and a member's vault refuses one it
+receives.
 
 - **Signature:** `proposal_sig = Sign(service IK, "vettid/vote/1/proposal\x00", H(proposal_bytes))`.
 - **Hash:** `proposal_hash = H(proposal_bytes)` binds every ballot to
@@ -115,8 +120,11 @@ The proposal is a document (§8.5).
 
 - **Eligible members** are the connections active on the service vault's
   roster at `record_at`: connected, not removed, not suspended, and with
-  a vault that advertised the vote feature (how it advertises is item
-  5.1's). One connection is one member, so a person holding several
+  a vault that advertised the vote feature: the last `profile.update`
+  the service holds from the connection carries `features` with
+  `"vote"` (VAULT-MESSAGING §10.8, §10.19.1). A vault that advertises
+  nothing is not eligible, so a proposal reaches only vaults that can
+  vote. One connection is one member, so a person holding several
   VettID accounts is several members, which the organisation sees in its
   own roster.
 - **Tags:** for each eligible member the service draws a 32-byte random
@@ -185,7 +193,11 @@ would instead drop and audit; that needs the §6.4 change of item 5.1.
 |---|---|---|
 | `vote.proposal` | `{proposal, proposal_sig, bundle, record_secret, record_proof}` | To every eligible member, once the proposal is published. `record_proof` is `{index, tree_size, path}` (§8.5). |
 | `vote.extended` | `{proposal_id, extension, extension_sig, bundle}` | To every eligible member, once an extension is published (§10.2). |
-| `vote.closed` | `{proposal_id, results_hash}` | To every eligible member, once the results are published. Optional: the vault checks at a fixed time anyway (§8.3). |
+| `vote.closed` | `{proposal_id, results_hash}` | To every eligible member, once the results are published. `results_hash` is `H(results_bytes)`, the SHA-256 of the exact `results.json` document (§8.5). Optional: the vault checks at a fixed time anyway (§8.3). |
+
+The vault answers each with `{proposal_id}` or an error. The service
+acknowledges and drops every answer, whatever its body: it changes
+nothing, and a member it missed asks `vote.status` (§4.2).
 
 **The vault keeps** a proposal whose signature verifies under its
 connection's identity key and whose bundle verifies under that service's
@@ -197,13 +209,18 @@ listed anchor key. A second, different proposal under the same
 | Type | Body | Answer |
 |---|---|---|
 | `vote.cast` | `{proposal_id, record_tag, vk, choice_id, ballot_sig, cast_sig}` (§5) | `{proposal_id, msg_ms, receipt_sig}`, or a refusal |
-| `vote.status` | `{proposal_id}` | `{proposal_id, proposal?, record_secret?, record_proof?, ballot?, msg_ms?, receipt_sig?, status_sig}`, or a refusal |
+| `vote.status` | `{proposal_id}` | `{proposal_id, proposal, proposal_sig, bundle, record_secret, record_proof, ballot?, msg_ms?, receipt_sig?, status_sig}`, or a refusal |
 
 - **`vote.status`** gives a vault what the service holds for its
-  connection: the proposal and its tag (as in `vote.proposal`), and the
-  ballot with its receipt if one is recorded. `ballot` is
-  `{vk, choice_id, ballot_sig}`. The answer is signed:
-  `status_sig = Sign(service IK, "vettid/vote/1/status\x00", lp(proposal_id) ‖ lp(record_tag) ‖ H(ballot_leaf or empty))`.
+  connection: the proposal with its signature and anchor bundle, and its
+  tag (as in `vote.proposal`), and the ballot with its receipt if one is
+  recorded. `ballot` is `{vk, choice_id, ballot_sig}`; `ballot`,
+  `msg_ms` and `receipt_sig` come together or not at all, and every
+  other member is always present. A proposal not yet published (with no
+  bundle) is `unknown_proposal`, so a vault can check one learned this
+  way without the site. The answer is signed:
+  `status_sig = Sign(service IK, "vettid/vote/1/status\x00", lp(proposal_id) ‖ lp(record_tag) ‖ H(ballot_leaf))`,
+  where with no ballot `H` is taken of the empty string.
   A vault asks it for a proposal on the site's index that it doesn't
   hold, after a restore (§5), and when a cast has had no answer for 24
   hours.
@@ -225,7 +242,7 @@ listed anchor key. A second, different proposal under the same
 | `not_active` | `vote.cast` | Removed or suspended, and `removed_may_vote` is false. |
 | `not_signed_in` | `vote.cast` | The member has never signed in, so no credential key is pinned (§5). |
 | `already_voted` | `vote.cast` | A different ballot is already recorded for this tag; the body also carries that ballot as `ballot` `{vk, choice_id, ballot_sig}`, with its `ballot_msg_ms` and `receipt_sig`. |
-| `bad_ballot` | `vote.cast` | The tag isn't the connection's, the choice isn't the proposal's, or a signature fails. |
+| `bad_ballot` | `vote.cast` | The tag isn't the connection's, the choice isn't the proposal's, or a signature fails. After a credential-key rotation (`connection.authenticate.rotated`, VAULT-MESSAGING §10.4) the vault may sign `cast_sig` again under its current key and send the same ballot once more; the service checks `cast_sig` under the key pinned when the cast arrives. |
 | `late` | `vote.cast` | The window was open, but the results were already published (§7). |
 | `unknown_proposal` | `vote.status` | No such proposal. |
 
@@ -516,8 +533,11 @@ item.
 2. Merkle: trees of 0, 1, 2, 3, 5 and 8 leaves, and an inclusion proof
    for every leaf of the 5-leaf tree.
 3. Documents: a proposal, an extension, rows and results, with their
-   signatures and anchor bundles; refusals of non-canonical bytes and
-   duplicate names.
+   signatures; refusals of non-canonical bytes and duplicate names. An
+   anchor bundle can't be made from fixed seeds, so its vector
+   (`vote/testdata/anchor-vector.json`) is a proposal captured from the
+   staging site with its bundle, its anchor key and certificate, and the
+   Sigstore staging trusted root it verifies under.
 4. Ed25519: every §2 rule: small-order keys and `R`, including
    non-canonical encodings; mixed-order keys; `y ≥ p`; `x = 0` with the
    sign bit set; a non-canonical `S`; valid signatures.
@@ -551,6 +571,21 @@ item.
 
 ## Changes
 
+- **0.12.3 (2026-10-30):** §11 adds the anchor-bundle vector, captured
+  from staging. No change to the documents or the other vectors.
+- **0.12.2 (2026-10-30):** §3.2 names how a vault advertises the vote
+  feature (VAULT-MESSAGING 0.81.0 `features`). No change to the
+  documents or the vectors.
+- **0.12.1 (2026-10-30):** §4.2 lists the `vote.status` answer as
+  the service sends it (`proposal_sig` and `bundle`, and every member
+  but the ballot's always present); §4.1 says what the vault answers and
+  that the service drops it, and what `results_hash` is hashed over;
+  `bad_ballot` after a rotation may be retried once with a new
+  `cast_sig`. No change to the documents or the vectors.
+- **0.12.0 (2026-10-30):** the proposal's bounds are the same as a
+  member vault's (§3.1): each choice label 1–200 bytes, `quorum.text`
+  and `outage_rule` at most 1,024 bytes each, `eligible` at least 1, and
+  the document at most 65,536 bytes. No change to the vectors.
 - **0.11.1 (2026-10-30):** `counts.unhandled` covers the window
   `[opens_at, closes_at)` and includes messages the relay dropped
   unhandled; a message's 24-hour wait doesn't restart when it comes

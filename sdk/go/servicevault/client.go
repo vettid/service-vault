@@ -141,6 +141,9 @@ const (
 type APIError struct {
 	Status int    // HTTP status
 	Code   string // the body's "error", or "" if it had none
+	// ProposalID is the body's "proposal_id": a proposal kept but not
+	// published (503 not_published), for PublishProposal to retry.
+	ProposalID string
 }
 
 func (e *APIError) Error() string {
@@ -572,10 +575,11 @@ func (c *Client) once(ctx context.Context, method, path string, body []byte, aut
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		ae := &APIError{Status: resp.StatusCode}
 		var e struct {
-			Error string `json:"error"`
+			Error      string `json:"error"`
+			ProposalID string `json:"proposal_id"`
 		}
 		if json.Unmarshal(b, &e) == nil {
-			ae.Code = e.Error
+			ae.Code, ae.ProposalID = e.Error, e.ProposalID
 		}
 		return resp.StatusCode >= 500, ae
 	}
@@ -585,13 +589,63 @@ func (c *Client) once(ctx context.Context, method, path string, body []byte, aut
 	return false, nil
 }
 
+// Votes (BALLOT-PROTOCOL; README "Votes"). The documents are the API's
+// JSON as served, unparsed: the proposal input and the answers are
+// specified there, and an operator tool passes them through.
+
+// AnchorKey returns GET /v1/anchor-key: the anchor key, its certificate
+// and the service's identity key, for the votes site's service list.
+func (c *Client) AnchorKey(ctx context.Context) (json.RawMessage, error) {
+	var out json.RawMessage
+	return out, c.do(ctx, http.MethodGet, "/v1/anchor-key", nil, true, &out)
+}
+
+// CreateProposal posts a proposal input (POST /v1/proposals). It is not
+// retried: a retry would make a second proposal. A proposal kept but not
+// published is an *APIError with Code "not_published" and its
+// ProposalID, for PublishProposal.
+func (c *Client) CreateProposal(ctx context.Context, in json.RawMessage) (json.RawMessage, error) {
+	var out json.RawMessage
+	return out, c.do(ctx, http.MethodPost, "/v1/proposals", in, true, &out)
+}
+
+// Proposal returns GET /v1/proposals/{id}.
+func (c *Client) Proposal(ctx context.Context, id string) (json.RawMessage, error) {
+	return c.proposalCall(ctx, http.MethodGet, id, "")
+}
+
+// PublishProposal retries a proposal's publication and sending.
+func (c *Client) PublishProposal(ctx context.Context, id string) (json.RawMessage, error) {
+	return c.proposalCall(ctx, http.MethodPost, id, "/publish")
+}
+
+// CloseProposal counts, publishes and announces a proposal's results,
+// once it has closed and the relay's messages are in (else an *APIError:
+// not_closed, collecting).
+func (c *Client) CloseProposal(ctx context.Context, id string) (json.RawMessage, error) {
+	return c.proposalCall(ctx, http.MethodPost, id, "/close")
+}
+
+// ProposalResults returns GET /v1/proposals/{id}/results.
+func (c *Client) ProposalResults(ctx context.Context, id string) (json.RawMessage, error) {
+	return c.proposalCall(ctx, http.MethodGet, id, "/results")
+}
+
+func (c *Client) proposalCall(ctx context.Context, method, id, sub string) (json.RawMessage, error) {
+	if id == "" {
+		return nil, errors.New("servicevault: empty proposal id")
+	}
+	var out json.RawMessage
+	return out, c.do(ctx, method, "/v1/proposals/"+url.PathEscape(id)+sub, nil, true, &out)
+}
+
 // routeName names a route without its id, for error messages.
 func routeName(path string) string {
 	path, _, _ = strings.Cut(path, "?")
-	for _, p := range []string{"/v1/invites/", "/v1/signins/", "/v1/approvals/"} {
+	for _, p := range []string{"/v1/invites/", "/v1/signins/", "/v1/approvals/", "/v1/proposals/"} {
 		if rest, ok := strings.CutPrefix(path, p); ok {
-			if strings.HasSuffix(rest, "/remind") {
-				return p + "{id}/remind"
+			if _, sub, ok := strings.Cut(rest, "/"); ok {
+				return p + "{id}/" + sub
 			}
 			return p + "{id}"
 		}
