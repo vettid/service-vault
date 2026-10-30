@@ -263,8 +263,8 @@ func TestCaughtUnackedCap(t *testing.T) {
 	}
 }
 
-// Two overlapping messages left unacked each wait MaxUnackedWait from
-// when they were first left, whatever order Caught visits them in.
+// Two overlapping messages left unacked, each redelivered every hour,
+// each wait MaxUnackedWait from when they were first left.
 func TestCaughtUnackedOverlap(t *testing.T) {
 	for run := 0; run < 20; run++ {
 		f := newFixture(t)

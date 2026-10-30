@@ -412,7 +412,8 @@ const MaxUnackedWait = 24 * time.Hour
 // waiting for is remembered for counts.unhandled: past the relay's TTL
 // (the message is gone, but the count went ahead without it), and past
 // the longest window with its extensions, so a close of any window it
-// falls in sees it.
+// falls in sees it. With a longer relay TTL, it is kept
+// MaxUnackedWait past the TTL instead.
 const gaveUpKeep = 30 * 24 * time.Hour
 
 // leaveUnacked notes a collected message that was not acked.

@@ -176,6 +176,9 @@ func (p *Peer) Caught(ctx context.Context, t, from, until time.Time) (caught boo
 				p.gaveUp = map[string]unacked{}
 			}
 			u.exp = time.UnixMilli(int64(u.ms)).Add(gaveUpKeep)
+			if t := u.ttl.Add(MaxUnackedWait); t.After(u.exp) {
+				u.exp = t // a longer relay TTL: still kept past its redeliveries
+			}
 			p.gaveUp[id] = u
 			delete(p.unacked, id)
 		case u.ms < tms:
