@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.12.0 (2026-10-30)
+**Status:** 0.12.1 (2026-10-30)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -190,7 +190,11 @@ would instead drop and audit; that needs the §6.4 change of item 5.1.
 |---|---|---|
 | `vote.proposal` | `{proposal, proposal_sig, bundle, record_secret, record_proof}` | To every eligible member, once the proposal is published. `record_proof` is `{index, tree_size, path}` (§8.5). |
 | `vote.extended` | `{proposal_id, extension, extension_sig, bundle}` | To every eligible member, once an extension is published (§10.2). |
-| `vote.closed` | `{proposal_id, results_hash}` | To every eligible member, once the results are published. Optional: the vault checks at a fixed time anyway (§8.3). |
+| `vote.closed` | `{proposal_id, results_hash}` | To every eligible member, once the results are published. `results_hash` is `H(results_bytes)`, the SHA-256 of the exact `results.json` document (§8.5). Optional: the vault checks at a fixed time anyway (§8.3). |
+
+The vault answers each with `{proposal_id}` or an error. The service
+acknowledges and drops every answer, whatever its body: it changes
+nothing, and a member it missed asks `vote.status` (§4.2).
 
 **The vault keeps** a proposal whose signature verifies under its
 connection's identity key and whose bundle verifies under that service's
@@ -202,13 +206,18 @@ listed anchor key. A second, different proposal under the same
 | Type | Body | Answer |
 |---|---|---|
 | `vote.cast` | `{proposal_id, record_tag, vk, choice_id, ballot_sig, cast_sig}` (§5) | `{proposal_id, msg_ms, receipt_sig}`, or a refusal |
-| `vote.status` | `{proposal_id}` | `{proposal_id, proposal?, record_secret?, record_proof?, ballot?, msg_ms?, receipt_sig?, status_sig}`, or a refusal |
+| `vote.status` | `{proposal_id}` | `{proposal_id, proposal, proposal_sig, bundle, record_secret, record_proof, ballot?, msg_ms?, receipt_sig?, status_sig}`, or a refusal |
 
 - **`vote.status`** gives a vault what the service holds for its
-  connection: the proposal and its tag (as in `vote.proposal`), and the
-  ballot with its receipt if one is recorded. `ballot` is
-  `{vk, choice_id, ballot_sig}`. The answer is signed:
-  `status_sig = Sign(service IK, "vettid/vote/1/status\x00", lp(proposal_id) ‖ lp(record_tag) ‖ H(ballot_leaf or empty))`.
+  connection: the proposal with its signature and anchor bundle, and its
+  tag (as in `vote.proposal`), and the ballot with its receipt if one is
+  recorded. `ballot` is `{vk, choice_id, ballot_sig}`; `ballot`,
+  `msg_ms` and `receipt_sig` come together or not at all, and every
+  other member is always present. A proposal not yet published (with no
+  bundle) is `unknown_proposal`, so a vault can check one learned this
+  way without the site. The answer is signed:
+  `status_sig = Sign(service IK, "vettid/vote/1/status\x00", lp(proposal_id) ‖ lp(record_tag) ‖ H(ballot_leaf))`,
+  where with no ballot `H` is taken of the empty string.
   A vault asks it for a proposal on the site's index that it doesn't
   hold, after a restore (§5), and when a cast has had no answer for 24
   hours.
@@ -230,7 +239,7 @@ listed anchor key. A second, different proposal under the same
 | `not_active` | `vote.cast` | Removed or suspended, and `removed_may_vote` is false. |
 | `not_signed_in` | `vote.cast` | The member has never signed in, so no credential key is pinned (§5). |
 | `already_voted` | `vote.cast` | A different ballot is already recorded for this tag; the body also carries that ballot as `ballot` `{vk, choice_id, ballot_sig}`, with its `ballot_msg_ms` and `receipt_sig`. |
-| `bad_ballot` | `vote.cast` | The tag isn't the connection's, the choice isn't the proposal's, or a signature fails. |
+| `bad_ballot` | `vote.cast` | The tag isn't the connection's, the choice isn't the proposal's, or a signature fails. After a credential-key rotation (`connection.authenticate.rotated`, VAULT-MESSAGING §10.4) the vault may sign `cast_sig` again under its current key and send the same ballot once more; the service checks `cast_sig` under the key pinned when the cast arrives. |
 | `late` | `vote.cast` | The window was open, but the results were already published (§7). |
 | `unknown_proposal` | `vote.status` | No such proposal. |
 
@@ -556,6 +565,12 @@ item.
 
 ## Changes
 
+- **0.12.1 (2026-10-30):** §4.2 lists the `vote.status` answer as
+  the service sends it (`proposal_sig` and `bundle`, and every member
+  but the ballot's always present); §4.1 says what the vault answers and
+  that the service drops it, and what `results_hash` is hashed over;
+  `bad_ballot` after a rotation may be retried once with a new
+  `cast_sig`. No change to the documents or the vectors.
 - **0.12.0 (2026-10-30):** the proposal's bounds are the same as a
   member vault's (§3.1): each choice label 1–200 bytes, `quorum.text`
   and `outage_rule` at most 1,024 bytes each, `eligible` at least 1, and
