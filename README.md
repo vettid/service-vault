@@ -504,9 +504,13 @@ both bind.
   within the rate limits supersedes that email's pending one, whether or
   not the email is bound: the older
   one reads `expired` at once, gets no webhook, and its challenge is
-  cancelled on the service's side, so approving it on the phone does
-  nothing (VAULT-MESSAGING §10.4 has no message to withdraw a challenge;
-  the phone shows it until its `exp`). (chosen; not in the spec)
+  cancelled, so approving it on the phone does nothing. The service
+  sends the member's vault `connection.authenticate.withdraw`
+  (VAULT-MESSAGING 0.80.0 §10.4), which closes the ask on the phone; a
+  vault before 0.80.0 drops it, and the phone shows the ask until its
+  `exp`. An approval's challenges are withdrawn the same way when it is
+  decided, reminded or its admin leaves the set. (chosen; not in the
+  spec, beyond the withdraw)
 - *Rate limits*, counted per email and per `source` in fixed windows in
   DynamoDB (so a restart does not reset them): by default 5 per 15
   minutes and 20 per 24 hours per email, and 20 per 15 minutes per

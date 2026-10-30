@@ -101,11 +101,14 @@ func (p *Peer) authenticate(ctx context.Context, connID, ctxt, purpose, matchCod
 	return wc.RequestID, nil
 }
 
-// CancelChallenge withdraws a pending challenge on the service's side: it
-// is forgotten, so a later answer matches no pending request and is
-// ignored (§8.1), and no event is emitted for it. VAULT-MESSAGING §10.4
-// has no message to withdraw a challenge, so the member's vault keeps
-// showing it until its exp. It reports whether the challenge was pending.
+// CancelChallenge withdraws a pending challenge: it is forgotten, so a
+// later answer matches no pending request and is ignored (§8.1), and no
+// event is emitted for it; and, unless it has expired, the member's vault
+// is sent connection.authenticate.withdraw so it closes the ask
+// (VAULT-MESSAGING 0.80.0 §10.4). The withdraw is best effort: a
+// connection that is not active, or whose outbox is full, gets none, and
+// the challenge is forgotten all the same. It reports whether the
+// challenge was pending.
 func (p *Peer) CancelChallenge(ctx context.Context, requestID string) (bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -118,10 +121,16 @@ func (p *Peer) CancelChallenge(ctx context.Context, requestID string) (bool, err
 	}
 	delete(p.challenges, requestID)
 	p.markDirty(kindAuth, requestID)
-	if err := p.flush(ctx); err != nil {
+	withdrawn := false
+	if now := p.now(); now.Before(ch.Exp) {
+		if c := p.conns[ch.ConnID]; c != nil {
+			withdrawn = p.sendInnerExp(c, peerwire.TypeConnAuthWithdraw, peerwire.ConnAuthWithdrawBody(requestID), ch.Exp, now) != ""
+		}
+	}
+	if err := p.flushAndDrain(ctx); err != nil {
 		return false, err
 	}
-	p.log().Info("challenge cancelled", "connection_id", ch.ConnID, "request_id", requestID)
+	p.log().Info("challenge cancelled", "connection_id", ch.ConnID, "request_id", requestID, "withdrawn", withdrawn)
 	return true, nil
 }
 
