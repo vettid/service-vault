@@ -11,3 +11,11 @@ useDefault = true
 [[allowlists]]
 description = "ballot protocol test vectors from fixed public inputs"
 paths = ['''^vote/testdata/vectors\.json$''', '''^internal/ballot/testdata/vectors\.json$''']
+
+# The anchor-bundle vector (BALLOT-PROTOCOL §11): a proposal published on
+# votes.staging.vettid.org with its public anchor key, signatures and
+# Sigstore bundle, and Sigstore's public trusted root. Nothing in it is
+# secret.
+[[allowlists]]
+description = "anchor-bundle vector of public, published values"
+paths = ['''^vote/testdata/anchor-vector\.json$''']
