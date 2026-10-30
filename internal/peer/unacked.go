@@ -93,18 +93,19 @@ func (p *Peer) writeUnacked(ctx context.Context) {
 }
 
 // storeGaveUp records that the count no longer waits for a message. A
-// record gone or changed meanwhile (handled, or another process gave up
-// first) is left as it is.
-func (p *Peer) storeGaveUp(ctx context.Context, id string, u unacked) error {
+// record gone or changed since it was loaded (handled, or another process
+// gave up first) is left as it is and changed is true: the next load
+// tells which.
+func (p *Peer) storeGaveUp(ctx context.Context, id string, u unacked) (changed bool, err error) {
 	if u.version == 0 {
-		return nil // not stored yet: writeUnacked stores it given up on
+		return false, nil // not stored yet: writeUnacked stores it given up on
 	}
 	data, _ := json.Marshal(unackedRec{MS: u.ms, First: u.first.UnixMilli(), GaveUp: true})
-	err := p.cfg.Store.Apply(ctx, []Change{{Kind: kindUnacked, ID: id, Data: data, Expires: gaveUpUntil(u), IfVersion: u.version}})
+	err = p.cfg.Store.Apply(ctx, []Change{{Kind: kindUnacked, ID: id, Data: data, Expires: gaveUpUntil(u), IfVersion: u.version}})
 	if errors.Is(err, ErrConflict) {
-		return nil
+		return true, nil
 	}
-	return err
+	return false, err
 }
 
 // handledUnacked deletes a message's record in the write of its

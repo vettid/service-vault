@@ -652,3 +652,44 @@ func TestCaughtUnackedGaveUpStored(t *testing.T) {
 		t.Fatalf("unhandled %d, want the kept one", n)
 	}
 }
+
+// handledMeanwhile deletes an unacked record just before the peer's
+// write marking it given up on, as another process handling the message
+// between the peer's load and that write would.
+type handledMeanwhile struct {
+	Store
+	done bool
+}
+
+func (s *handledMeanwhile) Apply(ctx context.Context, changes []Change) error {
+	if c := changes[0]; !s.done && c.Kind == kindUnacked && c.IfVersion != 0 {
+		s.done = true
+		if err := s.Store.Apply(ctx, []Change{{Kind: kindUnacked, ID: c.ID}}); err != nil {
+			return err
+		}
+	}
+	return s.Store.Apply(ctx, changes)
+}
+
+// A message handled elsewhere while the peer gives up on it isn't counted.
+func TestCaughtUnackedGaveUpRace(t *testing.T) {
+	f := newFixture(t)
+	f.clk.Advance(2 * time.Minute)
+	f.pump()
+	closeAt := f.clk.Now()
+	id := f.ulid(closeAt.Add(-time.Second))
+	f.leave(id)
+	f.caught(closeAt) // stores it
+	f.clk.Advance(MaxUnackedWait + time.Minute)
+	f.pump()
+	f.p.cfg.Store = &handledMeanwhile{Store: f.store}
+	if n := f.unhandled(closeAt, closeAt.Add(-time.Hour), closeAt); n != 0 {
+		t.Fatalf("unhandled %d with the message handled meanwhile, want 0", n)
+	}
+	if !f.caught(closeAt) {
+		t.Fatal("not caught up once the next load shows it handled")
+	}
+	if n := f.unhandled(closeAt, closeAt.Add(-time.Hour), closeAt); n != 0 {
+		t.Fatalf("unhandled %d later, want 0", n)
+	}
+}
