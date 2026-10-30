@@ -177,8 +177,16 @@ func (p *Peer) Caught(ctx context.Context, t, from, until time.Time) (caught boo
 			} else {
 				p.log().Warn("a message left unacked was dropped by the relay unhandled", "msg_id", id)
 			}
-			if err := p.storeGaveUp(ctx, id, u); err != nil {
+			changed, err := p.storeGaveUp(ctx, id, u)
+			if err != nil {
 				return false, 0, err
+			}
+			if changed {
+				// Handled or given up on elsewhere since the load: not
+				// counted here; the next call's load says which.
+				delete(p.unacked, id)
+				held = held || u.ms < tms
+				continue
 			}
 			if p.gaveUp == nil {
 				p.gaveUp = map[string]unacked{}

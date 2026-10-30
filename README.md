@@ -349,6 +349,12 @@ cluster and the service share the name):
    detection"). To retry a restore, use the same backup or an older one;
    `-newer-point` overrides, knowing every member must then connect
    again.
+   A restore during a vote, or before its close, also brings back the
+   backup's record of messages left unacked (kind `unacked`): one handled
+   since the backup holds the count again for up to its 24 hours and
+   then counts in `unhandled`, and one given up on since the backup is
+   forgotten if the relay has dropped it, so `unhandled` can come out too
+   high or too low. Note such a restore with the results.
 4. If the image changes too, deploy it now. Start the service:
    `aws ecs update-service --cluster T --service T --desired-count 1`.
 5. Check `/health`, the TLS pin, the `reconnected` lines and a member's
