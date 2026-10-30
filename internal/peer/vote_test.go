@@ -757,6 +757,9 @@ func TestChallengeMatchCode(t *testing.T) {
 	if ch == nil || ch.MatchCode != "07" || ch.Purpose != peerwire.PurposeSignIn {
 		t.Fatalf("challenge %+v", ch)
 	}
+	if len(m.Challenges) != 1 || m.Challenges[0].MatchCode != "07" || m.Challenges[0].Purpose != peerwire.PurposeSignIn {
+		t.Fatalf("member saw %+v", m.Challenges)
+	}
 	f.start() // kept across a restart, for the challenge's resend
 	f.p.mu.Lock()
 	ch = f.p.challenges[id]

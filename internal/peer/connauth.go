@@ -43,23 +43,10 @@ func (p *Peer) Authenticate(ctx context.Context, connID, ctxt, purpose string, t
 // carries matchCode, the code the sign-in screen shows (VAULT-MESSAGING
 // 0.79.0 §10.4: 2 or 3 ASCII digits, display only, not signed).
 func (p *Peer) AuthenticateSignIn(ctx context.Context, connID, ctxt, matchCode string, ttl time.Duration) (string, error) {
-	if !validMatchCode(matchCode) {
+	if !peerwire.ValidMatchCode(matchCode) {
 		return "", ErrMatchCode
 	}
 	return p.authenticate(ctx, connID, ctxt, peerwire.PurposeSignIn, matchCode, ttl)
-}
-
-// validMatchCode: exactly 2 or 3 ASCII digits.
-func validMatchCode(s string) bool {
-	if len(s) < 2 || len(s) > 3 {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		if s[i] < '0' || s[i] > '9' {
-			return false
-		}
-	}
-	return true
 }
 
 func (p *Peer) authenticate(ctx context.Context, connID, ctxt, purpose, matchCode string, ttl time.Duration) (string, error) {
@@ -96,9 +83,7 @@ func (p *Peer) authenticate(ctx context.Context, connID, ctxt, purpose, matchCod
 		return "", err
 	}
 	wc.Purpose = purpose
-	// TODO(VAULT-MESSAGING 0.79.0): wc.MatchCode = matchCode, once
-	// vettid-vault's peerwire.ConnAuthChallenge has the field; until then
-	// the code goes in the stored challenge only.
+	wc.MatchCode = matchCode
 	exp := now.Add(ttl).UTC().Truncate(time.Millisecond)
 	if p.sendInnerExp(c, peerwire.TypeConnAuthChallenge, wc.Marshal(), exp, now) == "" {
 		if c.State == StateActive && p.outboxFor(c.ID) >= MaxOutboxPerConn {
@@ -146,10 +131,9 @@ func (p *Peer) sendInnerExp(c *Connection, typ string, body []byte, exp, now tim
 	return p.sendInner(c, in, now)
 }
 
-// wire is the challenge as sent. TODO(VAULT-MESSAGING 0.79.0): with
-// MatchCode: ch.MatchCode, once peerwire.ConnAuthChallenge has it.
+// wire is the challenge as sent.
 func (ch *challenge) wire() *peerwire.ConnAuthChallenge {
-	return &peerwire.ConnAuthChallenge{RequestID: ch.ID, Nonce: ch.Nonce, Context: ch.Context, Purpose: ch.Purpose}
+	return &peerwire.ConnAuthChallenge{RequestID: ch.ID, Nonce: ch.Nonce, Context: ch.Context, Purpose: ch.Purpose, MatchCode: ch.MatchCode}
 }
 
 // connAuthResponse handles a connection's answer to a challenge: the
