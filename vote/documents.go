@@ -19,6 +19,12 @@ const MaxWindow = 7 * 24 * 3600
 // MaxProposal is the largest proposal document, in bytes (§3.1).
 const MaxProposal = 64 << 10
 
+// MaxExtensionDoc is the largest extension document, in bytes (§8.5).
+const MaxExtensionDoc = 64 << 10
+
+// MaxOutageSource is the longest outage source, in bytes (§8.5).
+const MaxOutageSource = 1024
+
 // MaxExtension is the most that extensions may add, in total (§10.2).
 const MaxExtension = 24 * 3600
 
@@ -333,11 +339,21 @@ func EncodeExtension(e *Extension) ([]byte, error) {
 	if err := e.validate(); err != nil {
 		return nil, err
 	}
-	return encodeCanonical(e)
+	doc, err := encodeCanonical(e)
+	if err != nil {
+		return nil, err
+	}
+	if len(doc) > MaxExtensionDoc {
+		return nil, fmt.Errorf("ballot: extension size")
+	}
+	return doc, nil
 }
 
 // ParseExtension parses an extension's exact bytes.
 func ParseExtension(data []byte) (*Extension, error) {
+	if len(data) > MaxExtensionDoc {
+		return nil, fmt.Errorf("ballot: extension size")
+	}
 	var e Extension
 	if err := parseDoc(data, extensionSchema, &e); err != nil {
 		return nil, err
@@ -349,7 +365,9 @@ func ParseExtension(data []byte) (*Extension, error) {
 }
 
 func (e *Extension) validate() error {
-	if e.V != 1 || !ValidProposalID(e.ProposalID) || e.N < 1 || e.Outage.From > e.Outage.To || e.Outage.Source == "" {
+	src := e.Outage.Source
+	if e.V != 1 || !ValidProposalID(e.ProposalID) || e.N < 1 || e.Outage.From >= e.Outage.To ||
+		src == "" || len(src) > MaxOutageSource || !utf8.ValidString(src) {
 		return fmt.Errorf("ballot: extension fields")
 	}
 	return nil

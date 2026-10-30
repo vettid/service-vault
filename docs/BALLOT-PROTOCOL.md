@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.12.3 (2026-10-30)
+**Status:** 0.12.4 (2026-10-30)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -102,8 +102,8 @@ The proposal is a document (§8.5).
 | `quorum` | The quorum rule, as text (UTF-8, at most 1,024 bytes, may be empty), and the number of ballots it needs (`min_ballots`, at least 0). `abstain` counts toward it. |
 | `binding` | Whether the organisation treats the result as binding. The protocol is the same either way. |
 | `removed_may_vote` | Whether a member removed or suspended after `record_at` may still vote. |
-| `record_at` | The roster snapshot, at or before creation (§3.2). |
-| `opens_at`, `closes_at` | The voting window: a ballot counts if the relay received it in `[opens_at, closes_at)` (§6). At most 7 days (owner decision). |
+| `record_at` | The roster snapshot, at or before creation (§3.2) and at or before `opens_at`. |
+| `opens_at`, `closes_at` | The voting window, `opens_at` before `closes_at`: a ballot counts if the relay received it in `[opens_at, closes_at)` (§6). At most 7 days (owner decision). |
 | `eligible`, `record_root` | The number of eligible members, at least 1, and the Merkle root of their tags (§3.2). |
 | `outage_rule` | The rule of §10.2, as text (UTF-8, at most 1,024 bytes). |
 
@@ -153,7 +153,13 @@ design: vettid/votes, docs/VOTES-SITE.md).
   `Sign(site key, "vettid/vote/1/service-list\x00", H(bytes))`. Each
   version has a higher `version`, names the hash of the previous one
   and keeps all its entries; a vault keeps the latest it has verified
-  and accepts a new one only if it chains.
+  and accepts a new one only if it chains. Keeping its entries means
+  every earlier `service_id` is still listed, with every identity key
+  it had (by bytes) and every anchor key it had (by `key`); these are
+  only ever added to. A `name` may change and services may be added.
+  A list has at most 64 services, each with at most 16 `iks` and 16
+  `anchor_keys` and a `name` of 1–100 bytes of UTF-8, and
+  `services.json` is at most 262,144 bytes. (chosen; not in the spec)
   - A vault accepts a proposal's `service` only if it is its own
     connection's identity key (current, or a past one learned through
     `identity.rotate`). The list only adds which anchor keys that
@@ -233,7 +239,8 @@ listed anchor key. A second, different proposal under the same
   `H(ballot_leaf)` for `vote.cast` and `H(proposal_id)` for
   `vote.status`, or `H(the request body)` when the body is too malformed
   to form them. A request that names no valid `proposal_id` gets an
-  unsigned refusal. A vault treats an unsigned refusal as no answer.
+  unsigned refusal, whose `refusal_sig` is `null`. A vault treats an
+  unsigned refusal as no answer.
 
 | Code | For | Meaning |
 |---|---|---|
@@ -428,6 +435,11 @@ SubjectPublicKeyInfo; `?` marks a field present only where stated.
 - **Proposal:** `{v: 1, proposal_id, service: b64, title, text, choices: [{id, label}], quorum: {text, min_ballots: int}, binding: boolean, removed_may_vote: boolean, record_at: time, opens_at: time, closes_at: time, eligible: int, record_root: hash, outage_rule: string}`.
 - **Extension:** `{v: 1, proposal_id, n: int (≥ 1), closes_at: time, outage: {from: time, to: time, source: string}}`;
   signature `Sign(IK, "vettid/vote/1/extended\x00", proposal_hash ‖ H(bytes))`.
+  `outage.from` is before `outage.to`, `source` is 1–1,024 bytes of
+  UTF-8 (where the outage was reported, such as the relay's status
+  page), and the document is at most 65,536 bytes. That the outage is
+  over an hour, within the window, and that the extension rounds it up
+  to the hour (§10.2) are checked by the service before it signs.
 - **Rows:** `{v: 1, proposal_id, rows: [{record_tag: hash, ballot: {vk: b64, choice_id: string, ballot_sig: sig} | null}]}`,
   `rows` sorted by `record_tag`.
 - **Results:** `{v: 1, proposal_id, proposal: {doc: b64, sig: sig}, extensions: [{doc: b64, sig: sig}], rows_hash: hash, rows_root: hash, tally: {<choice id>: int}, counts: {eligible: int, ballots: int, removed: int, unhandled: int}}`,
@@ -450,7 +462,13 @@ SubjectPublicKeyInfo; `?` marks a field present only where stated.
   authority, packaged as a Sigstore bundle (v0.3). A verifier checks
   that the entry names exactly `H(document)` and the anchor key, the
   signature, the inclusion proof and checkpoint, and the timestamp. The
-  Rekor version and trusted root are pinned in item 5.4.
+  entry is `hashedrekord` version 0.0.1, entered through Rekor's v1
+  API; the bundle (`application/vnd.dev.sigstore.bundle.v0.3+json`)
+  carries `publicKey`, `tlogEntries` and `timestampVerificationData`.
+  Each pinned trusted root is a Sigstore TrustedRoot document
+  (`application/vnd.dev.sigstore.trustedroot+json;version=0.1`, as
+  Sigstore's TUF repository serves `trusted_root.json`); §11 item 3 is a
+  bundle that verifies against the staging one.
 
 ## 9. Trust
 
@@ -571,6 +589,14 @@ item.
 
 ## Changes
 
+- **0.12.4 (2026-10-30):** spelled out with the member vault's
+  checks (VAULT-MESSAGING §10.19): `record_at` at or before `opens_at`
+  (§3.1); an extension's outage has `from` before `to` and a `source`
+  of 1–1,024 bytes, and the document is at most 65,536 bytes (§8.5);
+  what keeping a service list's entries means, and the list's bounds
+  (§3.3); an unsigned refusal's `refusal_sig` is `null` (§4.2); the
+  Rekor entry type and the trusted root's form (§8.5). No change to the
+  vectors.
 - **0.12.3 (2026-10-30):** §11 adds the anchor-bundle vector, captured
   from staging. No change to the documents or the other vectors.
 - **0.12.2 (2026-10-30):** §3.2 names how a vault advertises the vote
