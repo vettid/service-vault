@@ -216,6 +216,22 @@ func TestRestoreChecksOnDynamoDB(t *testing.T) {
 	if ok, err := dst.Restored(ctx); err != nil || ok {
 		t.Fatalf("Restored after ClearRestored: %v %v", ok, err)
 	}
+	// The ballots' rebuild marker, kept while ballots are off.
+	if ok, err := dst.BallotsRebuild(ctx); err != nil || ok {
+		t.Fatalf("BallotsRebuild before the marker: %v %v", ok, err)
+	}
+	if err := dst.MarkBallotsRebuild(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := dst.BallotsRebuild(ctx); err != nil || !ok {
+		t.Fatalf("BallotsRebuild after the marker: %v %v", ok, err)
+	}
+	if err := dst.ClearBallotsRebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := dst.BallotsRebuild(ctx); err != nil || ok {
+		t.Fatalf("BallotsRebuild after the clear: %v %v", ok, err)
+	}
 	if err := dst.ClearHeartbeat(ctx); err != nil {
 		t.Fatal(err)
 	}

@@ -382,6 +382,10 @@ func serve(args []string) error {
 	} else if restored {
 		pc.AfterRestore = tbl.ClearRestored
 	}
+	rebuild, err := ballotsRebuild(ctx, tbl, pc.AfterRestore != nil, ballots != nil, time.Now())
+	if err != nil {
+		return err
+	}
 	p, err := peer.New(pc)
 	if err != nil {
 		return err
@@ -419,11 +423,14 @@ func serve(args []string) error {
 			}
 			mgr.Publisher = &publish.Publisher{URL: cfg.VotesURL, Anchor: anc, Client: anchor.Client(time.Minute), Records: records}
 		}
-		if pc.AfterRestore != nil {
+		if rebuild {
 			// The table was restored: ballots it lost are in the copy (§6).
 			n, err := mgr.RebuildAll(ctx)
 			if err != nil {
 				return fmt.Errorf("rebuild ballots after the restore: %w", err)
+			}
+			if err := tbl.ClearBallotsRebuild(ctx); err != nil {
+				return fmt.Errorf("ballots rebuild marker: %w", err)
 			}
 			log.Info("ballots rebuilt after the restore", "count", n)
 		}
@@ -947,4 +954,34 @@ func sealedStore(ctx context.Context, kc keystore.KMS, keyID string, blobs keyst
 		log.Warn("record key rotated", "version", version, "retired", len(older))
 	}
 	return st, nil
+}
+
+// rebuildMarkers is the table's ballots rebuild marker (store.Table).
+type rebuildMarkers interface {
+	MarkBallotsRebuild(ctx context.Context, now time.Time) error
+	BallotsRebuild(ctx context.Context) (bool, error)
+}
+
+// ballotsRebuild reports whether this start puts back the ballots a
+// restore lost. After a restore with ballots off, the restore marker
+// still goes once the reconnects are sent, so the rebuild is kept for
+// later in its own marker; the start that has ballots on rebuilds and
+// then clears it.
+func ballotsRebuild(ctx context.Context, m rebuildMarkers, restored, ballotsOn bool, now time.Time) (bool, error) {
+	if !ballotsOn {
+		if restored {
+			if err := m.MarkBallotsRebuild(ctx, now); err != nil {
+				return false, fmt.Errorf("ballots rebuild marker: %w", err)
+			}
+		}
+		return false, nil
+	}
+	if restored {
+		return true, nil
+	}
+	pending, err := m.BallotsRebuild(ctx)
+	if err != nil {
+		return false, fmt.Errorf("ballots rebuild marker: %w", err)
+	}
+	return pending, nil
 }

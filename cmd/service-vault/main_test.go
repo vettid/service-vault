@@ -213,3 +213,35 @@ func TestFirstHeartbeat(t *testing.T) {
 		t.Fatal("a failed first write")
 	}
 }
+
+type fakeMarkers struct{ rebuild bool }
+
+func (f *fakeMarkers) MarkBallotsRebuild(context.Context, time.Time) error {
+	f.rebuild = true
+	return nil
+}
+
+func (f *fakeMarkers) BallotsRebuild(context.Context) (bool, error) { return f.rebuild, nil }
+
+// A restore while ballots are off keeps the rebuild for the first start
+// with ballots on, though the restore marker goes with the reconnects.
+func TestBallotsRebuildAfterRestoreWithBallotsOff(t *testing.T) {
+	ctx, now := context.Background(), time.Now()
+	m := &fakeMarkers{}
+	if r, err := ballotsRebuild(ctx, m, true, false, now); err != nil || r {
+		t.Fatalf("ballots off: rebuild %v, %v", r, err)
+	}
+	if !m.rebuild {
+		t.Fatal("the rebuild wasn't kept for later")
+	}
+	// The next start: restore marker gone, ballots on again.
+	if r, err := ballotsRebuild(ctx, m, false, true, now); err != nil || !r {
+		t.Fatalf("ballots back on: rebuild %v, %v", r, err)
+	}
+	if r, _ := ballotsRebuild(ctx, &fakeMarkers{}, false, true, now); r {
+		t.Fatal("a rebuild without a restore")
+	}
+	if r, _ := ballotsRebuild(ctx, &fakeMarkers{}, true, true, now); !r {
+		t.Fatal("no rebuild right after a restore")
+	}
+}
