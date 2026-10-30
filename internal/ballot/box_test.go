@@ -124,6 +124,7 @@ type answer struct {
 	Ballot      *rowBallotJSON  `json:"ballot"`
 	BallotMsgMS uint64          `json:"ballot_msg_ms"`
 	Proposal    []byte          `json:"proposal"`
+	ProposalSig []byte          `json:"proposal_sig"`
 	Secret      []byte          `json:"record_secret"`
 	RecordProof recordProof     `json:"record_proof"`
 	StatusSig   []byte          `json:"status_sig"`
@@ -261,6 +262,23 @@ func TestCastNeedsSignIn(t *testing.T) {
 	}
 }
 
+// After a credential-key rotation a cast signed under the old key is
+// bad_ballot, and the same ballot signed again under the new one counts
+// (§4.2).
+func TestCastAfterRotation(t *testing.T) {
+	f := newBoxFixture(t)
+	old, leaf := f.castBody("c0", "yes")
+	f.creds["c0"] = ed25519.NewKeyFromSeed(digest("credential c0 rotated"))
+	f.checkRefusal(f.send("c0", TypeCast, old, f.during(), true), "c0", CodeBadBallot, f.open.Members["c0"].Tag, sum(leaf))
+	again, leaf2 := f.castBody("c0", "yes")
+	if !bytes.Equal(leaf, leaf2) || again["cast_sig"] == old["cast_sig"] {
+		t.Fatal("not the same ballot under a new cast_sig")
+	}
+	if a := f.send("c0", TypeCast, again, f.during(), true); a.Code != "" || parseAnswer(t, a).ReceiptSig == nil {
+		t.Fatalf("re-signed cast: %q", a.Code)
+	}
+}
+
 func TestStatus(t *testing.T) {
 	f := newBoxFixture(t)
 	q := map[string]string{"proposal_id": f.p.ProposalID}
@@ -274,6 +292,9 @@ func TestStatus(t *testing.T) {
 		if !bytes.Equal(x.Proposal, f.v.propDoc) || !bytes.Equal(x.Secret, m.Secret) {
 			t.Fatal("status lacks the proposal or the tag's secret")
 		}
+		if vote.Verify(f.ik(), vote.LabelProposal, vote.ProposalSigMsg(x.Proposal), x.ProposalSig) != nil || len(x.Bundle) == 0 {
+			t.Fatal("status lacks the proposal's signature or bundle")
+		}
 		if !vote.VerifyProof(f.p.RecordRoot, m.Tag, x.RecordProof.Index, int(x.RecordProof.TreeSize), x.RecordProof.Path) {
 			t.Fatal("record proof")
 		}
@@ -283,8 +304,8 @@ func TestStatus(t *testing.T) {
 				t.Fatal("no ballot")
 			}
 			leaf, _ = (&vote.Ballot{RecordTag: m.Tag, VK: x.Ballot.VK, ChoiceID: x.Ballot.ChoiceID, BallotSig: x.Ballot.BallotSig}).Leaf()
-		} else if x.Ballot != nil {
-			t.Fatal("a ballot before any cast")
+		} else if x.Ballot != nil || x.MsgMS != 0 || x.ReceiptSig != nil {
+			t.Fatal("a ballot or receipt before any cast")
 		}
 		smsg, _ := vote.StatusMsg(f.p.ProposalID, m.Tag, leaf)
 		if vote.Verify(f.ik(), vote.LabelStatus, smsg, x.StatusSig) != nil {
