@@ -25,10 +25,11 @@ export const TABLE_ACTIONS = ['GetItem', 'PutItem', 'UpdateItem', 'DeleteItem', 
 
 /**
  * The calls the daemon makes on the ballots table: a conditional put, a
- * get and a query: no update and no delete (BALLOT-PROTOCOL §6
- * "Durability"). IAM can't require the put's condition; the daemon sets it.
+ * get, a query and a scan (the start's key check looks for any ballot):
+ * no update and no delete (BALLOT-PROTOCOL §6 "Durability"). IAM can't
+ * require the put's condition; the daemon sets it.
  */
-export const BALLOTS_TABLE_ACTIONS = ['GetItem', 'PutItem', 'Query'] as const;
+export const BALLOTS_TABLE_ACTIONS = ['GetItem', 'PutItem', 'Query', 'Scan'] as const;
 
 /** The Cloud Map service name: the API is at <name>.<namespace>:API_PORT. */
 export const DISCOVERY_NAME = 'service-vault';
@@ -94,9 +95,9 @@ export const ALARMS = {
   reconnect_failed: 'A reconnect after a table restore failed: that member must connect again from a new invitation (README "Restoring the table")',
   /** A reconnect after a restore unanswered for a day (internal/peer/reconnect.go): the member's vault may be locked. */
   reconnect_slow: 'A reconnect after a table restore is unanswered after a day: the member\'s vault may be locked; it stays open for 7 days',
-  /** A removed connection left fewer admins than the threshold (internal/approval/approval.go): no approval can pass. */
   /** The ballot copy's key is missing or not the copy's (cmd/service-vault ballotCopySeal): votes are off, the rest runs. */
   ballots_off: 'Ballots are off: the ballot copy\'s key is missing or not the one its ballots are under; restore the keystore item ballot-copy-key from a backup of the table (README "Rotating the record key")',
+  /** A removed connection left fewer admins than the threshold (internal/approval/approval.go): no approval can pass. */
   admins_short: 'An admin connection was removed and fewer admins than the threshold remain: no approval can pass until the operator recovers the set (README "Recovering admins")',
 } as const;
 

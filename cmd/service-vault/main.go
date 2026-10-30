@@ -797,10 +797,12 @@ func newSecretsIfFresh(ctx context.Context, anyRecord func(context.Context) ([]b
 // key-check item (an HMAC under the key, written once), so a key that
 // isn't the one its ballots are under is found at the start. A copy
 // holding ballots under a lost key can't be read, so no new key is made
-// while proposals exist or the copy has a key check; such a start, or a
-// key that doesn't match the check, is errCopyKey, and the daemon runs
-// with ballots off rather than not at all.
-func ballotCopySeal(ctx context.Context, kc keystore.KMS, keyID string, blobs keystore.Blobs, records peer.Store, cp ballot.Copy) (*sealstore.Store, error) {
+// while proposals exist or the copy has a key check or any ballot; a copy
+// from before the check gets its first check only under a key that opens
+// one of its ballots. Such a start, or a key that doesn't match the
+// check, is errCopyKey, and the daemon runs with ballots off rather than
+// not at all.
+func ballotCopySeal(ctx context.Context, kc keystore.KMS, keyID string, blobs keystore.Blobs, records peer.Store, cp scannableCopy) (*sealstore.Store, error) {
 	rk, err := keystore.LoadOrCreate(ctx, kc, keyID, blobs, keystore.BallotCopyKeyName, func() (*sealstore.RecordKey, error) {
 		props, err := records.Load(ctx, ballot.KindProposal)
 		if err != nil {
@@ -812,6 +814,12 @@ func ballotCopySeal(ctx context.Context, kc keystore.KMS, keyID string, blobs ke
 		}
 		if len(props) > 0 || len(checks) > 0 {
 			return nil, &errCopyKey{"the ballot copy's key is missing while proposals or copied ballots exist: restore it from a backup of the table"}
+		}
+		// A copy from before the key check has ballots but no check.
+		if _, _, ok, err := cp.Any(ctx, copyKeyCheckID); err != nil {
+			return nil, err
+		} else if ok {
+			return nil, &errCopyKey{"the ballot copy's key is missing while copied ballots exist: restore it from a backup of the table"}
 		}
 		return sealstore.NewRecordKey()
 	})
@@ -826,6 +834,27 @@ func ballotCopySeal(ctx context.Context, kc keystore.KMS, keyID string, blobs ke
 	mac := hmac.New(sha256.New, rk.Key)
 	mac.Write([]byte("vettid/ballot-copy-key-check/1"))
 	check := mac.Sum(nil)
+	ss, err := sealstore.New(nil, map[uint32][]byte{1: rk.Key}, 1, false)
+	if err != nil {
+		return nil, err
+	}
+	checks, err := cp.List(ctx, copyKeyCheckID)
+	if err != nil {
+		return nil, fmt.Errorf("ballot copy key check: %w", err)
+	}
+	if len(checks) == 0 {
+		// The first check: the key must open a ballot the copy holds from
+		// before the check, if any.
+		pid, it, ok, err := cp.Any(ctx, copyKeyCheckID)
+		if err != nil {
+			return nil, fmt.Errorf("ballot copy key check: %w", err)
+		}
+		if ok {
+			if _, err := ss.Open(ballot.KindBallot, ballot.BallotID(pid, it.Tag), it.Data); err != nil {
+				return nil, &errCopyKey{"the ballot copy's key doesn't open its ballots: restore the keystore's ballot-copy-key from a backup of the table"}
+			}
+		}
+	}
 	stored, err := cp.PutOnce(ctx, copyKeyCheckID, []byte{0}, check)
 	if err != nil {
 		return nil, fmt.Errorf("ballot copy key check: %w", err)
@@ -833,7 +862,14 @@ func ballotCopySeal(ctx context.Context, kc keystore.KMS, keyID string, blobs ke
 	if !hmac.Equal(stored, check) {
 		return nil, &errCopyKey{"the ballot copy's key isn't the one its ballots are under: restore the keystore's ballot-copy-key from a backup of the table"}
 	}
-	return sealstore.New(nil, map[uint32][]byte{1: rk.Key}, 1, false)
+	return ss, nil
+}
+
+// scannableCopy is the ballot copy with a way to find any ballot in it
+// (store.Ballots).
+type scannableCopy interface {
+	ballot.Copy
+	Any(ctx context.Context, skip string) (proposalID string, it ballot.CopyItem, ok bool, err error)
 }
 
 // copyKeyCheckID is the copy's partition for its key check: not a
