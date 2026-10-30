@@ -5,10 +5,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"io"
 	"log"
 	"log/slog"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -16,9 +19,11 @@ import (
 
 	"github.com/vettid/service-vault/internal/api"
 	"github.com/vettid/service-vault/internal/approval"
+	"github.com/vettid/service-vault/internal/ballot"
 	"github.com/vettid/service-vault/internal/connect"
 	"github.com/vettid/service-vault/internal/tlsid"
 	"github.com/vettid/service-vault/sdk/go/servicevault"
+	"github.com/vettid/service-vault/vote"
 )
 
 // randomHex: test keys are made at run time, never written down.
@@ -181,8 +186,19 @@ func newFixture(t *testing.T) *fixture {
 	deny, _ := idx.Key("deny@example.org")
 	f := &fixture{inv: &fakeInvites{final: api.InviteConnected}, si: &fakeSignIns{deny: deny}, apv: &fakeApprovals{}, idx: idx,
 		key: randomHex(t, 24)}
-	s := &api.Server{Keys: [][32]byte{api.HashKey(f.key)}, Email: idx, Invites: f.inv, SignIns: f.si, Approvals: f.apv,
+	f.serve(t, nil)
+	return f
+}
+
+// serve (re)starts the API for the fixture, with change applied to the
+// server first.
+func (f *fixture) serve(t *testing.T, change func(*api.Server)) {
+	t.Helper()
+	s := &api.Server{Keys: [][32]byte{api.HashKey(f.key)}, Email: f.idx, Invites: f.inv, SignIns: f.si, Approvals: f.apv,
 		LookupFloor: time.Millisecond, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	if change != nil {
+		change(s)
+	}
 	der, err := tlsid.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
@@ -198,7 +214,6 @@ func newFixture(t *testing.T) *fixture {
 	t.Cleanup(srv.Close)
 	f.pin, f.addr = pin, srv.URL
 	f.env = map[string]string{"SVCTL_URL": srv.URL, "SVCTL_API_KEY": f.key, "SVCTL_PIN": pin}
-	return f
 }
 
 // run runs svctl with the fixture's environment and a short poll.
@@ -416,5 +431,97 @@ func TestRenderQR(t *testing.T) {
 	inv, _ := renderQR("https://relay.vettid.test/connect#abc", true)
 	if strings.Trim(strings.SplitN(inv, "\n", 2)[0], " ") != "" {
 		t.Fatal("inverted quiet zone")
+	}
+}
+
+// fakeProposals answers the proposal routes: the first create is kept
+// but not published, and a close before the relay is caught up is
+// collecting.
+type fakeProposals struct {
+	created int
+	caught  bool
+}
+
+func (p *fakeProposals) Create(_ context.Context, in ballot.ProposalInput) (*ballot.Created, error) {
+	p.created++
+	if in.Title == "" {
+		return nil, &ballot.ErrInput{Err: errors.New("title")}
+	}
+	if p.created == 1 {
+		return nil, &ballot.ErrNotPublished{ProposalID: "01P", Err: errors.New("site down")}
+	}
+	return &ballot.Created{ProposalID: "01Q", Eligible: 3}, nil
+}
+
+func (p *fakeProposals) Status(_ context.Context, id string) (*ballot.ProposalStatus, error) {
+	if id != "01P" {
+		return nil, nil
+	}
+	return &ballot.ProposalStatus{ProposalID: id}, nil
+}
+
+func (p *fakeProposals) Close(context.Context, string) (*ballot.ResultsSummary, error) {
+	if !p.caught {
+		return nil, ballot.ErrNotCaught
+	}
+	return &ballot.ResultsSummary{ProposalID: "01P"}, nil
+}
+
+func (p *fakeProposals) Results(context.Context, string) (*ballot.PublishedResults, error) {
+	return nil, nil
+}
+
+func (p *fakeProposals) Extend(context.Context, string, ballot.ExtensionInput) (*vote.Extension, error) {
+	return nil, errors.New("not here")
+}
+
+func (p *fakeProposals) Publish(context.Context, string) (int, error) { return 3, nil }
+
+// The vote commands pass the API's answers through, and a proposal kept
+// but not published names itself for the retry.
+func TestProposalCommands(t *testing.T) {
+	f := newFixture(t)
+	fp := &fakeProposals{}
+	f.serve(t, func(s *api.Server) {
+		s.Proposals = fp
+		s.AnchorKey = &api.AnchorKey{Key: []byte{1}, Cert: []byte{2}, IK: []byte{3}, Sigstore: "staging"}
+	})
+	in := filepath.Join(t.TempDir(), "proposal.json")
+	if err := os.WriteFile(in, []byte(`{"title":"T","choices":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, _, errOut := f.run(t, "proposal", "create", "-in", in)
+	if code != exitError || !strings.Contains(errOut, "svctl proposal publish 01P") || !strings.Contains(errOut, "not_published") {
+		t.Fatalf("create, not published: exit %d %s", code, errOut)
+	}
+	if code, out, errOut := f.run(t, "proposal", "create", "-in", in); code != exitOK || !strings.Contains(out, `"proposal_id": "01Q"`) {
+		t.Fatalf("create: exit %d %s %s", code, out, errOut)
+	}
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"anchor-key"}, `"sigstore": "staging"`},
+		{[]string{"proposal", "status", "01P"}, `"proposal_id": "01P"`},
+		{[]string{"proposal", "publish", "01P"}, `3`},
+	} {
+		if code, out, errOut := f.run(t, c.args...); code != exitOK || !strings.Contains(out, c.want) {
+			t.Errorf("%v: exit %d\n%s\nstderr %s", c.args, code, out, errOut)
+		}
+	}
+	if code, _, errOut := f.run(t, "proposal", "close", "01P"); code != exitError || !strings.Contains(errOut, "collecting") {
+		t.Fatalf("close before caught up: exit %d %s", code, errOut)
+	}
+	fp.caught = true
+	if code, out, _ := f.run(t, "proposal", "close", "01P"); code != exitOK || !strings.Contains(out, "01P") {
+		t.Fatalf("close: exit %d %s", code, out)
+	}
+	for _, args := range [][]string{{"proposal"}, {"proposal", "create"}, {"proposal", "status"}, {"proposal", "nope", "x"}} {
+		if code, _, _ := f.run(t, args...); code != exitUsage {
+			t.Errorf("%v: exit %d, want usage", args, code)
+		}
+	}
+	if fp.created != 2 {
+		t.Fatalf("%d creates, want 2: a failed create isn't retried", fp.created)
 	}
 }
