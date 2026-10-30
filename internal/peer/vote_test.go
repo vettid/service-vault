@@ -457,3 +457,149 @@ func TestSignInEventEvidence(t *testing.T) {
 		t.Fatalf("the event's evidence doesn't verify: %v", err)
 	}
 }
+
+// The messages left unacked are stored: a restart neither starts a
+// message's wait again nor forgets the ones given up on.
+func TestCaughtUnackedAcrossRestart(t *testing.T) {
+	f := newFixture(t)
+	f.clk.Advance(2 * time.Minute)
+	f.pump()
+	closeAt := f.clk.Now()
+	a, b := f.ulid(closeAt.Add(-2*time.Second)), f.ulid(closeAt.Add(-time.Second))
+	f.leave(a)
+	f.caught(closeAt) // stores it
+	f.clk.Advance(MaxUnackedWait + time.Minute)
+	f.pump()
+	if !f.caught(closeAt) {
+		t.Fatal("still waiting past the cap")
+	}
+	f.leave(b)
+	f.caught(closeAt)
+
+	f.start() // a restart: a fresh peer on the same store
+	f.clk.Advance(2 * time.Minute)
+	f.pump()
+	f.leave(a) // redelivered after the restart
+	f.leave(b)
+	if f.caught(closeAt) {
+		t.Fatal("b no longer holds the count after the restart")
+	}
+	if n := f.unhandled(closeAt, closeAt.Add(-time.Hour), closeAt); n != 1 {
+		t.Fatalf("unhandled %d after the restart, want a", n)
+	}
+	// b's wait runs from when it was first left, not from the restart:
+	// 24 h 1 min since then, 23 h 59 min since it was left again.
+	f.clk.Advance(MaxUnackedWait - time.Minute)
+	f.pump()
+	if !f.caught(closeAt) {
+		t.Fatal("b's wait started again at the restart")
+	}
+	if n := f.unhandled(closeAt, closeAt.Add(-time.Hour), closeAt); n != 2 {
+		t.Fatalf("unhandled %d, want 2", n)
+	}
+}
+
+// A message handled after it was left unacked loses its record in the
+// write of its handling: it neither holds the count nor counts.
+func TestCaughtUnackedHandled(t *testing.T) {
+	f := newFixture(t)
+	f.clk.Advance(2 * time.Minute)
+	f.pump()
+	closeAt := f.clk.Now()
+	id := f.ulid(closeAt.Add(-time.Second))
+	f.leave(id)
+	if f.caught(closeAt) {
+		t.Fatal("caught up with a message left unacked")
+	}
+	recs, _ := f.store.Load(context.Background(), kindUnacked)
+	if len(recs) != 1 {
+		t.Fatalf("%d unacked records stored, want 1", len(recs))
+	}
+	f.p.mu.Lock()
+	f.p.handledUnacked(id)
+	err := f.p.flush(context.Background())
+	delete(f.p.unacked, id)
+	f.p.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recs, _ := f.store.Load(context.Background(), kindUnacked); len(recs) != 0 {
+		t.Fatalf("%d unacked records after the handling", len(recs))
+	}
+	f.start() // another process, or a restart, doesn't see it either
+	f.clk.Advance(2 * time.Minute)
+	f.pump()
+	if !f.caught(closeAt) {
+		t.Fatal("a handled message still holds the count")
+	}
+	if n := f.unhandled(closeAt, closeAt.Add(-time.Hour), closeAt); n != 0 {
+		t.Fatalf("unhandled %d, want 0", n)
+	}
+}
+
+// A message handled twice before a flush (its first flush failed, and it
+// came back) deletes its record once: a transaction takes one change
+// per item.
+func TestCaughtUnackedHandledTwice(t *testing.T) {
+	f := newFixture(t)
+	f.clk.Advance(2 * time.Minute)
+	f.pump()
+	closeAt := f.clk.Now()
+	id := f.ulid(closeAt.Add(-time.Second))
+	f.leave(id)
+	f.caught(closeAt) // stores it
+	f.p.mu.Lock()
+	f.p.handledUnacked(id)
+	f.p.handledUnacked(id)
+	err := f.p.flush(context.Background())
+	f.p.mu.Unlock()
+	if err != nil {
+		t.Fatalf("flush after a message handled twice: %v", err)
+	}
+}
+
+// unackedFailing fails every write of an unacked record while on.
+type unackedFailing struct {
+	Store
+	on bool
+}
+
+func (s *unackedFailing) Apply(ctx context.Context, changes []Change) error {
+	for _, c := range changes {
+		if s.on && c.Kind == kindUnacked {
+			return errors.New("unavailable")
+		}
+	}
+	return s.Store.Apply(ctx, changes)
+}
+
+// A message given up on before its record could be stored stays given
+// up on, and is stored so once the store takes writes again.
+func TestCaughtUnackedGaveUpBeforeStored(t *testing.T) {
+	f := newFixture(t)
+	fs := &unackedFailing{Store: f.store, on: true}
+	f.p.cfg.Store = fs
+	f.clk.Advance(2 * time.Minute)
+	f.pump()
+	closeAt := f.clk.Now()
+	id := f.ulid(closeAt.Add(-time.Second))
+	f.leave(id)
+	f.clk.Advance(MaxUnackedWait + time.Minute)
+	f.pump()
+	if !f.caught(closeAt) {
+		t.Fatal("still waiting past the cap")
+	}
+	fs.on = false
+	if n := f.unhandled(closeAt, closeAt.Add(-time.Hour), closeAt); n != 1 {
+		t.Fatalf("unhandled %d once the store is back, want 1", n)
+	}
+	recs, _ := f.store.Load(context.Background(), kindUnacked)
+	var rec unackedRec
+	if len(recs) != 1 || json.Unmarshal(recs[0].Data, &rec) != nil || !rec.GaveUp {
+		t.Fatalf("stored %d records (%+v), want one given up on", len(recs), rec)
+	}
+	f.leave(id) // redelivered: no new wait
+	if !f.caught(closeAt) {
+		t.Fatal("a redelivery started a new wait")
+	}
+}
