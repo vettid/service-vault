@@ -734,3 +734,37 @@ func TestCaughtUnackedGaveUpRace(t *testing.T) {
 		t.Fatalf("unhandled %d later, want 0", n)
 	}
 }
+
+// A sign-in challenge keeps its match code with the challenge; a code
+// that isn't 2 or 3 digits is refused (VAULT-MESSAGING 0.79.0 §10.4).
+func TestChallengeMatchCode(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "t")
+	for _, bad := range []string{"", "7", "1234", "1a", "٣٣"} {
+		if _, err := f.p.AuthenticateSignIn(context.Background(), cid, "Sign in", bad, time.Minute); err != ErrMatchCode {
+			t.Fatalf("match code %q: %v", bad, err)
+		}
+	}
+	id, err := f.p.AuthenticateSignIn(context.Background(), cid, "Sign in", "07", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.pump()
+	f.p.mu.Lock()
+	ch := f.p.challenges[id]
+	f.p.mu.Unlock()
+	if ch == nil || ch.MatchCode != "07" || ch.Purpose != peerwire.PurposeSignIn {
+		t.Fatalf("challenge %+v", ch)
+	}
+	if len(m.Challenges) != 1 || m.Challenges[0].MatchCode != "07" || m.Challenges[0].Purpose != peerwire.PurposeSignIn {
+		t.Fatalf("member saw %+v", m.Challenges)
+	}
+	f.start() // kept across a restart, for the challenge's resend
+	f.p.mu.Lock()
+	ch = f.p.challenges[id]
+	f.p.mu.Unlock()
+	if ch == nil || ch.MatchCode != "07" {
+		t.Fatalf("after a restart: %+v", ch)
+	}
+}

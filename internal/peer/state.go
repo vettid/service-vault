@@ -293,8 +293,11 @@ type challenge struct {
 	Context string `json:"context,omitempty"`
 	// Purpose is the challenge's purpose (VAULT-MESSAGING 0.65.0 §10.4),
 	// or "" for none.
-	Purpose string    `json:"purpose,omitempty"`
-	Exp     time.Time `json:"exp"`
+	Purpose string `json:"purpose,omitempty"`
+	// MatchCode is a sign-in challenge's match code (VAULT-MESSAGING
+	// 0.79.0 §10.4), or "".
+	MatchCode string    `json:"match_code,omitempty"`
+	Exp       time.Time `json:"exp"`
 }
 
 type cachedResponse struct {

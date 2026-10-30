@@ -65,6 +65,10 @@ func (p *fakePeer) Authenticate(context.Context, string, string, string, time.Du
 	return "req" + strconv.Itoa(int(p.n.Add(1))), nil
 }
 
+func (p *fakePeer) AuthenticateSignIn(ctx context.Context, conn, ctxt, _ string, ttl time.Duration) (string, error) {
+	return p.Authenticate(ctx, conn, ctxt, "", ttl)
+}
+
 func (*fakePeer) CancelChallenge(context.Context, string) (bool, error) { return true, nil }
 
 // fixture is the service (internal/service on a fake peer) behind the

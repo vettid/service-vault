@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/vettid/vettid-vault/vms/peerwire"
 	"hash/fnv"
 	"log/slog"
 	"sync"
@@ -44,7 +43,7 @@ type Peer interface {
 	CreateInvite(ctx context.Context, tag string) (*peer.InviteRecord, error)
 	Invite(id string) (peer.InviteRecord, bool)
 	Connection(id string) (peer.ConnectionInfo, bool)
-	Authenticate(ctx context.Context, connID, ctxt, purpose string, ttl time.Duration) (string, error)
+	AuthenticateSignIn(ctx context.Context, connID, ctxt, matchCode string, ttl time.Duration) (string, error)
 	CancelChallenge(ctx context.Context, requestID string) (bool, error)
 }
 
@@ -230,7 +229,7 @@ func (s *Service) challenge(ctx context.Context, req api.SignInRequest, rec *sig
 	if err != nil {
 		return err
 	}
-	reqID, err := s.Peer.Authenticate(ctx, connID, ctxt, peerwire.PurposeSignIn, signin.ChallengeTTL)
+	reqID, err := s.Peer.AuthenticateSignIn(ctx, connID, ctxt, req.MatchCode, signin.ChallengeTTL)
 	if err != nil {
 		// Answered as any other sign-in: it stays pending and expires.
 		s.log().Warn("signin challenge", "signin_id", rec.ID, "err", errName(err))

@@ -13,7 +13,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/kms v1.62.1
 	github.com/aws/aws-sdk-go-v2/service/ssm v1.81.1
 	github.com/vettid/vettid-relay v0.0.0-20261027144202-528df9b0bf76
-	github.com/vettid/vettid-vault v0.0.0-20261029162102-214b88f531e6
+	github.com/vettid/vettid-vault v0.0.0-20261030154933-8dfe0d4476f6
 	rsc.io/qr v0.2.0
 )
 
