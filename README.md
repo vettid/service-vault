@@ -802,6 +802,9 @@ svctl approve -action vote.open -summary "Open the vote" -payload '{"proposal":7
 svctl remind <approval id>
 svctl admins
 svctl audit [-since <entry id>] [-limit 100]
+svctl anchor-key
+svctl proposal create -in proposal.json
+svctl proposal status|publish|close|results <proposal id>
 svctl health
 ```
 
@@ -820,6 +823,12 @@ svctl health
   its outcome (the approving admins, `reason`, `applied`).
 - `audit` prints one JSON entry per line; when there are more, stderr
   says which `-since` gives the next page.
+- `anchor-key` and `proposal` print the API's JSON answers (see
+  "Votes"). `proposal create` posts the file as the proposal input and
+  is never retried (a retry would make a second proposal); a proposal
+  kept but not published (`503 not_published`) is named on stderr, with
+  the `proposal publish` command that retries it. `proposal close`
+  answers `collecting` until the relay's messages are in: run it again.
 - `-wait 0` creates without following. Exit status: 0 done (connected,
   approved), 3 another outcome (declined, denied, expired), 1 an error or
   stopped waiting, 2 a usage or configuration error.
