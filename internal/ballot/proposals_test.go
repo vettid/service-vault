@@ -18,6 +18,7 @@ import (
 type fakeRoster []string
 
 func (r fakeRoster) Eligible() []string { return append([]string{}, r...) }
+func (r fakeRoster) Active() []string   { return append([]string{}, r...) }
 
 type sent struct {
 	conn, typ string

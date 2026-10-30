@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.12.1 (2026-10-30)
+**Status:** 0.12.2 (2026-10-30)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -120,8 +120,11 @@ receives.
 
 - **Eligible members** are the connections active on the service vault's
   roster at `record_at`: connected, not removed, not suspended, and with
-  a vault that advertised the vote feature (how it advertises is item
-  5.1's). One connection is one member, so a person holding several
+  a vault that advertised the vote feature: the last `profile.update`
+  the service holds from the connection carries `features` with
+  `"vote"` (VAULT-MESSAGING §10.8, §10.19.1). A vault that advertises
+  nothing is not eligible, so a proposal reaches only vaults that can
+  vote. One connection is one member, so a person holding several
   VettID accounts is several members, which the organisation sees in its
   own roster.
 - **Tags:** for each eligible member the service draws a 32-byte random
@@ -565,6 +568,9 @@ item.
 
 ## Changes
 
+- **0.12.2 (2026-10-30):** §3.2 names how a vault advertises the vote
+  feature (VAULT-MESSAGING 0.81.0 `features`). No change to the
+  documents or the vectors.
 - **0.12.1 (2026-10-30):** §4.2 lists the `vote.status` answer as
   the service sends it (`proposal_sig` and `bundle`, and every member
   but the ballot's always present); §4.1 says what the vault answers and

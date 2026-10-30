@@ -17,10 +17,14 @@ import (
 // Proposals (BALLOT-PROTOCOL §3, §4.1): creating a proposal from the
 // roster, publishing it, and sending it to every eligible member.
 
-// Roster lists the connections eligible at this moment (§3.2): active,
-// and with a vault that takes votes.
+// Roster lists the connections at this moment.
 type Roster interface {
+	// Eligible lists those eligible (§3.2): active, and with a vault
+	// that takes votes.
 	Eligible() []string
+	// Active lists the active ones, whether or not their vault takes
+	// votes: a member not among them is removed or suspended (§10.1).
+	Active() []string
 }
 
 // Sender sends a message to a member's vault over its connection.

@@ -124,7 +124,47 @@ func (p *Peer) profileUpdate(c *Connection, body []byte) {
 		return
 	}
 	c.Peer.FirstName, c.Peer.LastName, c.ProfileVersion = u.FirstName, u.LastName, u.Version
+	// The last update's features replace the ones held: one that leaves a
+	// name out removes it.
+	var ok bool
+	if c.Features, ok = parseFeatures(u.Members["features"]); !ok {
+		p.audit("profile_features_malformed", c.ID)
+	}
 	p.markDirty(kindConn, c.ID)
+}
+
+// parseFeatures reads a profile.update's features (§10.8, 0.81.0): absent,
+// or a sorted array of distinct names matching [a-z0-9_]{1,32}. A
+// malformed member counts as none (chosen; not in the spec): ok is false.
+func parseFeatures(raw json.RawMessage) (features []string, ok bool) {
+	if raw == nil {
+		return nil, true
+	}
+	var names []string
+	if json.Unmarshal(raw, &names) != nil || len(names) == 0 || len(names) > maxFeatures {
+		return nil, false
+	}
+	for i, n := range names {
+		if !validFeature(n) || i > 0 && names[i-1] >= n {
+			return nil, false
+		}
+	}
+	return names, true
+}
+
+// maxFeatures bounds the names kept from one profile.update (chosen).
+const maxFeatures = 16
+
+func validFeature(n string) bool {
+	if len(n) == 0 || len(n) > 32 {
+		return false
+	}
+	for _, ch := range []byte(n) {
+		if !(ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' || ch == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 // sendTo seals a durable message to a connection's current epoch and
