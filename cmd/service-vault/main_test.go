@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -81,6 +82,16 @@ func TestConfigFromEnv(t *testing.T) {
 		t.Fatalf("approvals %+v %v", c, err)
 	}
 	e = goodEnv()
+	if c, err := configFromEnv(env(e)); err != nil || c.TestSignIns {
+		t.Fatalf("test sign-ins default %+v %v", c, err)
+	}
+	for v, want := range map[string]bool{"true": true, "false": false, " true ": true} {
+		e["SV_TEST_SIGNINS"] = v
+		if c, err := configFromEnv(env(e)); err != nil || c.TestSignIns != want {
+			t.Fatalf("SV_TEST_SIGNINS=%q: %+v %v", v, c, err)
+		}
+	}
+	e = goodEnv()
 	e["SV_SERVICE_NAME"] = "VettID " + strings.Repeat("x", 250)
 	if _, err := configFromEnv(env(e)); err == nil {
 		t.Error("a service name too long for an approval context accepted")
@@ -90,7 +101,7 @@ func TestConfigFromEnv(t *testing.T) {
 		"SV_TABLE": "", "SV_WEBHOOK_URL": "http://member.example/", "SV_WEBHOOK_SECRET": "short",
 		"SV_API_KEY_HASHES": "zz", "SV_SERVICE_NAME": "VettID",
 		"SV_SIGNIN_LIMITS_EMAIL": "5", "SV_SIGNIN_LIMITS_SOURCE": "0/1m",
-		"SV_RECORD_KEY_VERSION": "0",
+		"SV_RECORD_KEY_VERSION": "0", "SV_TEST_SIGNINS": "yes",
 	} {
 		e := goodEnv()
 		e[k] = v
@@ -243,5 +254,21 @@ func TestBallotsRebuildAfterRestoreWithBallotsOff(t *testing.T) {
 	}
 	if r, _ := ballotsRebuild(ctx, &fakeMarkers{}, true, true, now); !r {
 		t.Fatal("no rebuild right after a restore")
+	}
+}
+
+// A test-only setting that is on is named at start; off, nothing is said.
+func TestWarnTestMode(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	warnTestMode(log, &Config{})
+	if buf.Len() != 0 {
+		t.Fatalf("off: %q", buf.String())
+	}
+	warnTestMode(log, &Config{TestSignIns: true})
+	out := buf.String()
+	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, `msg="unsigned sign-ins enabled: test deployments only"`) ||
+		strings.Count(out, "=") != 3 { // time, level, msg: no other attributes
+		t.Fatalf("on: %q", out)
 	}
 }

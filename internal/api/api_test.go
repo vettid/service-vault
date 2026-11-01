@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -37,6 +38,7 @@ type fakeSignIns struct {
 	last    SignInRequest
 
 	unsignedMax, unsignedExamined int
+	unsignedCalls                 int
 }
 
 func (f *fakeSignIns) Start(_ context.Context, req SignInRequest) (string, error) {
@@ -59,6 +61,7 @@ func (f *fakeSignIns) StartUnsigned(_ context.Context, send, examine int) *Unsig
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.unsignedMax, f.unsignedExamined = send, examine
+	f.unsignedCalls++
 	return &UnsignedSignIns{SignIns: []UnsignedSignIn{{ConnectionID: "c1", SignInID: "s9", MatchCode: "42"},
 		{ConnectionID: "c2", Skipped: SkipPending}}, More: 1}
 }
@@ -87,7 +90,7 @@ func newServer(t *testing.T) (*Server, *fakeInvites, *fakeSignIns) {
 	}
 	known, _ := idx.Key("member@example.org")
 	inv, si := &fakeInvites{}, &fakeSignIns{known: known}
-	return &Server{Keys: [][32]byte{HashKey("other-key"), HashKey(apiKey)}, Email: idx,
+	return &Server{TestSignIns: true, Keys: [][32]byte{HashKey("other-key"), HashKey(apiKey)}, Email: idx,
 		Invites: inv, SignIns: si, LookupFloor: 60 * time.Millisecond}, inv, si
 }
 
@@ -269,5 +272,34 @@ func TestStartUnsigned(t *testing.T) {
 	first, second := list[0].(map[string]any), list[1].(map[string]any)
 	if first["signin_id"] != "s9" || first["match_code"] != "42" || second["skipped"] != "pending" || second["signin_id"] != nil {
 		t.Fatalf("%v", list)
+	}
+}
+
+// With the test gate off, POST /v1/signins/unsigned answers 403
+// test_only, starts nothing and logs only the fact.
+func TestStartUnsignedTestOnly(t *testing.T) {
+	s, _, si := newServer(t)
+	s.TestSignIns = false
+	var logs bytes.Buffer
+	s.Log = slog.New(slog.NewTextHandler(&logs, nil))
+	rec, m := do(t, s.Handler(), "POST", "/v1/signins/unsigned", apiKey, "")
+	if rec.Code != 403 || m["error"] != "test_only" {
+		t.Fatalf("%d %v", rec.Code, m)
+	}
+	// The fake would answer with c1 and c2 if it were called.
+	if si.unsignedCalls != 0 || si.unsignedMax != 0 || si.unsignedExamined != 0 {
+		t.Fatal("a run was started")
+	}
+	if body := rec.Body.String(); strings.Contains(body, "c1") || strings.Contains(body, "c2") {
+		t.Fatalf("body: %q", body)
+	}
+	out := logs.String()
+	if !strings.Contains(out, "unsigned sign-ins refused: test only") || strings.Contains(out, "c1") || strings.Contains(out, "c2") ||
+		strings.Contains(out, "connection") || strings.Count(out, "\n") != 1 {
+		t.Fatalf("log: %q", out)
+	}
+	// Unauthenticated callers still get 401, not the gate's answer.
+	if rec, _ := do(t, s.Handler(), "POST", "/v1/signins/unsigned", "", ""); rec.Code != 401 {
+		t.Fatalf("unauthenticated: %d", rec.Code)
 	}
 }

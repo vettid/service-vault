@@ -174,6 +174,18 @@ describe('compute', () => {
     expect(() => synth({ approvalTtl: 'a day' })).toThrow(/approvalTtl/);
   });
 
+  test('testSignIns: SV_TEST_SIGNINS only on staging with the flag', () => {
+    const envOf = (props: Partial<ServiceVaultStackProps>) => {
+      const td = Object.values<any>(synth(props).findResources('AWS::ECS::TaskDefinition'))[0].Properties;
+      return Object.fromEntries(td.ContainerDefinitions[0].Environment.map((e: any) => [e.Name, e.Value]));
+    };
+    expect(envOf({}).SV_TEST_SIGNINS).toBeUndefined();
+    expect(envOf({ envName: 'staging' }).SV_TEST_SIGNINS).toBeUndefined();
+    expect(envOf({ envName: 'staging', testSignIns: true }).SV_TEST_SIGNINS).toBe('true');
+    expect(() => synth({ envName: 'prod', testSignIns: true })).toThrow(/testSignIns/);
+    expect(() => synth({ envName: 'test', testSignIns: true })).toThrow(/testSignIns/);
+  });
+
   test('secrets are generated, never given a value, and retained', () => {
     const secrets = t.findResources('AWS::SecretsManager::Secret');
     expect(Object.keys(secrets)).toHaveLength(2);

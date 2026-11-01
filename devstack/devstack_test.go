@@ -285,7 +285,7 @@ func TestConnectAndSignInAgainstDevStack(t *testing.T) {
 		cancel()
 		<-runDone
 	}()
-	srv := httptest.NewTLSServer((&api.Server{Keys: [][32]byte{api.HashKey(apiKey)}, Email: email, Invites: svc.Invites(),
+	srv := httptest.NewTLSServer((&api.Server{TestSignIns: true, Keys: [][32]byte{api.HashKey(apiKey)}, Email: email, Invites: svc.Invites(),
 		SignIns: svc.SignIns(), Approvals: approvals, LookupFloor: 50 * time.Millisecond, Log: log}).Handler())
 	defer srv.Close()
 
