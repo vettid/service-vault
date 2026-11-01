@@ -15,19 +15,20 @@ import (
 
 // Webhook event types.
 const (
-	TypeConnectionPending   = "connection.pending"
-	TypeConnectionAdded     = "connection.added"
-	TypeConnectionDeclined  = "connection.declined"
-	TypeConnectionExpired   = "connection.expired"
-	TypeConnectionRemoved   = "connection.removed"
-	TypeConnectionSuspended = "connection.suspended"
-	TypeSignInApproved      = "signin.approved"
-	TypeSignInDenied        = "signin.denied"
-	TypeSignInExpired       = "signin.expired"
-	TypeApprovalApproved    = "approval.approved"
-	TypeApprovalDenied      = "approval.denied"
-	TypeApprovalExpired     = "approval.expired"
-	TypeAdminSetChanged     = "admin_set.changed"
+	TypeConnectionPending        = "connection.pending"
+	TypeConnectionAdded          = "connection.added"
+	TypeConnectionDeclined       = "connection.declined"
+	TypeConnectionExpired        = "connection.expired"
+	TypeConnectionRemoved        = "connection.removed"
+	TypeConnectionSuspended      = "connection.suspended"
+	TypeSignInApproved           = "signin.approved"
+	TypeSignInDenied             = "signin.denied"
+	TypeSignInExpired            = "signin.expired"
+	TypeApprovalApproved         = "approval.approved"
+	TypeApprovalDenied           = "approval.denied"
+	TypeApprovalExpired          = "approval.expired"
+	TypeApprovalChallengeExpired = "approval.challenge_expired"
+	TypeAdminSetChanged          = "admin_set.changed"
 )
 
 // Header is what every webhook event carries.
@@ -44,7 +45,8 @@ func (h Header) EventHeader() Header { return h }
 // Event is a verified webhook event: one of *ConnectionPending,
 // *ConnectionAdded, *ConnectionDeclined, *ConnectionExpired,
 // *ConnectionRemoved, *SignInApproved, *SignInDenied, *SignInExpired,
-// *ApprovalApproved, *ApprovalDenied, *ApprovalExpired, *AdminSetChanged,
+// *ApprovalApproved, *ApprovalDenied, *ApprovalExpired,
+// *ApprovalChallengeExpired, *AdminSetChanged,
 // or *UnknownEvent for a type this package does not know yet.
 type Event interface {
 	EventHeader() Header
@@ -157,6 +159,17 @@ type ApprovalExpired struct {
 	ApprovalID string `json:"approval_id"`
 	Action     string `json:"action"`
 	ActionHash string `json:"action_hash"`
+}
+
+// ApprovalChallengeExpired: an admin's challenge ran out unanswered (it
+// lives 10 minutes) while the approval is still open. Header.ConnectionID
+// is that admin; they see nothing on the phone until RemindApproval.
+type ApprovalChallengeExpired struct {
+	Header
+	ApprovalID string    `json:"approval_id"`
+	Action     string    `json:"action"`
+	RequestID  string    `json:"request_id"`
+	ExpiresAt  time.Time `json:"expires_at"` // when the approval itself ends
 }
 
 // Admin set change reasons (AdminSetChanged.Reason).
@@ -422,6 +435,8 @@ func decodeEvent(h Header, data json.RawMessage) (Event, error) {
 		ev = &ApprovalDenied{Header: h}
 	case TypeApprovalExpired:
 		ev = &ApprovalExpired{Header: h}
+	case TypeApprovalChallengeExpired:
+		ev = &ApprovalChallengeExpired{Header: h}
 	case TypeAdminSetChanged:
 		ev = &AdminSetChanged{Header: h}
 	default:

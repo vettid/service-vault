@@ -99,6 +99,14 @@ vote-capable connection, and before creating a proposal:
 3. Operator: `status: approved`; `sv audit` shows the request and the
    signed answer.
 
+A challenge lives 10 minutes (VAULT-MESSAGING §10.4). If the member's
+vault is held for its daily owner check (§3.6.3) the challenge runs out
+unseen: `sv approval <approval_id>` then prints `remind needed:
+<connection_id> (svctl remind <approval_id>)` and the service vault sends
+the `approval.challenge_expired` webhook. Release the vault, then `sv
+remind <approval_id>` sends a new challenge (at most once per 10
+minutes).
+
 ## 5. Optional
 
 - **Denied sign-in:** run step 3 again and deny on the phone. Do this

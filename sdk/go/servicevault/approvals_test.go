@@ -112,6 +112,19 @@ func TestApprovalsAgainstAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Its challenge runs out unanswered: the admin is listed as needing a
+	// reminder and the webhook says so.
+	f.deliver(t, peer.Event{ID: "01JEVENTX", Type: peer.EventSignInExpired, ConnectionID: "c1", RequestID: "req2"})
+	if err := f.tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if ap, err := c.Approval(ctx, cr2.ID); err != nil || len(ap.RemindNeeded) != 1 || ap.RemindNeeded[0] != "c1" {
+		t.Fatalf("%+v %v", ap, err)
+	}
+	if ev, ok := got.last().(*servicevault.ApprovalChallengeExpired); !ok || ev.ApprovalID != cr2.ID || ev.ConnectionID != "c1" ||
+		ev.RequestID != "req2" || ev.Action != servicevault.ActionVoteClose || ev.ExpiresAt.IsZero() {
+		t.Fatalf("event %#v", got.last())
+	}
 	f.deliver(t, peer.Event{ID: "01JEVENTC", Type: peer.EventConnectionRemoved, ConnectionID: "c1", Direction: "in",
 		Tag: f.emailKey})
 	if err := f.tick(ctx); err != nil {

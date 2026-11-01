@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -39,7 +40,7 @@ func (f *fakeApprovals) Status(_ context.Context, id string) (*approval.Status, 
 		return nil, approval.ErrNotFound
 	}
 	return &approval.Status{ID: id, Status: approval.StatusApproved, ActionHash: strings.Repeat("ab", 32), Threshold: 1,
-		Admins: []string{"c1"}, Approvals: []approval.Approver{{ConnectionID: "c1", KeyChanged: true}}, Denials: []approval.Denier{}}, nil
+		Admins: []string{"c1"}, Approvals: []approval.Approver{{ConnectionID: "c1", KeyChanged: true}}, Denials: []approval.Denier{}, RemindNeeded: []string{"c2"}}, nil
 }
 
 func (f *fakeApprovals) Remind(_ context.Context, id string) (*approval.Reminder, error) {
@@ -97,7 +98,7 @@ func TestApprovalRoutes(t *testing.T) {
 	}
 	rec, m = do(t, h, "GET", "/v1/approvals/a1", apiKey, "")
 	ap, _ := m["approvals"].([]any)
-	if rec.Code != 200 || m["status"] != "approved" || len(ap) != 1 || ap[0].(map[string]any)["key_changed"] != true {
+	if rec.Code != 200 || m["status"] != "approved" || len(ap) != 1 || ap[0].(map[string]any)["key_changed"] != true || fmt.Sprint(m["remind_needed"]) != "[c2]" {
 		t.Fatalf("%d %v", rec.Code, m)
 	}
 	if rec, _ := do(t, h, "GET", "/v1/approvals/nope", apiKey, ""); rec.Code != 404 {

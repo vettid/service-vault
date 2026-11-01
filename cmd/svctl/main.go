@@ -7,6 +7,7 @@
 //	svctl [global flags] signin -email E [-source S]
 //	svctl [global flags] signin -unsigned
 //	svctl [global flags] approve -action A -summary S -payload JSON
+//	svctl [global flags] approval ID
 //	svctl [global flags] remind ID
 //	svctl [global flags] admins
 //	svctl [global flags] audit [-since ID] [-limit N]
@@ -28,6 +29,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -59,6 +61,7 @@ commands:
                                    not wait for the answers; exit 1 if the run stopped early
   approve -action A -summary S -payload JSON
                                    submit an action for admin approval, then follow it
+  approval ID                      print an approval's status; "remind needed" lists admins with no live challenge
   remind ID                        challenge again the admins who have not answered
   admins                           print the admin set and the threshold
   audit [-since ID] [-limit N]     print a page of the audit log, one JSON entry per line
@@ -145,7 +148,7 @@ func run(ctx context.Context, args []string, getenv env, stdout, stderr io.Write
 	}
 	cmd, cargs := fs.Arg(0), fs.Args()[1:]
 	commands := map[string]func(*cli, context.Context, []string) error{
-		"invite": (*cli).invite, "signin": (*cli).signin, "approve": (*cli).approve, "remind": (*cli).remind,
+		"invite": (*cli).invite, "signin": (*cli).signin, "approve": (*cli).approve, "remind": (*cli).remind, "approval": (*cli).approval,
 		"admins": (*cli).admins, "audit": (*cli).audit, "health": (*cli).health,
 		"anchor-key": (*cli).anchorKey, "proposal": (*cli).proposal,
 	}
@@ -406,30 +409,73 @@ func (c *cli) approve(ctx context.Context, args []string) error {
 		return errors.New("the action hash does not match the one computed here")
 	}
 	c.printf("action_hash_check: ok\n")
+	var told string // the remind-needed line last printed
 	return c.follow(ctx, *wait, func(ctx context.Context) (bool, error) {
 		st, err := c.c.Approval(ctx, ap.ID)
-		if err != nil || st.Status == servicevault.ApprovalStatusPending {
+		if err != nil {
 			return false, err
 		}
-		c.printf("status: %s\n", st.Status)
-		if st.Reason != "" {
-			c.printf("reason: %s\n", st.Reason)
+		if st.Status == servicevault.ApprovalStatusPending {
+			if line := remindLine(st); line != told {
+				told = line
+				if line != "" {
+					c.printf("%s", line)
+				}
+			}
+			return false, nil
 		}
-		c.printf("threshold: %d\n", st.Threshold)
-		for _, a := range st.Approvals {
-			c.printf("approved_by: %s key_changed=%t\n", a.ConnectionID, a.KeyChanged)
-		}
-		for _, d := range st.Denials {
-			c.printf("denied_by: %s\n", d.ConnectionID)
-		}
-		if st.Applied != nil {
-			c.printf("applied: %t\n", *st.Applied)
-		}
+		c.printApproval(st)
 		if st.Status != servicevault.ApprovalStatusApproved {
 			return true, outcome(st.Status)
 		}
 		return true, nil
 	})
+}
+
+// now is the clock (replaced in tests).
+var now = time.Now
+
+// remindLine is the line that tells the operator which admins hold no
+// live challenge and have not answered; "" when there are none.
+func remindLine(st *servicevault.Approval) string {
+	if st.Status != servicevault.ApprovalStatusPending || len(st.RemindNeeded) == 0 {
+		return ""
+	}
+	cmd := "svctl remind " + st.ID
+	if st.RemindAfter != nil && now().Before(*st.RemindAfter) {
+		cmd += " after " + st.RemindAfter.UTC().Format("15:04:05Z")
+	}
+	return fmt.Sprintf("remind needed: %s (%s)\n", strings.Join(st.RemindNeeded, ","), cmd)
+}
+
+func (c *cli) printApproval(st *servicevault.Approval) {
+	c.printf("status: %s\n", st.Status)
+	if st.Reason != "" {
+		c.printf("reason: %s\n", st.Reason)
+	}
+	c.printf("threshold: %d\n", st.Threshold)
+	for _, a := range st.Approvals {
+		c.printf("approved_by: %s key_changed=%t\n", a.ConnectionID, a.KeyChanged)
+	}
+	for _, d := range st.Denials {
+		c.printf("denied_by: %s\n", d.ConnectionID)
+	}
+	c.printf("%s", remindLine(st))
+	if st.Applied != nil {
+		c.printf("applied: %t\n", *st.Applied)
+	}
+}
+
+func (c *cli) approval(ctx context.Context, args []string) error {
+	if err := c.flags(flag.NewFlagSet("approval", flag.ContinueOnError), args, 1); err != nil {
+		return err
+	}
+	st, err := c.c.Approval(ctx, args[0])
+	if err != nil {
+		return err
+	}
+	c.printApproval(st)
+	return nil
 }
 
 func (c *cli) remind(ctx context.Context, args []string) error {

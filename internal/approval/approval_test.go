@@ -898,3 +898,133 @@ func TestApprovalWithoutPurpose(t *testing.T) {
 		}
 	}
 }
+
+// An outstanding challenge that runs out while the approval is open is
+// logged, queued as a webhook, and shows in the status as remind_needed
+// until a reminder sends a new one.
+func TestChallengeExpired(t *testing.T) {
+	f := newFixture(t, 2, "c1", "c2")
+	c := f.create(ActionVoteOpen, "Open", `{}`)
+	if s := f.status(c.ID); len(s.RemindNeeded) != 0 || s.RemindNeeded == nil {
+		t.Fatalf("remind_needed at creation: %#v", s.RemindNeeded)
+	}
+	old := f.p.last("c1")
+	f.clk.Advance(RemindInterval)
+	f.answer("c1", "expire")
+	f.tick()
+	evs := f.hk.of(EventChallengeExpired)
+	if len(evs) != 1 {
+		t.Fatalf("webhooks %+v", evs)
+	}
+	d := evs[0]
+	st := f.status(c.ID)
+	if d["approval_id"] != c.ID || d["action"] != ActionVoteOpen || d["connection_id"] != "c1" || d["request_id"] != old.req ||
+		d["expires_at"] != st.ExpiresAt.Format(time.RFC3339) || d["_connection_id"] != "c1" {
+		t.Fatalf("payload %+v", d)
+	}
+	if got := strings.Join(st.RemindNeeded, ","); got != "c1" || st.Status != StatusPending {
+		t.Fatalf("status %+v", st)
+	}
+	logs := f.logs.String()
+	if !strings.Contains(logs, `msg="approval challenge expired"`) || !strings.Contains(logs, "request_id="+old.req) ||
+		!strings.Contains(logs, "connection_id=c1") || !strings.Contains(logs, "approval_id="+c.ID) {
+		t.Fatalf("logs %s", logs)
+	}
+	// The same event again matches no outstanding challenge.
+	f.answerTo(old, "expire")
+	f.tick()
+	if len(f.hk.of(EventChallengeExpired)) != 1 {
+		t.Fatal("webhook twice")
+	}
+	r, err := f.m.Remind(context.Background(), c.ID)
+	if err != nil || strings.Join(r.Reminded, ",") != "c1,c2" {
+		t.Fatalf("%+v %v", r, err)
+	}
+	if s := f.status(c.ID); len(s.RemindNeeded) != 0 {
+		t.Fatalf("after remind %+v", s.RemindNeeded)
+	}
+}
+
+// No webhook when the expired request is not an open approval's
+// outstanding challenge: answered, settled, or past the approval's time.
+func TestChallengeExpiredQuiet(t *testing.T) {
+	f := newFixture(t, 2, "c1", "c2")
+	c := f.create(ActionVoteOpen, "Open", `{}`)
+	first := f.p.last("c1")
+	f.answer("c1", "approve")
+	f.answerTo(first, "expire") // answered already
+	if s := f.status(c.ID); len(s.RemindNeeded) != 0 {
+		t.Fatalf("answered admin needs no reminder: %v", s.RemindNeeded)
+	}
+	f.answer("c2", "approve") // settles
+	f.answerTo(f.p.last("c2"), "expire")
+	f.tick()
+	if n := len(f.hk.of(EventChallengeExpired)); n != 0 {
+		t.Fatalf("%d webhooks", n)
+	}
+	if s := f.status(c.ID); s.Status != StatusApproved || len(s.RemindNeeded) != 0 {
+		t.Fatalf("%+v", s)
+	}
+	// Past the approval's time, before the expiry is settled.
+	g := newFixture(t, 1, "c1")
+	g.m.TTL = time.Hour
+	d := g.create(ActionVoteOpen, "Open", `{}`)
+	g.clk.Advance(time.Hour)
+	g.answer("c1", "expire")
+	if n := len(g.hk.of(EventChallengeExpired)); n != 0 {
+		t.Fatalf("%d webhooks after the approval's time", n)
+	}
+	if s := g.status(d.ID); s.Status != StatusExpired || len(s.RemindNeeded) != 0 {
+		t.Fatalf("%+v", s)
+	}
+	if strings.Contains(g.logs.String(), "approval challenge expired") {
+		t.Fatal("logged")
+	}
+}
+
+// An admin who left the set is not asked to be reminded, and an expiry
+// of its challenge is not announced.
+func TestRemindNeededLeavesWithAdmin(t *testing.T) {
+	f := newFixture(t, 1, "c1", "c2")
+	c := f.create(ActionVoteOpen, "Open", `{}`)
+	old := f.p.last("c2")
+	if err := f.m.ConnectionRemoved(context.Background(), "c2"); err != nil {
+		t.Fatal(err)
+	}
+	f.answerTo(old, "expire")
+	f.tick()
+	if n := len(f.hk.of(EventChallengeExpired)); n != 0 {
+		t.Fatalf("%d webhooks for a removed admin", n)
+	}
+	if s := f.status(c.ID); s.Status != StatusPending || len(s.RemindNeeded) != 0 || s.RemindAfter != nil {
+		t.Fatalf("%+v", s)
+	}
+	f.clk.Advance(RemindInterval)
+	if _, err := f.m.Remind(context.Background(), c.ID); err != nil {
+		t.Fatal(err)
+	}
+	if s := f.status(c.ID); len(s.RemindNeeded) != 0 {
+		t.Fatalf("after remind %v", s.RemindNeeded)
+	}
+}
+
+// An admin who could not be challenged is listed at once, with the time
+// from which a reminder is accepted.
+func TestRemindNeededNotSent(t *testing.T) {
+	f := newFixture(t, 1, "c1", "c2")
+	f.p.fail = map[string]error{"c2": peer.ErrNotFound}
+	c := f.create(ActionVoteOpen, "Open", `{}`)
+	s := f.status(c.ID)
+	if strings.Join(s.RemindNeeded, ",") != "c2" || s.RemindAfter == nil ||
+		!s.RemindAfter.Equal(f.clk.Now().Add(RemindInterval)) {
+		t.Fatalf("%+v", s)
+	}
+	f.p.fail = nil
+	f.clk.Advance(RemindInterval)
+	if _, err := f.m.Remind(context.Background(), c.ID); err != nil {
+		t.Fatal(err)
+	}
+	if s := f.status(c.ID); len(s.RemindNeeded) != 0 || s.RemindAfter != nil {
+		t.Fatalf("%+v", s)
+	}
+}
