@@ -188,6 +188,12 @@ MEMBER-SERVICE-PLAN §4.5 and §5.2; the operator's view is in the README,
   signature never counts. m approvals settle it `approved`; when the
   approvals plus the admins who can still answer fall below m, `denied`.
   Settling cancels the other admins' challenges on the service's side.
+  When a challenge expires unanswered (10 minutes) and the approval is
+  still pending, the service logs INFO `approval challenge expired`
+  (ids only), queues the `approval.challenge_expired` webhook with the
+  save, and the approval's status lists the admin in `remind_needed`
+  (admins asked, not answered, holding no live challenge) until a
+  reminder sends a new one.
 - **Periodic work** (every 15 s and at once after a change): bootstrap,
   expiry (`expired`), re-checking open approvals after admins left, and
   webhook delivery. Webhooks are written to an outbox in the same write

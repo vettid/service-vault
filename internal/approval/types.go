@@ -52,10 +52,14 @@ const (
 
 // Webhook event types.
 const (
-	EventApproved        = "approval.approved"
-	EventDenied          = "approval.denied"
-	EventExpired         = "approval.expired"
-	EventAdminSetChanged = "admin_set.changed"
+	EventApproved = "approval.approved"
+	EventDenied   = "approval.denied"
+	EventExpired  = "approval.expired"
+	// EventChallengeExpired: an admin's challenge ran out unanswered
+	// (VAULT-MESSAGING §10.4: 10 minutes) while the approval is still
+	// open; the admin has none until a reminder.
+	EventChallengeExpired = "approval.challenge_expired"
+	EventAdminSetChanged  = "admin_set.changed"
 )
 
 // Audit entry types.
@@ -168,6 +172,10 @@ type Status struct {
 	Denials    []Denier   `json:"denials"`
 	CreatedAt  time.Time  `json:"created_at"`
 	ExpiresAt  time.Time  `json:"expires_at"`
+	// RemindNeeded, while pending: the admins asked who have not answered
+	// and hold no live challenge (it ran out, or could not be sent), so
+	// they see nothing on the phone until a reminder.
+	RemindNeeded []string `json:"remind_needed"`
 	// Applied, for an approved admin_set.* action: whether the service
 	// vault changed the admin set (false when it no longer applied, for
 	// example the connection was removed meanwhile).

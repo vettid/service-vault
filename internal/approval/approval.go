@@ -462,9 +462,16 @@ func (m *Manager) Status(ctx context.Context, id string) (*Status, error) {
 	}
 	st := &Status{ID: r.ID, Action: r.Action, Summary: r.Summary, ActionHash: r.Hash, Status: r.Status, Reason: r.Reason,
 		Threshold: r.Threshold, Admins: r.Admins, Approvals: r.Approvals, Denials: r.Denials, CreatedAt: r.Created,
-		ExpiresAt: r.Exp, Applied: r.Applied}
+		ExpiresAt: r.Exp, Applied: r.Applied, RemindNeeded: []string{}}
 	if st.Status == StatusPending && !m.now().Before(r.Exp) {
 		st.Status = StatusExpired
+	}
+	if st.Status == StatusPending {
+		for _, a := range r.Admins {
+			if r.Pending[a] == "" && !r.answered(a) {
+				st.RemindNeeded = append(st.RemindNeeded, a)
+			}
+		}
 	}
 	if st.Approvals == nil {
 		st.Approvals = []Approver{}
@@ -598,13 +605,28 @@ func (m *Manager) Answer(ctx context.Context, e *peer.Event) (bool, error) {
 	b := m.batch(now)
 	outstanding := r.Pending[e.ConnectionID] == e.RequestID
 	if e.Type == peer.EventSignInExpired {
-		if outstanding {
-			delete(r.Pending, e.ConnectionID)
-			if err := b.save(r); err != nil {
+		if !outstanding {
+			return true, b.apply(ctx)
+		}
+		delete(r.Pending, e.ConnectionID)
+		live := r.Status == StatusPending && now.Before(r.Exp)
+		if live {
+			if err := b.hook(EventChallengeExpired, e.ConnectionID, map[string]any{"approval_id": r.ID, "action": r.Action,
+				"connection_id": e.ConnectionID, "request_id": e.RequestID, "expires_at": r.Exp}); err != nil {
 				return true, err
 			}
 		}
-		return true, b.apply(ctx)
+		if err := b.save(r); err != nil {
+			return true, err
+		}
+		if err := b.apply(ctx); err != nil {
+			return true, err
+		}
+		if live {
+			m.log().Info("approval challenge expired", "approval_id", r.ID, "connection_id", e.ConnectionID,
+				"request_id", e.RequestID)
+		}
+		return true, nil
 	}
 	b.changes = append(b.changes, peer.Change{Kind: kindSeen, ID: e.ID, Data: []byte{}, Expires: now.Add(seenRetention), IfAbsent: true})
 	set, err := m.admins(ctx)
