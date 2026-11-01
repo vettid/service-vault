@@ -55,12 +55,12 @@ func (f *fakeSignIns) Start(_ context.Context, req SignInRequest) (string, error
 	return id, nil
 }
 
-func (f *fakeSignIns) StartUnsigned(_ context.Context, send, examine int) (*UnsignedSignIns, error) {
+func (f *fakeSignIns) StartUnsigned(_ context.Context, send, examine int) *UnsignedSignIns {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.unsignedMax, f.unsignedExamined = send, examine
 	return &UnsignedSignIns{SignIns: []UnsignedSignIn{{ConnectionID: "c1", SignInID: "s9", MatchCode: "42"},
-		{ConnectionID: "c2", Skipped: SkipPending}}, More: 1}, nil
+		{ConnectionID: "c2", Skipped: SkipPending}}, More: 1}
 }
 
 func (f *fakeSignIns) Status(_ context.Context, id string) (*SignInStatus, error) {

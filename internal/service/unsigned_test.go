@@ -19,10 +19,7 @@ import (
 
 func (f *fixture) unsigned(max int) *api.UnsignedSignIns {
 	f.t.Helper()
-	u, err := f.svc.StartUnsigned(context.Background(), max, api.MaxUnsignedExamined)
-	if err != nil {
-		f.t.Fatal(err)
-	}
+	u := f.svc.StartUnsigned(context.Background(), max, api.MaxUnsignedExamined)
 	f.pump()
 	return u
 }
@@ -112,10 +109,7 @@ func TestStartUnsignedBounds(t *testing.T) {
 		t.Fatalf("second run: %+v", u)
 	}
 	// Examining two connections leaves the third.
-	u, err := f.svc.StartUnsigned(context.Background(), 10, 2)
-	if err != nil {
-		t.Fatal(err)
-	}
+	u = f.svc.StartUnsigned(context.Background(), 10, 2)
 	if len(u.SignIns) != 2 || u.SignIns[0].Skipped != api.SkipPending || u.SignIns[1].Skipped != api.SkipPending || u.More != 1 {
 		t.Fatalf("examine 2: %+v", u)
 	}
@@ -242,10 +236,7 @@ func TestStartUnsignedStopped(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	f.svc.Peer = cancelAfterSend{f.p, cancel}
-	u, err := f.svc.StartUnsigned(ctx, 10, 100)
-	if err != nil {
-		t.Fatal(err)
-	}
+	u := f.svc.StartUnsigned(ctx, 10, 100)
 	f.pump()
 	if len(u.SignIns) != 1 || u.SignIns[0].SignInID == "" || u.Stopped != api.StoppedTimeout || u.More != 1 {
 		t.Fatalf("%+v", u)
@@ -294,10 +285,20 @@ func stripe(k string) uint32 {
 	return h.Sum32() % 64
 }
 
-// An email sign-in for a connection whose history lock is on the same
-// stripe as the email's lock returns: the history has locks of its own.
-func TestSignInWithCollidingStripes(t *testing.T) {
+// The connection history's locks are not the email sign-in's: no
+// connection id maps to a lock of the email array, and an email sign-in
+// for a connection whose id hashes to the same index as the email key
+// returns (one array would deadlock it on its own mutex).
+func TestConnLocksAreNotEmailLocks(t *testing.T) {
 	f := newFixture(t)
+	for i := 0; i < 5000; i++ {
+		mu := f.svc.connLock(fmt.Sprintf("conn-%d", i))
+		for j := range f.svc.locks {
+			if mu == &f.svc.locks[j] {
+				t.Fatalf("connLock(conn-%d) is locks[%d]", i, j)
+			}
+		}
+	}
 	cid, _ := f.connect(f.m, "")
 	var k string
 	for i := 0; ; i++ {

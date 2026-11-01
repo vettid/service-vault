@@ -56,7 +56,7 @@ commands:
                                    connections per run, one challenge each; none to one with
                                    a challenge pending, declined within the hour or 10 in
                                    24 h); print each match code or why it was skipped; does
-                                   not wait for the answers
+                                   not wait for the answers; exit 1 if the run stopped early
   approve -action A -summary S -payload JSON
                                    submit an action for admin approval, then follow it
   remind ID                        challenge again the admins who have not answered
@@ -358,17 +358,25 @@ func (c *cli) signinUnsigned(ctx context.Context) error {
 		return err
 	}
 	for _, s := range u.SignIns {
-		if s.Skipped != "" {
-			c.printf("connection_id: %s\nskipped: %s\n", s.ConnectionID, s.Skipped)
-			continue
+		c.printf("connection_id: %s\n", s.ConnectionID)
+		if s.SignInID != "" {
+			c.printf("signin_id: %s\n", s.SignInID)
 		}
-		c.printf("connection_id: %s\nsignin_id: %s\nmatch_code: %s\n", s.ConnectionID, s.SignInID, s.MatchCode)
-	}
-	if u.Stopped != "" {
-		c.printf("stopped: %s\n", u.Stopped)
+		// A not_recorded entry has a code and no signin_id; the
+		// operator is the only one who can tell the member.
+		if s.MatchCode != "" {
+			c.printf("match_code: %s\n", s.MatchCode)
+		}
+		if s.Skipped != "" {
+			c.printf("skipped: %s\n", s.Skipped)
+		}
 	}
 	if u.More > 0 {
 		c.printf("more: %d (run again)\n", u.More)
+	}
+	if u.Stopped != "" {
+		c.printf("stopped: %s\n", u.Stopped)
+		return fmt.Errorf("stopped early (%s): what is printed was done; run again for the rest", u.Stopped)
 	}
 	return nil
 }

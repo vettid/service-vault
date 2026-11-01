@@ -72,7 +72,7 @@ type SignIns interface {
 	// StartUnsigned sends a sign-in challenge to each eligible connection
 	// with no pinned credential key, until it has sent send challenges or
 	// looked at examine connections (see UnsignedSignIns).
-	StartUnsigned(ctx context.Context, send, examine int) (*UnsignedSignIns, error)
+	StartUnsigned(ctx context.Context, send, examine int) *UnsignedSignIns
 }
 
 // MaxUnsignedSignIns bounds the challenges one POST /v1/signins/unsigned
@@ -87,7 +87,9 @@ const (
 	MaxUnsignedExamined = 100
 )
 
-const unsignedDeadline = 25 * time.Second
+// unsignedDeadline is under the SDK's default timeout (10 s), so that a
+// client that waits for the answer gets it, `stopped` included.
+const unsignedDeadline = 8 * time.Second
 
 // Why StartUnsigned sent no challenge to a connection.
 const (
@@ -402,12 +404,7 @@ func (s *Server) startUnsigned(w http.ResponseWriter, r *http.Request) {
 	// sent and unrecorded.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), unsignedDeadline)
 	defer cancel()
-	u, err := s.SignIns.StartUnsigned(ctx, MaxUnsignedSignIns, MaxUnsignedExamined)
-	if err != nil {
-		s.log().Error("signin unsigned", "err", err)
-		writeError(w, http.StatusServiceUnavailable, "unavailable")
-		return
-	}
+	u := s.SignIns.StartUnsigned(ctx, MaxUnsignedSignIns, MaxUnsignedExamined)
 	writeJSON(w, http.StatusOK, u)
 }
 

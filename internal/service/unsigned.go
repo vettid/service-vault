@@ -86,16 +86,16 @@ func (s *Service) noteDeclined(ctx context.Context, connID string, now time.Time
 // that has no pinned credential key (VAULT-MESSAGING §10.19.5), in id
 // order, until it has sent send challenges or looked at examine
 // connections. A skipped connection counts only toward examine, so that
-// ones skipped for long do not keep the rest from being reached. A connection with a sign-in challenge pending, one over
-// the day's count or one whose member declined within the hour is
-// skipped and says why. Each challenge is a sign-in like an email's:
+// ones skipped for long do not keep the rest from being reached. A
+// connection with a sign-in challenge pending, one over the day's count
+// or one whose member declined within the hour is skipped and says why. Each challenge is a sign-in like an email's:
 // its outcome reads at GET /v1/signins/{id} and arrives as a webhook.
 // Nothing here is rate limited by email or source: the caller is the
 // operator. (Chosen; not in the spec.)
 //
 // An error stops the run, but the entries made so far are returned with
 // Stopped set, so that the challenges already sent are not lost.
-func (s *Service) StartUnsigned(ctx context.Context, send, examine int) (*api.UnsignedSignIns, error) {
+func (s *Service) StartUnsigned(ctx context.Context, send, examine int) *api.UnsignedSignIns {
 	ids := s.Peer.EligibleUnsigned()
 	slices.Sort(ids)
 	out := &api.UnsignedSignIns{SignIns: []api.UnsignedSignIn{}}
@@ -121,7 +121,7 @@ func (s *Service) StartUnsigned(ctx context.Context, send, examine int) (*api.Un
 		}
 	}
 	out.More = len(ids) - len(out.SignIns)
-	return out, nil
+	return out
 }
 
 // challengeUnsigned sends connID's challenge, or says why not. It
@@ -168,6 +168,10 @@ func (s *Service) challengeUnsigned(ctx context.Context, connID string) (api.Uns
 	}
 	reqID, err := s.Peer.AuthenticateSignIn(ctx, connID, ctxt, code, signin.ChallengeTTL)
 	if err != nil {
+		// A context that expired during the send may still have queued
+		// the challenge: it can go out on a later drain. HasPendingSignIn
+		// then shows it pending, so the limits hold for the next run.
+
 		s.log().Warn("signin challenge", "connection_id", connID, "err", errName(err))
 		r.Skipped = api.SkipNotSent
 		return r, ""

@@ -103,11 +103,11 @@ func (f *fakeSignIns) Status(_ context.Context, id string) (*api.SignInStatus, e
 	return &api.SignInStatus{ID: id, Status: api.SignInApproved, ConnectionID: "c1", KeyChanged: &kc}, nil
 }
 
-func (f *fakeSignIns) StartUnsigned(context.Context, int, int) (*api.UnsignedSignIns, error) {
+func (f *fakeSignIns) StartUnsigned(context.Context, int, int) *api.UnsignedSignIns {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.unsignedCalls++
-	return f.unsigned, nil
+	return f.unsigned
 }
 
 // fakeApprovals: a1 is pending once, then approved by c1.
@@ -566,18 +566,28 @@ func TestSignInUnsigned(t *testing.T) {
 	f.si.unsigned = &api.UnsignedSignIns{SignIns: []api.UnsignedSignIn{
 		{ConnectionID: "c1", SignInID: "s1", MatchCode: "42"},
 		{ConnectionID: "c2", Skipped: api.SkipPending},
-	}, More: 7, Stopped: "timeout"}
+		{ConnectionID: "c3", MatchCode: "17", Skipped: api.SkipNotRecorded},
+	}, More: 7}
 	code, out, errOut := f.run(t, "signin", "-unsigned")
-	want := "connection_id: c1\nsignin_id: s1\nmatch_code: 42\nconnection_id: c2\nskipped: pending\nstopped: timeout\nmore: 7 (run again)\n"
+	want := "connection_id: c1\nsignin_id: s1\nmatch_code: 42\nconnection_id: c2\nskipped: pending\n" +
+		"connection_id: c3\nmatch_code: 17\nskipped: not_recorded\nmore: 7 (run again)\n"
 	if code != exitOK || out != want || errOut != "" {
 		t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
+	}
+	// A run that stopped early prints what it did and exits 1.
+	f.si.unsigned = &api.UnsignedSignIns{SignIns: []api.UnsignedSignIn{{ConnectionID: "c1", SignInID: "s1", MatchCode: "42"}},
+		More: 2, Stopped: api.StoppedTimeout}
+	code, out, errOut = f.run(t, "signin", "-unsigned")
+	if code != exitError || out != "connection_id: c1\nsignin_id: s1\nmatch_code: 42\nmore: 2 (run again)\nstopped: timeout\n" ||
+		!strings.Contains(errOut, "stopped early (timeout)") {
+		t.Fatalf("stopped: exit %d\n%s\n%s", code, out, errOut)
 	}
 	for _, extra := range [][]string{{"-email", "a@example.org"}, {"-source", "x"}, {"-wait", "1m"}} {
 		if code, _, _ := f.run(t, append([]string{"signin", "-unsigned"}, extra...)...); code != exitUsage {
 			t.Fatalf("-unsigned with %v: exit %d", extra, code)
 		}
 	}
-	if f.si.unsignedCalls != 1 {
+	if f.si.unsignedCalls != 2 {
 		t.Fatalf("%d calls", f.si.unsignedCalls)
 	}
 }
