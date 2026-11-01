@@ -645,12 +645,18 @@ admin's connection.
   `approval.challenge_expired`, and the approval's status lists the admin
   in `remind_needed` (`svctl approval ID` prints "remind needed") until a
   reminder sends a new challenge.
-- *The member vault's ask gate* (VAULT-MESSAGING §10.4.1) applies to
-  admins as to anyone: at most 5 asks per connection in 24 hours, sign-in
-  challenges included; after a denial, the service's challenges are in a
-  7-day cooldown; three denials within 30 days pause its asks. A
-  suppressed challenge is answered as a denial after a delay of 1 to 20
-  minutes, so it counts as that admin's denial. Remind sparingly.
+- *The member vault's ask gate* (VAULT-MESSAGING 0.65.0 §10.4.1, member
+  vault release 24 and later) applies to admins as to anyone. Approval
+  challenges (`purpose: "approval"`) have their own bucket: at most 5 per
+  connection in 24 hours, apart from sign-in challenges (10 per 24 hours,
+  their own). After an admin denies one, further approval challenges from
+  the service are in a 7-day cooldown; sign-ins are not affected. Approval
+  denials count toward a pause (three within 30 days pause every ask of
+  the connection), and mute and pause, and the 8 pending asks, cover every
+  kind together. A suppressed challenge is answered as a denial after a
+  random delay of 1 to 20 minutes, but at the latest 1 minute before the
+  challenge expires (so within about 9 minutes of a 10-minute challenge),
+  and it counts as that admin's denial. Remind sparingly.
 - *Outcomes.* `approval.approved` when m admins approved; the application
   applies the action (except `admin_set.*`, applied by the service
   vault). A signature that does not verify is audited and not counted;
