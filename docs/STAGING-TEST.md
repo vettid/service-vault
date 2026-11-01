@@ -67,6 +67,28 @@ cd cdk && npx cdk deploy -c envName=staging -c image=<digest> \
    locked).
 3. Operator: `status: approved`.
 
+### Before a vote: every connection signs in once
+
+A member's vault refuses `vote.cast` with `not_signed_in` until it has
+signed a sign-in challenge on that connection (VAULT-MESSAGING §10.19.5);
+a connection that was made again has to sign in again. After every new
+vote-capable connection, and before creating a proposal:
+
+1. Operator: `sv signin -unsigned`. It sends one challenge to each
+   eligible connection that has never signed in (it sends at most 10
+   challenges and looks at 100 connections per run; run it again while
+   it prints `more:`, or exits 1 with `stopped:`) and prints each
+   match code (or why it skipped one: a challenge already pending, a
+   decline within the hour, 10 in 24 h). It does not wait.
+2. Operator and member: tell each member to expect it and read out the
+   match code. The app shows an unrequested sign-in with "Only approve
+   if you are signing in right now"; the member authenticates as in
+   step 3 above only if the code matches. A challenge lives 5 minutes.
+3. Operator: `sv proposal create` prints a warning on stderr, and
+   `unsigned` above 0 in its answer, if a connection is still unsigned;
+   run step 1 again and have that member authenticate before the vote
+   opens.
+
 ## 4. Admin approval
 
 1. Operator:
@@ -88,9 +110,11 @@ minutes).
 ## 5. Optional
 
 - **Denied sign-in:** run step 3 again and deny on the phone. Do this
-  last: a deny starts a 7-day cooldown on every challenge from this
-  connection (VAULT-MESSAGING §10.4.1) until the member vault release
-  that gates sign-ins apart.
+  last: a deny starts a 1-hour cooldown on sign-in challenges from this
+  connection (member vault release 24 and later; VAULT-MESSAGING 0.65.0
+  §10.4.1: at most 2 pending and 10 per 24 hours, 1 hour after a
+  decline), so `sv signin -unsigned` skips it (`declined`) for that
+  hour.
 - **Removal:** the member removes the connection in the app; `sv admins`
   no longer lists it.
 

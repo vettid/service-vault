@@ -77,6 +77,9 @@ type fakeSignIns struct {
 	n     int
 	isDen bool
 	last  api.SignInRequest
+
+	unsigned      *api.UnsignedSignIns // StartUnsigned's answer
+	unsignedCalls int
 }
 
 func (f *fakeSignIns) Start(_ context.Context, r api.SignInRequest) (string, error) {
@@ -98,6 +101,13 @@ func (f *fakeSignIns) Status(_ context.Context, id string) (*api.SignInStatus, e
 	}
 	kc := false
 	return &api.SignInStatus{ID: id, Status: api.SignInApproved, ConnectionID: "c1", KeyChanged: &kc}, nil
+}
+
+func (f *fakeSignIns) StartUnsigned(context.Context, int, int) *api.UnsignedSignIns {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.unsignedCalls++
+	return f.unsigned
 }
 
 // fakeApprovals: a1 is pending once, then approved by c1.
@@ -464,8 +474,9 @@ func TestRenderQR(t *testing.T) {
 // but not published, and a close before the relay is caught up is
 // collecting.
 type fakeProposals struct {
-	created int
-	caught  bool
+	created  int
+	caught   bool
+	unsigned int
 }
 
 func (p *fakeProposals) Create(_ context.Context, in ballot.ProposalInput) (*ballot.Created, error) {
@@ -476,7 +487,7 @@ func (p *fakeProposals) Create(_ context.Context, in ballot.ProposalInput) (*bal
 	if p.created == 1 {
 		return nil, &ballot.ErrNotPublished{ProposalID: "01P", Err: errors.New("site down")}
 	}
-	return &ballot.Created{ProposalID: "01Q", Eligible: 3}, nil
+	return &ballot.Created{ProposalID: "01Q", Eligible: 3, Unsigned: p.unsigned}, nil
 }
 
 func (p *fakeProposals) Status(_ context.Context, id string) (*ballot.ProposalStatus, error) {
@@ -549,5 +560,60 @@ func TestProposalCommands(t *testing.T) {
 	}
 	if fp.created != 2 {
 		t.Fatalf("%d creates, want 2: a failed create isn't retried", fp.created)
+	}
+}
+
+// A proposal created with unsigned connections warns on stderr, and not
+// otherwise; the exit code and the answer are unchanged.
+func TestProposalCreateWarnsUnsigned(t *testing.T) {
+	f := newFixture(t)
+	fp := &fakeProposals{created: 1} // the first create would be kept, not published
+	f.serve(t, func(s *api.Server) { s.Proposals = fp })
+	in := filepath.Join(t.TempDir(), "proposal.json")
+	if err := os.WriteFile(in, []byte(`{"title":"T","choices":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errOut := f.run(t, "proposal", "create", "-in", in)
+	if code != exitOK || errOut != "" || !strings.Contains(out, `"unsigned": 0`) {
+		t.Fatalf("none unsigned: exit %d %q %q", code, out, errOut)
+	}
+	fp.unsigned = 2
+	code, out, errOut = f.run(t, "proposal", "create", "-in", in)
+	want := "warning: 2 eligible connection(s) have never signed in; their vaults will refuse to vote until they do (run: svctl signin -unsigned)\n"
+	if code != exitOK || errOut != want || !strings.Contains(out, `"unsigned": 2`) {
+		t.Fatalf("unsigned: exit %d %q %q", code, out, errOut)
+	}
+}
+
+// signin -unsigned prints each connection's match code or why it was
+// skipped, and takes no email.
+func TestSignInUnsigned(t *testing.T) {
+	f := newFixture(t)
+	f.si.unsigned = &api.UnsignedSignIns{SignIns: []api.UnsignedSignIn{
+		{ConnectionID: "c1", SignInID: "s1", MatchCode: "42"},
+		{ConnectionID: "c2", Skipped: api.SkipPending},
+		{ConnectionID: "c3", MatchCode: "17", Skipped: api.SkipNotRecorded},
+	}, More: 7}
+	code, out, errOut := f.run(t, "signin", "-unsigned")
+	want := "connection_id: c1\nsignin_id: s1\nmatch_code: 42\nconnection_id: c2\nskipped: pending\n" +
+		"connection_id: c3\nmatch_code: 17\nskipped: not_recorded\nmore: 7 (run again)\n"
+	if code != exitOK || out != want || errOut != "" {
+		t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
+	}
+	// A run that stopped early prints what it did and exits 1.
+	f.si.unsigned = &api.UnsignedSignIns{SignIns: []api.UnsignedSignIn{{ConnectionID: "c1", SignInID: "s1", MatchCode: "42"}},
+		More: 2, Stopped: api.StoppedTimeout}
+	code, out, errOut = f.run(t, "signin", "-unsigned")
+	if code != exitError || out != "connection_id: c1\nsignin_id: s1\nmatch_code: 42\nmore: 2 (run again)\nstopped: timeout\n" ||
+		!strings.Contains(errOut, "stopped early (timeout)") {
+		t.Fatalf("stopped: exit %d\n%s\n%s", code, out, errOut)
+	}
+	for _, extra := range [][]string{{"-email", "a@example.org"}, {"-source", "x"}, {"-wait", "1m"}} {
+		if code, _, _ := f.run(t, append([]string{"signin", "-unsigned"}, extra...)...); code != exitUsage {
+			t.Fatalf("-unsigned with %v: exit %d", extra, code)
+		}
+	}
+	if f.si.unsignedCalls != 2 {
+		t.Fatalf("%d calls", f.si.unsignedCalls)
 	}
 }

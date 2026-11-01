@@ -5,6 +5,7 @@
 //
 //	svctl [global flags] invite -email E [-verified]
 //	svctl [global flags] signin -email E [-source S]
+//	svctl [global flags] signin -unsigned
 //	svctl [global flags] approve -action A -summary S -payload JSON
 //	svctl [global flags] approval ID
 //	svctl [global flags] remind ID
@@ -52,6 +53,12 @@ const usage = `usage: svctl [global flags] <command> [flags]
 commands:
   invite -email E [-verified]      make an invitation; print its URL and QR code, then follow it
   signin -email E [-source S]      start an email sign-in; print the match code, then follow it
+  signin -unsigned                 send one sign-in challenge to each eligible connection that
+                                   has never signed in (sends 10 challenges and looks at 100
+                                   connections per run, one challenge each; none to one with
+                                   a challenge pending, declined within the hour or 10 in
+                                   24 h); print each match code or why it was skipped; does
+                                   not wait for the answers; exit 1 if the run stopped early
   approve -action A -summary S -payload JSON
                                    submit an action for admin approval, then follow it
   approval ID                      print an approval's status; "remind needed" lists admins with no live challenge
@@ -307,8 +314,17 @@ func (c *cli) signin(ctx context.Context, args []string) error {
 	email := fs.String("email", "", "the member's email")
 	source := fs.String("source", "", "the end user's address, for the per-source rate limit (optional)")
 	wait := fs.Duration("wait", 3*time.Minute, "how long to follow the sign-in (0: not at all)")
+	unsigned := fs.Bool("unsigned", false, "instead of an email: challenge the eligible connections that have never signed in: 10 challenges sent and 100 connections looked at per run, one challenge each (the answers are not waited for)")
 	if err := c.flags(fs, args, 0); err != nil {
 		return err
+	}
+	if *unsigned {
+		waitSet := false
+		fs.Visit(func(f *flag.Flag) { waitSet = waitSet || f.Name == "wait" })
+		if *email != "" || *source != "" || waitSet {
+			return usageError{errors.New("-unsigned takes no -email, -source or -wait")}
+		}
+		return c.signinUnsigned(ctx)
 	}
 	if *email == "" {
 		return usageError{errors.New("-email is required")}
@@ -335,6 +351,37 @@ func (c *cli) signin(ctx context.Context, args []string) error {
 		}
 		return true, nil
 	})
+}
+
+// signinUnsigned challenges the connections that have never signed in,
+// so a member's vault does not refuse their vote for want of one.
+func (c *cli) signinUnsigned(ctx context.Context) error {
+	u, err := c.c.StartUnsignedSignIns(ctx)
+	if err != nil {
+		return err
+	}
+	for _, s := range u.SignIns {
+		c.printf("connection_id: %s\n", s.ConnectionID)
+		if s.SignInID != "" {
+			c.printf("signin_id: %s\n", s.SignInID)
+		}
+		// A not_recorded entry has a code and no signin_id; the
+		// operator is the only one who can tell the member.
+		if s.MatchCode != "" {
+			c.printf("match_code: %s\n", s.MatchCode)
+		}
+		if s.Skipped != "" {
+			c.printf("skipped: %s\n", s.Skipped)
+		}
+	}
+	if u.More > 0 {
+		c.printf("more: %d (run again)\n", u.More)
+	}
+	if u.Stopped != "" {
+		c.printf("stopped: %s\n", u.Stopped)
+		return fmt.Errorf("stopped early (%s): what is printed was done; run again for the rest", u.Stopped)
+	}
+	return nil
 }
 
 func (c *cli) approve(ctx context.Context, args []string) error {
@@ -525,6 +572,14 @@ func (c *cli) proposal(ctx context.Context, args []string) error {
 			return usageError{fmt.Errorf("%s: not JSON", *in)}
 		}
 		b, err = c.c.CreateProposal(ctx, raw)
+		if err == nil {
+			var made struct {
+				Unsigned int `json:"unsigned"`
+			}
+			if json.Unmarshal(b, &made) == nil && made.Unsigned > 0 {
+				fmt.Fprintf(c.err, "warning: %d eligible connection(s) have never signed in; their vaults will refuse to vote until they do (run: svctl signin -unsigned)\n", made.Unsigned)
+			}
+		}
 		var ae *servicevault.APIError
 		if errors.As(err, &ae) && ae.ProposalID != "" {
 			fmt.Fprintf(c.err, "proposal %s is kept but not published: retry with svctl proposal publish %s\n", ae.ProposalID, ae.ProposalID)

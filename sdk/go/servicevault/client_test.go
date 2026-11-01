@@ -260,3 +260,32 @@ func TestTimeout(t *testing.T) {
 		t.Fatalf("Health: %v", err)
 	}
 }
+
+// StartUnsignedSignIns challenges the unsigned connections, once each,
+// and says why it skipped one.
+func TestStartUnsignedSignIns(t *testing.T) {
+	f := newFixture(t, nil)
+	c := f.client(t)
+	ctx := context.Background()
+	u, err := c.StartUnsignedSignIns(ctx)
+	if err != nil || len(u.SignIns) != 0 || u.More != 0 {
+		t.Fatalf("none unsigned: %+v, %v", u, err)
+	}
+	f.p.mu.Lock()
+	f.p.unsigned = []string{"c1"}
+	f.p.mu.Unlock()
+	u, err = c.StartUnsignedSignIns(ctx)
+	if err != nil || len(u.SignIns) != 1 || u.SignIns[0].ConnectionID != "c1" || u.SignIns[0].SignInID == "" || len(u.SignIns[0].MatchCode) != 2 {
+		t.Fatalf("one unsigned: %+v, %v", u, err)
+	}
+	if ss, err := c.SignInStatus(ctx, u.SignIns[0].SignInID); err != nil || ss.Status != servicevault.SignInStatusPending {
+		t.Fatalf("SignInStatus %+v, %v", ss, err)
+	}
+	f.p.mu.Lock()
+	f.p.pending = map[string]bool{"c1": true}
+	f.p.mu.Unlock()
+	u, err = c.StartUnsignedSignIns(ctx)
+	if err != nil || len(u.SignIns) != 1 || u.SignIns[0].Skipped != "pending" || u.SignIns[0].SignInID != "" {
+		t.Fatalf("pending: %+v, %v", u, err)
+	}
+}

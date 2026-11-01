@@ -35,6 +35,8 @@ type fakeSignIns struct {
 	known   string
 	started map[string]string // id -> email key
 	last    SignInRequest
+
+	unsignedMax, unsignedExamined int
 }
 
 func (f *fakeSignIns) Start(_ context.Context, req SignInRequest) (string, error) {
@@ -51,6 +53,14 @@ func (f *fakeSignIns) Start(_ context.Context, req SignInRequest) (string, error
 		time.Sleep(20 * time.Millisecond) // the known path does more work
 	}
 	return id, nil
+}
+
+func (f *fakeSignIns) StartUnsigned(_ context.Context, send, examine int) *UnsignedSignIns {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.unsignedMax, f.unsignedExamined = send, examine
+	return &UnsignedSignIns{SignIns: []UnsignedSignIn{{ConnectionID: "c1", SignInID: "s9", MatchCode: "42"},
+		{ConnectionID: "c2", Skipped: SkipPending}}, More: 1}
 }
 
 func (f *fakeSignIns) Status(_ context.Context, id string) (*SignInStatus, error) {
@@ -237,5 +247,27 @@ func TestSignInSource(t *testing.T) {
 		if rec, m := do(t, h, "POST", "/v1/signins", apiKey, body); rec.Code != 400 || m["error"] != "invalid_source" {
 			t.Errorf("%s: %d %v", body, rec.Code, m)
 		}
+	}
+}
+
+// POST /v1/signins/unsigned needs the key, asks for at most
+// MaxUnsignedSignIns and MaxUnsignedExamined and passes the answer through.
+func TestStartUnsigned(t *testing.T) {
+	s, _, si := newServer(t)
+	h := s.Handler()
+	if rec, _ := do(t, h, "POST", "/v1/signins/unsigned", "", ""); rec.Code != 401 {
+		t.Fatalf("unauthenticated: %d", rec.Code)
+	}
+	rec, m := do(t, h, "POST", "/v1/signins/unsigned", apiKey, "")
+	if rec.Code != 200 || si.unsignedMax != MaxUnsignedSignIns || si.unsignedExamined != MaxUnsignedExamined || m["more"] != float64(1) {
+		t.Fatalf("%d %v max %d", rec.Code, m, si.unsignedMax)
+	}
+	list, _ := m["signins"].([]any)
+	if len(list) != 2 {
+		t.Fatalf("%v", m)
+	}
+	first, second := list[0].(map[string]any), list[1].(map[string]any)
+	if first["signin_id"] != "s9" || first["match_code"] != "42" || second["skipped"] != "pending" || second["signin_id"] != nil {
+		t.Fatalf("%v", list)
 	}
 }

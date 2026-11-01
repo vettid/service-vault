@@ -22,6 +22,10 @@ type Roster interface {
 	// Eligible lists those eligible (§3.2): active, and with a vault
 	// that takes votes.
 	Eligible() []string
+	// EligibleUnsigned lists those of them whose credential key is not
+	// pinned: their vault refuses a vote until the member has signed in
+	// on the connection (VAULT-MESSAGING §10.19.5).
+	EligibleUnsigned() []string
 	// Active lists the active ones, whether or not their vault takes
 	// votes: a member not among them is removed or suspended (§10.1).
 	Active() []string
@@ -97,7 +101,11 @@ type Created struct {
 	ProposalID   string `json:"proposal_id"`
 	ProposalHash []byte `json:"proposal_hash"`
 	Eligible     int    `json:"eligible"`
-	Sent         int    `json:"sent"`
+	// Unsigned is how many of the eligible connections have no pinned
+	// credential key at creation: their vaults refuse a vote
+	// (not_signed_in) until the member signs in.
+	Unsigned int `json:"unsigned"`
+	Sent     int `json:"sent"`
 }
 
 // ErrInput is a proposal the application asked for that isn't valid.
@@ -160,7 +168,7 @@ func (m *Manager) Create(ctx context.Context, in ProposalInput) (*Created, error
 	if err := m.Store.SaveProposal(ctx, o, true); err != nil {
 		return nil, err
 	}
-	c := &Created{ProposalID: id, ProposalHash: sum(doc), Eligible: len(tags)}
+	c := &Created{ProposalID: id, ProposalHash: sum(doc), Eligible: len(tags), Unsigned: countIn(conns, m.Roster.EligibleUnsigned())}
 	if c.Sent, err = m.Publish(ctx, id); err != nil {
 		return c, &ErrNotPublished{ProposalID: id, Err: err}
 	}
@@ -283,4 +291,19 @@ func (m *Manager) Status(ctx context.Context, id string) (*ProposalStatus, error
 	}
 	return &ProposalStatus{ProposalID: id, Proposal: string(o.Doc), ProposalHash: sum(o.Doc), Eligible: p.Eligible,
 		OpensAt: p.OpensAt, ClosesAt: o.ClosesAt, Published: o.Bundle != nil}, nil
+}
+
+// countIn counts the ids of some that are in all.
+func countIn(all, some []string) int {
+	in := make(map[string]bool, len(all))
+	for _, id := range all {
+		in[id] = true
+	}
+	n := 0
+	for _, id := range some {
+		if in[id] {
+			n++
+		}
+	}
+	return n
 }

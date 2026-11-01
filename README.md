@@ -427,12 +427,13 @@ billed.
 | `GET /v1/invites/{id}` | `{invite_id, status, sas?, connection_id?}`; `status` is `waiting`, `sas` (show `sas`: the member compares it on the phone and approves), `connected`, `declined` or `expired` |
 | `POST /v1/signins` `{email, source?}` | `202 {signin_id, match_code}`, the same way and after the same delay whether or not the email is known and whether or not a rate limit was reached; `source` (optional, at most 64 printable ASCII bytes) is the end user's address as the application sees it, e.g. an IP or its /64, used only for the per-source limit |
 | `GET /v1/signins/{id}` | `{signin_id, status, connection_id?, key_changed?}`; `status` is `pending`, `approved`, `denied` or `expired`; `connection_id` and `key_changed` come with `approved` |
+| `POST /v1/signins/unsigned` | `200 {signins: [{connection_id, signin_id?, match_code?, skipped?}], more, stopped?}`: one sign-in challenge to each eligible connection (active, vault advertises the vote feature) that has no pinned credential key, i.e. whose member has never signed in on it, so that its vault does not refuse their vote with `not_signed_in` (VAULT-MESSAGING §10.19.5). A call goes through the connections in id order until it has sent 10 challenges or looked at 100 connections; a skipped connection counts only toward the 100, so connections skipped for long do not keep the call from the ones after them. `more` is the number not yet looked at (call again). Within the member vault's limits (§10.4.1): never a second challenge to a connection with a sign-in pending, none within an hour of a decline, at most 10 in 24 h (a challenge that expires unanswered counts; they live 5 minutes); a connection left out says `skipped`: `pending`, `declined`, `daily_limit`, `not_sent`, or `not_recorded` (sent, with its `match_code`, but no `signin_id` to read). An error or the call's 8-second deadline ends it early with `stopped` (`error` or `timeout`) and the entries done so far, still status 200; the call goes on server-side if the client gives up. Each `signin_id` is read at `GET /v1/signins/{id}`, and its outcome is a `signin.*` webhook: the application did not start these sign-ins, so it will see webhooks for ids it does not know. For the operator (`svctl signin -unsigned`) |
 | `POST /v1/approvals` `{action, summary, payload}` | `201 {approval_id, action_hash, status: "pending", expires_at}`; refused with `invalid_action`, `invalid_summary`, `invalid_payload` (400), `invalid_connection`, `unreachable`, `last_admin` (422) |
 | `GET /v1/approvals/{id}` | `{approval_id, action, summary, action_hash, status, reason?, threshold, admins, approvals: [{connection_id, at, key_changed}], denials: [{connection_id, at}], created_at, expires_at, remind_needed: [connection_id], remind_after?, applied?}`; `status` is `pending`, `approved`, `denied` or `expired`; `remind_needed`, while pending, lists the admins who have not answered and hold no live challenge (it ran out, or could not be sent); `remind_after` comes with it: the earliest a reminder is accepted |
 | `POST /v1/approvals/{id}/remind` | `{approval_id, reminded: [connection_id]}`: the challenge again to the admins who have not answered; `too_soon` (429) within 10 minutes of the last, `not_pending` (409) once settled |
 | `GET /v1/admins` | `{admins: [connection_id], threshold}` |
 | `GET /v1/audit?since=&limit=` | `{entries: [...], next?}`: the audit log after entry `since`, oldest first, `limit` 1–100 (default 100); pass `next` as `since` for the next page |
-| `POST /v1/proposals` `{title, text, choices, quorum, binding, removed_may_vote, opens_at, closes_at, outage_rule}` | `201 {proposal_id, proposal_hash, eligible, sent}`: the proposal is made from the active connections at this moment whose vault advertised the vote feature (BALLOT-PROTOCOL §3.2), published and sent to each (BALLOT-PROTOCOL §3); `abstain` is added to the choices if they lack it. `invalid_proposal` (400) for one outside the bounds of BALLOT-PROTOCOL §3.1 (member vaults refuse those) or with no such connection; `publication_not_configured` (503) until publication is configured; `503 {error: not_published, proposal_id}` when it was kept but its publication failed (retry with `/publish`). Served with `SV_BALLOTS_TABLE` |
+| `POST /v1/proposals` `{title, text, choices, quorum, binding, removed_may_vote, opens_at, closes_at, outage_rule}` | `201 {proposal_id, proposal_hash, eligible, unsigned, sent}`: the proposal is made from the active connections at this moment whose vault advertised the vote feature (BALLOT-PROTOCOL §3.2), published and sent to each (BALLOT-PROTOCOL §3); `abstain` is added to the choices if they lack it. `unsigned` is how many of the `eligible` connections have no pinned credential key: their member has never signed in on the connection, and their vault refuses `vote.cast` with `not_signed_in` until they do (VAULT-MESSAGING §10.19.5); sign them in with `POST /v1/signins/unsigned` (`svctl signin -unsigned`). `invalid_proposal` (400) for one outside the bounds of BALLOT-PROTOCOL §3.1 (member vaults refuse those) or with no such connection; `publication_not_configured` (503) until publication is configured; `503 {error: not_published, proposal_id}` when it was kept but its publication failed (retry with `/publish`). Served with `SV_BALLOTS_TABLE` |
 | `GET /v1/proposals/{id}` | `{proposal_id, proposal, proposal_hash, eligible, opens_at, closes_at, published}`: nothing that counts ballots before the results |
 | `POST /v1/proposals/{id}/publish` | `{sent}`: publishes a proposal whose publication failed, and sends it again to each eligible member. A proposal not published is no member's: a cast on it is `not_eligible`, `vote.status` `unknown_proposal`. `not_found` (404) |
 | `POST /v1/proposals/{id}/extend` `{closes_at, outage: {from, to, source}}` | The extension (BALLOT-PROTOCOL §10.2), published and sent to each member: for a relay outage of over an hour within the window, by its length rounded up to the hour, 24 h in all at most. `invalid_extension` (400), `too_late` (409) once the close has passed |
@@ -718,6 +719,7 @@ inv, err := c.CreateInvite(ctx, email, servicevault.EmailVerified) // POST /v1/i
 st, err := c.InviteStatus(ctx, inv.ID)              // GET /v1/invites/{id}
 si, err := c.StartSignIn(ctx, servicevault.SignInRequest{Email: email, Source: clientIP})
 ss, err := c.SignInStatus(ctx, si.ID)               // GET /v1/signins/{id}
+us, err := c.StartUnsignedSignIns(ctx)              // POST /v1/signins/unsigned; us.SignIns, us.More
 ap, err := c.CreateApproval(ctx, servicevault.ApprovalRequest{
 	Action: servicevault.ActionVoteOpen, Summary: "Open the vote on proposal 7",
 	Payload: json.RawMessage(`{"proposal":7}`)})   // POST /v1/approvals
@@ -811,6 +813,7 @@ polled.
 ```sh
 svctl invite -email E [-verified] [-no-qr] [-qr-invert] [-wait 11m]
 svctl signin -email E [-source S] [-wait 3m]
+svctl signin -unsigned
 svctl approve -action vote.open -summary "Open the vote" -payload '{"proposal":7}' [-wait 30m]
 svctl approval <approval id>
 svctl remind <approval id>
@@ -832,6 +835,26 @@ svctl health
 - `signin` prints the match code (the member finds it in the request on
   the phone) and follows the sign-in to `approved` (with `connection_id`
   and `key_changed`), `denied` or `expired`.
+- `signin -unsigned` sends one sign-in challenge to each eligible
+  connection that has never signed in (no pinned credential key), sending
+  at most 10 challenges and looking at 100 connections per run (a skipped
+  one counts only toward the 100), and prints for each the `signin_id` and match code, or `skipped:` and why
+  (`pending`, `declined`, `daily_limit`, `not_sent`, `not_recorded`);
+  `more:` says how many connections have not been looked at yet, and
+  `stopped:` that an error or the deadline ended the run early. It
+  keeps within the member vault's limits for sign-in challenges
+  (VAULT-MESSAGING §10.4.1): none to a connection with one pending,
+  none within an hour of a decline, at most 10 in 24 h. It does not wait
+  for the answers: each `signin_id` is read at `GET /v1/signins/{id}`.
+  When the run stopped early (`stopped:`) it exits 1, after printing
+  what it did; run it again. The member's app shows the request
+  unasked, with "Only approve if you are signing in right now":
+  contact each member first and read out the match code. A decline
+  costs that connection a 1-hour cooldown; a challenge lives 5
+  minutes, and one that expires unanswered still counts toward the 10
+  a day. The service emits `signin.*` webhooks for these
+  `signin_id`s, which the application did not start. Run it after
+  every new vote-capable connection and before creating a proposal.
 - `approve` prints the approval's id and action hash, checks the hash
   against `servicevault.ActionHash` of what it sent, and follows it to
   its outcome (the approving admins, `reason`, `applied`). While
@@ -847,7 +870,11 @@ svctl health
   "Votes"). `proposal create` posts the file as the proposal input and
   is never retried (a retry would make a second proposal); a proposal
   kept but not published (`503 not_published`) is named on stderr, with
-  the `proposal publish` command that retries it. `proposal close`
+  the `proposal publish` command that retries it. When the answer's
+  `unsigned` is above 0, `proposal create` also warns on stderr that
+  that many eligible connections have never signed in and their vaults will
+  refuse to vote until they do (run `svctl signin -unsigned`); the exit status is unchanged.
+  `proposal close`
   answers `collecting` until the relay's messages are in: run it again.
 - `-wait 0` creates without following. Exit status: 0 done (connected,
   approved), 3 another outcome (declined, denied, expired), 1 an error or

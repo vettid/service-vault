@@ -768,3 +768,69 @@ func TestChallengeMatchCode(t *testing.T) {
 		t.Fatalf("after a restart: %+v", ch)
 	}
 }
+
+// EligibleUnsigned lists the eligible connections with no pinned
+// credential key: a signed answer pins one; a connection that does not
+// vote or is not active is not listed.
+func TestEligibleUnsigned(t *testing.T) {
+	f := newFixture(t)
+	a, b, n := f.member(10), f.member(20), f.member(30)
+	ca, cb := f.connect(a, "a"), f.connect(b, "b")
+	n.Features = nil // not vote-capable
+	f.connect(n, "n")
+	got := f.p.EligibleUnsigned()
+	slices.Sort(got)
+	want := []string{ca, cb}
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("EligibleUnsigned = %v, want %v", got, want)
+	}
+	if !f.signIn(a, ca) {
+		t.Fatal("sign-in not approved")
+	}
+	if got := f.p.EligibleUnsigned(); len(got) != 1 || got[0] != cb {
+		t.Fatalf("after a signed: %v, want [%s]", got, cb)
+	}
+	f.p.mu.Lock()
+	f.p.conns[cb].State = StateStale
+	f.p.mu.Unlock()
+	if got := f.p.EligibleUnsigned(); len(got) != 0 {
+		t.Fatalf("an inactive connection is listed: %v", got)
+	}
+}
+
+// HasPendingSignIn is true from a sign-in challenge until it is
+// answered or expires; an approval challenge does not count.
+func TestHasPendingSignIn(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "t")
+	ctx := context.Background()
+	if f.p.HasPendingSignIn(cid) {
+		t.Fatal("pending before any challenge")
+	}
+	if _, err := f.p.Authenticate(ctx, cid, "x", peerwire.PurposeApproval, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if f.p.HasPendingSignIn(cid) {
+		t.Fatal("an approval challenge counted")
+	}
+	id, err := f.p.AuthenticateSignIn(ctx, cid, "Sign in", "42", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.p.HasPendingSignIn(cid) || f.p.HasPendingSignIn("other") {
+		t.Fatal("not pending, or pending elsewhere")
+	}
+	f.p.CancelChallenge(ctx, id)
+	if f.p.HasPendingSignIn(cid) {
+		t.Fatal("pending after cancel")
+	}
+	if _, err := f.p.AuthenticateSignIn(ctx, cid, "Sign in", "42", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	f.clk.Advance(2 * time.Minute)
+	if f.p.HasPendingSignIn(cid) {
+		t.Fatal("pending past its exp")
+	}
+}

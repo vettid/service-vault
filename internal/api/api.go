@@ -69,6 +69,64 @@ type SignIns interface {
 	Start(ctx context.Context, req SignInRequest) (id string, err error)
 	// Status reports a sign-in; ErrNotFound for an unknown id.
 	Status(ctx context.Context, id string) (*SignInStatus, error)
+	// StartUnsigned sends a sign-in challenge to each eligible connection
+	// with no pinned credential key, until it has sent send challenges or
+	// looked at examine connections (see UnsignedSignIns).
+	StartUnsigned(ctx context.Context, send, examine int) *UnsignedSignIns
+}
+
+// MaxUnsignedSignIns bounds the challenges one POST /v1/signins/unsigned
+// sends: each takes several round trips to the relay, and the call must
+// end well within a client's timeout. MaxUnsignedExamined bounds the
+// connections it looks at, skipped ones included (a skip costs a store
+// read), so that connections skipped for long do not keep it from the
+// ones after them. unsignedDeadline bounds its time; it runs on after
+// the client has gone, so that what it has sent is recorded.
+const (
+	MaxUnsignedSignIns  = 10
+	MaxUnsignedExamined = 100
+)
+
+// unsignedDeadline is under the SDK's default timeout (10 s), so that a
+// client that waits for the answer gets it, `stopped` included.
+const unsignedDeadline = 8 * time.Second
+
+// Why StartUnsigned sent no challenge to a connection.
+const (
+	SkipPending    = "pending"     // a sign-in challenge is still pending
+	SkipDeclined   = "declined"    // the member declined one within the hour
+	SkipDailyLimit = "daily_limit" // 10 challenges in the last 24 h
+	SkipNotSent    = "not_sent"    // the connection could not take it now
+	// SkipNotRecorded: the challenge was sent, with this match code, but
+	// its sign-in could not be saved, so there is no signin_id to read.
+	SkipNotRecorded = "not_recorded"
+)
+
+// Why a run stopped before looking at every connection it could.
+const (
+	StoppedTimeout = "timeout"
+	StoppedError   = "error"
+)
+
+// UnsignedSignIn is one connection's part in an unsigned run: the
+// sign-in started (read it at GET /v1/signins/{id}) with its match code,
+// or why none was.
+type UnsignedSignIn struct {
+	ConnectionID string `json:"connection_id"`
+	SignInID     string `json:"signin_id,omitempty"`
+	MatchCode    string `json:"match_code,omitempty"`
+	Skipped      string `json:"skipped,omitempty"`
+}
+
+// UnsignedSignIns is the answer of POST /v1/signins/unsigned: one entry
+// per connection looked at, and More, how many connections have not been
+// looked at yet (another run reaches them). Stopped is set when an error
+// or the deadline ended the run early: the entries are still what was
+// done.
+type UnsignedSignIns struct {
+	SignIns []UnsignedSignIn `json:"signins"`
+	More    int              `json:"more"`
+	Stopped string           `json:"stopped,omitempty"`
 }
 
 // SignInRequest is a sign-in to start.
@@ -162,6 +220,7 @@ func (s *Server) Handler() http.Handler {
 	v1.HandleFunc("GET /v1/invites/{id}", s.inviteStatus)
 	v1.HandleFunc("POST /v1/signins", s.startSignIn)
 	v1.HandleFunc("GET /v1/signins/{id}", s.signInStatus)
+	v1.HandleFunc("POST /v1/signins/unsigned", s.startUnsigned)
 	if s.Approvals != nil {
 		v1.HandleFunc("POST /v1/approvals", s.createApproval)
 		v1.HandleFunc("GET /v1/approvals/{id}", s.approvalStatus)
@@ -333,6 +392,20 @@ func (s *Server) startSignIn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, signInResponse{ID: id, MatchCode: code})
+}
+
+// startUnsigned serves POST /v1/signins/unsigned: a sign-in challenge to
+// each eligible connection that has never signed in, so its member's
+// vault takes votes (VAULT-MESSAGING §10.19.5). It sends no more than
+// MaxUnsignedSignIns challenges and looks at no more than
+// MaxUnsignedExamined connections per call.
+func (s *Server) startUnsigned(w http.ResponseWriter, r *http.Request) {
+	// Not r.Context(): a client that gives up must not leave a challenge
+	// sent and unrecorded.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), unsignedDeadline)
+	defer cancel()
+	u := s.SignIns.StartUnsigned(ctx, MaxUnsignedSignIns, MaxUnsignedExamined)
+	writeJSON(w, http.StatusOK, u)
 }
 
 func (s *Server) signInStatus(w http.ResponseWriter, r *http.Request) {

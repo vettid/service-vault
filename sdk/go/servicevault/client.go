@@ -208,6 +208,29 @@ type SignIn struct {
 	MatchCode string `json:"match_code"`
 }
 
+// UnsignedSignIn is one connection's part in StartUnsignedSignIns: the
+// sign-in started (read it with SignInStatus) and its match code, or the
+// reason none was started: "pending" (a sign-in challenge is still
+// pending), "declined" (the member declined one within the hour),
+// "daily_limit" (10 in the last 24 h), "not_sent", or "not_recorded"
+// (the challenge went out with MatchCode but has no SignInID).
+type UnsignedSignIn struct {
+	ConnectionID string `json:"connection_id"`
+	SignInID     string `json:"signin_id,omitempty"`
+	MatchCode    string `json:"match_code,omitempty"`
+	Skipped      string `json:"skipped,omitempty"`
+}
+
+// UnsignedSignIns is the answer of StartUnsignedSignIns. More counts the
+// connections not yet looked at, which another run reaches. Stopped is
+// "timeout" or "error" when the run ended early; SignIns is still what
+// it did.
+type UnsignedSignIns struct {
+	SignIns []UnsignedSignIn `json:"signins"`
+	More    int              `json:"more"`
+	Stopped string           `json:"stopped,omitempty"`
+}
+
 // SignInStatus reports a sign-in.
 type SignInStatus struct {
 	ID           string `json:"signin_id"`
@@ -495,6 +518,24 @@ func (c *Client) StartSignIn(ctx context.Context, req SignInRequest) (*SignIn, e
 		return nil, err
 	}
 	return si, nil
+}
+
+// StartUnsignedSignIns sends one sign-in challenge to each eligible
+// connection (one whose vault takes votes) that has no pinned
+// credential key, so that its votes are not refused for want of a
+// sign-in (VAULT-MESSAGING §10.19.5). It sends at most 10 challenges
+// and looks at at most 100 connections per call (More: those not looked
+// at). A connection that has a challenge pending, declined one within
+// the hour or has had 10 in 24 h is skipped, which keeps within the
+// limits of the member's vault (§10.4.1). The call ends within about
+// 8 s with what it did, Stopped set if it was cut short. It is not
+// retried.
+func (c *Client) StartUnsignedSignIns(ctx context.Context) (*UnsignedSignIns, error) {
+	u := &UnsignedSignIns{}
+	if err := c.do(ctx, http.MethodPost, "/v1/signins/unsigned", nil, true, u); err != nil {
+		return nil, err
+	}
+	return u, nil
 }
 
 // SignInStatus reports a sign-in; IsNotFound(err) for an unknown id.

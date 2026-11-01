@@ -45,6 +45,8 @@ type Peer interface {
 	Connection(id string) (peer.ConnectionInfo, bool)
 	AuthenticateSignIn(ctx context.Context, connID, ctxt, matchCode string, ttl time.Duration) (string, error)
 	CancelChallenge(ctx context.Context, requestID string) (bool, error)
+	EligibleUnsigned() []string
+	HasPendingSignIn(connID string) bool
 }
 
 // Service implements peer.Events; Invites and SignIns return its
@@ -66,8 +68,14 @@ type Service struct {
 	Now       func() time.Time
 	Log       *slog.Logger
 
-	limited atomic.Uint64 // sign-ins started over a limit
-	locks   [64]sync.Mutex
+	limited atomic.Uint64  // sign-ins started over a limit
+	locks   [64]sync.Mutex // by email key (StartSignIn)
+	// connLocks serialize a connection's challenge history. They are
+	// separate from locks, which StartSignIn holds while it records a
+	// challenge: one array would make a connection and an email on the
+	// same stripe wait on each other's mutex. Nothing takes locks while
+	// holding a connLock.
+	connLocks [64]sync.Mutex
 }
 
 var _ peer.Events = (*Service)(nil)
@@ -92,6 +100,10 @@ type signIns struct{ s *Service }
 
 func (x signIns) Start(ctx context.Context, req api.SignInRequest) (string, error) {
 	return x.s.StartSignIn(ctx, req)
+}
+
+func (x signIns) StartUnsigned(ctx context.Context, send, examine int) *api.UnsignedSignIns {
+	return x.s.StartUnsigned(ctx, send, examine)
 }
 
 func (x signIns) Status(ctx context.Context, id string) (*api.SignInStatus, error) {
@@ -157,6 +169,13 @@ func (s *Service) lock(emailKey string) *sync.Mutex {
 	h := fnv.New32a()
 	h.Write([]byte(emailKey))
 	return &s.locks[h.Sum32()%uint32(len(s.locks))]
+}
+
+// connLock serializes a connection's challenge history.
+func (s *Service) connLock(connID string) *sync.Mutex {
+	h := fnv.New32a()
+	h.Write([]byte(connID))
+	return &s.connLocks[h.Sum32()%uint32(len(s.connLocks))]
 }
 
 // LimitedSignIns is the number of sign-ins started over a rate limit
@@ -236,6 +255,7 @@ func (s *Service) challenge(ctx context.Context, req api.SignInRequest, rec *sig
 		return nil
 	}
 	rec.ConnID, rec.RequestID = connID, reqID
+	s.noteChallenge(ctx, connID, s.now())
 	return nil
 }
 
@@ -439,6 +459,9 @@ func (s *Service) finishSignIn(ctx context.Context, e *peer.Event) (string, erro
 	switch rec.Status {
 	case api.SignInPending:
 		rec.Status = status
+		if e.Type == peer.EventSignInDenied && e.Reason == "denied" {
+			s.noteDeclined(ctx, e.ConnectionID, s.now())
+		}
 		rec.KeyChanged = status == api.SignInApproved && e.KeyChanged
 		if err := s.Store.Apply(ctx, []peer.Change{s.signInChange(rec)}); err != nil {
 			return "", err
@@ -470,4 +493,6 @@ func (s *Service) webhook(ctx context.Context, e *peer.Event, data any) error {
 
 // Kinds lists every record kind the service stores (its webhook outbox
 // included), for a migration that must touch them all.
-func Kinds() []string { return []string{kindEmail, kindSignIn, kindSignInReq, kindSignInCur, HookKind} }
+func Kinds() []string {
+	return []string{kindEmail, kindSignIn, kindSignInReq, kindSignInCur, kindSignInConn, HookKind}
+}

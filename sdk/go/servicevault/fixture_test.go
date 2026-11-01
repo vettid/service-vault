@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -45,6 +46,10 @@ var inviteExp = time.Unix(1_800_000_600, 0).UTC()
 type fakePeer struct {
 	n   atomic.Int32
 	tag atomic.Pointer[string] // the last invitation's tag
+
+	mu       sync.Mutex
+	unsigned []string        // the eligible connections with no pinned key
+	pending  map[string]bool // connections with a sign-in challenge pending
 }
 
 func (p *fakePeer) CreateInvite(_ context.Context, tag string) (*peer.InviteRecord, error) {
@@ -67,6 +72,18 @@ func (p *fakePeer) Authenticate(context.Context, string, string, string, time.Du
 
 func (p *fakePeer) AuthenticateSignIn(ctx context.Context, conn, ctxt, _ string, ttl time.Duration) (string, error) {
 	return p.Authenticate(ctx, conn, ctxt, "", ttl)
+}
+
+func (p *fakePeer) EligibleUnsigned() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string{}, p.unsigned...)
+}
+
+func (p *fakePeer) HasPendingSignIn(conn string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.pending[conn]
 }
 
 func (*fakePeer) CancelChallenge(context.Context, string) (bool, error) { return true, nil }

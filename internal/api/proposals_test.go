@@ -19,7 +19,7 @@ func (f *fakeProposals) Create(_ context.Context, in ballot.ProposalInput) (*bal
 	if f.err != nil {
 		return nil, f.err
 	}
-	return &ballot.Created{ProposalID: "01JBQZ0000000000000000000A", ProposalHash: []byte{1}, Eligible: 3, Sent: 3}, nil
+	return &ballot.Created{ProposalID: "01JBQZ0000000000000000000A", ProposalHash: []byte{1}, Eligible: 3, Unsigned: 1, Sent: 3}, nil
 }
 
 func (f *fakeProposals) Status(_ context.Context, id string) (*ballot.ProposalStatus, error) {
@@ -80,7 +80,7 @@ func TestProposalRoutes(t *testing.T) {
 	}
 	body := `{"title":"T","text":"x","choices":[{"id":"yes","label":"Yes"},{"id":"no","label":"No"}],"quorum":{"text":"q","min_ballots":1},"binding":false,"removed_may_vote":false,"opens_at":1,"closes_at":2,"outage_rule":"r"}`
 	rec, m := do(t, h, "POST", "/v1/proposals", apiKey, body)
-	if rec.Code != 201 || m["proposal_id"] != "01JBQZ0000000000000000000A" || m["eligible"] != float64(3) || fp.last.Title != "T" || len(fp.last.Choices) != 2 {
+	if rec.Code != 201 || m["proposal_id"] != "01JBQZ0000000000000000000A" || m["eligible"] != float64(3) || m["unsigned"] != float64(1) || fp.last.Title != "T" || len(fp.last.Choices) != 2 {
 		t.Fatalf("%d %v", rec.Code, m)
 	}
 	if rec, _ := do(t, h, "POST", "/v1/proposals", apiKey, `{"title":"T","extra":1}`); rec.Code != 400 {
