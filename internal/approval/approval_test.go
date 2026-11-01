@@ -981,3 +981,50 @@ func TestChallengeExpiredQuiet(t *testing.T) {
 		t.Fatal("logged")
 	}
 }
+
+// An admin who left the set is not asked to be reminded, and an expiry
+// of its challenge is not announced.
+func TestRemindNeededLeavesWithAdmin(t *testing.T) {
+	f := newFixture(t, 1, "c1", "c2")
+	c := f.create(ActionVoteOpen, "Open", `{}`)
+	old := f.p.last("c2")
+	if err := f.m.ConnectionRemoved(context.Background(), "c2"); err != nil {
+		t.Fatal(err)
+	}
+	f.answerTo(old, "expire")
+	f.tick()
+	if n := len(f.hk.of(EventChallengeExpired)); n != 0 {
+		t.Fatalf("%d webhooks for a removed admin", n)
+	}
+	if s := f.status(c.ID); s.Status != StatusPending || len(s.RemindNeeded) != 0 || s.RemindAfter != nil {
+		t.Fatalf("%+v", s)
+	}
+	f.clk.Advance(RemindInterval)
+	if _, err := f.m.Remind(context.Background(), c.ID); err != nil {
+		t.Fatal(err)
+	}
+	if s := f.status(c.ID); len(s.RemindNeeded) != 0 {
+		t.Fatalf("after remind %v", s.RemindNeeded)
+	}
+}
+
+// An admin who could not be challenged is listed at once, with the time
+// from which a reminder is accepted.
+func TestRemindNeededNotSent(t *testing.T) {
+	f := newFixture(t, 1, "c1", "c2")
+	f.p.fail = map[string]error{"c2": peer.ErrNotFound}
+	c := f.create(ActionVoteOpen, "Open", `{}`)
+	s := f.status(c.ID)
+	if strings.Join(s.RemindNeeded, ",") != "c2" || s.RemindAfter == nil ||
+		!s.RemindAfter.Equal(f.clk.Now().Add(RemindInterval)) {
+		t.Fatalf("%+v", s)
+	}
+	f.p.fail = nil
+	f.clk.Advance(RemindInterval)
+	if _, err := f.m.Remind(context.Background(), c.ID); err != nil {
+		t.Fatal(err)
+	}
+	if s := f.status(c.ID); len(s.RemindNeeded) != 0 || s.RemindAfter != nil {
+		t.Fatalf("%+v", s)
+	}
+}

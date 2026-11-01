@@ -132,7 +132,7 @@ func (f *fakeApprovals) Status(_ context.Context, id string) (*approval.Status, 
 		return nil, approval.ErrNotFound
 	}
 	f.n++
-	st := &approval.Status{ID: id, Action: f.req.Action, Status: approval.StatusPending, Threshold: 1, Admins: []string{"c1"}, RemindNeeded: []string{"c1"}}
+	st := &approval.Status{ID: id, Action: f.req.Action, Status: approval.StatusPending, Threshold: 1, Admins: []string{"c1"}, RemindNeeded: []string{"c1"}, RemindAfter: &exp}
 	if f.n > 1 {
 		st.RemindNeeded = []string{}
 		st.Status = approval.StatusApproved
@@ -329,6 +329,14 @@ func TestApprovalStatus(t *testing.T) {
 	code, out, errOut := f.run(t, "approval", "a1")
 	if want := "status: pending\nthreshold: 1\nremind needed: c1 (svctl remind a1)\n"; code != exitOK || out != want {
 		t.Fatalf("exit %d\n%s\nstderr %s", code, out, errOut)
+	}
+	// Before remind_after a reminder would answer too_soon.
+	saved := now
+	now = func() time.Time { return exp.Add(-time.Minute) }
+	code, out, _ = newFixture(t).run(t, "approval", "a1")
+	now = saved
+	if want := "status: pending\nthreshold: 1\nremind needed: c1 (svctl remind a1 after 12:10:00Z)\n"; code != exitOK || out != want {
+		t.Fatalf("exit %d\n%s", code, out)
 	}
 	// Settled: no remind line.
 	code, out, _ = f.run(t, "approval", "a1")

@@ -467,10 +467,18 @@ func (m *Manager) Status(ctx context.Context, id string) (*Status, error) {
 		st.Status = StatusExpired
 	}
 	if st.Status == StatusPending {
+		set, err := m.admins(ctx)
+		if err != nil {
+			return nil, err
+		}
 		for _, a := range r.Admins {
-			if r.Pending[a] == "" && !r.answered(a) {
+			if slices.Contains(set, a) && r.Pending[a] == "" && !r.answered(a) {
 				st.RemindNeeded = append(st.RemindNeeded, a)
 			}
+		}
+		if len(st.RemindNeeded) > 0 {
+			ra := r.LastSent.Add(RemindInterval).UTC().Truncate(time.Second)
+			st.RemindAfter = &ra
 		}
 	}
 	if st.Approvals == nil {
@@ -610,6 +618,13 @@ func (m *Manager) Answer(ctx context.Context, e *peer.Event) (bool, error) {
 		}
 		delete(r.Pending, e.ConnectionID)
 		live := r.Status == StatusPending && now.Before(r.Exp)
+		if live {
+			set, err := m.admins(ctx)
+			if err != nil {
+				return true, err
+			}
+			live = slices.Contains(set, e.ConnectionID)
+		}
 		if live {
 			if err := b.hook(EventChallengeExpired, e.ConnectionID, map[string]any{"approval_id": r.ID, "action": r.Action,
 				"connection_id": e.ConnectionID, "request_id": e.RequestID, "expires_at": r.Exp}); err != nil {

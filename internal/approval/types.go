@@ -176,6 +176,9 @@ type Status struct {
 	// and hold no live challenge (it ran out, or could not be sent), so
 	// they see nothing on the phone until a reminder.
 	RemindNeeded []string `json:"remind_needed"`
+	// RemindAfter, with RemindNeeded: the earliest a reminder is accepted
+	// (RemindInterval after the last challenges were sent).
+	RemindAfter *time.Time `json:"remind_after,omitempty"`
 	// Applied, for an approved admin_set.* action: whether the service
 	// vault changed the admin set (false when it no longer applied, for
 	// example the connection was removed meanwhile).

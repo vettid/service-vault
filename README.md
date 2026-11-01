@@ -428,7 +428,7 @@ billed.
 | `POST /v1/signins` `{email, source?}` | `202 {signin_id, match_code}`, the same way and after the same delay whether or not the email is known and whether or not a rate limit was reached; `source` (optional, at most 64 printable ASCII bytes) is the end user's address as the application sees it, e.g. an IP or its /64, used only for the per-source limit |
 | `GET /v1/signins/{id}` | `{signin_id, status, connection_id?, key_changed?}`; `status` is `pending`, `approved`, `denied` or `expired`; `connection_id` and `key_changed` come with `approved` |
 | `POST /v1/approvals` `{action, summary, payload}` | `201 {approval_id, action_hash, status: "pending", expires_at}`; refused with `invalid_action`, `invalid_summary`, `invalid_payload` (400), `invalid_connection`, `unreachable`, `last_admin` (422) |
-| `GET /v1/approvals/{id}` | `{approval_id, action, summary, action_hash, status, reason?, threshold, admins, approvals: [{connection_id, at, key_changed}], denials: [{connection_id, at}], created_at, expires_at, remind_needed: [connection_id], applied?}`; `status` is `pending`, `approved`, `denied` or `expired`; `remind_needed`, while pending, lists the admins who have not answered and hold no live challenge (it ran out, or could not be sent) |
+| `GET /v1/approvals/{id}` | `{approval_id, action, summary, action_hash, status, reason?, threshold, admins, approvals: [{connection_id, at, key_changed}], denials: [{connection_id, at}], created_at, expires_at, remind_needed: [connection_id], remind_after?, applied?}`; `status` is `pending`, `approved`, `denied` or `expired`; `remind_needed`, while pending, lists the admins who have not answered and hold no live challenge (it ran out, or could not be sent); `remind_after` comes with it: the earliest a reminder is accepted |
 | `POST /v1/approvals/{id}/remind` | `{approval_id, reminded: [connection_id]}`: the challenge again to the admins who have not answered; `too_soon` (429) within 10 minutes of the last, `not_pending` (409) once settled |
 | `GET /v1/admins` | `{admins: [connection_id], threshold}` |
 | `GET /v1/audit?since=&limit=` | `{entries: [...], next?}`: the audit log after entry `since`, oldest first, `limit` 1–100 (default 100); pass `next` as `since` for the next page |
@@ -834,7 +834,13 @@ svctl health
   and `key_changed`), `denied` or `expired`.
 - `approve` prints the approval's id and action hash, checks the hash
   against `servicevault.ActionHash` of what it sent, and follows it to
-  its outcome (the approving admins, `reason`, `applied`).
+  its outcome (the approving admins, `reason`, `applied`). While
+  following it also prints `remind needed: <ids> (svctl remind <id>)`
+  whenever that list changes.
+- `approval ID` prints an approval's status, threshold, approving and
+  denying admins and `applied`, and `remind needed: <ids> (svctl remind
+  <id>)` (with `after HH:MM:SSZ` while a reminder would still answer
+  `too_soon`). It exits 0 whatever the status, unlike `approve`.
 - `audit` prints one JSON entry per line; when there are more, stderr
   says which `-since` gives the next page.
 - `anchor-key` and `proposal` print the API's JSON answers (see

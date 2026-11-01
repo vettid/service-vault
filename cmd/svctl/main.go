@@ -385,13 +385,20 @@ func (c *cli) approve(ctx context.Context, args []string) error {
 	})
 }
 
+// now is the clock (replaced in tests).
+var now = time.Now
+
 // remindLine is the line that tells the operator which admins hold no
 // live challenge and have not answered; "" when there are none.
 func remindLine(st *servicevault.Approval) string {
 	if st.Status != servicevault.ApprovalStatusPending || len(st.RemindNeeded) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("remind needed: %s (svctl remind %s)\n", strings.Join(st.RemindNeeded, ","), st.ID)
+	cmd := "svctl remind " + st.ID
+	if st.RemindAfter != nil && now().Before(*st.RemindAfter) {
+		cmd += " after " + st.RemindAfter.UTC().Format("15:04:05Z")
+	}
+	return fmt.Sprintf("remind needed: %s (%s)\n", strings.Join(st.RemindNeeded, ","), cmd)
 }
 
 func (c *cli) printApproval(st *servicevault.Approval) {
