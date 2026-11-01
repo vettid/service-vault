@@ -650,10 +650,10 @@ admin's connection.
   challenges (`purpose: "approval"`) have their own bucket: at most 5 per
   connection in 24 hours, apart from sign-in challenges (10 per 24 hours,
   their own). After an admin denies one, further approval challenges from
-  the service are in a 7-day cooldown; sign-ins are not affected. Approval
-  denials count toward a pause (three within 30 days pause every ask of
-  the connection), and mute and pause, and the 8 pending asks, cover every
-  kind together. A suppressed challenge is answered as a denial after a
+  the service are in a 7-day cooldown (a sign-in denial cools only
+  sign-ins, for 1 hour). Approval denials count toward a pause (three
+  within 30 days pause every ask of the connection), and mute and pause,
+  and the 8 pending asks, cover every kind together. A suppressed challenge is answered as a denial after a
   random delay of 1 to 20 minutes, but at the latest 1 minute before the
   challenge expires (so within about 9 minutes of a 10-minute challenge),
   and it counts as that admin's denial. Remind sparingly.
