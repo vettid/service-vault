@@ -103,7 +103,7 @@ func (f *fakeSignIns) Status(_ context.Context, id string) (*api.SignInStatus, e
 	return &api.SignInStatus{ID: id, Status: api.SignInApproved, ConnectionID: "c1", KeyChanged: &kc}, nil
 }
 
-func (f *fakeSignIns) StartUnsigned(context.Context, int) (*api.UnsignedSignIns, error) {
+func (f *fakeSignIns) StartUnsigned(context.Context, int, int) (*api.UnsignedSignIns, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.unsignedCalls++

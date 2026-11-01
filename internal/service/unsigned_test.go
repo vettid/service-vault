@@ -19,7 +19,7 @@ import (
 
 func (f *fixture) unsigned(max int) *api.UnsignedSignIns {
 	f.t.Helper()
-	u, err := f.svc.StartUnsigned(context.Background(), max)
+	u, err := f.svc.StartUnsigned(context.Background(), max, api.MaxUnsignedExamined)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -92,24 +92,55 @@ func TestStartUnsigned(t *testing.T) {
 	}
 }
 
-// A run looks at no more than max connections, and a skipped one counts
-// as looked at: with two pending, the third waits for another run.
-func TestStartUnsignedBound(t *testing.T) {
+// A run sends no more than its bound of challenges; skipped connections
+// do not use it, so a run still reaches the sendable ones behind them,
+// but they do count toward the examined bound.
+func TestStartUnsignedBounds(t *testing.T) {
 	f := newFixture(t)
 	f.connect(f.m, "")
 	f.connect(f.member(20), "")
 	f.connect(f.member(30), "")
 	u := f.unsigned(2)
 	if len(u.SignIns) != 2 || u.SignIns[0].SignInID == "" || u.SignIns[1].SignInID == "" || u.More != 1 || u.Stopped != "" {
-		t.Fatalf("max 2 of 3: %+v", u)
+		t.Fatalf("send 2 of 3: %+v", u)
 	}
-	// Both are pending now: skipped, but looked at all the same.
+	// The first two are pending now: skipped without using the bound, and
+	// the third gets the challenge.
 	u = f.unsigned(2)
-	if len(u.SignIns) != 2 || u.SignIns[0].Skipped != api.SkipPending || u.SignIns[1].Skipped != api.SkipPending || u.More != 1 {
+	if len(u.SignIns) != 3 || u.SignIns[0].Skipped != api.SkipPending || u.SignIns[1].Skipped != api.SkipPending ||
+		u.SignIns[2].SignInID == "" || u.More != 0 {
 		t.Fatalf("second run: %+v", u)
 	}
-	if u = f.unsigned(3); len(u.SignIns) != 3 || u.SignIns[2].SignInID == "" || u.More != 0 {
-		t.Fatalf("a bound of 3: %+v", u)
+	// Examining two connections leaves the third.
+	u, err := f.svc.StartUnsigned(context.Background(), 10, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(u.SignIns) != 2 || u.SignIns[0].Skipped != api.SkipPending || u.SignIns[1].Skipped != api.SkipPending || u.More != 1 {
+		t.Fatalf("examine 2: %+v", u)
+	}
+}
+
+// More than MaxUnsignedSignIns skippable connections ahead of a sendable
+// one do not keep a run from it.
+func TestStartUnsignedBehindSkipped(t *testing.T) {
+	f := newFixture(t)
+	n := api.MaxUnsignedSignIns + 2
+	for i := 0; i < n; i++ {
+		f.connect(f.member(byte(20+i)), "")
+	}
+	f.unsigned(n)              // all pending
+	f.clk.Advance(time.Second) // the next connection's id sorts after theirs
+	f.connect(f.member(100), "")
+	u := f.unsigned(1)
+	sent := 0
+	for _, s := range u.SignIns {
+		if s.SignInID != "" {
+			sent++
+		}
+	}
+	if sent != 1 || len(u.SignIns) != n+1 || u.More != 0 {
+		t.Fatalf("sent %d of %d entries, more %d", sent, len(u.SignIns), u.More)
 	}
 }
 
@@ -211,7 +242,7 @@ func TestStartUnsignedStopped(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	f.svc.Peer = cancelAfterSend{f.p, cancel}
-	u, err := f.svc.StartUnsigned(ctx, 10)
+	u, err := f.svc.StartUnsigned(ctx, 10, 100)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -70,16 +70,22 @@ type SignIns interface {
 	// Status reports a sign-in; ErrNotFound for an unknown id.
 	Status(ctx context.Context, id string) (*SignInStatus, error)
 	// StartUnsigned sends a sign-in challenge to each eligible connection
-	// with no pinned credential key, at most max (see UnsignedSignIns).
-	StartUnsigned(ctx context.Context, max int) (*UnsignedSignIns, error)
+	// with no pinned credential key, until it has sent send challenges or
+	// looked at examine connections (see UnsignedSignIns).
+	StartUnsigned(ctx context.Context, send, examine int) (*UnsignedSignIns, error)
 }
 
-// MaxUnsignedSignIns bounds the connections one POST /v1/signins/unsigned
-// looks at, whether it challenges them or skips them: a challenge takes
-// several round trips to the relay, and the call must end well within a
-// client's timeout. unsignedDeadline bounds its time; it runs on after
+// MaxUnsignedSignIns bounds the challenges one POST /v1/signins/unsigned
+// sends: each takes several round trips to the relay, and the call must
+// end well within a client's timeout. MaxUnsignedExamined bounds the
+// connections it looks at, skipped ones included (a skip costs a store
+// read), so that connections skipped for long do not keep it from the
+// ones after them. unsignedDeadline bounds its time; it runs on after
 // the client has gone, so that what it has sent is recorded.
-const MaxUnsignedSignIns = 10
+const (
+	MaxUnsignedSignIns  = 10
+	MaxUnsignedExamined = 100
+)
 
 const unsignedDeadline = 25 * time.Second
 
@@ -388,14 +394,15 @@ func (s *Server) startSignIn(w http.ResponseWriter, r *http.Request) {
 
 // startUnsigned serves POST /v1/signins/unsigned: a sign-in challenge to
 // each eligible connection that has never signed in, so its member's
-// vault takes votes (VAULT-MESSAGING §10.19.5). It looks at no more than
-// MaxUnsignedSignIns connections per call.
+// vault takes votes (VAULT-MESSAGING §10.19.5). It sends no more than
+// MaxUnsignedSignIns challenges and looks at no more than
+// MaxUnsignedExamined connections per call.
 func (s *Server) startUnsigned(w http.ResponseWriter, r *http.Request) {
 	// Not r.Context(): a client that gives up must not leave a challenge
 	// sent and unrecorded.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), unsignedDeadline)
 	defer cancel()
-	u, err := s.SignIns.StartUnsigned(ctx, MaxUnsignedSignIns)
+	u, err := s.SignIns.StartUnsigned(ctx, MaxUnsignedSignIns, MaxUnsignedExamined)
 	if err != nil {
 		s.log().Error("signin unsigned", "err", err)
 		writeError(w, http.StatusServiceUnavailable, "unavailable")

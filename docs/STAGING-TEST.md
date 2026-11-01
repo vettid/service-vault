@@ -75,8 +75,9 @@ a connection that was made again has to sign in again. After every new
 vote-capable connection, and before creating a proposal:
 
 1. Operator: `sv signin -unsigned`. It sends one challenge to each
-   eligible connection that has never signed in (it looks at 10
-   connections per run; run it again while it prints `more:`) and prints
+   eligible connection that has never signed in (it sends at most 10
+   challenges and looks at 100 connections per run; run it again while
+   it prints `more:`) and prints
    each match code (or why it skipped one: a challenge already pending,
    a decline within the hour, 10 in 24 h). It does not wait.
 2. Operator: tell each member to expect it and read out the match code.

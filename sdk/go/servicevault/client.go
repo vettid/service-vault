@@ -516,9 +516,9 @@ func (c *Client) StartSignIn(ctx context.Context, req SignInRequest) (*SignIn, e
 // StartUnsignedSignIns sends one sign-in challenge to each eligible
 // connection (one whose vault takes votes) that has no pinned
 // credential key, so that its votes are not refused for want of a
-// sign-in (VAULT-MESSAGING §10.19.5). It looks at no more than 10
-// connections per call (More: the rest); a
-// connection that has a challenge pending, declined one within the hour
+// sign-in (VAULT-MESSAGING §10.19.5). It sends at most 10
+// challenges and looks at at most 100 connections per call (More: those
+// not looked at); a connection that has a challenge pending, declined one within the hour
 // or has had 10 in 24 h is skipped, which keeps within the limits of the
 // member's vault (§10.4.1). It is not retried.
 func (c *Client) StartUnsignedSignIns(ctx context.Context) (*UnsignedSignIns, error) {

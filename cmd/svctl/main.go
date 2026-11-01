@@ -52,10 +52,11 @@ commands:
   invite -email E [-verified]      make an invitation; print its URL and QR code, then follow it
   signin -email E [-source S]      start an email sign-in; print the match code, then follow it
   signin -unsigned                 send one sign-in challenge to each eligible connection that
-                                   has never signed in (looks at 10 connections per run, one
-                                   challenge each; none to one with a challenge pending,
-                                   declined within the hour or 10 in 24 h); print each match
-                                   code or why it was skipped; does not wait for the answers
+                                   has never signed in (sends 10 challenges and looks at 100
+                                   connections per run, one challenge each; none to one with
+                                   a challenge pending, declined within the hour or 10 in
+                                   24 h); print each match code or why it was skipped; does
+                                   not wait for the answers
   approve -action A -summary S -payload JSON
                                    submit an action for admin approval, then follow it
   remind ID                        challenge again the admins who have not answered
@@ -310,7 +311,7 @@ func (c *cli) signin(ctx context.Context, args []string) error {
 	email := fs.String("email", "", "the member's email")
 	source := fs.String("source", "", "the end user's address, for the per-source rate limit (optional)")
 	wait := fs.Duration("wait", 3*time.Minute, "how long to follow the sign-in (0: not at all)")
-	unsigned := fs.Bool("unsigned", false, "instead of an email: challenge the eligible connections that have never signed in: 10 connections looked at per run, one challenge each (the answers are not waited for)")
+	unsigned := fs.Bool("unsigned", false, "instead of an email: challenge the eligible connections that have never signed in: 10 challenges sent and 100 connections looked at per run, one challenge each (the answers are not waited for)")
 	if err := c.flags(fs, args, 0); err != nil {
 		return err
 	}

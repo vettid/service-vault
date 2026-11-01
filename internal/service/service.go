@@ -102,8 +102,8 @@ func (x signIns) Start(ctx context.Context, req api.SignInRequest) (string, erro
 	return x.s.StartSignIn(ctx, req)
 }
 
-func (x signIns) StartUnsigned(ctx context.Context, max int) (*api.UnsignedSignIns, error) {
-	return x.s.StartUnsigned(ctx, max)
+func (x signIns) StartUnsigned(ctx context.Context, send, examine int) (*api.UnsignedSignIns, error) {
+	return x.s.StartUnsigned(ctx, send, examine)
 }
 
 func (x signIns) Status(ctx context.Context, id string) (*api.SignInStatus, error) {

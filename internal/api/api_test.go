@@ -36,7 +36,7 @@ type fakeSignIns struct {
 	started map[string]string // id -> email key
 	last    SignInRequest
 
-	unsignedMax int
+	unsignedMax, unsignedExamined int
 }
 
 func (f *fakeSignIns) Start(_ context.Context, req SignInRequest) (string, error) {
@@ -55,10 +55,10 @@ func (f *fakeSignIns) Start(_ context.Context, req SignInRequest) (string, error
 	return id, nil
 }
 
-func (f *fakeSignIns) StartUnsigned(_ context.Context, max int) (*UnsignedSignIns, error) {
+func (f *fakeSignIns) StartUnsigned(_ context.Context, send, examine int) (*UnsignedSignIns, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.unsignedMax = max
+	f.unsignedMax, f.unsignedExamined = send, examine
 	return &UnsignedSignIns{SignIns: []UnsignedSignIn{{ConnectionID: "c1", SignInID: "s9", MatchCode: "42"},
 		{ConnectionID: "c2", Skipped: SkipPending}}, More: 1}, nil
 }
@@ -251,7 +251,7 @@ func TestSignInSource(t *testing.T) {
 }
 
 // POST /v1/signins/unsigned needs the key, asks for at most
-// MaxUnsignedSignIns and passes the answer through.
+// MaxUnsignedSignIns and MaxUnsignedExamined and passes the answer through.
 func TestStartUnsigned(t *testing.T) {
 	s, _, si := newServer(t)
 	h := s.Handler()
@@ -259,7 +259,7 @@ func TestStartUnsigned(t *testing.T) {
 		t.Fatalf("unauthenticated: %d", rec.Code)
 	}
 	rec, m := do(t, h, "POST", "/v1/signins/unsigned", apiKey, "")
-	if rec.Code != 200 || si.unsignedMax != MaxUnsignedSignIns || m["more"] != float64(1) {
+	if rec.Code != 200 || si.unsignedMax != MaxUnsignedSignIns || si.unsignedExamined != MaxUnsignedExamined || m["more"] != float64(1) {
 		t.Fatalf("%d %v max %d", rec.Code, m, si.unsignedMax)
 	}
 	list, _ := m["signins"].([]any)

@@ -83,9 +83,10 @@ func (s *Service) noteDeclined(ctx context.Context, connID string, now time.Time
 }
 
 // StartUnsigned sends one sign-in challenge to each eligible connection
-// that has no pinned credential key (VAULT-MESSAGING §10.19.5), looking
-// at no more than max connections (in id order; a skipped one counts as
-// looked at). A connection with a sign-in challenge pending, one over
+// that has no pinned credential key (VAULT-MESSAGING §10.19.5), in id
+// order, until it has sent send challenges or looked at examine
+// connections. A skipped connection counts only toward examine, so that
+// ones skipped for long do not keep the rest from being reached. A connection with a sign-in challenge pending, one over
 // the day's count or one whose member declined within the hour is
 // skipped and says why. Each challenge is a sign-in like an email's:
 // its outcome reads at GET /v1/signins/{id} and arrives as a webhook.
@@ -94,12 +95,13 @@ func (s *Service) noteDeclined(ctx context.Context, connID string, now time.Time
 //
 // An error stops the run, but the entries made so far are returned with
 // Stopped set, so that the challenges already sent are not lost.
-func (s *Service) StartUnsigned(ctx context.Context, max int) (*api.UnsignedSignIns, error) {
+func (s *Service) StartUnsigned(ctx context.Context, send, examine int) (*api.UnsignedSignIns, error) {
 	ids := s.Peer.EligibleUnsigned()
 	slices.Sort(ids)
 	out := &api.UnsignedSignIns{SignIns: []api.UnsignedSignIn{}}
+	sent := 0
 	for i, connID := range ids {
-		if i >= max {
+		if i >= examine || sent >= send {
 			break
 		}
 		if ctx.Err() != nil {
@@ -109,6 +111,9 @@ func (s *Service) StartUnsigned(ctx context.Context, max int) (*api.UnsignedSign
 		r, stop := s.challengeUnsigned(ctx, connID)
 		if r.ConnectionID != "" {
 			out.SignIns = append(out.SignIns, r)
+		}
+		if r.MatchCode != "" {
+			sent++
 		}
 		if stop != "" {
 			out.Stopped = stop
