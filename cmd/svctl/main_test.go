@@ -132,8 +132,9 @@ func (f *fakeApprovals) Status(_ context.Context, id string) (*approval.Status, 
 		return nil, approval.ErrNotFound
 	}
 	f.n++
-	st := &approval.Status{ID: id, Action: f.req.Action, Status: approval.StatusPending, Threshold: 1, Admins: []string{"c1"}}
+	st := &approval.Status{ID: id, Action: f.req.Action, Status: approval.StatusPending, Threshold: 1, Admins: []string{"c1"}, RemindNeeded: []string{"c1"}, RemindAfter: &exp}
 	if f.n > 1 {
+		st.RemindNeeded = []string{}
 		st.Status = approval.StatusApproved
 		st.Approvals = []approval.Approver{{ConnectionID: "c1", At: exp}}
 	}
@@ -306,7 +307,7 @@ func TestApprove(t *testing.T) {
 	f := newFixture(t)
 	code, out, errOut := f.run(t, "approve", "-action", "vote.open", "-summary", "Open the vote on proposal 7", "-payload", `{"proposal":7}`)
 	h, _ := servicevault.ActionHash("vote.open", "Open the vote on proposal 7", []byte(`{"proposal":7}`))
-	want := "approval_id: a1\naction_hash: " + h + "\nexpires_at: 2026-10-27T12:10:00Z\naction_hash_check: ok\n" +
+	want := "approval_id: a1\naction_hash: " + h + "\nexpires_at: 2026-10-27T12:10:00Z\naction_hash_check: ok\n" + "remind needed: c1 (svctl remind a1)\n" +
 		"status: approved\nthreshold: 1\napproved_by: c1 key_changed=false\n"
 	if code != exitOK || out != want {
 		t.Fatalf("exit %d\n%s\nstderr %s", code, out, errOut)
@@ -319,6 +320,30 @@ func TestApprove(t *testing.T) {
 	}
 	// The API's refusal is reported with its code.
 	if code, _, errOut := f.run(t, "approve", "-action", "nope", "-summary", "x"); code != exitError || !strings.Contains(errOut, "invalid_action") {
+		t.Fatalf("exit %d %s", code, errOut)
+	}
+}
+
+func TestApprovalStatus(t *testing.T) {
+	f := newFixture(t)
+	code, out, errOut := f.run(t, "approval", "a1")
+	if want := "status: pending\nthreshold: 1\nremind needed: c1 (svctl remind a1)\n"; code != exitOK || out != want {
+		t.Fatalf("exit %d\n%s\nstderr %s", code, out, errOut)
+	}
+	// Before remind_after a reminder would answer too_soon.
+	saved := now
+	now = func() time.Time { return exp.Add(-time.Minute) }
+	code, out, _ = newFixture(t).run(t, "approval", "a1")
+	now = saved
+	if want := "status: pending\nthreshold: 1\nremind needed: c1 (svctl remind a1 after 12:10:00Z)\n"; code != exitOK || out != want {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	// Settled: no remind line.
+	code, out, _ = f.run(t, "approval", "a1")
+	if want := "status: approved\nthreshold: 1\napproved_by: c1 key_changed=false\n"; code != exitOK || out != want {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	if code, _, errOut := f.run(t, "approval", "nope"); code != exitError || !strings.Contains(errOut, "not_found") {
 		t.Fatalf("exit %d %s", code, errOut)
 	}
 }
@@ -390,6 +415,7 @@ func TestConfig(t *testing.T) {
 		{nil, []string{"approve", "-action", "vote.open"}},
 		{nil, []string{"approve", "-action", "vote.open", "-summary", "x", "-payload", "{"}},
 		{nil, []string{"remind"}},
+		{nil, []string{"approval"}},
 		{nil, []string{"admins", "extra"}},
 		{nil, []string{"audit", "-limit", "0"}},
 	} {

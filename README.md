@@ -428,7 +428,7 @@ billed.
 | `POST /v1/signins` `{email, source?}` | `202 {signin_id, match_code}`, the same way and after the same delay whether or not the email is known and whether or not a rate limit was reached; `source` (optional, at most 64 printable ASCII bytes) is the end user's address as the application sees it, e.g. an IP or its /64, used only for the per-source limit |
 | `GET /v1/signins/{id}` | `{signin_id, status, connection_id?, key_changed?}`; `status` is `pending`, `approved`, `denied` or `expired`; `connection_id` and `key_changed` come with `approved` |
 | `POST /v1/approvals` `{action, summary, payload}` | `201 {approval_id, action_hash, status: "pending", expires_at}`; refused with `invalid_action`, `invalid_summary`, `invalid_payload` (400), `invalid_connection`, `unreachable`, `last_admin` (422) |
-| `GET /v1/approvals/{id}` | `{approval_id, action, summary, action_hash, status, reason?, threshold, admins, approvals: [{connection_id, at, key_changed}], denials: [{connection_id, at}], created_at, expires_at, applied?}`; `status` is `pending`, `approved`, `denied` or `expired` |
+| `GET /v1/approvals/{id}` | `{approval_id, action, summary, action_hash, status, reason?, threshold, admins, approvals: [{connection_id, at, key_changed}], denials: [{connection_id, at}], created_at, expires_at, remind_needed: [connection_id], remind_after?, applied?}`; `status` is `pending`, `approved`, `denied` or `expired`; `remind_needed`, while pending, lists the admins who have not answered and hold no live challenge (it ran out, or could not be sent); `remind_after` comes with it: the earliest a reminder is accepted |
 | `POST /v1/approvals/{id}/remind` | `{approval_id, reminded: [connection_id]}`: the challenge again to the admins who have not answered; `too_soon` (429) within 10 minutes of the last, `not_pending` (409) once settled |
 | `GET /v1/admins` | `{admins: [connection_id], threshold}` |
 | `GET /v1/audit?since=&limit=` | `{entries: [...], next?}`: the audit log after entry `since`, oldest first, `limit` 1–100 (default 100); pass `next` as `since` for the next page |
@@ -451,7 +451,10 @@ billed.
 the member's account name as their vault presents it. Admin approvals add
 `approval.approved` `{approval_id, action, action_hash, applied?}`,
 `approval.denied` `{approval_id, action, action_hash, reason}`,
-`approval.expired` `{approval_id, action, action_hash}` and
+`approval.expired` `{approval_id, action, action_hash}`,
+`approval.challenge_expired` `{approval_id, action, connection_id,
+request_id, expires_at}` (an admin's 10-minute challenge ran out
+unanswered while the approval is still open; remind them) and
 `admin_set.changed` `{admins, added?, removed?, reason, approval_id?}`
 (its `connection_id` is the connection added or removed).
 
@@ -636,7 +639,12 @@ admin's connection.
 - *Timing.* An approval stays open for `SV_APPROVAL_TTL` (24 h); each
   challenge lives 10 minutes, the connauth maximum. `POST
   /v1/approvals/{id}/remind` sends it again to the admins who have not
-  answered, at most once per 10 minutes per approval.
+  answered, at most once per 10 minutes per approval. An admin whose
+  vault is held (its daily owner check, VAULT-MESSAGING §3.6.3) sees no
+  challenge once the 10 minutes pass: the service vault sends
+  `approval.challenge_expired`, and the approval's status lists the admin
+  in `remind_needed` (`svctl approval ID` prints "remind needed") until a
+  reminder sends a new challenge.
 - *The member vault's ask gate* (VAULT-MESSAGING §10.4.1) applies to
   admins as to anyone: at most 5 asks per connection in 24 hours, sign-in
   challenges included; after a denial, the service's challenges are in a
@@ -757,6 +765,7 @@ Name, EmailBound}`, `*ConnectionDeclined{InviteID}`,
 Reason}`, `*SignInExpired{SignInID}`, `*ApprovalApproved{ApprovalID,
 Action, ActionHash, Applied}`, `*ApprovalDenied{ApprovalID, Action,
 ActionHash, Reason}`, `*ApprovalExpired{ApprovalID, Action, ActionHash}`,
+`*ApprovalChallengeExpired{ApprovalID, Action, RequestID, ExpiresAt}`,
 `*AdminSetChanged{Admins, Added, Removed, Reason, ApprovalID}`, or
 `*UnknownEvent{Data}` for a
 type added later; each embeds `Header{ID, Type, ConnectionID,
@@ -803,6 +812,7 @@ polled.
 svctl invite -email E [-verified] [-no-qr] [-qr-invert] [-wait 11m]
 svctl signin -email E [-source S] [-wait 3m]
 svctl approve -action vote.open -summary "Open the vote" -payload '{"proposal":7}' [-wait 30m]
+svctl approval <approval id>
 svctl remind <approval id>
 svctl admins
 svctl audit [-since <entry id>] [-limit 100]
@@ -824,7 +834,13 @@ svctl health
   and `key_changed`), `denied` or `expired`.
 - `approve` prints the approval's id and action hash, checks the hash
   against `servicevault.ActionHash` of what it sent, and follows it to
-  its outcome (the approving admins, `reason`, `applied`).
+  its outcome (the approving admins, `reason`, `applied`). While
+  following it also prints `remind needed: <ids> (svctl remind <id>)`
+  whenever that list changes.
+- `approval ID` prints an approval's status, threshold, approving and
+  denying admins and `applied`, and `remind needed: <ids> (svctl remind
+  <id>)` (with `after HH:MM:SSZ` while a reminder would still answer
+  `too_soon`). It exits 0 whatever the status, unlike `approve`.
 - `audit` prints one JSON entry per line; when there are more, stderr
   says which `-since` gives the next page.
 - `anchor-key` and `proposal` print the API's JSON answers (see

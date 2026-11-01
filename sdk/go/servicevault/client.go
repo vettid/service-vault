@@ -287,6 +287,13 @@ type Approval struct {
 	Denials    []Denier   `json:"denials"`
 	CreatedAt  time.Time  `json:"created_at"`
 	ExpiresAt  time.Time  `json:"expires_at"`
+	// RemindNeeded, while pending: the admins who have not answered and
+	// hold no live challenge (it ran out after 10 minutes, or could not
+	// be sent); RemindApproval challenges them again.
+	RemindNeeded []string `json:"remind_needed"`
+	// RemindAfter, with RemindNeeded: the earliest RemindApproval is
+	// accepted; before it the answer is too_soon.
+	RemindAfter *time.Time `json:"remind_after,omitempty"`
 	// Applied, for an approved admin_set.* action: whether the service
 	// vault changed the admin set.
 	Applied *bool `json:"applied,omitempty"`
