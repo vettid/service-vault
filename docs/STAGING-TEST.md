@@ -67,6 +67,23 @@ cd cdk && npx cdk deploy -c envName=staging -c image=<digest> \
    locked).
 3. Operator: `status: approved`.
 
+### Before a vote: every connection signs in once
+
+A member's vault refuses `vote.cast` with `not_signed_in` until it has
+signed a sign-in challenge on that connection (VAULT-MESSAGING §10.19.5);
+a connection that was made again has to sign in again. After every new
+vote-capable connection, and before creating a proposal:
+
+1. Operator: `sv signin -unsigned`. It sends one challenge to each
+   eligible connection that has never signed in and prints each match
+   code (or why it skipped one: a challenge already pending, a decline
+   within the hour, 10 in 24 h). It does not wait.
+2. Member: authenticate as in step 3 above.
+3. Operator: `sv proposal create` prints a warning on stderr, and
+   `unsigned` above 0 in its answer, if a connection is still unsigned;
+   run step 1 again and have that member authenticate before the vote
+   opens.
+
 ## 4. Admin approval
 
 1. Operator:

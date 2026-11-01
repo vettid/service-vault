@@ -45,6 +45,8 @@ type Peer interface {
 	Connection(id string) (peer.ConnectionInfo, bool)
 	AuthenticateSignIn(ctx context.Context, connID, ctxt, matchCode string, ttl time.Duration) (string, error)
 	CancelChallenge(ctx context.Context, requestID string) (bool, error)
+	EligibleUnsigned() []string
+	HasPendingSignIn(connID string) bool
 }
 
 // Service implements peer.Events; Invites and SignIns return its
@@ -92,6 +94,10 @@ type signIns struct{ s *Service }
 
 func (x signIns) Start(ctx context.Context, req api.SignInRequest) (string, error) {
 	return x.s.StartSignIn(ctx, req)
+}
+
+func (x signIns) StartUnsigned(ctx context.Context, max int) (*api.UnsignedSignIns, error) {
+	return x.s.StartUnsigned(ctx, max)
 }
 
 func (x signIns) Status(ctx context.Context, id string) (*api.SignInStatus, error) {
@@ -236,6 +242,7 @@ func (s *Service) challenge(ctx context.Context, req api.SignInRequest, rec *sig
 		return nil
 	}
 	rec.ConnID, rec.RequestID = connID, reqID
+	s.noteChallenge(ctx, connID, s.now())
 	return nil
 }
 
@@ -439,6 +446,9 @@ func (s *Service) finishSignIn(ctx context.Context, e *peer.Event) (string, erro
 	switch rec.Status {
 	case api.SignInPending:
 		rec.Status = status
+		if e.Type == peer.EventSignInDenied && e.Reason == "denied" {
+			s.noteDeclined(ctx, e.ConnectionID, s.now())
+		}
 		rec.KeyChanged = status == api.SignInApproved && e.KeyChanged
 		if err := s.Store.Apply(ctx, []peer.Change{s.signInChange(rec)}); err != nil {
 			return "", err
@@ -470,4 +480,6 @@ func (s *Service) webhook(ctx context.Context, e *peer.Event, data any) error {
 
 // Kinds lists every record kind the service stores (its webhook outbox
 // included), for a migration that must touch them all.
-func Kinds() []string { return []string{kindEmail, kindSignIn, kindSignInReq, kindSignInCur, HookKind} }
+func Kinds() []string {
+	return []string{kindEmail, kindSignIn, kindSignInReq, kindSignInCur, kindSignInConn, HookKind}
+}

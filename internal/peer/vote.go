@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 )
 
 // Votes (BALLOT-PROTOCOL §4.2): a member vault's vote.* requests go to the
@@ -226,4 +227,30 @@ func (p *Peer) Caught(ctx context.Context, t, from, until time.Time) (caught boo
 	}
 	caught = p.lastMsgMS >= tms && !p.lastMsgAt.Before(since) || !p.emptyAt.Before(t) && !p.emptyAt.Before(since)
 	return caught, unhandled, nil
+}
+
+// EligibleUnsigned lists the eligible connections (Eligible) that have
+// no pinned credential key: their member's vault has not yet signed a
+// connection.authenticate.response on the connection, and refuses
+// vote.cast with not_signed_in until it has (VAULT-MESSAGING §10.19.5;
+// the key is pinned at the first success, §10.4).
+func (p *Peer) EligibleUnsigned() []string {
+	return p.activeIf(func(c *Connection) bool { return slices.Contains(c.Features, FeatureVote) && len(c.AuthKey) == 0 })
+}
+
+// HasPendingSignIn reports whether a sign-in challenge sent to the
+// connection awaits its answer. It reads the challenges alone: the
+// member vault bounds the pending challenges it holds per connection
+// (VAULT-MESSAGING §10.4.1), so a caller that sends at most one while
+// none is pending stays within the bound.
+func (p *Peer) HasPendingSignIn(connID string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := p.now()
+	for _, ch := range p.challenges {
+		if ch.ConnID == connID && ch.Purpose == peerwire.PurposeSignIn && now.Before(ch.Exp) {
+			return true
+		}
+	}
+	return false
 }

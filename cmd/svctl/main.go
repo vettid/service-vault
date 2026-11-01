@@ -5,6 +5,7 @@
 //
 //	svctl [global flags] invite -email E [-verified]
 //	svctl [global flags] signin -email E [-source S]
+//	svctl [global flags] signin -unsigned
 //	svctl [global flags] approve -action A -summary S -payload JSON
 //	svctl [global flags] remind ID
 //	svctl [global flags] admins
@@ -50,6 +51,11 @@ const usage = `usage: svctl [global flags] <command> [flags]
 commands:
   invite -email E [-verified]      make an invitation; print its URL and QR code, then follow it
   signin -email E [-source S]      start an email sign-in; print the match code, then follow it
+  signin -unsigned                 send one sign-in challenge to each eligible connection that
+                                   has never signed in (at most 50 per run; one per connection;
+                                   none to one with a challenge pending, declined within the
+                                   hour or 10 in 24 h); print each match code or why it was
+                                   skipped; does not wait for the answers
   approve -action A -summary S -payload JSON
                                    submit an action for admin approval, then follow it
   remind ID                        challenge again the admins who have not answered
@@ -304,8 +310,15 @@ func (c *cli) signin(ctx context.Context, args []string) error {
 	email := fs.String("email", "", "the member's email")
 	source := fs.String("source", "", "the end user's address, for the per-source rate limit (optional)")
 	wait := fs.Duration("wait", 3*time.Minute, "how long to follow the sign-in (0: not at all)")
+	unsigned := fs.Bool("unsigned", false, "instead of an email: challenge every eligible connection that has never signed in, at most 50 per run, one challenge each (not waited for)")
 	if err := c.flags(fs, args, 0); err != nil {
 		return err
+	}
+	if *unsigned {
+		if *email != "" || *source != "" {
+			return usageError{errors.New("-unsigned takes no -email or -source")}
+		}
+		return c.signinUnsigned(ctx)
 	}
 	if *email == "" {
 		return usageError{errors.New("-email is required")}
@@ -332,6 +345,26 @@ func (c *cli) signin(ctx context.Context, args []string) error {
 		}
 		return true, nil
 	})
+}
+
+// signinUnsigned challenges the connections that have never signed in,
+// so a vote does not wait for a sign-in the member does not know to make.
+func (c *cli) signinUnsigned(ctx context.Context) error {
+	u, err := c.c.StartUnsignedSignIns(ctx)
+	if err != nil {
+		return err
+	}
+	for _, s := range u.SignIns {
+		if s.Skipped != "" {
+			c.printf("connection_id: %s\nskipped: %s\n", s.ConnectionID, s.Skipped)
+			continue
+		}
+		c.printf("connection_id: %s\nsignin_id: %s\nmatch_code: %s\n", s.ConnectionID, s.SignInID, s.MatchCode)
+	}
+	if u.More > 0 {
+		c.printf("more: %d (run again)\n", u.More)
+	}
+	return nil
 }
 
 func (c *cli) approve(ctx context.Context, args []string) error {
@@ -479,6 +512,14 @@ func (c *cli) proposal(ctx context.Context, args []string) error {
 			return usageError{fmt.Errorf("%s: not JSON", *in)}
 		}
 		b, err = c.c.CreateProposal(ctx, raw)
+		if err == nil {
+			var made struct {
+				Unsigned int `json:"unsigned"`
+			}
+			if json.Unmarshal(b, &made) == nil && made.Unsigned > 0 {
+				fmt.Fprintf(c.err, "warning: %d eligible connection(s) have never signed in; their votes will wait (run: svctl signin -unsigned)\n", made.Unsigned)
+			}
+		}
 		var ae *servicevault.APIError
 		if errors.As(err, &ae) && ae.ProposalID != "" {
 			fmt.Fprintf(c.err, "proposal %s is kept but not published: retry with svctl proposal publish %s\n", ae.ProposalID, ae.ProposalID)

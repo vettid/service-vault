@@ -20,6 +20,18 @@ type fakeRoster []string
 func (r fakeRoster) Eligible() []string { return append([]string{}, r...) }
 func (r fakeRoster) Active() []string   { return append([]string{}, r...) }
 
+// EligibleUnsigned: the fake roster has every key pinned.
+func (r fakeRoster) EligibleUnsigned() []string { return nil }
+
+// unsignedRoster is a roster some of whose members have no pinned key,
+// and an id that is not eligible among them.
+type unsignedRoster struct {
+	fakeRoster
+	unsigned []string
+}
+
+func (r unsignedRoster) EligibleUnsigned() []string { return r.unsigned }
+
 type sent struct {
 	conn, typ string
 	body      json.RawMessage
@@ -481,5 +493,23 @@ func TestExtendPublishedTooLate(t *testing.T) {
 	}
 	if o, _ := m.Store.OpenProposal(ctx, c.ProposalID); o.ClosesAt != in.ClosesAt || len(o.Extensions) != 0 {
 		t.Fatal("the late extension was saved")
+	}
+}
+
+// Create reports how many of the eligible connections have no pinned
+// credential key; one that is not eligible is not counted.
+func TestCreateCountsUnsigned(t *testing.T) {
+	m, _, _ := newManager(t)
+	m.Roster = unsignedRoster{fakeRoster{"c0", "c1", "c2"}, []string{"c1", "c2", "gone"}}
+	c, err := m.Create(context.Background(), input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Eligible != 3 || c.Unsigned != 2 {
+		t.Fatalf("eligible %d unsigned %d, want 3 and 2", c.Eligible, c.Unsigned)
+	}
+	m2, _, _ := newManager(t)
+	if c, err = m2.Create(context.Background(), input()); err != nil || c.Unsigned != 0 {
+		t.Fatalf("all pinned: %+v, %v", c, err)
 	}
 }

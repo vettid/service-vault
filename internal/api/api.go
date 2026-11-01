@@ -69,6 +69,39 @@ type SignIns interface {
 	Start(ctx context.Context, req SignInRequest) (id string, err error)
 	// Status reports a sign-in; ErrNotFound for an unknown id.
 	Status(ctx context.Context, id string) (*SignInStatus, error)
+	// StartUnsigned sends a sign-in challenge to each eligible connection
+	// with no pinned credential key, at most max (see UnsignedSignIns).
+	StartUnsigned(ctx context.Context, max int) (*UnsignedSignIns, error)
+}
+
+// MaxUnsignedSignIns bounds the challenges one POST /v1/signins/unsigned
+// sends.
+const MaxUnsignedSignIns = 50
+
+// Why StartUnsigned sent no challenge to a connection.
+const (
+	SkipPending    = "pending"     // a sign-in challenge is still pending
+	SkipDeclined   = "declined"    // the member declined one within the hour
+	SkipDailyLimit = "daily_limit" // 10 challenges in the last 24 h
+	SkipNotSent    = "not_sent"    // the connection could not take it now
+)
+
+// UnsignedSignIn is one connection's part in an unsigned run: the
+// sign-in started (read it at GET /v1/signins/{id}) with its match code,
+// or why none was.
+type UnsignedSignIn struct {
+	ConnectionID string `json:"connection_id"`
+	SignInID     string `json:"signin_id,omitempty"`
+	MatchCode    string `json:"match_code,omitempty"`
+	Skipped      string `json:"skipped,omitempty"`
+}
+
+// UnsignedSignIns is the answer of POST /v1/signins/unsigned: one entry
+// per connection looked at, and More, how many connections were left for
+// another run.
+type UnsignedSignIns struct {
+	SignIns []UnsignedSignIn `json:"signins"`
+	More    int              `json:"more"`
 }
 
 // SignInRequest is a sign-in to start.
@@ -162,6 +195,7 @@ func (s *Server) Handler() http.Handler {
 	v1.HandleFunc("GET /v1/invites/{id}", s.inviteStatus)
 	v1.HandleFunc("POST /v1/signins", s.startSignIn)
 	v1.HandleFunc("GET /v1/signins/{id}", s.signInStatus)
+	v1.HandleFunc("POST /v1/signins/unsigned", s.startUnsigned)
 	if s.Approvals != nil {
 		v1.HandleFunc("POST /v1/approvals", s.createApproval)
 		v1.HandleFunc("GET /v1/approvals/{id}", s.approvalStatus)
@@ -333,6 +367,20 @@ func (s *Server) startSignIn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, signInResponse{ID: id, MatchCode: code})
+}
+
+// startUnsigned serves POST /v1/signins/unsigned: a sign-in challenge to
+// each eligible connection that has never signed in, so its member's
+// vault takes votes (VAULT-MESSAGING §10.19.5). At most MaxUnsignedSignIns
+// are sent per call.
+func (s *Server) startUnsigned(w http.ResponseWriter, r *http.Request) {
+	u, err := s.SignIns.StartUnsigned(r.Context(), MaxUnsignedSignIns)
+	if err != nil {
+		s.log().Error("signin unsigned", "err", err)
+		writeError(w, http.StatusServiceUnavailable, "unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, u)
 }
 
 func (s *Server) signInStatus(w http.ResponseWriter, r *http.Request) {
