@@ -202,6 +202,7 @@ type Server struct {
 	Approvals   Approvals     // nil: the approval routes are not served
 	Proposals   Proposals     // nil: the proposal routes are not served
 	AnchorKey   *AnchorKey    // nil: GET /v1/anchor-key is not served
+	TestSignIns bool          // serve POST /v1/signins/unsigned; false: it answers 403 test_only
 	LookupFloor time.Duration // uniform response time for POST /v1/signin; default 1.5 s
 	Log         *slog.Logger
 }
@@ -399,7 +400,17 @@ func (s *Server) startSignIn(w http.ResponseWriter, r *http.Request) {
 // vault takes votes (VAULT-MESSAGING §10.19.5). It sends no more than
 // MaxUnsignedSignIns challenges and looks at no more than
 // MaxUnsignedExamined connections per call.
+//
+// It is for testing: a member's app tells them to approve a sign-in only
+// if they are signing in right now, and one they did not start teaches
+// the opposite. So it answers 403 test_only unless the server was set up
+// for testing (Server.TestSignIns).
 func (s *Server) startUnsigned(w http.ResponseWriter, r *http.Request) {
+	if !s.TestSignIns {
+		s.log().Info("unsigned sign-ins refused: test only")
+		writeError(w, http.StatusForbidden, "test_only")
+		return
+	}
 	// Not r.Context(): a client that gives up must not leave a challenge
 	// sent and unrecorded.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), unsignedDeadline)

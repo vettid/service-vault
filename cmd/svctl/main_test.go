@@ -205,7 +205,7 @@ func newFixture(t *testing.T) *fixture {
 // server first.
 func (f *fixture) serve(t *testing.T, change func(*api.Server)) {
 	t.Helper()
-	s := &api.Server{Keys: [][32]byte{api.HashKey(f.key)}, Email: f.idx, Invites: f.inv, SignIns: f.si, Approvals: f.apv,
+	s := &api.Server{TestSignIns: true, Keys: [][32]byte{api.HashKey(f.key)}, Email: f.idx, Invites: f.inv, SignIns: f.si, Approvals: f.apv,
 		LookupFloor: time.Millisecond, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	if change != nil {
 		change(s)
@@ -579,7 +579,7 @@ func TestProposalCreateWarnsUnsigned(t *testing.T) {
 	}
 	fp.unsigned = 2
 	code, out, errOut = f.run(t, "proposal", "create", "-in", in)
-	want := "warning: 2 eligible connection(s) have never signed in; their vaults will refuse to vote until they do (run: svctl signin -unsigned)\n"
+	want := "warning: 2 eligible connection(s) have never signed in; their vaults will refuse to vote until they do: ask them to sign in to the service once (on a test deployment: svctl signin -unsigned)\n"
 	if code != exitOK || errOut != want || !strings.Contains(out, `"unsigned": 2`) {
 		t.Fatalf("unsigned: exit %d %q %q", code, out, errOut)
 	}
@@ -615,5 +615,20 @@ func TestSignInUnsigned(t *testing.T) {
 	}
 	if f.si.unsignedCalls != 2 {
 		t.Fatalf("%d calls", f.si.unsignedCalls)
+	}
+}
+
+// With SV_TEST_SIGNINS off, signin -unsigned says it is for testing and
+// exits 1.
+func TestSignInUnsignedTestOnly(t *testing.T) {
+	f := newFixture(t)
+	f.serve(t, func(s *api.Server) { s.TestSignIns = false })
+	code, out, errOut := f.run(t, "signin", "-unsigned")
+	want := "svctl signin: signin -unsigned is for testing only: this service vault has SV_TEST_SIGNINS off\n"
+	if code != exitError || out != "" || errOut != want {
+		t.Fatalf("exit %d %q %q", code, out, errOut)
+	}
+	if f.si.unsignedCalls != 0 {
+		t.Fatal("a run was started")
 	}
 }

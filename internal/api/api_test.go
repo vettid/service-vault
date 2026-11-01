@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -87,7 +88,7 @@ func newServer(t *testing.T) (*Server, *fakeInvites, *fakeSignIns) {
 	}
 	known, _ := idx.Key("member@example.org")
 	inv, si := &fakeInvites{}, &fakeSignIns{known: known}
-	return &Server{Keys: [][32]byte{HashKey("other-key"), HashKey(apiKey)}, Email: idx,
+	return &Server{TestSignIns: true, Keys: [][32]byte{HashKey("other-key"), HashKey(apiKey)}, Email: idx,
 		Invites: inv, SignIns: si, LookupFloor: 60 * time.Millisecond}, inv, si
 }
 
@@ -269,5 +270,30 @@ func TestStartUnsigned(t *testing.T) {
 	first, second := list[0].(map[string]any), list[1].(map[string]any)
 	if first["signin_id"] != "s9" || first["match_code"] != "42" || second["skipped"] != "pending" || second["signin_id"] != nil {
 		t.Fatalf("%v", list)
+	}
+}
+
+// With the test gate off, POST /v1/signins/unsigned answers 403
+// test_only, starts nothing and logs only the fact.
+func TestStartUnsignedTestOnly(t *testing.T) {
+	s, _, si := newServer(t)
+	s.TestSignIns = false
+	var logs bytes.Buffer
+	s.Log = slog.New(slog.NewTextHandler(&logs, nil))
+	rec, m := do(t, s.Handler(), "POST", "/v1/signins/unsigned", apiKey, "")
+	if rec.Code != 403 || m["error"] != "test_only" {
+		t.Fatalf("%d %v", rec.Code, m)
+	}
+	if si.unsignedMax != 0 || si.unsignedExamined != 0 {
+		t.Fatal("a run was started")
+	}
+	out := logs.String()
+	if !strings.Contains(out, "unsigned sign-ins refused: test only") || strings.Contains(out, "c1") ||
+		strings.Contains(out, "connection") || strings.Count(out, "\n") != 1 {
+		t.Fatalf("log: %q", out)
+	}
+	// Unauthenticated callers still get 401, not the gate's answer.
+	if rec, _ := do(t, s.Handler(), "POST", "/v1/signins/unsigned", "", ""); rec.Code != 401 {
+		t.Fatalf("unauthenticated: %d", rec.Code)
 	}
 }

@@ -130,6 +130,9 @@ type Config struct {
 	AdminThreshold      int           // SV_ADMIN_THRESHOLD (m), default 1
 	ApprovalTTL         time.Duration // SV_APPROVAL_TTL, default 24h
 	AllowNoPurpose      bool          // SV_APPROVAL_ALLOW_NO_PURPOSE, default false
+	// TestSignIns serves POST /v1/signins/unsigned (SV_TEST_SIGNINS, default
+	// false): for test deployments only.
+	TestSignIns bool
 	// RecordKeyVersion is the lowest record key version to use
 	// (SV_RECORD_KEY_VERSION, default 1; README "Rotating the record key").
 	RecordKeyVersion uint32
@@ -209,6 +212,13 @@ func configFromEnv(getenv func(string) string) (*Config, error) {
 		c.AllowNoPurpose = true
 	default:
 		return nil, errors.New("SV_APPROVAL_ALLOW_NO_PURPOSE: true or false")
+	}
+	switch v := strings.TrimSpace(getenv("SV_TEST_SIGNINS")); v {
+	case "", "false":
+	case "true":
+		c.TestSignIns = true
+	default:
+		return nil, errors.New("SV_TEST_SIGNINS: true or false")
 	}
 	c.RecordKeyVersion = 1
 	if v := strings.TrimSpace(getenv("SV_RECORD_KEY_VERSION")); v != "" {
@@ -440,7 +450,7 @@ func serve(args []string) error {
 
 	srv := &http.Server{
 		Addr: cfg.Listen,
-		Handler: (&api.Server{Keys: cfg.APIKeyHashes, Email: email, Invites: svc.Invites(), SignIns: svc.SignIns(),
+		Handler: (&api.Server{TestSignIns: cfg.TestSignIns, Keys: cfg.APIKeyHashes, Email: email, Invites: svc.Invites(), SignIns: svc.SignIns(),
 			Approvals: approvals, Proposals: proposals, AnchorKey: anchorInfo, Log: log}).Handler(),
 		TLSConfig:         tlsid.ServerConfig(cert),
 		ReadHeaderTimeout: 10 * time.Second,

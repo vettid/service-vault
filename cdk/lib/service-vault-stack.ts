@@ -160,6 +160,12 @@ export interface ServiceVaultStackProps extends cdk.StackProps {
   /** Count approvals signed without a purpose, from vaults before VAULT-MESSAGING 0.65.0 (SV_APPROVAL_ALLOW_NO_PURPOSE; a transition only). */
   readonly approvalAllowNoPurpose?: boolean;
   /**
+   * Serve POST /v1/signins/unsigned, which sends members a sign-in they did
+   * not start (SV_TEST_SIGNINS). For testing only, so staging only: any
+   * other envName throws.
+   */
+  readonly testSignIns?: boolean;
+  /**
    * Where the alarms go; exactly one is required, so that an alarm always
    * reaches a person: an existing SNS topic (staging: vettid.org's vault
    * alerts topic, /vettid-org/staging/vault/alerts-topic-arn), or an
@@ -265,6 +271,12 @@ export class ServiceVaultStack extends cdk.Stack {
     if (props.adminThreshold !== undefined) approvalEnv.SV_ADMIN_THRESHOLD = String(props.adminThreshold);
     if (props.approvalTtl) approvalEnv.SV_APPROVAL_TTL = props.approvalTtl;
     if (props.approvalAllowNoPurpose) approvalEnv.SV_APPROVAL_ALLOW_NO_PURPOSE = 'true';
+    if (props.testSignIns) {
+      if (envName !== 'staging') {
+        throw new Error(`testSignIns is for the staging deployment only: members of a real service must sign in themselves (envName is "${envName}")`);
+      }
+      approvalEnv.SV_TEST_SIGNINS = 'true';
+    }
     const prefix = `vettid-service-vault-${envName}`;
     const exportPrefix = `ServiceVault-${envName}`;
 

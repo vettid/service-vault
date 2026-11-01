@@ -122,7 +122,7 @@ func newFixture(t *testing.T, hooks iwebhook.Sender) *fixture {
 		svc.Approvals.Hooks = &iwebhook.Outbox{Store: st, Kind: approval.HookKind, Sender: hooks, Log: quiet}
 	}
 	f := &fixture{p: fp, svc: svc, apv: svc.Approvals, emailKey: ek, key: randomHex(t, 24)}
-	s := &api.Server{Keys: [][32]byte{api.HashKey(f.key)}, Email: idx, Invites: svc.Invites(), SignIns: svc.SignIns(),
+	s := &api.Server{TestSignIns: true, Keys: [][32]byte{api.HashKey(f.key)}, Email: idx, Invites: svc.Invites(), SignIns: svc.SignIns(),
 		Approvals: svc.Approvals, LookupFloor: 10 * time.Millisecond, Log: quiet}
 	var srv *httptest.Server
 	srv, f.pin = tlsServer(t, s.Handler())
