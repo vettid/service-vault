@@ -102,7 +102,7 @@ type Created struct {
 	ProposalHash []byte `json:"proposal_hash"`
 	Eligible     int    `json:"eligible"`
 	// Unsigned is how many of the eligible connections have no pinned
-	// credential key at creation: their votes wait for a sign-in.
+	// credential key at creation: their vaults refuse a vote (not_signed_in) until the member signs in.
 	Unsigned int `json:"unsigned"`
 	Sent     int `json:"sent"`
 }

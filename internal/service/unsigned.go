@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"time"
 
@@ -53,7 +54,7 @@ func (s *Service) saveHistory(ctx context.Context, connID string, h *connHistory
 // noteChallenge records a sign-in challenge sent to connID. Best effort:
 // the history only keeps the sender inside the member vault's limits.
 func (s *Service) noteChallenge(ctx context.Context, connID string, now time.Time) {
-	mu := s.lock("conn:" + connID)
+	mu := s.connLock(connID)
 	mu.Lock()
 	defer mu.Unlock()
 	h, err := s.history(ctx, connID)
@@ -68,7 +69,7 @@ func (s *Service) noteChallenge(ctx context.Context, connID string, now time.Tim
 
 // noteDeclined records that connID's member declined a sign-in.
 func (s *Service) noteDeclined(ctx context.Context, connID string, now time.Time) {
-	mu := s.lock("conn:" + connID)
+	mu := s.connLock(connID)
 	mu.Lock()
 	defer mu.Unlock()
 	h, err := s.history(ctx, connID)
@@ -82,44 +83,54 @@ func (s *Service) noteDeclined(ctx context.Context, connID string, now time.Time
 }
 
 // StartUnsigned sends one sign-in challenge to each eligible connection
-// that has no pinned credential key (VAULT-MESSAGING §10.19.5), at most
-// max of them. A connection with a sign-in challenge pending, one over
+// that has no pinned credential key (VAULT-MESSAGING §10.19.5), looking
+// at no more than max connections (in id order; a skipped one counts as
+// looked at). A connection with a sign-in challenge pending, one over
 // the day's count or one whose member declined within the hour is
 // skipped and says why. Each challenge is a sign-in like an email's:
 // its outcome reads at GET /v1/signins/{id} and arrives as a webhook.
 // Nothing here is rate limited by email or source: the caller is the
 // operator. (Chosen; not in the spec.)
+//
+// An error stops the run, but the entries made so far are returned with
+// Stopped set, so that the challenges already sent are not lost.
 func (s *Service) StartUnsigned(ctx context.Context, max int) (*api.UnsignedSignIns, error) {
 	ids := s.Peer.EligibleUnsigned()
 	slices.Sort(ids)
 	out := &api.UnsignedSignIns{SignIns: []api.UnsignedSignIn{}}
-	sent := 0
 	for i, connID := range ids {
-		if sent >= max {
-			out.More = len(ids) - i
+		if i >= max {
 			break
 		}
-		r, err := s.challengeUnsigned(ctx, connID)
-		if err != nil {
-			return nil, err
+		if ctx.Err() != nil {
+			out.Stopped = api.StoppedTimeout
+			break
 		}
-		if r.SignInID != "" {
-			sent++
+		r, stop := s.challengeUnsigned(ctx, connID)
+		if r.ConnectionID != "" {
+			out.SignIns = append(out.SignIns, r)
 		}
-		out.SignIns = append(out.SignIns, r)
+		if stop != "" {
+			out.Stopped = stop
+			break
+		}
 	}
+	out.More = len(ids) - len(out.SignIns)
 	return out, nil
 }
 
-func (s *Service) challengeUnsigned(ctx context.Context, connID string) (api.UnsignedSignIn, error) {
+// challengeUnsigned sends connID's challenge, or says why not. It
+// returns a stop code when the run should not go on; the entry is then
+// empty unless a challenge was sent whose record could not be saved.
+func (s *Service) challengeUnsigned(ctx context.Context, connID string) (api.UnsignedSignIn, string) {
 	r := api.UnsignedSignIn{ConnectionID: connID}
-	mu := s.lock("conn:" + connID)
+	mu := s.connLock(connID)
 	mu.Lock()
 	defer mu.Unlock()
 	now := s.now()
 	h, err := s.history(ctx, connID)
 	if err != nil {
-		return r, err
+		return api.UnsignedSignIn{}, stopCode(ctx, err)
 	}
 	day := 0
 	for _, t := range h.Sent {
@@ -130,41 +141,54 @@ func (s *Service) challengeUnsigned(ctx context.Context, connID string) (api.Uns
 	switch {
 	case s.Peer.HasPendingSignIn(connID):
 		r.Skipped = api.SkipPending
-		return r, nil
+		return r, ""
 	case !h.DeclinedAt.IsZero() && now.Sub(h.DeclinedAt) < declineCooldown:
 		r.Skipped = api.SkipDeclined
-		return r, nil
+		return r, ""
 	case day >= maxChallengesPerDay:
 		r.Skipped = api.SkipDailyLimit
-		return r, nil
+		return r, ""
 	}
 	code, err := signin.MatchCode()
 	if err != nil {
-		return r, err
+		return api.UnsignedSignIn{}, stopCode(ctx, err)
 	}
 	ctxt, err := signin.Context(s.ServiceName, code)
 	if err != nil {
-		return r, err
+		return api.UnsignedSignIn{}, stopCode(ctx, err)
 	}
 	id, err := envelope.NewULID(now)
 	if err != nil {
-		return r, err
+		return api.UnsignedSignIn{}, stopCode(ctx, err)
 	}
 	reqID, err := s.Peer.AuthenticateSignIn(ctx, connID, ctxt, code, signin.ChallengeTTL)
 	if err != nil {
 		s.log().Warn("signin challenge", "connection_id", connID, "err", errName(err))
 		r.Skipped = api.SkipNotSent
-		return r, nil
+		return r, ""
 	}
-	rec := &signInRecord{ID: id, ConnID: connID, RequestID: reqID, Status: api.SignInPending, Exp: now.Add(signin.ChallengeTTL)}
-	if err := s.Store.Apply(ctx, []peer.Change{s.signInChange(rec), {Kind: kindSignInReq, ID: reqID, Data: []byte(id),
-		Expires: rec.Exp.Add(signInRetention), IfAbsent: true}}); err != nil {
-		return r, err
-	}
+	// The challenge is sent: it counts against the day whatever follows.
 	h.Sent = append(h.Sent, now)
 	if err := s.saveHistory(ctx, connID, h, now); err != nil {
 		s.log().Warn("signin history", "connection_id", connID, "err", err)
 	}
+	rec := &signInRecord{ID: id, ConnID: connID, RequestID: reqID, Status: api.SignInPending, Exp: now.Add(signin.ChallengeTTL)}
+	if err := s.Store.Apply(ctx, []peer.Change{s.signInChange(rec), {Kind: kindSignInReq, ID: reqID, Data: []byte(id),
+		Expires: rec.Exp.Add(signInRetention), IfAbsent: true}}); err != nil {
+		// The member has the challenge, but there is no sign-in to read:
+		// the code is still given, so the operator can tell the member.
+		s.log().Error("signin record", "connection_id", connID, "err", err)
+		r.MatchCode, r.Skipped = code, api.SkipNotRecorded
+		return r, stopCode(ctx, err)
+	}
 	r.SignInID, r.MatchCode = id, code
-	return r, nil
+	return r, ""
+}
+
+// stopCode names why a run stopped.
+func stopCode(ctx context.Context, err error) string {
+	if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
+		return api.StoppedTimeout
+	}
+	return api.StoppedError
 }

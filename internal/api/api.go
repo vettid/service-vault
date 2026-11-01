@@ -74,9 +74,14 @@ type SignIns interface {
 	StartUnsigned(ctx context.Context, max int) (*UnsignedSignIns, error)
 }
 
-// MaxUnsignedSignIns bounds the challenges one POST /v1/signins/unsigned
-// sends.
-const MaxUnsignedSignIns = 50
+// MaxUnsignedSignIns bounds the connections one POST /v1/signins/unsigned
+// looks at, whether it challenges them or skips them: a challenge takes
+// several round trips to the relay, and the call must end well within a
+// client's timeout. unsignedDeadline bounds its time; it runs on after
+// the client has gone, so that what it has sent is recorded.
+const MaxUnsignedSignIns = 10
+
+const unsignedDeadline = 25 * time.Second
 
 // Why StartUnsigned sent no challenge to a connection.
 const (
@@ -84,6 +89,15 @@ const (
 	SkipDeclined   = "declined"    // the member declined one within the hour
 	SkipDailyLimit = "daily_limit" // 10 challenges in the last 24 h
 	SkipNotSent    = "not_sent"    // the connection could not take it now
+	// SkipNotRecorded: the challenge was sent, with this match code, but
+	// its sign-in could not be saved, so there is no signin_id to read.
+	SkipNotRecorded = "not_recorded"
+)
+
+// Why a run stopped before looking at every connection it could.
+const (
+	StoppedTimeout = "timeout"
+	StoppedError   = "error"
 )
 
 // UnsignedSignIn is one connection's part in an unsigned run: the
@@ -97,11 +111,14 @@ type UnsignedSignIn struct {
 }
 
 // UnsignedSignIns is the answer of POST /v1/signins/unsigned: one entry
-// per connection looked at, and More, how many connections were left for
-// another run.
+// per connection looked at, and More, how many connections have not been
+// looked at yet (another run reaches them). Stopped is set when an error
+// or the deadline ended the run early: the entries are still what was
+// done.
 type UnsignedSignIns struct {
 	SignIns []UnsignedSignIn `json:"signins"`
 	More    int              `json:"more"`
+	Stopped string           `json:"stopped,omitempty"`
 }
 
 // SignInRequest is a sign-in to start.
@@ -371,10 +388,14 @@ func (s *Server) startSignIn(w http.ResponseWriter, r *http.Request) {
 
 // startUnsigned serves POST /v1/signins/unsigned: a sign-in challenge to
 // each eligible connection that has never signed in, so its member's
-// vault takes votes (VAULT-MESSAGING §10.19.5). At most MaxUnsignedSignIns
-// are sent per call.
+// vault takes votes (VAULT-MESSAGING §10.19.5). It looks at no more than
+// MaxUnsignedSignIns connections per call.
 func (s *Server) startUnsigned(w http.ResponseWriter, r *http.Request) {
-	u, err := s.SignIns.StartUnsigned(r.Context(), MaxUnsignedSignIns)
+	// Not r.Context(): a client that gives up must not leave a challenge
+	// sent and unrecorded.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), unsignedDeadline)
+	defer cancel()
+	u, err := s.SignIns.StartUnsigned(ctx, MaxUnsignedSignIns)
 	if err != nil {
 		s.log().Error("signin unsigned", "err", err)
 		writeError(w, http.StatusServiceUnavailable, "unavailable")

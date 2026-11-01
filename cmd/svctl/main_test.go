@@ -553,7 +553,7 @@ func TestProposalCreateWarnsUnsigned(t *testing.T) {
 	}
 	fp.unsigned = 2
 	code, out, errOut = f.run(t, "proposal", "create", "-in", in)
-	want := "warning: 2 eligible connection(s) have never signed in; their votes will wait (run: svctl signin -unsigned)\n"
+	want := "warning: 2 eligible connection(s) have never signed in; their vaults will refuse to vote until they do (run: svctl signin -unsigned)\n"
 	if code != exitOK || errOut != want || !strings.Contains(out, `"unsigned": 2`) {
 		t.Fatalf("unsigned: exit %d %q %q", code, out, errOut)
 	}
@@ -566,14 +566,16 @@ func TestSignInUnsigned(t *testing.T) {
 	f.si.unsigned = &api.UnsignedSignIns{SignIns: []api.UnsignedSignIn{
 		{ConnectionID: "c1", SignInID: "s1", MatchCode: "42"},
 		{ConnectionID: "c2", Skipped: api.SkipPending},
-	}, More: 7}
+	}, More: 7, Stopped: "timeout"}
 	code, out, errOut := f.run(t, "signin", "-unsigned")
-	want := "connection_id: c1\nsignin_id: s1\nmatch_code: 42\nconnection_id: c2\nskipped: pending\nmore: 7 (run again)\n"
+	want := "connection_id: c1\nsignin_id: s1\nmatch_code: 42\nconnection_id: c2\nskipped: pending\nstopped: timeout\nmore: 7 (run again)\n"
 	if code != exitOK || out != want || errOut != "" {
 		t.Fatalf("exit %d\n%s\n%s", code, out, errOut)
 	}
-	if code, _, _ := f.run(t, "signin", "-unsigned", "-email", "a@example.org"); code != exitUsage {
-		t.Fatalf("-unsigned with -email: exit %d", code)
+	for _, extra := range [][]string{{"-email", "a@example.org"}, {"-source", "x"}, {"-wait", "1m"}} {
+		if code, _, _ := f.run(t, append([]string{"signin", "-unsigned"}, extra...)...); code != exitUsage {
+			t.Fatalf("-unsigned with %v: exit %d", extra, code)
+		}
 	}
 	if f.si.unsignedCalls != 1 {
 		t.Fatalf("%d calls", f.si.unsignedCalls)

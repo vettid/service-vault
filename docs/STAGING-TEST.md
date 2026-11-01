@@ -75,11 +75,16 @@ a connection that was made again has to sign in again. After every new
 vote-capable connection, and before creating a proposal:
 
 1. Operator: `sv signin -unsigned`. It sends one challenge to each
-   eligible connection that has never signed in and prints each match
-   code (or why it skipped one: a challenge already pending, a decline
-   within the hour, 10 in 24 h). It does not wait.
-2. Member: authenticate as in step 3 above.
-3. Operator: `sv proposal create` prints a warning on stderr, and
+   eligible connection that has never signed in (it looks at 10
+   connections per run; run it again while it prints `more:`) and prints
+   each match code (or why it skipped one: a challenge already pending,
+   a decline within the hour, 10 in 24 h). It does not wait.
+2. Operator: tell each member to expect it and read out the match code.
+   The app shows an unrequested sign-in with "Only approve if you are
+   signing in right now"; the member authenticates as in step 3 above
+   only if the code matches. A challenge lives 5 minutes.
+3. Member: authenticate as in step 3 above.
+4. Operator: `sv proposal create` prints a warning on stderr, and
    `unsigned` above 0 in its answer, if a connection is still unsigned;
    run step 1 again and have that member authenticate before the vote
    opens.
@@ -97,9 +102,11 @@ vote-capable connection, and before creating a proposal:
 ## 5. Optional
 
 - **Denied sign-in:** run step 3 again and deny on the phone. Do this
-  last: a deny starts a 7-day cooldown on every challenge from this
-  connection (VAULT-MESSAGING §10.4.1) until the member vault release
-  that gates sign-ins apart.
+  last: a deny starts a 1-hour cooldown on sign-in challenges from this
+  connection (member vault release 24 and later; VAULT-MESSAGING 0.65.0
+  §10.4.1: at most 2 pending and 10 per 24 hours, 1 hour after a
+  decline), so `sv signin -unsigned` skips it (`declined`) for that
+  hour.
 - **Removal:** the member removes the connection in the app; `sv admins`
   no longer lists it.
 

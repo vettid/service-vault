@@ -68,8 +68,14 @@ type Service struct {
 	Now       func() time.Time
 	Log       *slog.Logger
 
-	limited atomic.Uint64 // sign-ins started over a limit
-	locks   [64]sync.Mutex
+	limited atomic.Uint64  // sign-ins started over a limit
+	locks   [64]sync.Mutex // by email key (StartSignIn)
+	// connLocks serialize a connection's challenge history. They are
+	// separate from locks, which StartSignIn holds while it records a
+	// challenge: one array would make a connection and an email on the
+	// same stripe wait on each other's mutex. Nothing takes locks while
+	// holding a connLock.
+	connLocks [64]sync.Mutex
 }
 
 var _ peer.Events = (*Service)(nil)
@@ -163,6 +169,13 @@ func (s *Service) lock(emailKey string) *sync.Mutex {
 	h := fnv.New32a()
 	h.Write([]byte(emailKey))
 	return &s.locks[h.Sum32()%uint32(len(s.locks))]
+}
+
+// connLock serializes a connection's challenge history.
+func (s *Service) connLock(connID string) *sync.Mutex {
+	h := fnv.New32a()
+	h.Write([]byte(connID))
+	return &s.connLocks[h.Sum32()%uint32(len(s.connLocks))]
 }
 
 // LimitedSignIns is the number of sign-ins started over a rate limit

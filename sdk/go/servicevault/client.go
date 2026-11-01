@@ -212,7 +212,8 @@ type SignIn struct {
 // sign-in started (read it with SignInStatus) and its match code, or the
 // reason none was started: "pending" (a sign-in challenge is still
 // pending), "declined" (the member declined one within the hour),
-// "daily_limit" (10 in the last 24 h) or "not_sent".
+// "daily_limit" (10 in the last 24 h), "not_sent", or "not_recorded"
+// (the challenge went out with MatchCode but has no SignInID).
 type UnsignedSignIn struct {
 	ConnectionID string `json:"connection_id"`
 	SignInID     string `json:"signin_id,omitempty"`
@@ -221,10 +222,13 @@ type UnsignedSignIn struct {
 }
 
 // UnsignedSignIns is the answer of StartUnsignedSignIns. More counts the
-// connections left for another run.
+// connections not yet looked at, which another run reaches. Stopped is
+// "timeout" or "error" when the run ended early; SignIns is still what
+// it did.
 type UnsignedSignIns struct {
 	SignIns []UnsignedSignIn `json:"signins"`
 	More    int              `json:"more"`
+	Stopped string           `json:"stopped,omitempty"`
 }
 
 // SignInStatus reports a sign-in.
@@ -512,7 +516,8 @@ func (c *Client) StartSignIn(ctx context.Context, req SignInRequest) (*SignIn, e
 // StartUnsignedSignIns sends one sign-in challenge to each eligible
 // connection (one whose vault takes votes) that has no pinned
 // credential key, so that its votes are not refused for want of a
-// sign-in (VAULT-MESSAGING §10.19.5). At most 50 are sent per call; a
+// sign-in (VAULT-MESSAGING §10.19.5). It looks at no more than 10
+// connections per call (More: the rest); a
 // connection that has a challenge pending, declined one within the hour
 // or has had 10 in 24 h is skipped, which keeps within the limits of the
 // member's vault (§10.4.1). It is not retried.
