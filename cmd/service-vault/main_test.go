@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -253,5 +254,21 @@ func TestBallotsRebuildAfterRestoreWithBallotsOff(t *testing.T) {
 	}
 	if r, _ := ballotsRebuild(ctx, &fakeMarkers{}, true, true, now); !r {
 		t.Fatal("no rebuild right after a restore")
+	}
+}
+
+// A test-only setting that is on is named at start; off, nothing is said.
+func TestWarnTestMode(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	warnTestMode(log, &Config{})
+	if buf.Len() != 0 {
+		t.Fatalf("off: %q", buf.String())
+	}
+	warnTestMode(log, &Config{TestSignIns: true})
+	out := buf.String()
+	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, `msg="unsigned sign-ins enabled: test deployments only"`) ||
+		strings.Count(out, "=") != 3 { // time, level, msg: no other attributes
+		t.Fatalf("on: %q", out)
 	}
 }

@@ -482,7 +482,8 @@ func serve(args []string) error {
 	go approvals.Hooks.Run(ctx)
 	srvErr := make(chan error, 1)
 	go func() { srvErr <- srv.ListenAndServeTLS("", "") }()
-	log.Info("serving", "version", version, "listen", cfg.Listen, "mailbox", keys.Mailbox())
+	warnTestMode(log, cfg)
+	log.Info("serving", "version", version, "listen", cfg.Listen, "mailbox", keys.Mailbox(), "test_signins", cfg.TestSignIns)
 
 	var runErr error
 	select {
@@ -1030,4 +1031,11 @@ func ballotsRebuild(ctx context.Context, m rebuildMarkers, restored, ballotsOn b
 		return false, fmt.Errorf("ballots rebuild marker: %w", err)
 	}
 	return pending, nil
+}
+
+// warnTestMode says at start that a test-only setting is on.
+func warnTestMode(log *slog.Logger, cfg *Config) {
+	if cfg.TestSignIns {
+		log.Warn("unsigned sign-ins enabled: test deployments only")
+	}
 }

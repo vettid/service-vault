@@ -38,6 +38,7 @@ type fakeSignIns struct {
 	last    SignInRequest
 
 	unsignedMax, unsignedExamined int
+	unsignedCalls                 int
 }
 
 func (f *fakeSignIns) Start(_ context.Context, req SignInRequest) (string, error) {
@@ -60,6 +61,7 @@ func (f *fakeSignIns) StartUnsigned(_ context.Context, send, examine int) *Unsig
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.unsignedMax, f.unsignedExamined = send, examine
+	f.unsignedCalls++
 	return &UnsignedSignIns{SignIns: []UnsignedSignIn{{ConnectionID: "c1", SignInID: "s9", MatchCode: "42"},
 		{ConnectionID: "c2", Skipped: SkipPending}}, More: 1}
 }
@@ -284,11 +286,15 @@ func TestStartUnsignedTestOnly(t *testing.T) {
 	if rec.Code != 403 || m["error"] != "test_only" {
 		t.Fatalf("%d %v", rec.Code, m)
 	}
-	if si.unsignedMax != 0 || si.unsignedExamined != 0 {
+	// The fake would answer with c1 and c2 if it were called.
+	if si.unsignedCalls != 0 || si.unsignedMax != 0 || si.unsignedExamined != 0 {
 		t.Fatal("a run was started")
 	}
+	if body := rec.Body.String(); strings.Contains(body, "c1") || strings.Contains(body, "c2") {
+		t.Fatalf("body: %q", body)
+	}
 	out := logs.String()
-	if !strings.Contains(out, "unsigned sign-ins refused: test only") || strings.Contains(out, "c1") ||
+	if !strings.Contains(out, "unsigned sign-ins refused: test only") || strings.Contains(out, "c1") || strings.Contains(out, "c2") ||
 		strings.Contains(out, "connection") || strings.Count(out, "\n") != 1 {
 		t.Fatalf("log: %q", out)
 	}

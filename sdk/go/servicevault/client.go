@@ -520,7 +520,9 @@ func (c *Client) StartSignIn(ctx context.Context, req SignInRequest) (*SignIn, e
 	return si, nil
 }
 
-// StartUnsignedSignIns sends one sign-in challenge to each eligible
+// StartUnsignedSignIns is for test deployments only: unless the service
+// vault has SV_TEST_SIGNINS=true it returns an *APIError with status 403
+// and code "test_only". It sends one sign-in challenge to each eligible
 // connection (one whose vault takes votes) that has no pinned
 // credential key, so that its votes are not refused for want of a
 // sign-in (VAULT-MESSAGING §10.19.5). It sends at most 10 challenges

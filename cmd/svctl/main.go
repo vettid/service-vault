@@ -54,13 +54,15 @@ const usage = `usage: svctl [global flags] <command> [flags]
 commands:
   invite -email E [-verified]      make an invitation; print its URL and QR code, then follow it
   signin -email E [-source S]      start an email sign-in; print the match code, then follow it
-  signin -unsigned                 testing only (staging test connections); members of a real
-                                   service must sign in themselves. Sends one sign-in challenge to each eligible connection that
-                                   has never signed in (sends 10 challenges and looks at 100
-                                   connections per run, one challenge each; none to one with
-                                   a challenge pending, declined within the hour or 10 in
-                                   24 h); print each match code or why it was skipped; does
-                                   not wait for the answers; exit 1 if the run stopped early
+  signin -unsigned                 testing only (staging test connections); members of a
+                                   real service must sign in themselves. Sends one
+                                   sign-in challenge to each eligible connection that
+                                   has never signed in (sends 10 challenges and looks at
+                                   100 connections per run, one challenge each; none to
+                                   one with a challenge pending, declined within the hour
+                                   or 10 in 24 h); print each match code or why it was
+                                   skipped; does not wait for the answers; exit 1 if the
+                                   run stopped early
   approve -action A -summary S -payload JSON
                                    submit an action for admin approval, then follow it
   approval ID                      print an approval's status; "remind needed" lists admins with no live challenge

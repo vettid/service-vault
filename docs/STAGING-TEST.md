@@ -43,7 +43,9 @@ cd cdk && npx cdk deploy -c envName=staging -c image=<digest> \
 ```
 
 `testSignIns=true` sets `SV_TEST_SIGNINS`, which "Before a vote" below
-needs; the stack accepts it on staging only.
+needs; the stack accepts it on staging only. CDK context is not
+remembered: a staging deploy without `-c testSignIns=true` turns the
+route off again.
 
 ## 2. Connect
 
@@ -75,10 +77,10 @@ needs; the stack accepts it on staging only.
 A member's vault refuses `vote.cast` with `not_signed_in` until it has
 signed a sign-in challenge on that connection (VAULT-MESSAGING §10.19.5);
 a connection that was made again has to sign in again. After every new
-vote-capable connection, and before creating a proposal. This is for
-testing only: it needs the `-c testSignIns=true` deploy above (without it
-the service vault answers `403 test_only`), and a real service's members
-sign in themselves.
+vote-capable connection, and before creating a proposal, run the steps
+below. This is for testing only: it needs the `-c testSignIns=true`
+deploy above (without it the service vault answers `403 test_only`), and
+a real service's members sign in themselves.
 
 1. Operator: `sv signin -unsigned`. It sends one challenge to each
    eligible connection that has never signed in (it sends at most 10
@@ -126,7 +128,8 @@ minutes).
 
 ## 6. Clean up
 
-- Deploy again without `adminBootstrapEmail`.
+- Deploy again without `adminBootstrapEmail` (and without `testSignIns`:
+  context is not remembered, so that turns the unsigned sign-in route off).
 - Keep the connection only if further tests need it; otherwise the member
   removes it.
 - Record the outcome (dates, app version, vault release, pass/fail per

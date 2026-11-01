@@ -78,7 +78,7 @@ npx cdk deploy \
 | `adminThreshold` | no (1) | `SV_ADMIN_THRESHOLD` |
 | `approvalTtl` | no (`24h`) | `SV_APPROVAL_TTL` |
 | `approvalAllowNoPurpose` | no | `true` sets `SV_APPROVAL_ALLOW_NO_PURPOSE` (see "Admin approvals"): only while an admin's vault predates purposes |
-| `testSignIns` | no | `true` sets `SV_TEST_SIGNINS` (see `POST /v1/signins/unsigned`): testing only, so the stack refuses it unless `envName` is `staging` |
+| `testSignIns` | no | `true` sets `SV_TEST_SIGNINS` (see `POST /v1/signins/unsigned`): testing only, so the stack refuses it unless `envName` is `staging`. Context is not remembered: a staging deploy without `-c testSignIns=true` turns the route off again |
 | `recordSealMigrate` | no | `true` only for the deploy that upgrades a deployment from before sealing (see "Records at rest") |
 | `recordKeyVersion` | no (1) | `SV_RECORD_KEY_VERSION`, the lowest record key version to use: set it one above the table's to rotate the record key (see "Rotating the record key"). Leaving it out later is fine |
 | `alarmTopicArn` or `alarmEmail` | one of them | Where the alarms go (below). Either an SNS topic that reaches a person, or an address for a topic of the stack's own; confirm that subscription from the email AWS sends. For staging, use vettid.org's vault alerts topic, which emails the admin address: `aws ssm get-parameter --name /vettid-org/staging/vault/alerts-topic-arn` |
@@ -727,7 +727,7 @@ inv, err := c.CreateInvite(ctx, email, servicevault.EmailVerified) // POST /v1/i
 st, err := c.InviteStatus(ctx, inv.ID)              // GET /v1/invites/{id}
 si, err := c.StartSignIn(ctx, servicevault.SignInRequest{Email: email, Source: clientIP})
 ss, err := c.SignInStatus(ctx, si.ID)               // GET /v1/signins/{id}
-us, err := c.StartUnsignedSignIns(ctx)              // POST /v1/signins/unsigned; us.SignIns, us.More
+us, err := c.StartUnsignedSignIns(ctx)              // test deployments only; POST /v1/signins/unsigned; us.SignIns, us.More
 ap, err := c.CreateApproval(ctx, servicevault.ApprovalRequest{
 	Action: servicevault.ActionVoteOpen, Summary: "Open the vote on proposal 7",
 	Payload: json.RawMessage(`{"proposal":7}`)})   // POST /v1/approvals
