@@ -35,6 +35,20 @@ func TestApprovalsAgainstAPI(t *testing.T) {
 	if err := f.tick(ctx); err != nil {
 		t.Fatal(err)
 	}
+	// The connection waits for the operator's confirmation first.
+	if a, err := c.Admins(ctx); err != nil || len(a.Admins) != 0 {
+		t.Fatalf("before the confirmation: %+v %v", a, err)
+	}
+	pc, pfp, err := f.apv.BootstrapPending(ctx)
+	if err != nil || pc != "c1" {
+		t.Fatalf("pending %q %v", pc, err)
+	}
+	if err := f.apv.ConfirmBootstrap(ctx, pc, pfp); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.tick(ctx); err != nil {
+		t.Fatal(err)
+	}
 	a, err := c.Admins(ctx)
 	if err != nil || len(a.Admins) != 1 || a.Admins[0] != "c1" || a.Threshold != 1 {
 		t.Fatalf("%+v %v", a, err)
@@ -107,8 +121,8 @@ func TestApprovalsAgainstAPI(t *testing.T) {
 	for _, e := range all {
 		types = append(types, e.Type)
 	}
-	if len(all) != 4 || all[1].Type != "approval.requested" || all[2].Answer != "approved" || len(all[2].Signature) != 64 ||
-		string(all[1].Payload) != `{"id":7,"title":"Bylaws"}` {
+	if len(all) != 5 || all[2].Type != "approval.requested" || all[3].Answer != "approved" || len(all[3].Signature) != 64 ||
+		string(all[2].Payload) != `{"id":7,"title":"Bylaws"}` {
 		t.Fatalf("audit %v", types)
 	}
 

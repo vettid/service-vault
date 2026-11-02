@@ -53,18 +53,31 @@ const (
 
 // Reasons an approval response was audited as not counted, for a
 // governance action (Governance): the admin signed with a credential key
-// other than their governance key (types.go, Approver), either one that is
-// new (key_changed: the key is not the one pinned at the last sign-in
-// either) or one the service has seen sign in since but that the other
-// admins have not re-pinned (not_repinned).
+// other than their governance key, either one the service had not seen
+// (key_changed: it is not the key pinned at the last sign-in either) or
+// one it has seen sign in since but that the other admins have not
+// re-pinned (not_repinned).
 const (
 	ReasonKeyChanged  = "key_changed"
 	ReasonNotRepinned = "not_repinned"
 )
 
+// Reasons of the migration of governance keys (AuditGovKeyMigrated and
+// AuditGovKeyRefused) and of the approvals it ends.
+const (
+	// ReasonEvidence: the key pinned is that of the admin's earliest signed
+	// approval in the audit log; a different current key then needs a
+	// re-pin. ReasonNoEvidence: there is none, the current key was pinned.
+	ReasonEvidence     = "evidence"
+	ReasonNoEvidence   = "no_evidence"
+	ReasonAuthKeyMoved = "auth_key_moved" // the key shown is no longer the credential key
+	// ReasonGovMigrated ends an open governance approval at the migration.
+	ReasonGovMigrated = "gov_key_migrated"
+)
+
 // Governance reports whether an action decides who governs or what binds
-// the members: the admin set, new votes, extended votes and the contract
-// template. An approval of one signed with a changed credential key does
+// the members: the admin set and its governance keys, new votes, extended
+// votes and the contract template. An approval of one signed with a changed credential key does
 // not count, since someone else may now hold the member's credential.
 // assignment.push is not governance: it hands work to named members, and
 // changes neither who decides nor what binds them (chosen).
@@ -101,9 +114,16 @@ const (
 	AuditConsumed        = "approval.consumed"
 	AuditAdminSetChanged = "admin_set.changed"
 	AuditAdminRepinned   = "admin.repinned" // an admin's governance key was re-pinned (admin.repin applied)
+	// AuditGovKeyMigrated: an existing admin's governance key was pinned
+	// when the feature began (Reason: the evidence, see ReasonNoEvidence);
+	// AuditGovKeyRefused: an approved change would have pinned a key that
+	// is no longer the connection's credential key (ReasonAuthKeyMoved).
+	AuditGovKeyMigrated = "gov_key.migrated"
+	AuditGovKeyRefused  = "gov_key.refused"
 	// AuditBootstrapArmed: the operator armed a new one-shot bootstrap
 	// (`service-vault admin bootstrap`); the email is not recorded.
-	AuditBootstrapArmed = "admin_set.bootstrap_armed"
+	AuditBootstrapArmed     = "admin_set.bootstrap_armed"
+	AuditBootstrapConfirmed = "admin_set.bootstrap_confirmed"
 )
 
 // Answers in an approval.response audit entry.
@@ -269,14 +289,24 @@ type Approver struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// UnmarshalJSON reads an approval stored before Counted existed as counted.
+// UnmarshalJSON reads an approval stored before Counted existed: it counted
+// unless it carried a changed key.
 func (a *Approver) UnmarshalJSON(b []byte) error {
 	type plain Approver
-	p := plain{Counted: true}
+	var p struct {
+		plain
+		Counted *bool `json:"counted"`
+	}
 	if err := json.Unmarshal(b, &p); err != nil {
 		return err
 	}
-	*a = Approver(p)
+	*a = Approver(p.plain)
+	// Before Counted existed an approval counted; one that carried a changed
+	// key did not (fail closed).
+	a.Counted = !a.KeyChanged
+	if p.Counted != nil {
+		a.Counted = *p.Counted
+	}
 	return nil
 }
 
@@ -394,6 +424,8 @@ type AuditEntry struct {
 	N          int64  `json:"n,omitempty"`
 	Added      string `json:"added,omitempty"`
 	Removed    string `json:"removed,omitempty"`
+	// Fingerprint, with gov_key.migrated: of the credential key pinned.
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 // AuditPage is a page of the audit log.

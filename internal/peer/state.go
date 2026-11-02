@@ -126,6 +126,9 @@ type Connection struct {
 	// connection becomes an admin) and RepinGov (the other admins approved
 	// admin.repin). Empty: not pinned, no governance approval counts.
 	GovKey []byte `json:"gov_key,omitempty"`
+	// AuthKeyChangedAt is when AuthKey last moved to a key that no rotation
+	// chain reached (the first sign-in with the new key); zero if never.
+	AuthKeyChangedAt time.Time `json:"auth_key_changed_at,omitzero"`
 
 	// relay.token.refresh bounds (§7.2): when this peer last got a fresh
 	// token near its token's end, and after quota_exceeded.

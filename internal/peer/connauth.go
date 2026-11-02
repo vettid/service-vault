@@ -263,6 +263,9 @@ func (p *Peer) connAuthResponse(c *Connection, body []byte, now time.Time) {
 	default:
 		ev.Type = EventSignInApproved
 		ev.KeyChanged = peerwire.PinnedKeyChanged(c.AuthKey, r.Key, r.Rotations)
+		if ev.KeyChanged {
+			c.AuthKeyChangedAt = now.UTC().Truncate(time.Millisecond)
+		}
 		switch {
 		case len(c.GovKey) == 0 && len(c.AuthKey) == 0:
 			c.GovKey = append([]byte(nil), r.Key...) // the first pin

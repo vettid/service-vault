@@ -691,17 +691,49 @@ admin's connection.
   approval never counts for their own re-pin) whose approvals count as
   above, and is applied (`admin.repinned` audited) only if `new_key` is
   still the connection's credential key. The application gives no
-  `summary`; the service writes `name given "<name>", old key <16 hex
-  digits in 4 groups>, new key <16 hex digits in 4 groups>, connection
-  <id>`, the keys' fingerprints being `SHA-256("vettid/vms/2/ck-fp" || key)`
-  (the first 16 hex digits), so the admins compare the new key with the
-  member out of band before approving. With one admin it is refused
-  (`sole_admin`): a sole admin whose key changed has no one to confirm it: the
-  connection is removed (which empties the set) and the operator arms
-  `service-vault admin bootstrap` for a new one (`ArmBootstrap` is refused
-  while the set is not empty). `svctl approve -action admin.repin
-  -payload '{"connection_id":"…"}'` runs it; `svctl approval` shows an
-  approval that did not count as `not_counted: <connection> reason=…`.
+  `summary`; the service writes `name given "<name>", new key <16 hex
+  digits in 4 groups>, key changed <YYYY-MM-DD HH:MM> UTC, connection
+  <id>`: the fingerprint is `SHA-256("vettid/vms/2/ck-fp" || key)` (the
+  first 16 hex digits) and the time that of the first sign-in with the new
+  key. **Before approving, the other admins ask the admin out of band, by
+  phone or in person, "did you recover or replace your vault's keys at
+  <that time>?", and approve only on a clear yes**; the admin cannot
+  compare the fingerprint yet. A member's app will show its own
+  credential-key fingerprint in a later release, and the
+  `vettid/vms/2/ck-fp` label will then be specified in VAULT-MESSAGING.
+  Know that a stolen copy of the vault, still holding the old key, can
+  rotate the governance key away from the real admin's and lock the real
+  admin out; they then need a re-pin too. With one admin a re-pin is
+  refused (`sole_admin`): a sole admin whose key changed has no one to
+  confirm it: the connection is removed (which empties the set) and the
+  operator arms `service-vault admin bootstrap` for a new one
+  (`ArmBootstrap` is refused while the set is not empty).
+  `svctl approve -action admin.repin -payload '{"connection_id":"…"}'`
+  runs it; `svctl approval` shows an approval that did not count as
+  `not_counted: <connection> reason=…`. `approvals[]` of the status answer
+  lists every admin's answer, including approvals that do not count
+  (`counted: false`); only `counted: true` ones count toward the threshold.
+- *Pinning at the start.* The governance key of an admin that has none (one
+  from before it existed) is pinned at a tick after the peer has loaded its
+  connections, from the audit log: the credential key of the admin's
+  earliest signed approval since they became an admin (`gov_key.migrated`,
+  reason `evidence`, with the key's fingerprint; if the connection holds
+  another key now, it needs a re-pin), or with no signed approval at all
+  the connection's current credential key (reason `no_evidence`). Open
+  governance approvals holding approvals are ended (`expired`, reason
+  `gov_key_migrated`) so the admins approve again. `admin_set.add` pins the
+  credential key whose fingerprint its summary shows (`cred key <16 hex
+  digits>`), and only if it is still the connection's credential key when
+  applied; otherwise nothing is applied and `gov_key.refused` is audited.
+  An approval's threshold is the higher of the one it was created with and
+  the current m when it settles and when it is applied.
+- *Bootstrap confirmation.* The connection bound to the bootstrap email
+  does not become the first admin by itself: the service records it with
+  the fingerprint of its identity key (logged, and shown by
+  `service-vault admin bootstrap -connection ID`), and the operator
+  confirms with `service-vault admin bootstrap -connection ID -fingerprint
+  16HEX` after checking the fingerprint with the member out of band. Its
+  governance key is the credential key of its first sign-in.
 - *Threshold.* m = `SV_ADMIN_THRESHOLD` (default 1, 1-of-n); each
   approval keeps the m it was created with, so m changes by configuration
   only. m distinct admins (connections) among those asked must approve,
@@ -725,7 +757,7 @@ admin's connection.
   `Push assignment:` (`assignment.push`). For `admin_set.add` and
   `admin_set.remove` the application gives no `summary` (`invalid_summary`):
   the service writes `name given "<name>", connected <date>, key <16 hex
-  digits in 4 groups>, connection <id>` for the connection. The name is the one the
+  digits in 4 groups>, cred key <16 hex digits in 4 groups>, connection <id>` for the connection (the credential key is the one pinned as its governance key). The name is the one the
   member's vault sent when it connected, so the wording says it is
   self-declared; it is shown whole, at most 32 characters of printable
   ASCII and Latin-1 letters, or the approval is refused (`field_not_shown`).

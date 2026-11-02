@@ -201,7 +201,11 @@ credential key other than the admin's governance key (the key pinned
 when the connection became an admin, which moves only by a rotation chain
 from it or by the other admins' `admin.repin`) does not count, here or
 when the service counts again before using the approval: someone else
-may now hold that credential. Its payload is the input
+may now hold that credential. An admin whose key changed is re-pinned only
+by the other admins' approval, who first ask them out of band whether they
+recovered or replaced their vault's keys at the time the summary names; a
+member's app will show its own credential-key fingerprint in a later
+release. Its payload is the input
 in JCS form with every field present, parsed strictly (§2).
 
 Before creating, the service checks, in one step that no other request

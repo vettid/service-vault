@@ -359,6 +359,9 @@ type ConnectionInfo struct {
 	// GovKey is the credential key the connection's governance approvals
 	// must be signed with (empty: none pinned). See Connection.GovKey.
 	GovKey []byte
+	// AuthKeyChangedAt: when AuthKey last changed to a key no rotation
+	// chain reached (zero: never).
+	AuthKeyChangedAt time.Time
 }
 
 // Connection returns a connection by id.
@@ -371,32 +374,43 @@ func (p *Peer) Connection(id string) (ConnectionInfo, bool) {
 	}
 	return ConnectionInfo{ID: c.ID, State: c.State, Name: c.Name(), InviteID: c.InviteID, Tag: c.Tag, Activated: c.Activated,
 		IK: append([]byte(nil), c.Peer.IK...), AuthKey: append([]byte(nil), c.AuthKey...),
-		GovKey: append([]byte(nil), c.GovKey...)}, true
+		GovKey: append([]byte(nil), c.GovKey...), AuthKeyChangedAt: c.AuthKeyChangedAt}, true
 }
 
-// PinGov pins the connection's governance key to its credential key as it
-// is now, when it becomes an admin (or, with onlyIfEmpty, when none is
-// pinned yet: the migration of an existing admin). It reports whether it
-// pinned.
-func (p *Peer) PinGov(ctx context.Context, connID string, onlyIfEmpty bool) (bool, error) {
+// PinGov pins the connection's governance key: to key, or to its
+// credential key as it is now when key is empty. With onlyIfEmpty it does
+// so only when none is pinned. It reports whether it pinned, and
+// ErrNotFound for a connection it does not know (the peer may not have
+// loaded its state yet).
+func (p *Peer) PinGov(ctx context.Context, connID string, key []byte, onlyIfEmpty bool) (bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	c := p.conns[connID]
-	if c == nil || len(c.AuthKey) == 0 || onlyIfEmpty && len(c.GovKey) > 0 {
+	if c == nil {
+		return false, ErrNotFound
+	}
+	if len(key) == 0 {
+		key = c.AuthKey
+	}
+	if len(key) == 0 || onlyIfEmpty && len(c.GovKey) > 0 {
 		return false, nil
 	}
-	c.GovKey = append([]byte(nil), c.AuthKey...)
+	c.GovKey = append([]byte(nil), key...)
 	p.markDirty(kindConn, c.ID)
 	return true, p.flushAndDrain(ctx)
 }
 
 // RepinGov moves the connection's governance key to key, but only while
-// key is still its credential key; it reports whether it did.
+// key is still its credential key; it reports whether it did, and
+// ErrNotFound for a connection it does not know.
 func (p *Peer) RepinGov(ctx context.Context, connID string, key []byte) (bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	c := p.conns[connID]
-	if c == nil || len(key) == 0 || !bytes.Equal(c.AuthKey, key) {
+	if c == nil {
+		return false, ErrNotFound
+	}
+	if len(key) == 0 || !bytes.Equal(c.AuthKey, key) {
 		return false, nil
 	}
 	c.GovKey = append([]byte(nil), key...)

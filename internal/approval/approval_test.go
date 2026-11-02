@@ -37,7 +37,8 @@ type fakePeer struct {
 	auth      map[string][]byte // connection id -> its credential key (default: 7 x 32)
 	// gov: connection id -> its governance key. Absent: the default
 	// credential key (pinned); present and empty: none pinned.
-	gov map[string][]byte
+	gov       map[string][]byte
+	changedAt map[string]time.Time // connection id -> AuthKeyChangedAt
 }
 
 func (p *fakePeer) authKey(id string) []byte {
@@ -47,22 +48,31 @@ func (p *fakePeer) authKey(id string) []byte {
 	return bytes.Repeat([]byte{7}, 32)
 }
 
-func (p *fakePeer) PinGov(_ context.Context, id string, onlyIfEmpty bool) (bool, error) {
+func (p *fakePeer) PinGov(_ context.Context, id string, key []byte, onlyIfEmpty bool) (bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if !p.active[id] && p.states[id] == "" {
+		return false, peer.ErrNotFound
+	}
 	if k, set := p.gov[id]; p.noAuth[id] || onlyIfEmpty && (!set || len(k) > 0) {
 		return false, nil
 	}
 	if p.gov == nil {
 		p.gov = map[string][]byte{}
 	}
-	p.gov[id] = p.authKey(id)
+	if len(key) == 0 {
+		key = p.authKey(id)
+	}
+	p.gov[id] = key
 	return true, nil
 }
 
 func (p *fakePeer) RepinGov(_ context.Context, id string, key []byte) (bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if !p.active[id] && p.states[id] == "" {
+		return false, peer.ErrNotFound
+	}
 	if p.noAuth[id] || !bytes.Equal(key, p.authKey(id)) {
 		return false, nil
 	}
@@ -82,6 +92,7 @@ func (p *fakePeer) info(id, state string) peer.ConnectionInfo {
 		Activated: time.Date(2026, 11, 2, 9, 30, 0, 0, time.UTC)}
 	if !p.noAuth[id] {
 		ci.AuthKey = p.authKey(id)
+		ci.AuthKeyChangedAt = p.changedAt[id]
 		ci.GovKey = bytes.Repeat([]byte{7}, 32) // pinned before any test moves auth
 		if g, set := p.gov[id]; set {
 			ci.GovKey = g
@@ -595,9 +606,17 @@ func TestRemindRateLimit(t *testing.T) {
 	}
 }
 
+// confirm gives the operator's confirmation of the connection waiting to
+// become the first admin, with the fingerprint of its identity key.
+func (f *fixture) confirm(conn string) error {
+	return f.m.ConfirmBootstrap(context.Background(), conn, compactFP(fingerprint(ikFPLabel, fakeIK(conn))))
+}
+
 func TestBootstrap(t *testing.T) {
 	f := newFixture(t, 1)
 	f.m.BootstrapKey = "boot-key"
+	bound := map[string]string{}
+	f.m.BoundConnection = func(_ context.Context, k string) (string, bool, error) { c, ok := bound[k]; return c, ok, nil }
 	ctx := context.Background()
 	for _, c := range []struct {
 		conn, key string
@@ -607,11 +626,35 @@ func TestBootstrap(t *testing.T) {
 			t.Fatalf("%+v: %v %v", c, err, f.admins())
 		}
 	}
-	if err := f.m.ConnectionAdded(ctx, "c1", "boot-key", true); err != nil {
+	f.p.active["c1"] = true
+	// The bound connection waits for the operator's confirmation, with
+	// the fingerprint of its identity key.
+	if err := f.m.ConnectionAdded(ctx, "c1", "boot-key", true); err != nil || len(f.admins()) != 0 {
+		t.Fatalf("%v %v", err, f.admins())
+	}
+	if c, fp, err := f.m.BootstrapPending(ctx); err != nil || c != "c1" || fp != compactFP(fingerprint(ikFPLabel, fakeIK("c1"))) {
+		t.Fatalf("pending %q %q %v", c, fp, err)
+	}
+	if err := f.m.ConfirmBootstrap(ctx, "c1", "0000000000000000"); !errors.Is(err, ErrBootMismatch) {
+		t.Fatalf("wrong fingerprint: %v", err)
+	}
+	if err := f.m.ConfirmBootstrap(ctx, "c2", compactFP(fingerprint(ikFPLabel, fakeIK("c1")))); !errors.Is(err, ErrBootMismatch) {
+		t.Fatalf("wrong connection: %v", err)
+	}
+	f.tick()
+	if len(f.admins()) != 0 {
+		t.Fatal("bootstrapped without confirmation")
+	}
+	if err := f.confirm("c1"); err != nil {
 		t.Fatal(err)
 	}
+	bound["boot-key"], f.p.active["c1"] = "c1", true
+	f.tick()
 	if a := f.admins(); len(a) != 1 || a[0] != "c1" {
 		t.Fatalf("admins %v", a)
+	}
+	if err := f.confirm("c1"); !errors.Is(err, ErrBootNothing) {
+		t.Fatalf("confirm after the bootstrap: %v", err)
 	}
 	// The set is not empty: the setting is ignored.
 	if err := f.m.ConnectionAdded(ctx, "c2", "boot-key", true); err != nil || len(f.admins()) != 1 {
@@ -638,6 +681,13 @@ func TestBootstrapAtStart(t *testing.T) {
 		t.Fatal("bootstrapped an inactive connection")
 	}
 	f.p.active["c1"] = true
+	f.tick() // waits for the confirmation
+	if len(f.admins()) != 0 {
+		t.Fatal("bootstrapped without confirmation")
+	}
+	if err := f.confirm("c1"); err != nil {
+		t.Fatal(err)
+	}
 	f.tick()
 	if a := f.admins(); len(a) != 1 || a[0] != "c1" {
 		t.Fatalf("admins %v", a)
@@ -653,8 +703,16 @@ func TestBootstrapOneShot(t *testing.T) {
 	bound := map[string]string{}
 	f.m.BoundConnection = func(_ context.Context, k string) (string, bool, error) { c, ok := bound[k]; return c, ok, nil }
 	ctx := context.Background()
-	if err := f.m.ConnectionAdded(ctx, "c1", "boot-key", true); err != nil || len(f.admins()) != 1 {
-		t.Fatalf("%v %v", err, f.admins())
+	bound["boot-key"], f.p.active["c1"] = "c1", true
+	if err := f.m.ConnectionAdded(ctx, "c1", "boot-key", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.confirm("c1"); err != nil {
+		t.Fatal(err)
+	}
+	f.tick()
+	if len(f.admins()) != 1 {
+		t.Fatalf("%v", f.admins())
 	}
 	// Armed while the set is not empty: refused.
 	if err := f.m.ArmBootstrap(ctx, "new-key"); !errors.Is(err, ErrAdminsExist) {
@@ -690,6 +748,10 @@ func TestBootstrapOneShot(t *testing.T) {
 		t.Fatalf("the configured email bootstrapped after arming another: %v", f.admins())
 	}
 	bound["new-key"], f.p.active["c3"] = "c3", true
+	f.tick()
+	if err := f.confirm("c3"); err != nil {
+		t.Fatal(err)
+	}
 	f.tick()
 	if a := f.admins(); len(a) != 1 || a[0] != "c3" {
 		t.Fatalf("armed bootstrap: %v", a)

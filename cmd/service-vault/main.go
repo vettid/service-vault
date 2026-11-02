@@ -8,6 +8,8 @@
 //	service-vault healthcheck  probe GET /health on the local API; exit 0 or 1
 //	service-vault admin bootstrap -email E
 //	                           arm a new one-shot admin bootstrap (the same environment as serve)
+//	service-vault admin bootstrap -connection ID [-fingerprint 16HEX]
+//	                           show the connection waiting to become the first admin, or confirm it
 //	service-vault table restore -from RESTORED -to TABLE [-other-keys] [-newer-point]
 //	                           copy a restored backup back into the stack's table (README "Restoring the table")
 //	service-vault version
@@ -69,7 +71,7 @@ var version = "dev"
 
 func main() {
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "usage: service-vault serve [flags] | healthcheck | admin bootstrap -email E | table restore -from RESTORED -to TABLE [-other-keys] [-newer-point] | version\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "usage: service-vault serve [flags] | healthcheck | admin bootstrap -email E | admin bootstrap -connection ID [-fingerprint 16HEX] | table restore -from RESTORED -to TABLE [-other-keys] [-newer-point] | version\n")
 	}
 	flag.Parse()
 	switch flag.Arg(0) {
@@ -700,22 +702,23 @@ var errNoSecrets = errors.New("the service vault has no keys yet: run serve firs
 // The running daemon picks the armed bootstrap up within seconds.
 func admin(args []string, out io.Writer) error {
 	if len(args) == 0 || args[0] != "bootstrap" {
-		return errors.New("usage: service-vault admin bootstrap -email E")
+		return errors.New(adminUsage)
 	}
 	fs := flag.NewFlagSet("admin bootstrap", flag.ContinueOnError)
+	conn := fs.String("connection", "", "the connection waiting to become the first admin (shown when it connects): with -fingerprint, confirms it; alone, shows it")
+	fprint := fs.String("fingerprint", "", "the 16 hex digits of the fingerprint of its identity key, which you have checked with the member out of band")
 	addr := fs.String("email", "", "the email of the member to become the first admin; their connection must come from an invitation with a verified email")
 	awsEndpoint := fs.String("dev-aws-endpoint", "", "local development only: send KMS and DynamoDB calls to this URL (LocalStack)")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
-	if fs.NArg() > 0 {
-		return errors.New("usage: service-vault admin bootstrap -email E")
+	if fs.NArg() > 0 || (*conn != "") == (*addr != "") || *fprint != "" && *conn == "" {
+		return errors.New(adminUsage)
 	}
-	if *addr == "" {
-		return errors.New("-email is required")
-	}
-	if _, err := connect.NormalizeEmail(*addr); err != nil {
-		return errors.New("-email: not an email address")
+	if *addr != "" {
+		if _, err := connect.NormalizeEmail(*addr); err != nil {
+			return errors.New("-email: not an email address")
+		}
 	}
 	cfg, err := configFromEnv(os.Getenv)
 	if err != nil {
@@ -733,7 +736,37 @@ func admin(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if *conn != "" {
+		return confirmBootstrap(ctx, records, *conn, *fprint, out)
+	}
 	return armBootstrap(ctx, kc, cfg.KMSKeyID, tbl.Blobs(), records, *addr, out)
+}
+
+const adminUsage = "usage: service-vault admin bootstrap -email E | -connection ID [-fingerprint 16HEX]"
+
+// confirmBootstrap shows the connection waiting to become the first admin,
+// or, given its identity key's fingerprint, confirms it. The operator
+// checks the fingerprint with the member out of band (the member's vault
+// key fingerprint, VAULT-MESSAGING §10.8) before confirming.
+func confirmBootstrap(ctx context.Context, st peer.Store, conn, fp string, out io.Writer) error {
+	m := &approval.Manager{Store: st, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	if fp == "" {
+		c, f, err := m.BootstrapPending(ctx)
+		if err != nil {
+			return err
+		}
+		if c == "" {
+			return errors.New("no connection is waiting for confirmation")
+		}
+		fmt.Fprintf(out, "connection: %s\nidentity key fingerprint: %s\n", c, f)
+		fmt.Fprintln(out, "check the fingerprint with the member out of band, then confirm with -connection ID -fingerprint 16HEX")
+		return nil
+	}
+	if err := m.ConfirmBootstrap(ctx, conn, fp); err != nil {
+		return err
+	}
+	fmt.Fprintln(out, "admin bootstrap confirmed: the running service makes the connection the first admin within seconds")
+	return nil
 }
 
 // armBootstrap computes the email's index key under the service vault's
@@ -759,7 +792,7 @@ func armBootstrap(ctx context.Context, kc keystore.KMS, keyID string, blobs keys
 		}
 		return err
 	}
-	fmt.Fprintln(out, "admin bootstrap armed: the next connection bound to this email (from an invitation with a verified email) becomes the first admin, once")
+	fmt.Fprintln(out, "admin bootstrap armed: the next connection bound to this email (from an invitation with a verified email) waits for your confirmation, then becomes the first admin, once")
 	return nil
 }
 

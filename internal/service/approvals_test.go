@@ -31,6 +31,21 @@ func TestApprovalEndToEnd(t *testing.T) {
 	ctx := context.Background()
 	other, _ := f.connect(f.member(20), "other-key")
 	admin, _ := f.connect(f.m, "admin-key")
+	// The connection waits for the operator, who confirms the fingerprint
+	// of its identity key; then the first tick makes it the admin.
+	if a, _ := m.Admins(ctx); len(a.Admins) != 0 {
+		t.Fatalf("admin before the confirmation: %v", a.Admins)
+	}
+	pc, pfp, err := m.BootstrapPending(ctx)
+	if err != nil || pc != admin {
+		t.Fatalf("pending %q %v", pc, err)
+	}
+	if err := m.ConfirmBootstrap(ctx, pc, pfp); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
 	a, _ := m.Admins(ctx)
 	if len(a.Admins) != 1 || a.Admins[0] != admin {
 		t.Fatalf("admins %v (other %s)", a.Admins, other)
@@ -88,6 +103,24 @@ func TestApprovalEndToEnd(t *testing.T) {
 	}
 	if logs := f.logs.String(); strings.Contains(logs, "proposal 7") || strings.Contains(logs, hash[:16]) {
 		t.Fatalf("logs carry the context:\n%s", logs)
+	}
+
+	// The real peer pinned the governance key at the admin's first sign-in.
+	// A later approval signed with another key does not count, the first
+	// time (key_changed) and every time after (not_repinned), while an
+	// ordinary sign-in with that key still works.
+	_, otherKey, _ := ed25519.GenerateKey(nil)
+	for i, want := range []string{approval.ReasonKeyChanged, approval.ReasonNotRepinned} {
+		d, err := m.Create(ctx, approval.Request{Action: approval.ActionContractTemplateChange, Summary: "Second", Payload: json.RawMessage(`{"n":` + string(rune('1'+i)) + `}`)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.pump()
+		f.sign(f.m, f.m.Challenges[len(f.m.Challenges)-1], otherKey)
+		s, _ := m.Status(ctx, d.ID)
+		if s.Status != approval.StatusPending || len(s.Approvals) != 1 || s.Approvals[0].Counted || s.Approvals[0].Reason != want {
+			t.Fatalf("approval %d with another key: %+v", i, s)
+		}
 	}
 
 	// The admin removes the connection: the set is empty.

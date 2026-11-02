@@ -1,6 +1,7 @@
 package servicevault_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -63,7 +64,7 @@ func (*fakePeer) Invite(id string) (peer.InviteRecord, bool) {
 }
 
 func (*fakePeer) Connection(id string) (peer.ConnectionInfo, bool) {
-	return peer.ConnectionInfo{ID: id, State: peer.StateActive}, id == "c1"
+	return peer.ConnectionInfo{ID: id, State: peer.StateActive, IK: bytes.Repeat([]byte{1}, 32)}, id == "c1"
 }
 
 func (p *fakePeer) Authenticate(context.Context, string, string, string, time.Duration) (string, error) {
@@ -86,9 +87,9 @@ func (p *fakePeer) HasPendingSignIn(conn string) bool {
 	return p.pending[conn]
 }
 
-func (*fakePeer) CancelChallenge(context.Context, string) (bool, error)  { return true, nil }
-func (*fakePeer) PinGov(context.Context, string, bool) (bool, error)     { return true, nil }
-func (*fakePeer) RepinGov(context.Context, string, []byte) (bool, error) { return true, nil }
+func (*fakePeer) CancelChallenge(context.Context, string) (bool, error)      { return true, nil }
+func (*fakePeer) PinGov(context.Context, string, []byte, bool) (bool, error) { return true, nil }
+func (*fakePeer) RepinGov(context.Context, string, []byte) (bool, error)     { return true, nil }
 
 // fixture is the service (internal/service on a fake peer) behind the
 // private API (internal/api) over TLS 1.3 with a tlsid key.

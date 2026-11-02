@@ -3,6 +3,7 @@ package peer
 import (
 	"context"
 	"crypto/ed25519"
+	"github.com/vettid/service-vault/internal/peer/peertest"
 	"testing"
 	"time"
 
@@ -80,7 +81,7 @@ func TestGovKeyMigration(t *testing.T) {
 	m := f.member(10)
 	cid := f.connect(m, "tag")
 	ctx := context.Background()
-	if ok, _ := f.p.PinGov(ctx, cid, true); ok {
+	if ok, _ := f.p.PinGov(ctx, cid, nil, true); ok {
 		t.Fatal("pinned with no credential key")
 	}
 	if _, err := f.p.Authenticate(ctx, cid, "Approve", peerwire.PurposeApproval, 2*time.Minute); err != nil {
@@ -93,13 +94,51 @@ func TestGovKeyMigration(t *testing.T) {
 	f.p.mu.Lock()
 	f.p.conns[cid].GovKey = nil // as stored before the governance key existed
 	f.p.mu.Unlock()
-	if ok, err := f.p.PinGov(ctx, cid, true); err != nil || !ok {
+	if ok, err := f.p.PinGov(ctx, cid, nil, true); err != nil || !ok {
 		t.Fatalf("migrate: %v %v", ok, err)
 	}
-	if ok, _ := f.p.PinGov(ctx, cid, true); ok {
+	if ok, _ := f.p.PinGov(ctx, cid, nil, true); ok {
 		t.Fatal("pinned twice")
 	}
 	if ci, _ := f.p.Connection(cid); string(ci.GovKey) != string(ci.AuthKey) || len(ci.GovKey) == 0 {
 		t.Fatal("not pinned to the credential key")
+	}
+}
+
+// The service vault starts its approvals before the peer has loaded its
+// state: PinGov and RepinGov then know no connection and say so (ErrNotFound)
+// instead of reporting nothing to do, and the pin survives a restart.
+func TestGovKeyBeforeAndAfterPeerLoad(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "tag")
+	ctx := context.Background()
+	if _, err := f.p.Authenticate(ctx, cid, "Approve", peerwire.PurposeApproval, 2*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	f.pump()
+	r, _ := peerwire.SignConnAuth(m.Cred, f.keys.IKPublic(), m.IK.Public().(ed25519.PublicKey), m.Challenges[0], f.clk.Now(), nil)
+	m.Send(peerwire.TypeConnAuthResponse, r.Marshal())
+	f.pump()
+	if ok, err := f.p.PinGov(ctx, "nobody", nil, true); ok || err != ErrNotFound {
+		t.Fatalf("unknown connection: %v %v", ok, err)
+	}
+	// A new process: created, not started.
+	p, err := New(Config{Log: f.p.cfg.Log, Keys: f.keys, Relay: testRelay{f.sv, f}, RelayURL: peertest.RelayURL, Store: f.store,
+		Events: f.ev, Now: f.clk.Now, Profile: Profile{FirstName: "VettID", LastName: "Member Service"}, AfterRestore: f.afterRestore, Votes: f.votes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := p.PinGov(ctx, cid, nil, true); ok || err != ErrNotFound {
+		t.Fatalf("before the load: %v %v", ok, err)
+	}
+	if ok, err := p.RepinGov(ctx, cid, m.Cred.Public().(ed25519.PublicKey)); ok || err != ErrNotFound {
+		t.Fatalf("re-pin before the load: %v %v", ok, err)
+	}
+	if err := p.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if ci, ok := p.Connection(cid); !ok || !ed25519.PublicKey(ci.GovKey).Equal(m.Cred.Public()) {
+		t.Fatal("the governance key did not survive the restart")
 	}
 }
