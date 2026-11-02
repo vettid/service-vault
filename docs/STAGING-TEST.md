@@ -107,13 +107,18 @@ a real service's members sign in themselves.
 3. Operator: `status: approved`; `sv audit` shows the request and the
    signed answer.
 
-A challenge lives 10 minutes (VAULT-MESSAGING §10.4). If the member's
-vault is held for its daily owner check (§3.6.3) the challenge runs out
-unseen: `sv approval <approval_id>` then prints `remind needed:
-<connection_id> (svctl remind <approval_id>)` and the service vault sends
-the `approval.challenge_expired` webhook. Release the vault, then `sv
-remind <approval_id>` sends a new challenge (at most once per 10
-minutes).
+On staging an approval lasts at most 1 hour (`SV_CHANNEL=staging`; the
+stack refuses a longer `approvalTtl`). With member vault release 26 and
+later an approval challenge lives as long as the approval (VAULT-MESSAGING
+0.82.0 §10.4, at most 24 hours; at most 1 hour here), so a vault held for
+its daily owner check (§3.6.3) shows it after the owner check, if that
+comes within the hour. With an older member vault the challenge is cut to
+10 minutes and runs out unseen: `sv approval <approval_id>` then prints
+`remind needed: <connection_id> (svctl remind <approval_id>)` and the
+service vault sends the `approval.challenge_expired` webhook. Release the
+vault, then `sv remind <approval_id>` sends a new challenge (at most once
+per 10 minutes, and only to an admin holding no live challenge: otherwise
+`sv remind` says there is nothing to remind).
 
 ## 5. Optional
 

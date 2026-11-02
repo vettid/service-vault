@@ -148,7 +148,7 @@ describe('compute', () => {
     const c = container();
     const env = Object.fromEntries(c.Environment.map((e: any) => [e.Name, e.Value]));
     expect(Object.keys(env).sort()).toEqual(
-      ['AWS_REGION', 'SV_BALLOTS_TABLE', 'SV_KMS_KEY_ID', 'SV_LISTEN', 'SV_RELAY_URL', 'SV_SERVICE_NAME', 'SV_SIGSTORE', 'SV_TABLE', 'SV_TLS_NAME', 'SV_TLS_PIN_PARAM', 'SV_WEBHOOK_URL'],
+      ['AWS_REGION', 'SV_BALLOTS_TABLE', 'SV_CHANNEL', 'SV_KMS_KEY_ID', 'SV_LISTEN', 'SV_RELAY_URL', 'SV_SERVICE_NAME', 'SV_SIGSTORE', 'SV_TABLE', 'SV_TLS_NAME', 'SV_TLS_PIN_PARAM', 'SV_WEBHOOK_URL'],
     );
     expect(env.SV_RELAY_URL).toBe('https://relay.vettid.org');
     expect(env.SV_SIGSTORE).toBe('staging'); // the test stack's envName is not prod
@@ -172,6 +172,25 @@ describe('compute', () => {
     expect(env.SV_APPROVAL_ALLOW_NO_PURPOSE).toBe('true');
     expect(() => synth({ adminThreshold: 0 })).toThrow(/adminThreshold/);
     expect(() => synth({ approvalTtl: 'a day' })).toThrow(/approvalTtl/);
+  });
+
+  test('SV_CHANNEL: staging on staging, production elsewhere; staging approvals last at most 1h', () => {
+    const envOf = (props: Partial<ServiceVaultStackProps>) => {
+      const td = Object.values<any>(synth(props).findResources('AWS::ECS::TaskDefinition'))[0].Properties;
+      return Object.fromEntries(td.ContainerDefinitions[0].Environment.map((e: any) => [e.Name, e.Value]));
+    };
+    expect(envOf({ envName: 'staging' }).SV_CHANNEL).toBe('staging');
+    expect(envOf({ envName: 'staging' }).SV_APPROVAL_TTL).toBeUndefined();
+    expect(envOf({ envName: 'staging', approvalTtl: '1h' }).SV_APPROVAL_TTL).toBe('1h');
+    expect(envOf({ envName: 'staging', approvalTtl: '30m' }).SV_APPROVAL_TTL).toBe('30m');
+    expect(() => synth({ envName: 'staging', approvalTtl: '2h' })).toThrow(/approvalTtl/);
+    expect(() => synth({ envName: 'staging', approvalTtl: '1h1m' })).toThrow(/approvalTtl/);
+    expect(() => synth({ envName: 'staging', approvalTtl: '90m' })).toThrow(/approvalTtl/);
+    expect(envOf({}).SV_CHANNEL).toBe('production');
+    expect(envOf({ envName: 'prod' }).SV_CHANNEL).toBe('production');
+    expect(envOf({ envName: 'test' }).SV_CHANNEL).toBe('production');
+    expect(envOf({ envName: 'prod' }).SV_APPROVAL_TTL).toBeUndefined(); // the service's 24h default
+    expect(envOf({ envName: 'prod', approvalTtl: '48h' }).SV_APPROVAL_TTL).toBe('48h');
   });
 
   test('testSignIns: SV_TEST_SIGNINS only on staging with the flag', () => {

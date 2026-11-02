@@ -128,7 +128,8 @@ type Config struct {
 	// Admin approvals (MEMBER-SERVICE-PLAN §4.5).
 	AdminBootstrapEmail string        // SV_ADMIN_BOOTSTRAP_EMAIL, normalized; "" for none
 	AdminThreshold      int           // SV_ADMIN_THRESHOLD (m), default 1
-	ApprovalTTL         time.Duration // SV_APPROVAL_TTL, default 24h
+	ApprovalTTL         time.Duration // SV_APPROVAL_TTL, default 24h (1h on staging)
+	Channel             string        // SV_CHANNEL: staging | production (default)
 	AllowNoPurpose      bool          // SV_APPROVAL_ALLOW_NO_PURPOSE, default false
 	// TestSignIns serves POST /v1/signins/unsigned (SV_TEST_SIGNINS, default
 	// false): for test deployments only.
@@ -143,6 +144,15 @@ const (
 	maxAdminThreshold = 64
 	minApprovalTTL    = approval.RemindInterval
 	maxApprovalTTL    = 7 * 24 * time.Hour
+	// maxStagingApprovalTTL bounds an approval's life on the staging channel
+	// (STAGING-TIME-SCALE N16; VAULT-MESSAGING 0.82.0 §10.4).
+	maxStagingApprovalTTL = time.Hour
+)
+
+// Release channels (SV_CHANNEL).
+const (
+	ChannelStaging    = "staging"
+	ChannelProduction = "production"
 )
 
 // configFromEnv reads and checks the SV_* variables.
@@ -200,10 +210,24 @@ func configFromEnv(getenv func(string) string) (*Config, error) {
 			return nil, fmt.Errorf("SV_ADMIN_THRESHOLD: an integer from 1 to %d", maxAdminThreshold)
 		}
 	}
+	c.Channel = ChannelProduction
+	switch v := strings.TrimSpace(getenv("SV_CHANNEL")); v {
+	case "", ChannelProduction:
+	case ChannelStaging:
+		c.Channel = v
+	default:
+		return nil, errors.New("SV_CHANNEL: staging or production")
+	}
 	c.ApprovalTTL = approval.DefaultTTL
+	if c.Channel == ChannelStaging {
+		c.ApprovalTTL = maxStagingApprovalTTL
+	}
 	if v := strings.TrimSpace(getenv("SV_APPROVAL_TTL")); v != "" {
 		if c.ApprovalTTL, err = time.ParseDuration(v); err != nil || c.ApprovalTTL < minApprovalTTL || c.ApprovalTTL > maxApprovalTTL {
 			return nil, fmt.Errorf("SV_APPROVAL_TTL: a duration from %v to %v", minApprovalTTL, maxApprovalTTL)
+		}
+		if c.Channel == ChannelStaging && c.ApprovalTTL > maxStagingApprovalTTL {
+			return nil, fmt.Errorf("SV_APPROVAL_TTL: at most %v when SV_CHANNEL=staging", maxStagingApprovalTTL)
 		}
 	}
 	switch v := strings.TrimSpace(getenv("SV_APPROVAL_ALLOW_NO_PURPOSE")); v {

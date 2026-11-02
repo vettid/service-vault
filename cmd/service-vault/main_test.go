@@ -81,6 +81,38 @@ func TestConfigFromEnv(t *testing.T) {
 		c.ApprovalTTL != 48*time.Hour {
 		t.Fatalf("approvals %+v %v", c, err)
 	}
+	// SV_CHANNEL: production by default; on staging the approval TTL
+	// defaults to and is at most 1 hour.
+	e = goodEnv()
+	if c, err := configFromEnv(env(e)); err != nil || c.Channel != ChannelProduction || c.ApprovalTTL != 24*time.Hour {
+		t.Fatalf("channel default %+v %v", c, err)
+	}
+	e["SV_CHANNEL"] = "production"
+	if c, err := configFromEnv(env(e)); err != nil || c.Channel != ChannelProduction {
+		t.Fatalf("production %+v %v", c, err)
+	}
+	e["SV_CHANNEL"], e["SV_APPROVAL_TTL"] = "staging", "36h"
+	if _, err := configFromEnv(env(e)); err == nil {
+		t.Error("a staging approval TTL over 1h accepted")
+	}
+	e["SV_CHANNEL"], e["SV_APPROVAL_TTL"] = "staging", "1h"
+	if c, err := configFromEnv(env(e)); err != nil || c.Channel != ChannelStaging || c.ApprovalTTL != time.Hour {
+		t.Fatalf("staging 1h %+v %v", c, err)
+	}
+	e["SV_APPROVAL_TTL"] = "1h1m"
+	if _, err := configFromEnv(env(e)); err == nil {
+		t.Error("a staging approval TTL of 1h1m accepted")
+	}
+	delete(e, "SV_APPROVAL_TTL")
+	if c, err := configFromEnv(env(e)); err != nil || c.ApprovalTTL != time.Hour {
+		t.Fatalf("staging default %+v %v", c, err)
+	}
+	for _, v := range []string{"Staging", "prod", " x "} {
+		e["SV_CHANNEL"] = v
+		if _, err := configFromEnv(env(e)); err == nil {
+			t.Errorf("SV_CHANNEL=%q accepted", v)
+		}
+	}
 	e = goodEnv()
 	if c, err := configFromEnv(env(e)); err != nil || c.TestSignIns {
 		t.Fatalf("test sign-ins default %+v %v", c, err)

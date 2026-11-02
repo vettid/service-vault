@@ -257,6 +257,16 @@ export class ServiceVaultStack extends cdk.Stack {
     if (props.approvalTtl !== undefined && !/^([0-9]+(h|m|s))+$/.test(props.approvalTtl)) {
       throw new Error(`approvalTtl must be a duration such as 24h (got "${props.approvalTtl}")`);
     }
+    if (envName === 'staging' && props.approvalTtl !== undefined) {
+      // The staging channel keeps an approval to 1 hour (VAULT-MESSAGING
+      // 0.82.0 §10.4; STAGING-TIME-SCALE N16): the challenge lives as long.
+      const unit: Record<string, number> = { h: 3600, m: 60, s: 1 };
+      let seconds = 0;
+      for (const m of props.approvalTtl.matchAll(/([0-9]+)([hms])/g)) seconds += Number(m[1]) * unit[m[2]];
+      if (seconds > 3600) {
+        throw new Error(`approvalTtl must be at most 1h when envName is "staging" (got "${props.approvalTtl}")`);
+      }
+    }
     if (!props.alarmTopicArn === !props.alarmEmail) {
       throw new Error('set exactly one of alarmTopicArn and alarmEmail: the alarms must reach a person');
     }
@@ -266,7 +276,7 @@ export class ServiceVaultStack extends cdk.Stack {
     if (props.alarmEmail && !/^[^@\s]+@[a-z0-9.-]+\.[a-z]+$/.test(props.alarmEmail)) {
       throw new Error(`alarmEmail must be an address (got "${props.alarmEmail}")`);
     }
-    const approvalEnv: Record<string, string> = {};
+    const approvalEnv: Record<string, string> = { SV_CHANNEL: envName === 'staging' ? 'staging' : 'production' };
     if (props.adminBootstrapEmail) approvalEnv.SV_ADMIN_BOOTSTRAP_EMAIL = props.adminBootstrapEmail;
     if (props.adminThreshold !== undefined) approvalEnv.SV_ADMIN_THRESHOLD = String(props.adminThreshold);
     if (props.approvalTtl) approvalEnv.SV_APPROVAL_TTL = props.approvalTtl;
