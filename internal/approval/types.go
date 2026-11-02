@@ -426,6 +426,9 @@ type AuditEntry struct {
 	Removed    string `json:"removed,omitempty"`
 	// Fingerprint, with gov_key.migrated: of the credential key pinned.
 	Fingerprint string `json:"fingerprint,omitempty"`
+	// KeyChangesSeen, with gov_key.migrated: the evidence showed a later
+	// approval signed with another key, or reporting a key change.
+	KeyChangesSeen bool `json:"key_changes_seen,omitempty"`
 }
 
 // AuditPage is a page of the audit log.

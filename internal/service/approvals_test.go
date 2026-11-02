@@ -9,6 +9,7 @@ import (
 
 	"github.com/vettid/service-vault/internal/approval"
 	"github.com/vettid/service-vault/internal/peer"
+	"github.com/vettid/service-vault/internal/peer/peertest"
 	"github.com/vettid/service-vault/sdk/go/servicevault"
 	"github.com/vettid/vettid-vault/vms/peerwire"
 )
@@ -159,4 +160,108 @@ func TestBootstrapNeedsVerifiedInvite(t *testing.T) {
 	if a, _ := m.Admins(context.Background()); len(a.Admins) != 0 {
 		t.Fatalf("admins %v (connection %s)", a.Admins, conn)
 	}
+}
+
+// An admin from before the governance key, with the real peer created and
+// loading only after the manager is up: the first ticks find no connection
+// and pin nothing; once the peer has loaded, the key of the admin's earliest
+// signed approval is pinned and audited.
+func TestGovKeyMigrationAfterPeerLoads(t *testing.T) {
+	f := newFixture(t)
+	m := f.withApprovals(1, "admin-key")
+	ctx := context.Background()
+	admin, _ := f.connect(f.m, "admin-key")
+	pc, pfp, _ := m.BootstrapPending(ctx)
+	if err := m.ConfirmBootstrap(ctx, pc, pfp); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	c, err := m.Create(ctx, approval.Request{Action: approval.ActionContractTemplateChange, Summary: "First", Payload: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.pump()
+	f.sign(f.m, f.m.Challenges[0], f.m.Cred)
+	if s, _ := m.Status(ctx, c.ID); s.Status != approval.StatusApproved {
+		t.Fatalf("%+v", s)
+	}
+
+	// As stored before the governance key existed: no gov_key.
+	st := f.svc.Store.(*peer.MemStore)
+	recs, err := st.Load(ctx, "conn")
+	if err != nil || len(recs) == 0 {
+		t.Fatalf("connections: %v", err)
+	}
+	for _, r := range recs {
+		var v map[string]json.RawMessage
+		if json.Unmarshal(r.Data, &v) != nil || r.ID != admin {
+			continue
+		}
+		if _, ok := v["gov_key"]; !ok {
+			t.Fatal("no gov_key stored")
+		}
+		delete(v, "gov_key")
+		data, _ := json.Marshal(v)
+		if err := st.Apply(ctx, []peer.Change{{Kind: "conn", ID: r.ID, Data: data}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A new process: the manager is up and ticking before the peer loads.
+	p2, err := peer.New(peer.Config{Keys: f.keys, Relay: f.w.View(f.keys.Relay), RelayURL: peertest.RelayURL, Store: st, Events: f.svc,
+		Now: f.clk.Now, Log: f.svc.Log, Profile: peer.Profile{FirstName: "VettID", LastName: "Member Service"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2 := &approval.Manager{Peer: p2, Store: st, Pager: st, Hooks: f.hk.outbox(st, approval.HookKind), ServiceName: f.svc.ServiceName,
+		Threshold: 1, Now: f.clk.Now, Log: f.svc.Log}
+	if err := m2.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := m2.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := countAudit(t, m2, approval.AuditGovKeyMigrated); n != 0 {
+		t.Fatalf("%d pins before the peer loaded", n)
+	}
+	if err := p2.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if ci, _ := p2.Connection(admin); len(ci.GovKey) != 0 {
+		t.Fatal("setup: gov key still stored")
+	}
+	if err := m2.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ci, _ := p2.Connection(admin)
+	if !ed25519.PublicKey(ci.GovKey).Equal(f.m.Cred.Public()) {
+		t.Fatalf("pinned %x", ci.GovKey)
+	}
+	page, _ := m2.Audit(ctx, "", 0)
+	var got *approval.AuditEntry
+	for i := range page.Entries {
+		if page.Entries[i].Type == approval.AuditGovKeyMigrated {
+			got = &page.Entries[i]
+		}
+	}
+	if got == nil || got.ConnectionID != admin || got.Reason != approval.ReasonEvidence || got.KeyChangesSeen || len(got.Fingerprint) != 16 {
+		t.Fatalf("audit %+v", got)
+	}
+}
+
+func countAudit(t *testing.T, m *approval.Manager, typ string) int {
+	t.Helper()
+	page, err := m.Audit(context.Background(), "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, e := range page.Entries {
+		if e.Type == typ {
+			n++
+		}
+	}
+	return n
 }

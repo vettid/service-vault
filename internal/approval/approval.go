@@ -1565,10 +1565,14 @@ type bootState struct {
 	// Connection and IKFP: the connection bound to the email, and the 16 hex
 	// digits of its identity key's fingerprint, waiting for the operator's
 	// confirmation; Confirmed once given (ConfirmBootstrap).
-	Connection string    `json:"connection,omitempty"`
-	IKFP       string    `json:"ik_fp,omitempty"`
-	Confirmed  bool      `json:"confirmed,omitempty"`
-	At         time.Time `json:"at"`
+	Connection string `json:"connection,omitempty"`
+	IKFP       string `json:"ik_fp,omitempty"`
+	Confirmed  bool   `json:"confirmed,omitempty"`
+	// ConnectedAt and InviteID: when the connection was made and the
+	// invitation it came through, for the operator to ask the member about.
+	ConnectedAt time.Time `json:"connected_at,omitzero"`
+	InviteID    string    `json:"invite_id,omitempty"`
+	At          time.Time `json:"at"`
 }
 
 // ErrAdminsExist is returned by ArmBootstrap when the admin set is not
@@ -1637,9 +1641,12 @@ func (m *Manager) bootstrap(ctx context.Context, connID string) error {
 		return err
 	}
 	fp := ""
+	var connected time.Time
+	invite := ""
 	if m.Peer != nil {
 		if info, ok := m.Peer.Connection(connID); ok && len(info.IK) == ed25519.PublicKeySize {
 			fp = compactFP(fingerprint(ikFPLabel, info.IK))
+			connected, invite = info.Activated.UTC().Truncate(time.Second), info.InviteID
 		}
 	}
 	if fp == "" {
@@ -1651,10 +1658,12 @@ func (m *Manager) bootstrap(ctx context.Context, connID string) error {
 	if !st.Confirmed || st.Connection != connID || st.IKFP != fp {
 		if st.Connection != connID || st.IKFP != fp || st.Confirmed {
 			st.Connection, st.IKFP, st.Confirmed = connID, fp, false
+			st.ConnectedAt, st.InviteID = connected, invite
 			if err := m.Store.Apply(ctx, []peer.Change{{Kind: kindBoot, ID: bootID, Data: mustMarshal(st)}}); err != nil {
 				return err
 			}
-			m.log().Info("admin bootstrap waiting for the operator's confirmation", "connection_id", connID, "ik_fingerprint", fp)
+			m.log().Info("admin bootstrap waiting for the operator's confirmation", "connection_id", connID, "ik_fingerprint", fp,
+				"connected_at", connected, "invite_id", invite)
 		}
 		return nil
 	}
@@ -1702,11 +1711,29 @@ var (
 // confirmation and the 16 hex digits of the fingerprint of its identity key
 // (the member's vault key fingerprint of VAULT-MESSAGING §10.8), if any.
 func (m *Manager) BootstrapPending(ctx context.Context) (connID, fp string, err error) {
-	st, err := m.bootState(ctx)
-	if err != nil || st == nil || st.State != bootArmed || st.Connection == "" {
+	w, err := m.BootstrapWaiting(ctx)
+	if err != nil || w == nil {
 		return "", "", err
 	}
-	return st.Connection, st.IKFP, nil
+	return w.ConnectionID, w.Fingerprint, nil
+}
+
+// BootstrapWaiting is the connection waiting for the operator's
+// confirmation: what the operator asks the member about out of band.
+type BootstrapWaiting struct {
+	ConnectionID string
+	Fingerprint  string    // 16 hex digits of the identity key's fingerprint
+	ConnectedAt  time.Time // when the connection was made
+	InviteID     string    // the invitation it came through
+}
+
+// BootstrapWaiting returns the connection waiting for confirmation, or nil.
+func (m *Manager) BootstrapWaiting(ctx context.Context) (*BootstrapWaiting, error) {
+	st, err := m.bootState(ctx)
+	if err != nil || st == nil || st.State != bootArmed || st.Connection == "" {
+		return nil, err
+	}
+	return &BootstrapWaiting{ConnectionID: st.Connection, Fingerprint: st.IKFP, ConnectedAt: st.ConnectedAt, InviteID: st.InviteID}, nil
 }
 
 // ConfirmBootstrap confirms the connection waiting to become the first
@@ -1954,7 +1981,7 @@ func (m *Manager) migrateGov(ctx context.Context) error {
 		migrated++
 		b := m.batch(m.now())
 		if err := b.audit(&AuditEntry{Type: AuditGovKeyMigrated, ConnectionID: a, Reason: why, Key: key,
-			Fingerprint: compactFP(fingerprint(ckFPLabel, key))}); err != nil {
+			Fingerprint: compactFP(fingerprint(ckFPLabel, key)), KeyChangesSeen: changed}); err != nil {
 			return err
 		}
 		if err := b.apply(ctx); err != nil {

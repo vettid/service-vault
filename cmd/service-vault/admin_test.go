@@ -107,7 +107,8 @@ func TestArmBootstrap(t *testing.T) {
 		t.Fatalf("admins before the confirmation: %v", a.Admins)
 	}
 	out.Reset()
-	if err := confirmBootstrap(ctx, st, "c1", "", &out); err != nil || !strings.Contains(out.String(), "connection: c1") {
+	if err := confirmBootstrap(ctx, st, "c1", "", &out); err != nil || !strings.Contains(out.String(), "connection: c1") ||
+		!strings.Contains(out.String(), "connected: 2026-11-02 09:30:00 UTC") || !strings.Contains(out.String(), "invitation: inv1") {
 		t.Fatalf("show: %v %q", err, out.String())
 	}
 	_, fp, _ := m.BootstrapPending(ctx)
@@ -133,7 +134,8 @@ func TestArmBootstrap(t *testing.T) {
 type ikPeer struct{}
 
 func (ikPeer) Connection(id string) (peer.ConnectionInfo, bool) {
-	return peer.ConnectionInfo{ID: id, State: peer.StateActive, IK: bytes.Repeat([]byte{1}, 32)}, true
+	return peer.ConnectionInfo{ID: id, State: peer.StateActive, IK: bytes.Repeat([]byte{1}, 32), InviteID: "inv1",
+		Activated: time.Date(2026, 11, 2, 9, 30, 0, 0, time.UTC)}, true
 }
 func (ikPeer) Authenticate(context.Context, string, string, string, time.Duration) (string, error) {
 	return "r", nil

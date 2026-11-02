@@ -698,7 +698,10 @@ admin's connection.
   key. **Before approving, the other admins ask the admin out of band, by
   phone or in person, "did you recover or replace your vault's keys at
   <that time>?", and approve only on a clear yes**; the admin cannot
-  compare the fingerprint yet. A member's app will show its own
+  compare the fingerprint yet. A summary that says "key changed time not
+  recorded" means the key changed before this release recorded it: the
+  admins then need a stronger out-of-band check (in person, or by a
+  channel they already trust) before approving. A member's app will show its own
   credential-key fingerprint in a later release, and the
   `vettid/vms/2/ck-fp` label will then be specified in VAULT-MESSAGING.
   Know that a stolen copy of the vault, still holding the old key, can
@@ -717,7 +720,8 @@ admin's connection.
   from before it existed) is pinned at a tick after the peer has loaded its
   connections, from the audit log: the credential key of the admin's
   earliest signed approval since they became an admin (`gov_key.migrated`,
-  reason `evidence`, with the key's fingerprint; if the connection holds
+  reason `evidence`, with the key's fingerprint and `key_changes_seen`
+  when a later approval was signed with another key; if the connection holds
   another key now, it needs a re-pin), or with no signed approval at all
   the connection's current credential key (reason `no_evidence`). Open
   governance approvals holding approvals are ended (`expired`, reason
@@ -730,7 +734,10 @@ admin's connection.
 - *Bootstrap confirmation.* The connection bound to the bootstrap email
   does not become the first admin by itself: the service records it with
   the fingerprint of its identity key (logged, and shown by
-  `service-vault admin bootstrap -connection ID`), and the operator
+  `service-vault admin bootstrap -connection ID`, with the time the
+  connection was made and the invitation it came through, so the operator
+  can ask the member out of band "did you connect at <time> from the
+  invitation we sent?"), and the operator
   confirms with `service-vault admin bootstrap -connection ID -fingerprint
   16HEX` after checking the fingerprint with the member out of band. Its
   governance key is the credential key of its first sign-in.

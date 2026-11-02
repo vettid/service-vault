@@ -751,15 +751,16 @@ const adminUsage = "usage: service-vault admin bootstrap -email E | -connection 
 func confirmBootstrap(ctx context.Context, st peer.Store, conn, fp string, out io.Writer) error {
 	m := &approval.Manager{Store: st, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	if fp == "" {
-		c, f, err := m.BootstrapPending(ctx)
+		w, err := m.BootstrapWaiting(ctx)
 		if err != nil {
 			return err
 		}
-		if c == "" {
+		if w == nil {
 			return errors.New("no connection is waiting for confirmation")
 		}
-		fmt.Fprintf(out, "connection: %s\nidentity key fingerprint: %s\n", c, f)
-		fmt.Fprintln(out, "check the fingerprint with the member out of band, then confirm with -connection ID -fingerprint 16HEX")
+		fmt.Fprintf(out, "connection: %s\nconnected: %s\ninvitation: %s\nidentity key fingerprint: %s\n", w.ConnectionID,
+			w.ConnectedAt.UTC().Format("2006-01-02 15:04:05 UTC"), w.InviteID, w.Fingerprint)
+		fmt.Fprintln(out, "ask the member out of band whether they connected at that time from the invitation you sent, and check the fingerprint with them, then confirm with -connection ID -fingerprint 16HEX")
 		return nil
 	}
 	if err := m.ConfirmBootstrap(ctx, conn, fp); err != nil {
