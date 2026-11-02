@@ -160,6 +160,8 @@ func (f *fakeApprovals) Remind(_ context.Context, id string, force ...string) (*
 			return nil, &approval.Error{Code: approval.CodeNotAdmin}
 		case "done":
 			return nil, &approval.Error{Code: approval.CodeAnswered}
+		case "spent":
+			return nil, &approval.Error{Code: approval.CodeAskBudget}
 		}
 		return &approval.Reminder{ID: id, Reminded: force}, nil
 	}
@@ -406,6 +408,10 @@ func TestRemindAdminsAuditHealth(t *testing.T) {
 	}
 	if code, _, errOut := f.run(t, "remind", "-force", "done", "a1"); code != exitError || !strings.Contains(errOut, "answered") {
 		t.Fatalf("answered: exit %d %s", code, errOut)
+	}
+	if code, _, errOut := f.run(t, "remind", "-force", "spent", "a1"); code != exitError || !strings.Contains(errOut, "ask_budget") ||
+		!strings.Contains(errOut, "5 approval challenges in the last 24 hours") {
+		t.Fatalf("ask budget: exit %d %s", code, errOut)
 	}
 	if code, _, _ := f.run(t, "remind", "-force", ",", "a1"); code != exitUsage {
 		t.Fatalf("empty -force: exit %d", code)

@@ -71,8 +71,9 @@ commands:
                                    exit 0 and "nothing to remind" if there are none; exit 1 on
                                    too_soon). -force names admins to challenge again even with a
                                    live challenge (the old one is withdrawn); each forced re-send
-                                   spends one of that admin's 5 approval asks per 24 h and a
-                                   sixth comes back as a delayed denial: use it only when the
+                                   spends one of that admin's 5 approval asks per 24 h, and a
+                                   force naming an admin sent 5 approval challenges in the last
+                                   24 h is refused (ask_budget, exit 1): use it only when the
                                    admin reports not seeing the request
   admins                           print the admin set and the threshold
   audit [-since ID] [-limit N]     print a page of the audit log, one JSON entry per line
@@ -513,6 +514,10 @@ func (c *cli) remind(ctx context.Context, args []string) error {
 	if errors.As(err, &ae) && ae.Code == servicevault.CodeNothingToRemind {
 		c.printf("nothing to remind: every admin who has not answered still holds a live challenge\n")
 		return nil
+	}
+	if errors.As(err, &ae) && ae.Code == servicevault.CodeAskBudget {
+		return fmt.Errorf("remind: a named admin was sent 5 approval challenges in the last 24 hours; "+
+			"a sixth would come back as a denial (%w)", err)
 	}
 	if err != nil {
 		return err

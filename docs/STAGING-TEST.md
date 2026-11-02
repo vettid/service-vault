@@ -124,8 +124,9 @@ the admin stays unremindable until the challenge's expiry, at most 1 hour
 here. If the admin reports not seeing the request, `sv remind -force
 <connection_id> <approval_id>` withdraws their live challenge and sends a
 new one (once per 10 minutes); each forced re-send spends one of that
-admin's 5 approval asks per 24 hours, and a sixth comes back as a delayed
-denial. If the withdraw was lost the member may see two requests for the
+admin's 5 approval asks per 24 hours, and a force for an admin already
+sent 5 approval challenges in the last 24 hours is refused (`ask_budget`),
+since a sixth would come back as a delayed denial. If the withdraw was lost the member may see two requests for the
 same approval: approve the newest (the older one's answer is ignored).
 Without the flag
 (older member vaults) the challenge lives 10 minutes and a held vault

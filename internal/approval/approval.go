@@ -26,6 +26,7 @@ const (
 	kindSeen     = "apv_seen"   // peer event id -> "": an answer already handled
 	kindAdmins   = "admin_set"  // "admins" -> the admin set
 	kindBoot     = "admin_boot" // "state" -> the bootstrap state (bootState)
+	kindAsks     = "apv_asks"   // admin connection id -> its newest approval challenges (askLog)
 	// HookKind is the kind of the approvals' webhook Outbox: an event
 	// waiting to be delivered.
 	HookKind = "apv_hook"
@@ -38,6 +39,38 @@ const (
 	seenRetention = 16 * 24 * time.Hour // as the peer's dedupe markers (VAULT-MESSAGING §8)
 	reqRetention  = 24 * time.Hour      // past the approval's expiry
 )
+
+// The member vault's approval rate bucket (VAULT-MESSAGING §10.4.1): 5
+// approval challenges per connection in a fixed 24-hour window. The
+// service counts its own sends in a sliding 24 hours, which is never less
+// than the member's count (a suppressed or lost challenge counts here and
+// not there), so a forced reminder is refused before it could come back
+// as a delayed denial.
+const (
+	askBudget = 5
+	askWindow = 24 * time.Hour
+)
+
+// askLog is the send times of the newest approval challenges to one
+// connection, at most askBudget, oldest first.
+type askLog struct {
+	Sent []time.Time `json:"sent"`
+}
+
+// full reports whether askBudget challenges were sent within askWindow
+// before now.
+func (l *askLog) full(now time.Time) bool {
+	return len(l.Sent) >= askBudget && now.Sub(l.Sent[len(l.Sent)-askBudget]) < askWindow
+}
+
+func (m *Manager) asks(ctx context.Context, connID string) (*askLog, error) {
+	l := &askLog{}
+	data, ok, err := m.Store.Get(ctx, kindAsks, connID)
+	if err != nil || !ok {
+		return l, err
+	}
+	return l, json.Unmarshal(data, l)
+}
 
 // Peer is the part of peer.Peer the manager uses.
 type Peer interface {
@@ -448,8 +481,28 @@ func (m *Manager) challenge(ctx context.Context, b *batch, r *record, conns []st
 		b.changes = append(b.changes, peer.Change{Kind: kindReq, ID: reqID, Data: []byte(r.ID),
 			Expires: r.Exp.Add(reqRetention)})
 		sent = append(sent, Challenge{ConnectionID: c, RequestID: reqID})
+		m.logAsk(ctx, b, c)
 	}
 	return sent
+}
+
+// logAsk adds a challenge sent now to connID's askLog. A log that cannot
+// be read is left as it is (and the send not counted) rather than
+// replaced by a shorter one.
+func (m *Manager) logAsk(ctx context.Context, b *batch, connID string) {
+	l, err := m.asks(ctx, connID)
+	if err != nil {
+		m.log().Warn("approval ask log", "connection_id", connID, "err", errName(err))
+		return
+	}
+	now := b.now.UTC().Truncate(time.Millisecond)
+	l.Sent = append(l.Sent, now)
+	if n := len(l.Sent); n > askBudget {
+		l.Sent = l.Sent[n-askBudget:]
+	}
+	if err := b.put(kindAsks, connID, l, now.Add(askWindow)); err != nil {
+		m.log().Warn("approval ask log", "connection_id", connID, "err", errName(err))
+	}
 }
 
 func (m *Manager) cancel(ctx context.Context, chs []Challenge) {
@@ -522,7 +575,8 @@ var ErrNotFound = errors.New("approval: not found")
 // Otherwise to every admin who has not answered, replacing their challenge.
 // With force, only to the named admins (CodeNotAdmin for one outside the
 // approval's admins or the current set, CodeAnswered for one who has
-// answered): each one's live challenge is withdrawn and a new one sent,
+// answered, CodeAskBudget for one sent 5 approval challenges in the last
+// 24 hours): each one's live challenge is withdrawn and a new one sent,
 // whatever the gate says, still at most once per RemindInterval. Each
 // forced re-send uses one of the member's approval asks (VAULT-MESSAGING
 // §10.4.1). (chosen; not in the spec)
@@ -555,6 +609,11 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 		}
 		if slices.Contains(conns, a) {
 			continue
+		}
+		if l, err := m.asks(ctx, a); err != nil {
+			return nil, err
+		} else if l.full(now) {
+			return nil, errCode(CodeAskBudget)
 		}
 		// Forced: any live challenge is withdrawn and a new one sent,
 		// whatever the gate says (the member vault may have lost it).
@@ -1200,5 +1259,5 @@ func (m *Manager) Run(ctx context.Context) {
 // their webhook outbox included), for a migration that must touch them
 // all.
 func Kinds() []string {
-	return []string{kindApproval, kindOpen, kindReq, kindSeen, kindAdmins, kindBoot, KindAudit, HookKind}
+	return []string{kindApproval, kindOpen, kindReq, kindSeen, kindAdmins, kindBoot, kindAsks, KindAudit, HookKind}
 }

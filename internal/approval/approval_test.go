@@ -1284,3 +1284,82 @@ func TestRemindForcePlaceLimit(t *testing.T) {
 		t.Fatalf("forced re-send %v", got)
 	}
 }
+
+// A forced re-send is refused (ask_budget) once the service has sent an
+// admin 5 approval challenges in the last 24 hours, counting every
+// approval's challenges to that admin; the 6th would come back from the
+// member's vault as a delayed denial (VAULT-MESSAGING §10.4.1). The
+// window slides: a send older than 24 hours frees its part.
+func TestRemindForceAskBudget(t *testing.T) {
+	for _, gate := range []bool{true, false} {
+		f := newFixture(t, 1, "c1", "c2")
+		f.m.LongChallenges = gate
+		ctx := context.Background()
+		// Five approvals, a challenge each to c1 and c2.
+		var ids []string
+		for i := range askBudget {
+			ids = append(ids, f.create(ActionVoteOpen, fmt.Sprint("Open ", i), `{}`).ID)
+			f.clk.Advance(time.Hour)
+		}
+		f.clk.Advance(RemindInterval)
+		before := len(f.p.sent)
+		cancelled := len(f.p.cancelled)
+		if _, err := f.m.Remind(ctx, ids[4], "c1"); codeOf(err) != CodeAskBudget {
+			t.Fatalf("gate %v: sixth: %v", gate, err)
+		}
+		if _, err := f.m.Remind(ctx, ids[4], "c2", "c1"); codeOf(err) != CodeAskBudget {
+			t.Fatalf("gate %v: any named admin over budget refuses the call: %v", gate, err)
+		}
+		if len(f.p.sent) != before || len(f.p.cancelled) != cancelled {
+			t.Fatalf("gate %v: a refused force sent or withdrew something", gate)
+		}
+		if f.status(ids[4]).Status != StatusPending {
+			t.Fatalf("gate %v: status", gate)
+		}
+		// 24 hours after the first send, its part is free again.
+		f.clk.Advance(24*time.Hour - 5*time.Hour - RemindInterval - time.Second)
+		if _, err := f.m.Remind(ctx, ids[4], "c1"); codeOf(err) != CodeAskBudget {
+			t.Fatalf("gate %v: a second early: %v", gate, err)
+		}
+		f.clk.Advance(time.Second)
+		if r, err := f.m.Remind(ctx, ids[4], "c1"); err != nil || fmt.Sprint(r.Reminded) != "[c1]" {
+			t.Fatalf("gate %v: after the window: %+v %v", gate, r, err)
+		}
+		// That send counts: the second approval's first send is within the
+		// window, so a further force on another approval is refused.
+		f.clk.Advance(RemindInterval)
+		if _, err := f.m.Remind(ctx, ids[3], "c1"); codeOf(err) != CodeAskBudget {
+			t.Fatalf("gate %v: after the re-send: %v", gate, err)
+		}
+	}
+}
+
+// Plain reminders count in the log as well; the log keeps only the newest
+// askBudget sends.
+func TestAskLogBounded(t *testing.T) {
+	f := newFixture(t, 1, "c1")
+	ctx := context.Background()
+	c := f.create(ActionVoteOpen, "Open", `{}`)
+	for range 2 * askBudget {
+		f.clk.Advance(RemindInterval)
+		if _, err := f.m.Remind(ctx, c.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	l, err := f.m.asks(ctx, "c1")
+	if err != nil || len(l.Sent) != askBudget || !l.full(f.clk.Now()) {
+		t.Fatalf("%+v %v", l, err)
+	}
+	if !l.Sent[askBudget-1].Equal(f.clk.Now()) {
+		t.Fatalf("newest %v", l.Sent[askBudget-1])
+	}
+	f.clk.Advance(RemindInterval)
+	if _, err := f.m.Remind(ctx, c.ID, "c1"); codeOf(err) != CodeAskBudget {
+		t.Fatalf("force after plain reminders: %v", err)
+	}
+	// The record expires 24 hours after the newest send.
+	f.clk.Advance(askWindow)
+	if _, ok, _ := f.st.Get(ctx, kindAsks, "c1"); ok {
+		t.Fatal("ask log kept past its window")
+	}
+}

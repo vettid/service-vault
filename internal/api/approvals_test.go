@@ -53,6 +53,8 @@ func (f *fakeApprovals) Remind(_ context.Context, id string, force ...string) (*
 			return nil, &approval.Error{Code: approval.CodeNotAdmin}
 		case "answered":
 			return nil, &approval.Error{Code: approval.CodeAnswered}
+		case "spent":
+			return nil, &approval.Error{Code: approval.CodeAskBudget}
 		}
 		return &approval.Reminder{ID: id, Reminded: force}, nil
 	}
@@ -125,7 +127,8 @@ func TestApprovalRoutes(t *testing.T) {
 	}
 	// A forced re-send names admins in the body; the body is optional.
 	for body, want := range map[string]int{`{"force":["c2"]}`: 200, `{"force":["notadmin"]}`: 422, `{"force":["answered"]}`: 409,
-		`{"force":"c2"}`: 400, `{"other":1}`: 400, `{`: 400} {
+		`{"force":["spent"]}`: 409, `{"force":"c2"}`: 400, `{"other":1}`: 400, `{`: 400,
+		`{"force":["c2"]}}`: 400, `{"force":["c2"]}]`: 400, `{"force":["c2"]} x`: 400, `{"force":["c2"]}{}`: 400} {
 		if rec, m := do(t, h, "POST", "/v1/approvals/a1/remind", apiKey, body); rec.Code != want {
 			t.Errorf("remind %s: %d %v", body, rec.Code, m)
 		}

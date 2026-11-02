@@ -144,6 +144,23 @@ func TestCreateInvite(t *testing.T) {
 	}
 }
 
+// A body is one JSON value and nothing after it but whitespace: a stray
+// closing bracket or brace, or a second value, is a bad request.
+func TestReadJSONTrailing(t *testing.T) {
+	s, inv, _ := newServer(t)
+	h := s.Handler()
+	const ok = `{"email":"a@example.org","email_verified":false}`
+	for _, body := range []string{ok + "}", ok + "]", ok + "{}", ok + " x", ok + ` ""`} {
+		inv.lastKey = "untouched"
+		if rec, m := do(t, h, "POST", "/v1/invites", apiKey, body); rec.Code != 400 || m["error"] != "bad_request" || inv.lastKey != "untouched" {
+			t.Errorf("body %s: %d %v", body, rec.Code, m)
+		}
+	}
+	if rec, m := do(t, h, "POST", "/v1/invites", apiKey, ok+" \n\t"); rec.Code != 201 {
+		t.Errorf("trailing whitespace: %d %v", rec.Code, m)
+	}
+}
+
 // email_verified is required: missing (or null) is a bad request, so
 // that every application decides.
 func TestCreateInviteVerifiedRequired(t *testing.T) {
