@@ -298,6 +298,12 @@ type challenge struct {
 	// 0.79.0 §10.4), or "".
 	MatchCode string    `json:"match_code,omitempty"`
 	Exp       time.Time `json:"exp"`
+	// Sent is when it was sent: with Exp it tells a long-lived challenge.
+	Sent time.Time `json:"sent,omitzero"`
+	// Gone marks a long challenge cancelled whose withdraw was not queued:
+	// forgotten for every purpose but the count of the member vault's
+	// long-lived places, until Exp.
+	Gone bool `json:"gone,omitempty"`
 }
 
 type cachedResponse struct {

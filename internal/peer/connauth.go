@@ -26,6 +26,14 @@ const MaxPendingChallenges = 8
 // peerwire.ConnAuthChallengeTTL.
 const MaxApprovalChallengeTTL = 24 * time.Hour
 
+// MaxLongLivedChallenges mirrors the member vault's limit of long-lived
+// challenges per connection (VAULT-MESSAGING 0.82.0 §10.4, "Limits": an
+// approval challenge whose expiry is more than ConnAuthChallengeTTL after
+// arrival). The member vault clamps a third one to 10 minutes without
+// telling the sender, so the service sends it with 10 minutes: its record
+// then matches what the member vault keeps. (chosen; not in the spec)
+const MaxLongLivedChallenges = 2
+
 // Errors of Authenticate.
 var (
 	ErrNotStarted = errors.New("peer: not started")
@@ -94,6 +102,9 @@ func (p *Peer) authenticate(ctx context.Context, connID, ctxt, purpose, matchCod
 		return "", ErrLimit
 	}
 	now := p.now()
+	if ttl > peerwire.ConnAuthChallengeTTL && p.longLived(connID, now) >= MaxLongLivedChallenges {
+		ttl = peerwire.ConnAuthChallengeTTL
+	}
 	wc, err := peerwire.NewConnAuthChallenge(p.newID(now), ctxt)
 	if err != nil {
 		return "", err
@@ -108,13 +119,32 @@ func (p *Peer) authenticate(ctx context.Context, connID, ctxt, purpose, matchCod
 		return "", ErrNotFound
 	}
 	p.challenges[wc.RequestID] = &challenge{ID: wc.RequestID, ConnID: connID, Nonce: wc.Nonce, Context: ctxt, Purpose: purpose,
-		MatchCode: matchCode, Exp: exp}
+		MatchCode: matchCode, Exp: exp, Sent: now.UTC().Truncate(time.Millisecond)}
 	p.markDirty(kindAuth, wc.RequestID)
 	if err := p.flushAndDrain(ctx); err != nil {
 		return "", err
 	}
 	p.log().Info("challenge sent", "connection_id", connID, "request_id", wc.RequestID)
 	return wc.RequestID, nil
+}
+
+// long reports whether the challenge was sent with more than the usual
+// 10 minutes (one of the member vault's long-lived places).
+func (ch *challenge) long() bool {
+	return !ch.Sent.IsZero() && ch.Exp.Sub(ch.Sent) > peerwire.ConnAuthChallengeTTL
+}
+
+// longLived counts the long challenges to connID that may still hold a
+// place at the member vault: those pending and those cancelled without a
+// withdraw reaching the outbox (ch.Gone), until their exp.
+func (p *Peer) longLived(connID string, now time.Time) int {
+	n := 0
+	for _, ch := range p.challenges {
+		if ch.ConnID == connID && ch.long() && now.Before(ch.Exp) {
+			n++
+		}
+	}
+	return n
 }
 
 // CancelChallenge withdraws a pending challenge: it is forgotten, so a
@@ -132,17 +162,24 @@ func (p *Peer) CancelChallenge(ctx context.Context, requestID string) (bool, err
 		return false, ErrNotStarted
 	}
 	ch := p.challenges[requestID]
-	if ch == nil {
+	if ch == nil || ch.Gone {
 		return false, nil
 	}
-	delete(p.challenges, requestID)
-	p.markDirty(kindAuth, requestID)
 	withdrawn := false
-	if now := p.now(); now.Before(ch.Exp) {
+	now := p.now()
+	if now.Before(ch.Exp) {
 		if c := p.conns[ch.ConnID]; c != nil {
 			withdrawn = p.sendInnerExp(c, peerwire.TypeConnAuthWithdraw, peerwire.ConnAuthWithdrawBody(requestID), ch.Exp, now) != ""
 		}
 	}
+	if !withdrawn && ch.long() && now.Before(ch.Exp) {
+		// The member vault may still hold it: keep its place counted until
+		// its exp, but answer to nothing.
+		ch.Gone = true
+	} else {
+		delete(p.challenges, requestID)
+	}
+	p.markDirty(kindAuth, requestID)
 	if err := p.flushAndDrain(ctx); err != nil {
 		return false, err
 	}
@@ -171,7 +208,7 @@ func (p *Peer) connAuthResponse(c *Connection, body []byte, now time.Time) {
 		return
 	}
 	ch := p.challenges[r.RequestID]
-	if ch == nil || ch.ConnID != c.ID {
+	if ch == nil || ch.Gone || ch.ConnID != c.ID {
 		return // §8.1: matches no pending request
 	}
 	if !now.Before(ch.Exp) {
@@ -232,6 +269,9 @@ func (p *Peer) expireChallenges(now time.Time) {
 		}
 		delete(p.challenges, id)
 		p.markDirty(kindAuth, id)
+		if ch.Gone {
+			continue // cancelled earlier: its place is free now, nothing to report
+		}
 		tag := ""
 		if c := p.conns[ch.ConnID]; c != nil {
 			tag = c.Tag
