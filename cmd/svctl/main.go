@@ -527,8 +527,12 @@ func (c *cli) remind(ctx context.Context, args []string) error {
 		return nil
 	}
 	if errors.As(err, &ae) && ae.Code == servicevault.CodeAskBudget {
+		if len(named) > 0 {
+			return fmt.Errorf("remind: a named admin has 5 approval challenges still counting (each until its expiry plus 24 hours); "+
+				"a sixth would come back as a denial (%w)", err)
+		}
 		return fmt.Errorf("remind: no admin to challenge is within the budget: each has 5 approval challenges still counting "+
-			"(each until its expiry plus 24 hours), and a sixth would come back as a denial; nothing was sent (%w)", err)
+			"(each until its expiry plus 24 hours) or an ask log that cannot be read; nothing was sent or withdrawn (%w)", err)
 	}
 	if err != nil {
 		return err

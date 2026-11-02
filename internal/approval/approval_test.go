@@ -992,8 +992,8 @@ func TestChallengeLife(t *testing.T) {
 	if got := f.p.last("c1").ttl; got != 4*time.Hour {
 		t.Fatalf("reminder ttl %v", got)
 	}
-	f.clk.Advance(24 * time.Hour) // the first challenges are over
-	// (and the ask log, which is not what this test is about, is empty)
+	f.clk.Advance(24 * time.Hour) // the first challenges have expired
+	// (they still count in the ask log, which this test is not about: clear it)
 	if err := f.st.Apply(context.Background(), []peer.Change{{Kind: kindAsks, ID: "c1"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -1493,7 +1493,8 @@ func TestAskLogBounded(t *testing.T) {
 
 // An ask log that cannot be read, or does not decode, fails closed: a
 // forced reminder is refused with an error before anything is withdrawn
-// or sent, and a plain one skips that admin.
+// or sent; a plain one answers ask_budget for a log that does not decode,
+// and a store error is a plain error.
 func TestAskLogUnreadable(t *testing.T) {
 	ctx := context.Background()
 	for _, how := range []string{"get", "decode"} {
@@ -1514,8 +1515,16 @@ func TestAskLogUnreadable(t *testing.T) {
 		if len(f.p.sent) != before || slices.Contains(f.p.cancelled, old.req) {
 			t.Fatalf("%s: a failed force sent or withdrew something", how)
 		}
-		if r, err := f.m.Remind(ctx, c.ID); err != nil || len(r.Reminded) != 0 || len(f.p.sent) != before {
-			t.Fatalf("%s: plain: %+v %v", how, r, err)
+		_, err := f.m.Remind(ctx, c.ID)
+		if (how == "decode") != (codeOf(err) == CodeAskBudget) || err == nil || len(f.p.sent) != before {
+			t.Fatalf("%s: plain: %v", how, err)
+		}
+		// Neither a refusal nor an error uses up the interval.
+		if _, err := f.m.Remind(ctx, c.ID); codeOf(err) == CodeTooSoon {
+			t.Fatalf("%s: plain: too soon after a failed reminder", how)
+		}
+		if page, _ := f.m.Audit(ctx, "", 20); strings.Contains(fmt.Sprint(page.Entries), AuditReminded) {
+			t.Fatalf("%s: a reminder audit entry: %+v", how, page.Entries)
 		}
 		if how == "decode" && !strings.Contains(f.logs.String(), "approval ask log unreadable") {
 			t.Fatalf("no log line: %s", f.logs.String())
@@ -1665,5 +1674,47 @@ func TestCreateAskBudgetConcurrent(t *testing.T) {
 	wg.Wait()
 	if ok != 2 || refused != 10 || len(f.p.sent) != 2 || f.openCount() != 2 {
 		t.Fatalf("ok %d refused %d sent %d open %d", ok, refused, len(f.p.sent), f.openCount())
+	}
+}
+
+// Two managers on one store (a deploy overlaps two tasks) racing to an
+// admin's last slot: only one challenge is sent. The other's write
+// conflicts, so it skips the admin (the approval is stored, with the admin
+// in remind_needed).
+func TestAskLogTwoManagers(t *testing.T) {
+	f := newFixture(t, 1, "c1")
+	f.fillAsks("c1", askBudget-1)
+	m2 := &Manager{Peer: f.m.Peer, Store: f.st, Pager: f.st, ServiceName: f.m.ServiceName, Threshold: 1, Now: f.clk.Now}
+	var wg sync.WaitGroup
+	for _, m := range []*Manager{f.m, m2} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := m.Create(context.Background(), Request{Action: ActionVoteOpen, Summary: "Open",
+				Payload: json.RawMessage(`{}`)}); err != nil && codeOf(err) != CodeAskBudget {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if len(f.p.sent) != 1 {
+		t.Fatalf("sent %d", len(f.p.sent))
+	}
+	if l, _ := f.m.asks(context.Background(), "c1"); len(l.Exp) != askBudget {
+		t.Fatalf("log %+v", l)
+	}
+}
+
+// A transient read error is an error, not ask_budget.
+func TestAskLogStoreError(t *testing.T) {
+	f := newFixture(t, 1, "c1")
+	c := f.create(ActionVoteOpen, "Open", `{}`)
+	f.clk.Advance(RemindInterval)
+	f.m.Store = &failStore{Store: f.st, getKind: kindAsks}
+	if _, err := f.createErr(); err == nil || codeOf(err) != "" {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := f.m.Remind(context.Background(), c.ID); err == nil || codeOf(err) != "" {
+		t.Fatalf("remind: %v", err)
 	}
 }

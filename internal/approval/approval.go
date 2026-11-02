@@ -72,18 +72,39 @@ func (l *askLog) full(now time.Time) bool {
 }
 
 func (m *Manager) asks(ctx context.Context, connID string) (*askLog, error) {
+	l, _, err := m.asksVersion(ctx, connID)
+	return l, err
+}
+
+// errAskUndecodable is an ask log that is stored but does not decode.
+var errAskUndecodable = errors.New("approval: ask log undecodable")
+
+// asksVersion is asks with the stored record's version (0: absent, or the
+// store has no versions).
+func (m *Manager) asksVersion(ctx context.Context, connID string) (*askLog, uint64, error) {
 	l := &askLog{}
-	data, ok, err := m.Store.Get(ctx, kindAsks, connID)
-	if err != nil || !ok {
-		return l, err
+	var data []byte
+	var ver uint64
+	if rg, ok := m.Store.(peer.RecordGetter); ok {
+		rec, found, err := rg.GetRecord(ctx, kindAsks, connID)
+		if err != nil || !found {
+			return l, 0, err
+		}
+		data, ver = rec.Data, rec.Version
+	} else {
+		d, found, err := m.Store.Get(ctx, kindAsks, connID)
+		if err != nil || !found {
+			return l, 0, err
+		}
+		data = d
 	}
 	if err := json.Unmarshal(data, l); err != nil {
 		// Fails closed: that admin is neither challenged nor forced until
 		// the record expires.
 		m.log().Error("approval ask log unreadable", "connection_id", connID)
-		return nil, err
+		return nil, 0, errAskUndecodable
 	}
-	return l, nil
+	return l, ver, nil
 }
 
 // Peer is the part of peer.Peer the manager uses.
@@ -448,7 +469,11 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 	// (canAsk) for the threshold to be met.
 	askable := 0
 	for _, a := range set {
-		if ok, _ := m.canAsk(ctx, a, now); ok {
+		ok, err := m.canAsk(ctx, a, now)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
 			askable++
 		}
 	}
@@ -523,20 +548,19 @@ func (m *Manager) challenge(ctx context.Context, b *batch, r *record, conns []st
 var errAskFull = errors.New("approval: ask budget full")
 
 // canAsk reports whether another challenge to connID is within the
-// member's budget at now. An admin whose log cannot be read is not
-// askable (full is false then). m.mu is held across the check and the
-// logAsk that follows, and the manager is the only writer, so no other
-// send can fill the log in between.
-func (m *Manager) canAsk(ctx context.Context, connID string, now time.Time) (ok, full bool) {
+// member's budget at now. An admin whose log is full, or is stored but
+// does not decode, is not askable; a store error is returned. m.mu is
+// held across the check and the logAsk that follows, and logAsk's write
+// is conditional, so no other send can fill the log in between.
+func (m *Manager) canAsk(ctx context.Context, connID string, now time.Time) (bool, error) {
 	l, err := m.asks(ctx, connID)
+	if errors.Is(err, errAskUndecodable) {
+		return false, nil
+	}
 	if err != nil {
-		m.log().Warn("approval ask log", "connection_id", connID, "err", errName(err))
-		return false, false
+		return false, err
 	}
-	if l.full(now) {
-		return false, true
-	}
-	return true, false
+	return !l.full(now), nil
 }
 
 // logAsk adds a challenge to connID's askLog, with exp (at least the
@@ -548,7 +572,7 @@ func (m *Manager) canAsk(ctx context.Context, connID string, now time.Time) (ok,
 // later forced reminder to that admin. It refuses (errAskFull) when the
 // log is already full, so no send is a sixth.
 func (m *Manager) logAsk(ctx context.Context, connID string, exp time.Time) error {
-	l, err := m.asks(ctx, connID)
+	l, ver, err := m.asksVersion(ctx, connID)
 	if err != nil {
 		return err
 	}
@@ -565,8 +589,21 @@ func (m *Manager) logAsk(ctx context.Context, connID string, exp time.Time) erro
 		return err
 	}
 	last := l.Exp[len(l.Exp)-1]
-	return m.Store.Apply(ctx, []peer.Change{{Kind: kindAsks, ID: connID, Data: data,
-		Expires: last.Add(askWindow + peer.ClockSkew)}})
+	c := peer.Change{Kind: kindAsks, ID: connID, Data: data, Expires: last.Add(askWindow + peer.ClockSkew)}
+	if _, ok := m.Store.(peer.RecordGetter); ok {
+		// Another task (a deploy overlaps two) may have written since the
+		// read: that is a log that may be full, so fail closed.
+		if ver == 0 {
+			c.IfAbsent = true
+		} else {
+			c.IfVersion = ver
+		}
+	}
+	if err := m.Store.Apply(ctx, []peer.Change{c}); errors.Is(err, peer.ErrConflict) {
+		return errAskFull
+	} else {
+		return err
+	}
 }
 
 func (m *Manager) cancel(ctx context.Context, chs []Challenge) {
@@ -585,6 +622,8 @@ func errName(err error) string {
 		return "not_found"
 	case errors.Is(err, peer.ErrNotStarted):
 		return "not_started"
+	case errors.Is(err, errAskFull):
+		return "ask_budget"
 	}
 	return "error"
 }
@@ -691,7 +730,7 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 		}
 		conns = append(conns, a)
 	}
-	cands, limited := 0, 0 // admins to remind; of those left out for a full ask log
+	cands, limited := 0, 0 // admins to remind; of those left out for a full or unreadable ask log
 	for _, a := range r.Admins {
 		if len(force) > 0 {
 			break // only the named admins
@@ -711,10 +750,12 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 		cands++
 		// Before anything is withdrawn: an admin at the budget keeps the
 		// challenge they hold, and stays in remind_needed if they hold none.
-		if ok, full := m.canAsk(ctx, a, now); !ok {
-			if full {
-				limited++
-			}
+		ok, err := m.canAsk(ctx, a, now)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			limited++
 			continue
 		}
 		if old := r.Pending[a]; old != "" && !m.LongChallenges {
