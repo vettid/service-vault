@@ -797,6 +797,7 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 			return nil, errCode(CodeSoleAdmin)
 		}
 		asked = slices.DeleteFunc(slices.Clone(set), func(c string) bool { return c == target })
+		th = min(th, len(asked)) // see needed
 	case ActionAdminSetAdd:
 		target, err := adminSetTarget(payload)
 		if err != nil {
@@ -1338,7 +1339,7 @@ func (m *Manager) Answer(ctx context.Context, e *peer.Event) (bool, error) {
 		case AnswerDenied:
 			r.Denials = append(r.Denials, Denier{ConnectionID: e.ConnectionID, At: at})
 		}
-		if settled, err = m.evaluate(ctx, b, r, set, max(r.Threshold, m.threshold()), ReasonDenied); err != nil {
+		if settled, err = m.evaluate(ctx, b, r, set, m.needed(r, set), ReasonDenied); err != nil {
 			return true, err
 		}
 	}
@@ -1380,6 +1381,29 @@ func (m *Manager) evaluate(ctx context.Context, b *batch, r *record, set []strin
 		return m.settle(ctx, b, r, StatusDenied, reason, set)
 	}
 	return nil, nil
+}
+
+// needed is how many approvals settle r: the higher of its own threshold
+// and the current one. An admin.repin needs no more than the other admins
+// there are in the set now (owner decision of 2026-11-02: with 2 admins at
+// m = 2, the other one re-pins after asking out of band); never fewer than
+// one. The count is of the current admins, so removing admins to lower it
+// takes admin_set.remove approvals at the full threshold, and the approvals
+// of the removed no longer count.
+func (m *Manager) needed(r *record, set []string) int {
+	n := max(r.Threshold, m.threshold())
+	if r.Action != ActionAdminRepin {
+		return n
+	}
+	target, _, err := parseRepin(r.Payload)
+	if err != nil {
+		return n
+	}
+	others := len(set)
+	if slices.Contains(set, target) {
+		others--
+	}
+	return max(min(n, others), 1)
 }
 
 // standing counts the approvals that count toward the threshold: those of
@@ -1448,7 +1472,7 @@ func (m *Manager) applyAdminSet(ctx context.Context, b *batch, r *record, set []
 			return false, nil
 		}
 	}
-	if r.standing(set) < max(r.Threshold, m.threshold()) {
+	if r.standing(set) < m.needed(r, set) {
 		return false, nil
 	}
 	if r.Action == ActionAdminRepin {
@@ -1548,7 +1572,7 @@ func (m *Manager) reevaluate(ctx context.Context) error {
 				}
 			}
 			m.cancel(ctx, gone)
-			if settled, err = m.evaluate(ctx, b, r, set, max(r.Threshold, m.threshold()), ReasonAdminsRemoved); err != nil {
+			if settled, err = m.evaluate(ctx, b, r, set, m.needed(r, set), ReasonAdminsRemoved); err != nil {
 				return err
 			}
 		}

@@ -250,7 +250,7 @@ MEMBER-SERVICE-PLAN §4.5 and §5.2; the operator's view is in the README,
   approval only if it is signed with the admin's *governance key*: the
   credential key at the time the connection became an admin, moved on by a
   rotation chain from it and otherwise only by `admin.repin`, which the
-  other admins approve (m of them, never the admin re-pinned; a sole admin
+  other admins approve (m of them, or all the other admins if fewer, never fewer than one: owner decision of 2026-11-02; never the admin re-pinned; a sole admin
   has none to confirm it: the connection is removed and a bootstrap armed).
   Before approving, the other admins ask the admin out of band (by phone or
   in person) "did you recover or replace your vault's keys at <the time in

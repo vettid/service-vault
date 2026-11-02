@@ -72,7 +72,7 @@ func (m *Manager) Consume(ctx context.Context, id, action string, payload []byte
 		return err
 	}
 	n := r.standing(set)
-	if n < max(r.Threshold, m.threshold()) {
+	if n < m.needed(r, set) {
 		return errCode(CodeApprovalNotApproved)
 	}
 	// The summary the admins read must be the one the service builds from

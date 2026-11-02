@@ -492,3 +492,93 @@ func TestMigrationLeavesUsedApprovalsAlone(t *testing.T) {
 		t.Fatal("no marker")
 	}
 }
+
+// A re-pin needs the threshold or all the other admins, whichever is fewer.
+func TestRepinThresholdIsCappedAtTheOtherAdmins(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		m       int
+		admins  []string
+		needed  int
+		answers []string // the other admins, in order
+	}{
+		{"2-of-2: the other admin alone", 2, []string{"c1", "c2"}, 1, []string{"c2"}},
+		{"3-of-3: both others", 3, []string{"c1", "c2", "c3"}, 2, []string{"c2", "c3"}},
+		{"2-of-3: two", 2, []string{"c1", "c2", "c3"}, 2, []string{"c2", "c3"}},
+		{"1-of-3: one", 1, []string{"c1", "c2", "c3"}, 1, []string{"c2"}},
+	} {
+		f := newFixture(t, tc.m, tc.admins...)
+		f.moved("c1", keyB)
+		c := f.create(ActionAdminRepin, "", repinPay("c1", keyB))
+		if s := f.status(c.ID); s.Threshold != tc.needed {
+			t.Errorf("%s: threshold %d, want %d", tc.name, s.Threshold, tc.needed)
+		}
+		for i, a := range tc.answers {
+			if s := f.status(c.ID); s.Status != StatusPending {
+				t.Fatalf("%s: settled before answer %d", tc.name, i)
+			}
+			f.answer(a, "approve")
+		}
+		if s := f.status(c.ID); s.Status != StatusApproved || s.Applied == nil || !*s.Applied || !bytes.Equal(f.govKey("c1"), keyB) {
+			t.Errorf("%s: %+v", tc.name, s)
+		}
+	}
+	// A sole admin is still refused.
+	f := newFixture(t, 2, "c1")
+	f.moved("c1", keyB)
+	if _, err := f.m.Create(context.Background(), Request{Action: ActionAdminRepin, Payload: json.RawMessage(repinPay("c1", keyB))}); codeOf(err) != CodeSoleAdmin {
+		t.Fatalf("sole admin: %v", err)
+	}
+}
+
+// Removing admins mid-approval lowers the cap only by the admins gone, and
+// the approvals of the removed no longer count: a re-pin never passes with
+// fewer than the new cap.
+func TestRepinCapAfterAdminsLeave(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, 3, "c1", "c2", "c3", "c4")
+	f.moved("c1", keyB)
+	c := f.create(ActionAdminRepin, "", repinPay("c1", keyB))
+	if f.status(c.ID).Threshold != 3 {
+		t.Fatal("threshold")
+	}
+	f.answer("c2", "approve")
+	f.answer("c3", "approve")
+	// c3, who approved, leaves: the others are c2 and c4, the cap 2, and
+	// only c2's approval stands.
+	if err := f.m.ConnectionRemoved(ctx, "c3"); err != nil {
+		t.Fatal(err)
+	}
+	if s := f.status(c.ID); s.Status != StatusPending {
+		t.Fatalf("passed with one standing approval of two needed: %+v", s)
+	}
+	f.answer("c4", "approve")
+	if s := f.status(c.ID); s.Status != StatusApproved || s.Applied == nil || !*s.Applied {
+		t.Fatalf("%+v", s)
+	}
+
+	// An admin who has not answered leaves: the cap falls to the answers
+	// that stand.
+	g := newFixture(t, 3, "c1", "c2", "c3", "c4")
+	g.moved("c1", keyB)
+	d := g.create(ActionAdminRepin, "", repinPay("c1", keyB))
+	g.answer("c2", "approve")
+	g.answer("c3", "approve")
+	if err := g.m.ConnectionRemoved(ctx, "c4"); err != nil {
+		t.Fatal(err)
+	}
+	if s := g.status(d.ID); s.Status != StatusApproved {
+		t.Fatalf("two others, two standing approvals: %+v", s)
+	}
+
+	// The cap is read at apply time as well: with approvals short of it,
+	// nothing is applied.
+	h := newFixture(t, 2, "c1", "c2", "c3")
+	h.moved("c1", keyB)
+	e := h.create(ActionAdminRepin, "", repinPay("c1", keyB))
+	r, _ := h.m.load(ctx, e.ID)
+	r.Approvals = []Approver{{ConnectionID: "c2", Counted: true}}
+	if applied, err := h.m.applyAdminSet(ctx, h.m.batch(h.clk.Now()), r, []string{"c1", "c2", "c3"}); err != nil || applied {
+		t.Fatalf("applied=%v err=%v", applied, err)
+	}
+}

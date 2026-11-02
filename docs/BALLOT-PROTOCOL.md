@@ -218,7 +218,17 @@ key). Nothing else moves it but a rotation chain that starts at it and the
 other admins' `admin.repin`. Known limits: the migration can only use
 the approvals the audit log holds, so an admin who never approved is pinned
 to whatever key they hold then; and the fingerprints shown to the admins
-are 64 bits (16 hex digits) of a SHA-256. Its payload is the input
+are 64 bits (16 hex digits) of a SHA-256.
+
+A re-pin (`admin.repin`) is approved by the other admins only, and needs
+the threshold or all the other admins who are admins at that moment,
+whichever is fewer (never fewer than one; owner decision of 2026-11-02):
+with two admins at m = 2 the other admin alone re-pins, after asking out
+of band. Removing admins to lower that number takes `admin_set.remove`
+approvals at the full threshold, and the approvals of the removed no
+longer count. A sole admin cannot be re-pinned this way (`sole_admin`).
+
+The `proposal.create` approval's payload is the input
 in JCS form with every field present, parsed strictly (§2).
 
 Before creating, the service checks, in one step that no other request

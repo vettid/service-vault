@@ -687,9 +687,13 @@ admin's connection.
   "<base64 of the 32-byte credential key>"}` (`new_key` may be left out:
   the service fills in the connection's credential key now), makes the
   connection's current credential key its governance key. It is approved by
-  m admins other than the one re-pinned (they alone are asked; their own
-  approval never counts for their own re-pin) whose approvals count as
-  above, and is applied (`admin.repinned` audited) only if `new_key` is
+  m admins other than the one re-pinned, or all the other admins if
+  there are fewer than m (owner decision of 2026-11-02: with 2 admins at
+  m = 2 the other one re-pins after asking out of band; never fewer than
+  one, counted among the admins in the set when it settles and is
+  applied, so removing admins to lower it takes `admin_set.remove`
+  approvals at the full m); they alone are asked and their own approval
+  never counts for their own re-pin; the approvals count as above, and is applied (`admin.repinned` audited) only if `new_key` is
   still the connection's credential key. The application gives no
   `summary`; the service writes `name given "<name>", new key <16 hex
   digits in 4 groups>, key changed <YYYY-MM-DD HH:MM> UTC, connection
