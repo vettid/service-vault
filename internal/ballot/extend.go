@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/vettid/service-vault/vote"
+	"time"
 )
 
 // Extensions (BALLOT-PROTOCOL §10.2): a relay outage of more than an hour
@@ -27,6 +28,13 @@ type ExtensionInput struct {
 	ClosesAt int64       `json:"closes_at"`
 	Outage   vote.Outage `json:"outage"`
 }
+
+// ExtendMargin is how long before the close an extension must be asked
+// for: one published later may not reach the close it extends in time
+// (§10.2), and the approval would be used for nothing. It is refused
+// before the approval is looked at, so that it stays usable. It is
+// CollectMargin, the margin the count already allows after the close.
+const ExtendMargin = CollectMargin
 
 // ErrTooLate is an extension asked for once the close it would extend has
 // passed.
@@ -61,7 +69,7 @@ func (m *Manager) Extend(ctx context.Context, id, approvalID string, in Extensio
 	if err != nil {
 		return nil, err
 	}
-	if o.Published || m.Now().Unix() >= o.ClosesAt {
+	if o.Published || m.Now().Unix() >= o.ClosesAt-int64(ExtendMargin/time.Second) {
 		return nil, ErrTooLate
 	}
 	out := in.Outage
@@ -94,7 +102,7 @@ func (m *Manager) Extend(ctx context.Context, id, approvalID string, in Extensio
 	if err := checkExtension(&ExtensionPayload{ProposalID: id, ClosesAt: in.ClosesAt, Outage: in.Outage}); err != nil {
 		return nil, &ErrInput{err}
 	}
-	if err := m.consume(ctx, approvalID, ActionVoteExtend, payload); err != nil {
+	if err := m.consume(ctx, approvalID, ActionVoteExtend, payload, Use{ProposalID: id, N: e.N}); err != nil {
 		return nil, err
 	}
 	bundle, err := ep.PublishExtension(ctx, id, e.N, doc, sig)

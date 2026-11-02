@@ -201,13 +201,23 @@ in JCS form with every field present, parsed strictly (§2).
 
 Before creating, the service checks, in one step that no other request
 can interleave with, that the approval is approved (counting again the
-signatures of the admins in the set now, against the threshold now),
+signatures of the admins in the set now, against the larger of the
+threshold the approval was made with and the threshold now), that the
+summary the admins read is the one the service builds from the payload
+(an approval made with any other is refused),
 is for `proposal.create`, has not run out and has not been used, and
 that its payload equals, byte for byte, the JCS form of the input it is
 about to execute. It then records the approval as used, and only then
 makes, publishes and sends the proposal. An approval used for a proposal
 that then fails to be made or published is not usable again; the admins
-approve again.
+approve again. The use is recorded with what it was used for: the
+proposal's id (and, for an extension, its number), in the `apv_used`
+record, in the `approval.consumed` audit entry and in the approval's
+status (`used: {at, proposal_id, n}`). After a lost answer or a crash,
+the operator reads the status: if `used` is there, the proposal (or the
+extension) was started, and its status says whether it was published
+(`/publish` finishes one that was not); if it is not, nothing was made
+and the same approval can be used again.
 
 **What the admins read.** The challenge's context (VAULT-MESSAGING
 §10.4, at most 256 bytes) is
@@ -217,7 +227,7 @@ action (and `Extend vote:` before an extension's); the application
 writes no text of either. The summary is built from the payload: binding
 or advisory, the window, the quorum's minimum, the choices' labels and
 the title, all shown whole: an input whose summary does not fit the
-context (about 65 bytes of title with two short labels) is refused, never
+context is refused, never
 cut, so a title that equals the motion can't hide the rest of it. For an extension it is the proposal (its title, from
 the service's copy, and its id), the new close, the outage and its source.
 
@@ -241,8 +251,12 @@ Titles and labels use printable ASCII and Latin-1 letters only
 (`unsupported_characters`), so that two labels can't differ only by a
 look-alike letter from another script (a Cyrillic `е` for `e`); a wider
 character set waits for a check for confusables. An extension's summary
-shows the stored title, which was approved in full when the proposal was
-made, and may cut it with `…` to fit.
+shows the stored title whole too, in the same character set. So that
+every vote can be extended, a title is accepted at creation only if it
+fits whole in the longest extension summary (the longest source, the
+widest times): **at most 35 bytes** (`MaxTitleBytes`, computed from the
+same summary builder), and with the choices' labels it must fit the
+creation summary too.
 
 A refused field makes the approval request fail (`field_not_shown`, or
 `invalid_payload`), and the proposal request fail with nothing made and
@@ -608,7 +622,12 @@ from the index. An extension needs the admins' approval, as creating a
 proposal does (§3.4): an approval of the action `vote.extend`, whose
 payload is `{proposal_id, closes_at, outage}` in JCS form, checked and
 used once before the extension is published; the outage's `source` is an
-`https://` URL of at most 32 bytes, shown to the admins whole. **(chosen; not in the
+`https://` URL of at most 32 bytes of visible ASCII (so no
+internationalised look-alike domain), shown to the admins whole. An
+extension asked for less than 1 minute before the close it extends (the
+`CollectMargin` that the count already allows after the close) is refused
+as too late (`too_late`) before the approval is looked at, so that the
+approval stays usable: one published later may not reach the close in time. **(chosen; not in the
 spec.)** Counting the votes after the close (§7) needs no approval: it
 decides nothing that the window and the ballots have not.
 

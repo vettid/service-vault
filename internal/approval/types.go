@@ -259,6 +259,18 @@ type Status struct {
 	// vault changed the admin set (false when it no longer applied, for
 	// example the connection was removed meanwhile).
 	Applied *bool `json:"applied,omitempty"`
+	// Used, for a proposal.create or vote.extend approval that was used:
+	// when, and what it was used for (the proposal made, or the proposal
+	// extended and the extension's number), so that a lost answer is
+	// resolved by reading what exists.
+	Used *Used `json:"used,omitempty"`
+}
+
+// Used is a used approval's record.
+type Used struct {
+	At         time.Time `json:"at"`
+	ProposalID string    `json:"proposal_id"`
+	N          int64     `json:"n,omitempty"`
 }
 
 // Reminder answers a reminder.
@@ -316,8 +328,11 @@ type AuditEntry struct {
 	Status  string `json:"status,omitempty"`
 	Reason  string `json:"reason,omitempty"`
 	Applied *bool  `json:"applied,omitempty"`
-	Added   string `json:"added,omitempty"`
-	Removed string `json:"removed,omitempty"`
+	// approval.consumed: what the approval was used for.
+	ProposalID string `json:"proposal_id,omitempty"`
+	N          int64  `json:"n,omitempty"`
+	Added      string `json:"added,omitempty"`
+	Removed    string `json:"removed,omitempty"`
 }
 
 // AuditPage is a page of the audit log.

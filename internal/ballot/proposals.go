@@ -196,7 +196,7 @@ func (m *Manager) Create(ctx context.Context, approvalID string, in ProposalInpu
 	if err != nil {
 		return nil, err
 	}
-	if err := m.consume(ctx, approvalID, ActionProposalCreate, payload); err != nil {
+	if err := m.consume(ctx, approvalID, ActionProposalCreate, payload, Use{ProposalID: id}); err != nil {
 		return nil, err
 	}
 	o := &OpenProposal{Doc: doc, Sig: sig, ClosesAt: p.ClosesAt, Members: members}

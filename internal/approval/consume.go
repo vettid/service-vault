@@ -7,12 +7,17 @@ import (
 	"slices"
 	"time"
 
+	"github.com/vettid/service-vault/internal/ballot"
 	"github.com/vettid/service-vault/internal/peer"
 )
 
 // usedRecord is an apv_used record: an approval that was used.
 type usedRecord struct {
 	At time.Time `json:"at"`
+	// What the approval was used for (ballot.Use): the proposal made, or
+	// the proposal extended and the extension's number.
+	ProposalID string `json:"proposal_id,omitempty"`
+	N          int64  `json:"n,omitempty"`
 }
 
 // Consume uses an approved proposal.create or vote.extend approval, once,
@@ -29,7 +34,12 @@ type usedRecord struct {
 // again. A call that fails leaves the approval as it was, usable, except
 // that a store error may leave it unknown whether the write happened, and
 // then the approval is used or unused but never both.
-func (m *Manager) Consume(ctx context.Context, id, action string, payload []byte) error {
+//
+// use says what the caller is about to make: the new proposal's id, or the
+// proposal and the number of the extension. It is kept in the apv_used
+// record and the audit entry, so that a lost answer or a crash is
+// resolved by reading what the approval made (Status.Used).
+func (m *Manager) Consume(ctx context.Context, id, action string, payload []byte, use ballot.Use) error {
 	if action != ActionProposalCreate && action != ActionVoteExtend {
 		return errCode(CodeInvalidAction)
 	}
@@ -71,16 +81,41 @@ func (m *Manager) Consume(ctx context.Context, id, action string, payload []byte
 	if n < max(r.Threshold, m.threshold()) {
 		return errCode(CodeApprovalNotApproved)
 	}
+	// The summary the admins read must be the one the service builds from
+	// the payload (and, for an extension, the stored proposal's title):
+	// an approval made with a summary an application wrote is refused.
+	title := ""
+	if action == ActionVoteExtend {
+		pid, err := ballot.ExtensionProposalID(payload)
+		if err != nil || m.ProposalTitle == nil {
+			return errCode(CodeApprovalMismatch)
+		}
+		t, ok, err := m.ProposalTitle(ctx, pid)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errCode(CodeApprovalMismatch)
+		}
+		title = t
+	}
+	if want, _, err := ballot.SummaryFor(action, payload, title); err != nil || want != r.Summary {
+		return errCode(CodeApprovalMismatch)
+	}
+	if use.ProposalID == "" {
+		return errCode(CodeApprovalMismatch)
+	}
 	if _, used, err := m.Store.Get(ctx, kindUsed, id); err != nil {
 		return err
 	} else if used {
 		return errCode(CodeApprovalUsed)
 	}
 	b := m.batch(now)
-	if err := b.putNew(kindUsed, id, &usedRecord{At: now.UTC().Truncate(time.Millisecond)}); err != nil {
+	if err := b.putNew(kindUsed, id, &usedRecord{At: now.UTC().Truncate(time.Millisecond), ProposalID: use.ProposalID, N: use.N}); err != nil {
 		return err
 	}
-	if err := b.audit(&AuditEntry{Type: AuditConsumed, ApprovalID: r.ID, Action: r.Action, ActionHash: r.Hash}); err != nil {
+	if err := b.audit(&AuditEntry{Type: AuditConsumed, ApprovalID: r.ID, Action: r.Action, ActionHash: r.Hash,
+		ProposalID: use.ProposalID, N: use.N}); err != nil {
 		return err
 	}
 	if err := b.apply(ctx); errors.Is(err, peer.ErrConflict) {

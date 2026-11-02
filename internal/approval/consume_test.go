@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"regexp"
 	"strings"
 	"sync"
@@ -58,7 +59,7 @@ func (f *fixture) built(action string, payload []byte) *Created {
 }
 
 func (f *fixture) consume(id, action string, payload []byte) error {
-	return f.m.Consume(context.Background(), id, action, payload)
+	return f.m.Consume(context.Background(), id, action, payload, ballot.Use{ProposalID: extProposal, N: 1})
 }
 
 func TestVoteOpenAndCloseAreUnknownActions(t *testing.T) {
@@ -230,7 +231,7 @@ func TestConsumeConcurrent(t *testing.T) {
 			f.answer("c1", "approve")
 			// Two managers over one store, as two processes would be: the
 			// store's conditional write decides.
-			g := &Manager{Peer: f.p, Store: f.st, Pager: f.st, Now: f.clk.Now, ServiceName: f.m.ServiceName}
+			g := &Manager{Peer: f.p, Store: f.st, Pager: f.st, Now: f.clk.Now, ServiceName: f.m.ServiceName, ProposalTitle: f.m.ProposalTitle}
 			ms := []*Manager{f.m, g, f.m, g}
 			errs := make([]error, len(ms))
 			var wg sync.WaitGroup
@@ -238,7 +239,7 @@ func TestConsumeConcurrent(t *testing.T) {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					errs[i] = m.Consume(context.Background(), a.ID, tc.action, pl)
+					errs[i] = m.Consume(context.Background(), a.ID, tc.action, pl, ballot.Use{ProposalID: extProposal, N: 1})
 				}()
 			}
 			wg.Wait()
@@ -461,5 +462,94 @@ func TestAdminSetSummaryFitsContext(t *testing.T) {
 		if _, err := ChallengeContext(f.m.ServiceName, a, sum, strings.Repeat("a", 64)); err != nil {
 			t.Fatalf("%s: %v", a, err)
 		}
+	}
+}
+
+// The use is recorded with what the approval made: in the apv_used
+// record, the approval.consumed audit entry and the status.
+func TestConsumeRecordsUse(t *testing.T) {
+	for name, tc := range consumeCases {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, 1, "c1")
+			pl := tc.payload(t)
+			a := f.built(tc.action, pl)
+			f.answer("c1", "approve")
+			if f.status(a.ID).Used != nil {
+				t.Fatal("used before")
+			}
+			if err := f.m.Consume(context.Background(), a.ID, tc.action, pl, ballot.Use{ProposalID: "01JBQZ0000000000000000000C", N: 3}); err != nil {
+				t.Fatal(err)
+			}
+			u := f.status(a.ID).Used
+			if u == nil || u.ProposalID != "01JBQZ0000000000000000000C" || u.N != 3 || u.At.IsZero() {
+				t.Fatalf("status used %+v", u)
+			}
+			n := 0
+			for _, e := range f.audit() {
+				if e.Type == AuditConsumed && e.ProposalID == "01JBQZ0000000000000000000C" && e.N == 3 {
+					n++
+				}
+			}
+			if n != 1 {
+				t.Fatalf("%d entries with the use", n)
+			}
+			if err := f.m.Consume(context.Background(), a.ID, tc.action, pl, ballot.Use{}); err == nil {
+				t.Fatal("a use with no proposal")
+			}
+		})
+	}
+}
+
+// An approval whose summary is not the one the service builds from the
+// payload (made before the summary was the service's) is refused; so is an
+// extension whose proposal's title is no longer what the admins read.
+func TestConsumeChecksSummary(t *testing.T) {
+	for name, tc := range consumeCases {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, 1, "c1")
+			pl := tc.payload(t)
+			a := f.built(tc.action, pl)
+			f.answer("c1", "approve")
+			ctx := context.Background()
+			r, err := f.m.load(ctx, a.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.Summary = "Routine budget vote"
+			b := f.m.batch(f.clk.Now())
+			if err := errors.Join(b.save(r), b.apply(ctx)); err != nil {
+				t.Fatal(err)
+			}
+			if code := codeOf(f.consume(a.ID, tc.action, pl)); code != CodeApprovalMismatch {
+				t.Fatalf("app-written summary: %q", code)
+			}
+			if _, used, _ := f.st.Get(ctx, kindUsed, a.ID); used {
+				t.Fatal("used")
+			}
+		})
+	}
+	f := newFixture(t, 1, "c1")
+	pl := canonExtension(t, extensionInput())
+	a := f.built(ActionVoteExtend, pl)
+	f.answer("c1", "approve")
+	f.m.ProposalTitle = func(context.Context, string) (string, bool, error) { return "Another title", true, nil }
+	if code := codeOf(f.consume(a.ID, ActionVoteExtend, pl)); code != CodeApprovalMismatch {
+		t.Fatalf("another title: %q", code)
+	}
+}
+
+// An extension's summary shows the stored title whole or is refused.
+func TestExtensionTitleWholeOrRefused(t *testing.T) {
+	f := newFixture(t, 1, "c1")
+	pl := canonExtension(t, extensionInput())
+	for name, title := range map[string]string{"long": strings.Repeat("T", 80), "cyrillic": "Budg\u0435t"} {
+		f.m.ProposalTitle = func(context.Context, string) (string, bool, error) { return title, true, nil }
+		_, err := f.m.Create(context.Background(), Request{Action: ActionVoteExtend, Payload: json.RawMessage(pl)})
+		if err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	if len(f.p.sent) != 0 {
+		t.Fatal("sent")
 	}
 }

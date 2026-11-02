@@ -36,7 +36,16 @@ type Approvals interface {
 	// Consume uses an approval once, for action with exactly payload
 	// (canonical): it fails unless the approval is approved, is for this
 	// action and payload, and has not been used.
-	Consume(ctx context.Context, approvalID, action string, payload []byte) error
+	Consume(ctx context.Context, approvalID, action string, payload []byte, use Use) error
+}
+
+// Use is what an approval is used for: the id of the proposal made, or of
+// the proposal extended with the extension's number N. It is recorded with
+// the use, so that after a lost answer or a crash what the approval made
+// can be read from its status.
+type Use struct {
+	ProposalID string
+	N          int64
 }
 
 // ErrNoApprovals is a service vault with no way to check approvals: it
@@ -116,7 +125,7 @@ const (
 // take the rest. A summary is shown whole or refused, never cut.
 const (
 	maxSummaryFixed = 115 // everything but the title
-	maxSummary      = 165 // the whole; the title is cut to fit
+	maxSummary      = 172 // the whole (the room left by the longest service name and label)
 )
 
 // errTooLong: what the admins would read does not fit the challenge's
@@ -168,6 +177,40 @@ func when(t int64) (string, error) {
 	return time.Unix(t, 0).UTC().Format("2006-01-02 15:04Z"), nil
 }
 
+// widestExtension is the payload of the longest extension summary: a
+// proposal id, the longest source and the widest times.
+func widestExtension() []byte {
+	p, err := canonical(ExtensionPayload{ProposalID: strings.Repeat("0", 26), ClosesAt: 7258118399,
+		Outage: vote.Outage{From: 7258000000, To: 7258100000, Source: "https://" + strings.Repeat("w", MaxSource-len("https://"))}})
+	if err != nil {
+		panic(err)
+	}
+	return p
+}
+
+// MaxTitleBytes is the longest title create accepts, which is the longest
+// that still fits whole in an extension's summary.
+func MaxTitleBytes() int {
+	n := 0
+	for ; n < 200; n++ {
+		if _, err := ExtensionSummary(widestExtension(), strings.Repeat("T", n+1)); err != nil {
+			break
+		}
+	}
+	return n
+}
+
+// asciiGraphic accepts visible ASCII only (no space), so a source URL
+// can't carry look-alike letters (an internationalised domain name).
+func asciiGraphic(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] <= 0x20 || s[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
 // checkInput refuses what an approval can't carry: a field the admins
 // would not see that isn't the service's own, choice labels that can't be
 // shown whole or that the admins could mix up, or a time the summary can't
@@ -179,6 +222,12 @@ func checkInput(in *ProposalInput) error {
 	}
 	if !latin(in.Title) {
 		return ErrCharset
+	}
+	// Every vote must be extendable: the title has to fit whole in the
+	// summary of the longest extension (the longest source and the widest
+	// times; the summary has no other variable part).
+	if _, err := ExtensionSummary(widestExtension(), in.Title); err != nil {
+		return err
 	}
 	if in.Text != "" && in.Text != in.Title {
 		return &ErrNotShown{"text"}
@@ -258,37 +307,6 @@ func ProposalSummary(payload []byte) (string, error) {
 	return "", errTooLong
 }
 
-// quoteFit is s quoted (only an extension's summary uses it: the stored
-// title it shows was approved in full when the proposal was made, so
-// cutting it here hides nothing that was not already approved), its end cut (and marked with …) so that the
-// whole is at most n bytes.
-func quoteFit(s string, n int) string {
-	if q := strconv.Quote(s); len(q) <= n {
-		return q
-	}
-	for room := n; room > 0; room-- {
-		c := strings.TrimSuffix(strconv.Quote(cutBytes(s, room)), `"`) + `…"`
-		if len(c) <= n {
-			return c
-		}
-	}
-	return `"…"`
-}
-
-// cutBytes cuts s to at most n bytes on a character boundary.
-func cutBytes(s string, n int) string {
-	if n < 0 {
-		n = 0
-	}
-	if len(s) <= n {
-		return s
-	}
-	for n > 0 && !utf8.RuneStart(s[n]) {
-		n--
-	}
-	return s[:n]
-}
-
 // ExtensionProposalID is the proposal a vote.extend payload is for.
 func ExtensionProposalID(payload []byte) (string, error) {
 	var x ExtensionPayload
@@ -306,7 +324,7 @@ func checkExtension(x *ExtensionPayload) error {
 		return errors.New("ballot: bad proposal id")
 	}
 	src := x.Outage.Source
-	if !strings.HasPrefix(src, "https://") || !plain(src) || strings.ContainsAny(src, " \"") {
+	if !strings.HasPrefix(src, "https://") || !asciiGraphic(src) || strings.Contains(src, `"`) {
 		return &ErrNotShown{"outage.source"}
 	}
 	if len(src) > MaxSource {
@@ -330,6 +348,9 @@ func ExtensionSummary(payload []byte, title string) (string, error) {
 	if !plain(title) || title == "" {
 		return "", errors.New("ballot: the proposal's title can't be shown")
 	}
+	if !latin(title) {
+		return "", ErrCharset
+	}
 	closes, err := when(x.ClosesAt)
 	if err != nil {
 		return "", err
@@ -342,11 +363,14 @@ func ExtensionSummary(payload []byte, title string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	tail := fmt.Sprintf(" (%s) new close %s, outage %s to %s, source %s", x.ProposalID, closes, from, to, x.Outage.Source)
-	if len(tail) > maxSummaryFixed+MaxSource {
+	// The outage's times are given without the year, to leave room for
+	// the title: it is shown whole or the extension is refused.
+	s := fmt.Sprintf("%s (%s) new close %s, outage %s to %s, source %s", strconv.Quote(title), x.ProposalID, closes, from[5:], to[5:],
+		x.Outage.Source)
+	if len(s) > maxSummary {
 		return "", errTooLong
 	}
-	return quoteFit(title, maxSummary-len(tail)) + tail, nil
+	return s, nil
 }
 
 // SummaryFor builds the summary of an approval for action from payload
@@ -365,9 +389,9 @@ func SummaryFor(action string, payload []byte, title string) (summary string, ok
 }
 
 // consume uses the approval for action and payload, or fails closed.
-func (m *Manager) consume(ctx context.Context, approvalID, action string, payload []byte) error {
+func (m *Manager) consume(ctx context.Context, approvalID, action string, payload []byte, use Use) error {
 	if m.Approvals == nil {
 		return ErrNoApprovals
 	}
-	return m.Approvals.Consume(ctx, approvalID, action, payload)
+	return m.Approvals.Consume(ctx, approvalID, action, payload, use)
 }

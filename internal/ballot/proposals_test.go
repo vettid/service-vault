@@ -76,6 +76,7 @@ type fakeApprovals struct {
 	approved map[string]fakeApproval
 	used     map[string]bool
 	consumed int
+	uses     []Use
 }
 
 type fakeApproval struct {
@@ -84,7 +85,10 @@ type fakeApproval struct {
 	status  string // "" is approved
 }
 
-func (f *fakeApprovals) Consume(_ context.Context, id, action string, payload []byte) error {
+func (f *fakeApprovals) Consume(_ context.Context, id, action string, payload []byte, use Use) error {
+	if use.ProposalID == "" {
+		return errors.New("no use")
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.auto {
@@ -102,6 +106,7 @@ func (f *fakeApprovals) Consume(_ context.Context, id, action string, payload []
 	}
 	f.used[id] = true
 	f.consumed++
+	f.uses = append(f.uses, use)
 	return nil
 }
 

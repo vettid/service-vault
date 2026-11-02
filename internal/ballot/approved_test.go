@@ -307,7 +307,7 @@ func TestProposalSummaryFromPayload(t *testing.T) {
 	if _, err = ProposalSummary(mustCanon(t, in)); !errors.As(err, new(*ErrNotShown)) {
 		t.Errorf("a title that does not fit: %v", err)
 	}
-	in.Title = strings.Repeat("B", 40)
+	in.Title = strings.Repeat("B", 30)
 	if s, err = ProposalSummary(mustCanon(t, in)); err != nil || !strings.HasSuffix(s, `"`+in.Title+`"`) || len(s) > maxSummary {
 		t.Errorf("%d %q %v", len(s), s, err)
 	}
@@ -456,5 +456,95 @@ func TestLabelCharacters(t *testing.T) {
 	}
 	if latin("\u00d7") || latin("\u00f7") || latin("\u0100") || latin("a\u200bb") || !latin("Yes") {
 		t.Fatal("latin")
+	}
+}
+
+// The source of an extension is visible ASCII: an internationalised
+// look-alike domain is refused.
+func TestExtensionSourceASCII(t *testing.T) {
+	x := ExtensionInput{ClosesAt: 1793527200, Outage: vote.Outage{From: 1793512800, To: 1793518200, Source: "https://status.vettid.org/"}}
+	pid := "01JBQZ0000000000000000000A"
+	if _, err := ExtensionSummary(mustExt(t, pid, x), "T"); err != nil {
+		t.Fatal(err)
+	}
+	for _, src := range []string{"https://str\u00e9am.vettid.org", "https://\u0455tatus.org", "https://a.org/\u200b"} {
+		x.Outage.Source = src
+		if _, err := ExtensionSummary(mustExt(t, pid, x), "T"); err == nil {
+			t.Errorf("%q accepted", src)
+		}
+	}
+	x.Outage.Source = "https://status.vettid.org/"
+	if _, err := ExtensionSummary(mustExt(t, pid, x), strings.Repeat("T", 60)); err == nil {
+		t.Error("a title that does not fit")
+	}
+	if _, err := ExtensionSummary(mustExt(t, pid, x), "Budg\u0435t"); !errors.Is(err, ErrCharset) {
+		t.Errorf("non-Latin title: %v", err)
+	}
+}
+
+// The use recorded with the approval is the proposal made and, for an
+// extension, its number; an extension too close to the close is refused
+// before the approval is used.
+func TestUseAndExtendMargin(t *testing.T) {
+	ctx := context.Background()
+	m, _, _, a := strictManager(t)
+	approveProposal(t, a, "a", input())
+	c, err := m.Create(ctx, "a", input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(a.uses) != 1 || a.uses[0] != (Use{ProposalID: c.ProposalID}) {
+		t.Fatalf("uses %+v", a.uses)
+	}
+	in := input()
+	x := ExtensionInput{ClosesAt: in.ClosesAt + 7200, Outage: vote.Outage{From: in.ClosesAt - 7200, To: in.ClosesAt - 7200 + 5400, Source: "https://status.vettid.org/"}}
+	approveExtension(t, a, "x", c.ProposalID, x)
+	// Within the margin of the close: too late, and the approval stays usable.
+	m.Now = func() time.Time { return time.Unix(in.ClosesAt-int64(ExtendMargin/time.Second)+1, 0) }
+	if _, err := m.Extend(ctx, c.ProposalID, "x", x); !errors.Is(err, ErrTooLate) || a.used["x"] {
+		t.Fatalf("%v, used %v", err, a.used["x"])
+	}
+	m.Now = func() time.Time { return time.Unix(in.ClosesAt-int64(ExtendMargin/time.Second)-1, 0) }
+	if _, err := m.Extend(ctx, c.ProposalID, "x", x); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.uses[len(a.uses)-1]; got != (Use{ProposalID: c.ProposalID, N: 1}) {
+		t.Fatalf("uses %+v", a.uses)
+	}
+}
+
+// Every vote that create allows can be extended: a title of the longest
+// length create accepts fits whole in the longest extension's summary,
+// and a title one byte longer is refused at create.
+func TestLongestTitleCanBeExtended(t *testing.T) {
+	ctx := context.Background()
+	n := MaxTitleBytes()
+	t.Logf("longest title: %d bytes", n)
+	if n < 20 || n > 60 {
+		t.Fatalf("title limit %d", n)
+	}
+	m, _, _, a := strictManager(t)
+	in := input()
+	in.Title = strings.Repeat("T", n)
+	approveProposal(t, a, "a", in)
+	c, err := m.Create(ctx, "a", in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	long := in
+	long.Title += "T"
+	var ei *ErrInput
+	if _, err := m.Create(ctx, "b", long); !errors.As(err, &ei) {
+		t.Fatalf("a title one byte over: %v", err)
+	}
+	x := ExtensionInput{ClosesAt: in.ClosesAt + 7200, Outage: vote.Outage{From: in.ClosesAt - 7200, To: in.ClosesAt - 7200 + 5400,
+		Source: "https://" + strings.Repeat("w", MaxSource-len("https://"))}}
+	if _, err := ExtensionSummary(mustExt(t, c.ProposalID, x), in.Title); err != nil {
+		t.Fatal(err)
+	}
+	approveExtension(t, a, "x", c.ProposalID, x)
+	m.Now = func() time.Time { return time.Unix(in.ClosesAt-600, 0) }
+	if _, err := m.Extend(ctx, c.ProposalID, "x", x); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -824,6 +824,17 @@ func (m *Manager) Status(ctx context.Context, id string) (*Status, error) {
 	st := &Status{ID: r.ID, Action: r.Action, Summary: r.Summary, ActionHash: r.Hash, Status: r.Status, Reason: r.Reason,
 		Threshold: r.Threshold, Admins: r.Admins, Approvals: r.Approvals, Denials: r.Denials, CreatedAt: r.Created,
 		ExpiresAt: r.Exp, Applied: r.Applied, RemindNeeded: []string{}}
+	if r.Action == ActionProposalCreate || r.Action == ActionVoteExtend {
+		if data, ok, err := m.Store.Get(ctx, kindUsed, id); err != nil {
+			return nil, err
+		} else if ok {
+			var u usedRecord
+			if err := json.Unmarshal(data, &u); err != nil {
+				return nil, err
+			}
+			st.Used = &Used{At: u.At, ProposalID: u.ProposalID, N: u.N}
+		}
+	}
 	if st.Status == StatusPending && !m.now().Before(r.Exp) {
 		st.Status = StatusExpired
 	}

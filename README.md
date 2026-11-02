@@ -721,7 +721,7 @@ admin's connection.
     distinct and not `Abstain`; titles and labels use printable ASCII and
     Latin-1 letters only (`unsupported_characters`), and a title is shown
     whole or the approval is refused (`field_not_shown`); an extension's `outage.source` is an
-    `https://` URL of at most 32 bytes, and its proposal must exist (the
+    `https://` URL of at most 32 bytes of visible ASCII, and its proposal must exist (the
     admins read its title: `unknown_proposal`). These
     two approvals take no `summary` (`invalid_summary` if one is given):
     the service builds what the admins read from the payload: `BINDING` or
@@ -740,6 +740,11 @@ admin's connection.
     use (an `apv_used` record written only if absent, and an
     `approval.consumed` audit entry, in one write), and only then makes
     the proposal or the extension. Two uses at once: one succeeds.
+  - The use is recorded with the proposal's id (and the extension's
+    number) in `apv_used`, the `approval.consumed` audit entry and the
+    approval's status (`used`), so a lost answer is resolved by reading it.
+    An extension asked for less than a minute before the close is refused
+    (`too_late`) before the approval is used.
   - Whatever refuses the input (a bad window, no eligible member, no
     publisher) is checked before the approval is used, so the approval
     stays usable. What fails after (storing, publishing) leaves it used:
