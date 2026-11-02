@@ -7,7 +7,7 @@ import { ServiceVaultStack } from '../lib/service-vault-stack';
 //   (votes.vettid.org, for publishing votes; optional), webhookUrl
 //   (required), relayUrl, serviceName, apiClientSecurityGroupId,
 //   apiClientCidr, vpcCidr, adminBootstrapEmail, adminThreshold,
-//   approvalTtl, approvalAllowNoPurpose, testSignIns (staging only), longApprovalChallenges (true or absent),recordSealMigrate, recordKeyVersion, and one of alarmTopicArn and
+//   approvalTtl, approvalAllowNoPurpose, testSignIns (staging only), longApprovalChallenges (true or absent), recordSealMigrate, recordKeyVersion, and one of alarmTopicArn and
 //   alarmEmail (required). See
 //   README "Deployment".
 const app = new cdk.App();

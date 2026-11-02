@@ -34,6 +34,18 @@ const MaxApprovalChallengeTTL = 24 * time.Hour
 // then matches what the member vault keeps. (chosen; not in the spec)
 const MaxLongLivedChallenges = 2
 
+// MaxHeldChallenges mirrors the member vault's limit of challenges it holds
+// received from one connection (VAULT-MESSAGING §10.4.1, "4 received"): it
+// drops a fifth without telling the sender. The service then sends a long
+// challenge with 10 minutes instead, so that it sees it expire and can
+// remind. (chosen; not in the spec)
+const MaxHeldChallenges = 4
+
+// ClockSkew is how long past its exp a challenge keeps counting as a place
+// at the member vault: the member's clock may lag the service's.
+// (chosen; not in the spec)
+const ClockSkew = time.Minute
+
 // Errors of Authenticate.
 var (
 	ErrNotStarted = errors.New("peer: not started")
@@ -92,17 +104,18 @@ func (p *Peer) authenticate(ctx context.Context, connID, ctxt, purpose, matchCod
 	if c == nil || c.State != StateActive {
 		return "", ErrNotFound
 	}
+	now := p.now()
 	n := 0
 	for _, ch := range p.challenges {
-		if ch.ConnID == connID {
+		if ch.ConnID == connID && now.Before(ch.Exp) {
 			n++
 		}
 	}
 	if n >= MaxPendingChallenges {
 		return "", ErrLimit
 	}
-	now := p.now()
-	if ttl > peerwire.ConnAuthChallengeTTL && p.longLived(connID, now) >= MaxLongLivedChallenges {
+	if ttl > peerwire.ConnAuthChallengeTTL &&
+		(p.longLived(connID, now) >= MaxLongLivedChallenges || p.held(connID, now) >= MaxHeldChallenges) {
 		ttl = peerwire.ConnAuthChallengeTTL
 	}
 	wc, err := peerwire.NewConnAuthChallenge(p.newID(now), ctxt)
@@ -128,19 +141,50 @@ func (p *Peer) authenticate(ctx context.Context, connID, ctxt, purpose, matchCod
 	return wc.RequestID, nil
 }
 
+// sentAt is when the challenge was sent: Sent, or for a record that has
+// none, the time in its request id (a ULID).
+func (ch *challenge) sentAt() time.Time {
+	if !ch.Sent.IsZero() {
+		return ch.Sent
+	}
+	if ms, err := ulidMS(ch.ID); err == nil {
+		return time.UnixMilli(int64(ms)).UTC()
+	}
+	return time.Time{}
+}
+
 // long reports whether the challenge was sent with more than the usual
 // 10 minutes (one of the member vault's long-lived places).
 func (ch *challenge) long() bool {
-	return !ch.Sent.IsZero() && ch.Exp.Sub(ch.Sent) > peerwire.ConnAuthChallengeTTL
+	sent := ch.sentAt()
+	return !sent.IsZero() && ch.Exp.Sub(sent) > peerwire.ConnAuthChallengeTTL
+}
+
+// holds reports whether the challenge may still hold a place at the member
+// vault: pending, or cancelled without a withdraw reaching the outbox
+// (ch.Gone), or just expired, until its exp plus ClockSkew.
+func (ch *challenge) holds(now time.Time) bool {
+	return now.Before(ch.Exp.Add(ClockSkew))
 }
 
 // longLived counts the long challenges to connID that may still hold a
-// place at the member vault: those pending and those cancelled without a
-// withdraw reaching the outbox (ch.Gone), until their exp.
+// long-lived place at the member vault.
 func (p *Peer) longLived(connID string, now time.Time) int {
 	n := 0
 	for _, ch := range p.challenges {
-		if ch.ConnID == connID && ch.long() && now.Before(ch.Exp) {
+		if ch.ConnID == connID && ch.long() && ch.holds(now) {
+			n++
+		}
+	}
+	return n
+}
+
+// held counts the challenges to connID that may still be held at the
+// member vault, of every purpose.
+func (p *Peer) held(connID string, now time.Time) int {
+	n := 0
+	for _, ch := range p.challenges {
+		if ch.ConnID == connID && ch.holds(now) {
 			n++
 		}
 	}
@@ -172,9 +216,9 @@ func (p *Peer) CancelChallenge(ctx context.Context, requestID string) (bool, err
 			withdrawn = p.sendInnerExp(c, peerwire.TypeConnAuthWithdraw, peerwire.ConnAuthWithdrawBody(requestID), ch.Exp, now) != ""
 		}
 	}
-	if !withdrawn && ch.long() && now.Before(ch.Exp) {
+	if !withdrawn && now.Before(ch.Exp) {
 		// The member vault may still hold it: keep its place counted until
-		// its exp, but answer to nothing.
+		// its exp (and the skew), but answer to nothing.
 		ch.Gone = true
 	} else {
 		delete(p.challenges, requestID)
@@ -261,17 +305,23 @@ func (p *Peer) connAuthRotated(c *Connection, body []byte) {
 	p.markDirty(kindConn, c.ID)
 }
 
-// expireChallenges ends the challenges past their exp: signin.expired.
+// expireChallenges ends the challenges past their exp: signin.expired. A
+// record stays, marked Gone, until its exp plus ClockSkew, so that its
+// place at the member vault is still counted.
 func (p *Peer) expireChallenges(now time.Time) {
 	for id, ch := range p.challenges {
 		if now.Before(ch.Exp) {
 			continue
 		}
-		delete(p.challenges, id)
-		p.markDirty(kindAuth, id)
 		if ch.Gone {
-			continue // cancelled earlier: its place is free now, nothing to report
+			if !ch.holds(now) {
+				delete(p.challenges, id)
+				p.markDirty(kindAuth, id)
+			}
+			continue // cancelled or reported already
 		}
+		ch.Gone = true
+		p.markDirty(kindAuth, id)
 		tag := ""
 		if c := p.conns[ch.ConnID]; c != nil {
 			tag = c.Tag

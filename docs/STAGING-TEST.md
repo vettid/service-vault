@@ -116,7 +116,11 @@ held for its daily owner check (§3.6.3) shows it after the owner check, if
 that comes within the hour; `sv remind <approval_id>` sends only to an
 admin holding no live challenge, and otherwise says there is nothing to
 remind. The service vault cannot see a member vault shorten a challenge,
-so it sends at most 2 long ones per connection at a time. Without the flag
+so it sends at most 2 long ones per connection at a time (and none while
+4 are held). A challenge the member vault loses for another reason (a
+vault restore, a deposit refused for good) leaves that admin unremindable
+until the challenge's expiry, at most 1 hour here; there is no forced
+re-send. Without the flag
 (older member vaults) the challenge lives 10 minutes and a held vault
 misses it: `sv approval <approval_id>` prints `remind needed:
 <connection_id> (svctl remind <approval_id>)` and the service vault sends

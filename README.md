@@ -667,7 +667,14 @@ admin's connection.
     uses the member vault's approval bucket, below), at most once per 10
     minutes per approval; with none it answers `nothing_to_remind` (409)
     before `too_soon`, and `svctl remind` says so and exits 0 (`too_soon`
-    exits non-zero) (chosen; not in the spec).
+    exits non-zero) (chosen; not in the spec). The same holds for the
+    member vault's limit of 4 challenges held per connection: a long
+    challenge sent while 4 are held (live ones and withdraws not queued,
+    counted until their expiry plus a minute for clock skew) goes with 10
+    minutes. Known limit: a challenge the member vault loses for another
+    reason (a vault restore, a deposit refused for good) leaves that admin
+    unremindable until the challenge's expiry, at most 24 h (1 h on
+    staging); there is no forced re-send.
   - Without it (the default, for member vaults before release 26) each
     challenge lives 10 minutes and the service vault reports a run-out challenge as below. When a
     challenge runs out while the approval is open the service vault sends

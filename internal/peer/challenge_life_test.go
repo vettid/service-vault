@@ -113,7 +113,107 @@ func TestLongLivedChallengeLimit(t *testing.T) {
 			t.Fatalf("event %s for a cancelled challenge", e.Type)
 		}
 	}
+	// At exp the places still count for the clock skew, then they are free.
+	if _, d := send(long); d != short {
+		t.Fatalf("at exp %v", d)
+	}
+	f.clk.Advance(ClockSkew)
+	f.tick()
 	if _, d := send(long); d != long {
 		t.Fatalf("after the places ended %v", d)
+	}
+}
+
+// The member vault holds at most 4 challenges from a connection and drops a
+// fifth silently; a long approval challenge past that is sent with 10
+// minutes, so that its expiry is seen (VAULT-MESSAGING §10.4.1).
+func TestHeldChallengeLimit(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "tag")
+	ctx := context.Background()
+	short := peerwire.ConnAuthChallengeTTL
+	expOf := func(purpose string, ttl time.Duration) (string, time.Duration) {
+		t.Helper()
+		n := len(m.Received(peerwire.TypeConnAuthChallenge))
+		id, err := f.p.Authenticate(ctx, cid, "x", purpose, ttl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.pump()
+		return id, m.Received(peerwire.TypeConnAuthChallenge)[n].Exp.Sub(f.clk.Now())
+	}
+	// A sign-in and three short approvals fill the four places.
+	s, _ := expOf(peerwire.PurposeSignIn, 0)
+	for i := 0; i < 3; i++ {
+		if _, d := expOf(peerwire.PurposeApproval, 0); d != short {
+			t.Fatal(d)
+		}
+	}
+	if _, d := expOf(peerwire.PurposeApproval, 6*time.Hour); d != short {
+		t.Fatalf("a fifth place %v", d)
+	}
+	// Withdrawn: a place is free, and a long one is long again.
+	if ok, err := f.p.CancelChallenge(ctx, s); !ok || err != nil {
+		t.Fatal(ok, err)
+	}
+	f.pump()
+	// The fifth (10 minutes) still holds a place: 4 held.
+	if _, d := expOf(peerwire.PurposeApproval, 6*time.Hour); d != short {
+		t.Fatalf("still four held %v", d)
+	}
+	f.clk.Advance(short + ClockSkew)
+	f.tick()
+	if _, d := expOf(peerwire.PurposeApproval, 6*time.Hour); d != 6*time.Hour {
+		t.Fatalf("after the places ended %v", d)
+	}
+}
+
+// A long challenge keeps its place until exp plus the clock skew.
+func TestLongPlaceSkewBoundary(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "tag")
+	ctx := context.Background()
+	long := time.Hour
+	for i := 0; i < MaxLongLivedChallenges; i++ {
+		if _, err := f.p.Authenticate(ctx, cid, "x", peerwire.PurposeApproval, long); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.pump()
+	next := func() time.Duration {
+		t.Helper()
+		n := len(m.Received(peerwire.TypeConnAuthChallenge))
+		if _, err := f.p.Authenticate(ctx, cid, "x", peerwire.PurposeApproval, long); err != nil {
+			t.Fatal(err)
+		}
+		f.pump()
+		return m.Received(peerwire.TypeConnAuthChallenge)[n].Exp.Sub(f.clk.Now())
+	}
+	f.clk.Advance(long + ClockSkew - time.Second)
+	f.tick()
+	if d := next(); d != peerwire.ConnAuthChallengeTTL {
+		t.Fatalf("inside the skew %v", d)
+	}
+	f.clk.Advance(time.Second)
+	f.tick()
+	if d := next(); d != long {
+		t.Fatalf("at exp plus the skew %v", d)
+	}
+}
+
+// A record without Sent takes the send time from its ULID.
+func TestLongWithoutSent(t *testing.T) {
+	f := newFixture(t)
+	now := f.clk.Now()
+	id := f.p.newID(now)
+	ch := &challenge{ID: id, Exp: now.Add(time.Hour)}
+	if !ch.long() {
+		t.Fatal("a one-hour challenge without Sent is not long")
+	}
+	ch.Exp = now.Add(5 * time.Minute)
+	if ch.long() {
+		t.Fatal("a 5-minute challenge is long")
 	}
 }

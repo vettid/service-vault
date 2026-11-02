@@ -300,9 +300,10 @@ type challenge struct {
 	Exp       time.Time `json:"exp"`
 	// Sent is when it was sent: with Exp it tells a long-lived challenge.
 	Sent time.Time `json:"sent,omitzero"`
-	// Gone marks a long challenge cancelled whose withdraw was not queued:
-	// forgotten for every purpose but the count of the member vault's
-	// long-lived places, until Exp.
+	// Gone marks a challenge that is over for us (cancelled with its withdraw
+	// not queued, or expired) but may still hold a place at the member
+	// vault: forgotten for every purpose but that count, until Exp plus
+	// ClockSkew.
 	Gone bool `json:"gone,omitempty"`
 }
 
