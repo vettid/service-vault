@@ -203,7 +203,10 @@ describe('compute', () => {
     expect(envOf({}).SV_LONG_APPROVAL_CHALLENGES).toBeUndefined();
     expect(envOf({ longApprovalChallenges: false }).SV_LONG_APPROVAL_CHALLENGES).toBeUndefined();
     expect(envOf({ longApprovalChallenges: true }).SV_LONG_APPROVAL_CHALLENGES).toBe('true');
-    expect(envOf({ envName: 'prod', longApprovalChallenges: true }).SV_LONG_APPROVAL_CHALLENGES).toBe('true');
+    expect(envOf({ envName: 'staging', longApprovalChallenges: true }).SV_LONG_APPROVAL_CHALLENGES).toBe('true');
+    // Production waits for a production member-vault release with 0.82.0.
+    expect(() => synth({ envName: 'prod', longApprovalChallenges: true })).toThrow(/longApprovalChallenges/);
+    expect(envOf({ envName: 'prod' }).SV_LONG_APPROVAL_CHALLENGES).toBeUndefined();
   });
 
   test('testSignIns: SV_TEST_SIGNINS only on staging with the flag', () => {

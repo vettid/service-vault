@@ -107,7 +107,7 @@ a real service's members sign in themselves.
 3. Operator: `status: approved`; `sv audit` shows the request and the
    signed answer.
 
-On staging an approval lasts at most 1 hour (`SV_CHANNEL=staging`; the
+On staging an approval lasts at most 1 hour (`SV_CHANNEL=staging`, which the stack sets; a staging run outside it must set it itself, the default being production; the
 stack refuses a longer `approvalTtl`). Deploy with `-c
 longApprovalChallenges=true` only once the staging member vault is on
 release 26 or later (VAULT-MESSAGING 0.82.0 §10.4). Then an approval

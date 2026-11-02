@@ -289,6 +289,9 @@ export class ServiceVaultStack extends cdk.Stack {
       throw new Error(`alarmEmail must be an address (got "${props.alarmEmail}")`);
     }
     const approvalEnv: Record<string, string> = { SV_CHANNEL: channel };
+    if (props.longApprovalChallenges && channel === 'production') {
+      throw new Error('longApprovalChallenges is refused for envName "prod": production waits for a production member-vault release with VAULT-MESSAGING 0.82.0');
+    }
     if (props.longApprovalChallenges) approvalEnv.SV_LONG_APPROVAL_CHALLENGES = 'true';
     if (props.adminBootstrapEmail) approvalEnv.SV_ADMIN_BOOTSTRAP_EMAIL = props.adminBootstrapEmail;
     if (props.adminThreshold !== undefined) approvalEnv.SV_ADMIN_THRESHOLD = String(props.adminThreshold);
