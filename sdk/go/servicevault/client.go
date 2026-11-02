@@ -331,18 +331,21 @@ type Denier struct {
 
 // Approval reports an approval.
 type Approval struct {
-	ID         string     `json:"approval_id"`
-	Action     string     `json:"action"`
-	Summary    string     `json:"summary"`
-	ActionHash string     `json:"action_hash"`
-	Status     string     `json:"status"`
-	Reason     string     `json:"reason,omitempty"` // with denied: denied | admins_removed
-	Threshold  int        `json:"threshold"`
-	Admins     []string   `json:"admins"` // the admins asked
-	Approvals  []Approver `json:"approvals"`
-	Denials    []Denier   `json:"denials"`
-	CreatedAt  time.Time  `json:"created_at"`
-	ExpiresAt  time.Time  `json:"expires_at"`
+	ID         string `json:"approval_id"`
+	Action     string `json:"action"`
+	Summary    string `json:"summary"`
+	ActionHash string `json:"action_hash"`
+	// Payload is the canonical payload the hash covers; for admin.repin it
+	// carries the new_key the service filled in.
+	Payload   json.RawMessage `json:"payload,omitempty"`
+	Status    string          `json:"status"`
+	Reason    string          `json:"reason,omitempty"` // with denied: denied | admins_removed
+	Threshold int             `json:"threshold"`
+	Admins    []string        `json:"admins"` // the admins asked
+	Approvals []Approver      `json:"approvals"`
+	Denials   []Denier        `json:"denials"`
+	CreatedAt time.Time       `json:"created_at"`
+	ExpiresAt time.Time       `json:"expires_at"`
 	// RemindNeeded, while pending: the admins who have not answered and
 	// hold no live challenge (it ran out after 10 minutes, or could not
 	// be sent); RemindApproval challenges them again.

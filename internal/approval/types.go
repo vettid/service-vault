@@ -60,6 +60,9 @@ const (
 const (
 	ReasonKeyChanged  = "key_changed"
 	ReasonNotRepinned = "not_repinned"
+	// ReasonLegacy: a governance approval stored before approvals were
+	// checked against a governance key.
+	ReasonLegacy = "legacy_unpinned"
 )
 
 // Reasons of the migration of governance keys (AuditGovKeyMigrated and
@@ -287,6 +290,8 @@ type Approver struct {
 	Counted bool `json:"counted"`
 	// Reason, with Counted false: key_changed, key_changed or not_repinned.
 	Reason string `json:"reason,omitempty"`
+
+	legacy bool // read without a counted field (UnmarshalJSON)
 }
 
 // UnmarshalJSON reads an approval stored before Counted existed: it counted
@@ -306,6 +311,8 @@ func (a *Approver) UnmarshalJSON(b []byte) error {
 	a.Counted = !a.KeyChanged
 	if p.Counted != nil {
 		a.Counted = *p.Counted
+	} else {
+		a.legacy = true // on a governance action, record.load sets it aside
 	}
 	return nil
 }
@@ -325,18 +332,21 @@ type Denier struct {
 
 // Status is what became of an approval.
 type Status struct {
-	ID         string     `json:"approval_id"`
-	Action     string     `json:"action"`
-	Summary    string     `json:"summary"`
-	ActionHash string     `json:"action_hash"`
-	Status     string     `json:"status"`
-	Reason     string     `json:"reason,omitempty"` // with denied
-	Threshold  int        `json:"threshold"`
-	Admins     []string   `json:"admins"` // the admins asked
-	Approvals  []Approver `json:"approvals"`
-	Denials    []Denier   `json:"denials"`
-	CreatedAt  time.Time  `json:"created_at"`
-	ExpiresAt  time.Time  `json:"expires_at"`
+	ID         string `json:"approval_id"`
+	Action     string `json:"action"`
+	Summary    string `json:"summary"`
+	ActionHash string `json:"action_hash"`
+	// Payload is the canonical payload the hash covers (the service may
+	// have added to it: admin.repin's new_key).
+	Payload   json.RawMessage `json:"payload,omitempty"`
+	Status    string          `json:"status"`
+	Reason    string          `json:"reason,omitempty"` // with denied
+	Threshold int             `json:"threshold"`
+	Admins    []string        `json:"admins"` // the admins asked
+	Approvals []Approver      `json:"approvals"`
+	Denials   []Denier        `json:"denials"`
+	CreatedAt time.Time       `json:"created_at"`
+	ExpiresAt time.Time       `json:"expires_at"`
 	// AskBudget, while pending: those of RemindNeeded at the ask budget.
 	AskBudget []AskBudget `json:"ask_budget,omitempty"`
 	// RemindNeeded, while pending: the admins asked who have not answered

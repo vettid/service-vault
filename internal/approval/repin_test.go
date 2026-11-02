@@ -5,9 +5,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/vettid/service-vault/internal/peer"
 )
 
 var (
@@ -256,6 +259,7 @@ func TestGovKeyMigrationFromEvidence(t *testing.T) {
 	f.p.active["c4"] = true
 	c := f.create(ActionAdminSetAdd, "", `{"connection_id":"c4"}`)
 	f.answer("c1", "approve") // signed with the fixture's 0x11 key
+	f.legacy(c.ID, "c1")
 	signed := bytes.Repeat([]byte{0x11}, 32)
 	f.moved("c1", keyB) // the connection holds another key now
 	f.p.gov = map[string][]byte{"c1": nil, "c2": nil, "c3": nil}
@@ -353,5 +357,125 @@ func TestApproverLegacyCounted(t *testing.T) {
 		if err := json.Unmarshal([]byte(in), &a); err != nil || a.Counted != want {
 			t.Errorf("%s: counted %v, %v", in, a.Counted, err)
 		}
+	}
+}
+
+// legacy rewrites approval id as an earlier release stored it: the
+// approvals of conns without a counted field.
+func (f *fixture) legacy(id string, conns ...string) {
+	f.t.Helper()
+	ctx := context.Background()
+	data, ok, err := f.st.Get(ctx, kindApproval, id)
+	if err != nil || !ok {
+		f.t.Fatalf("get: %v", err)
+	}
+	var v map[string]json.RawMessage
+	if err := json.Unmarshal(data, &v); err != nil {
+		f.t.Fatal(err)
+	}
+	var aps []map[string]any
+	for _, c := range conns {
+		aps = append(aps, map[string]any{"connection_id": c, "at": f.clk.Now(), "key_changed": false})
+	}
+	v["approvals"], _ = json.Marshal(aps)
+	out, _ := json.Marshal(v)
+	if err := f.st.Apply(ctx, []peer.Change{{Kind: kindApproval, ID: id, Data: out}}); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// flakyStore fails the writes of approval records while fail is set.
+type flakyStore struct {
+	peer.Store
+	fail bool
+}
+
+func (s *flakyStore) Apply(ctx context.Context, ch []peer.Change) error {
+	if s.fail {
+		for _, c := range ch {
+			if c.Kind == kindApproval {
+				return errors.New("store down")
+			}
+		}
+	}
+	return s.Store.Apply(ctx, ch)
+}
+
+// A governance approval stored without Counted never stands, whatever
+// happens to the migration; pending and approved-unused ones are ended.
+func TestLegacyGovernanceApprovalsNeverStand(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, 1, "c1", "c2")
+	f.p.active["c3"] = true
+	a := f.create(ActionAdminSetAdd, "", `{"connection_id":"c3"}`)
+	f.legacy(a.ID, "c1")
+	r, _ := f.m.load(ctx, a.ID)
+	if n := r.standing([]string{"c1", "c2"}); n != 0 || r.Approvals[0].Counted || r.Approvals[0].Reason != ReasonLegacy {
+		t.Fatalf("standing %d %+v", n, r.Approvals)
+	}
+	// An approved, unused proposal.create is refused by Consume.
+	pl := canonProposal(t, proposalInput())
+	p := f.built(ActionProposalCreate, pl)
+	f.answer("c1", "approve")
+	f.legacy(p.ID, "c1")
+	if code := codeOf(f.consume(p.ID, ActionProposalCreate, pl)); code != CodeApprovalNotApproved {
+		t.Fatalf("consume: %q", code)
+	}
+	// A vote.extend already used stays as it is; an unused one is expired.
+	ext := canonExtension(t, extensionInput())
+	e := f.built(ActionVoteExtend, ext)
+	f.answer("c1", "approve")
+	f.legacy(e.ID, "c1")
+	// The migration: a flaky store fails the expiry; the marker is not
+	// written, and the next tick ends them.
+	fs := &flakyStore{Store: f.st}
+	f.m.Store = fs
+	f.p.gov = map[string][]byte{"c1": nil, "c2": nil}
+	fs.fail = true
+	if err := f.m.Tick(ctx); err == nil {
+		t.Fatal("tick did not fail with the store down")
+	}
+	if _, done, _ := f.st.Get(ctx, kindGovMig, govMigID); done || f.m.govDone {
+		t.Fatal("marker written after a failed expiry")
+	}
+	if len(f.govKey("c1")) == 0 {
+		t.Fatal("pins lost") // pinned before the failed expiry
+	}
+	fs.fail = false
+	if err := f.m.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, done, _ := f.st.Get(ctx, kindGovMig, govMigID); !done || !f.m.govDone {
+		t.Fatal("no marker")
+	}
+	for _, id := range []string{a.ID, p.ID, e.ID} {
+		if s := f.status(id); s.Status != StatusExpired || s.Reason != ReasonGovMigrated {
+			t.Errorf("%s: %+v", id, s)
+		}
+	}
+	// A restart (a new manager) finds the marker and does nothing more.
+	g := &Manager{Peer: f.p, Store: f.st, Pager: f.st, Now: f.clk.Now, Threshold: 1, Log: f.m.Log}
+	if err := g.Tick(ctx); err != nil || !g.govDone {
+		t.Fatalf("restart: %v", err)
+	}
+}
+
+// A used approval is not expired by the migration.
+func TestMigrationLeavesUsedApprovalsAlone(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, 1, "c1")
+	pl := canonProposal(t, proposalInput())
+	p := f.built(ActionProposalCreate, pl)
+	f.answer("c1", "approve")
+	if err := f.consume(p.ID, ActionProposalCreate, pl); err != nil {
+		t.Fatal(err)
+	}
+	f.legacy(p.ID, "c1")
+	f.tick()
+	if s := f.status(p.ID); s.Status != StatusApproved {
+		t.Fatalf("%+v", s)
+	}
+	if _, done, _ := f.st.Get(ctx, kindGovMig, govMigID); !done {
+		t.Fatal("no marker")
 	}
 }

@@ -461,6 +461,7 @@ func (c *cli) approveAndFollow(ctx context.Context, req servicevault.ApprovalReq
 	}
 	c.printf("approval_id: %s\naction_hash: %s\nexpires_at: %s\n", ap.ID, ap.ActionHash, ap.ExpiresAt.UTC().Format(time.RFC3339))
 	summary := req.Summary
+	hashPayload := req.Payload // what the action hash covers
 	title := ""
 	if req.Action == servicevault.ActionVoteExtend {
 		if title, err = c.proposalTitle(ctx, req.Payload); err != nil {
@@ -484,6 +485,20 @@ func (c *cli) approveAndFollow(ctx context.Context, req servicevault.ApprovalReq
 		}
 		summary = st.Summary
 		c.printf("summary: %s\n", summary)
+		if req.Action == servicevault.ActionAdminRepin && !strings.Contains(string(req.Payload), "new_key") {
+			// The service filled in new_key (the connection's credential
+			// key now): the hash covers the payload it returns, which must
+			// be the one given with that key added.
+			var got, asked struct {
+				ConnectionID string `json:"connection_id"`
+				NewKey       string `json:"new_key"`
+			}
+			if json.Unmarshal(st.Payload, &got) != nil || json.Unmarshal(req.Payload, &asked) != nil ||
+				got.ConnectionID != asked.ConnectionID || got.NewKey == "" {
+				return ap.ID, errors.New("the payload the service approved is not the one asked for")
+			}
+			hashPayload = st.Payload
+		}
 	} else if want, built, err := ballot.SummaryFor(req.Action, req.Payload, title); err != nil {
 		return ap.ID, fmt.Errorf("the payload can't be summarized: %w", err)
 	} else if built {
@@ -497,15 +512,10 @@ func (c *cli) approveAndFollow(ctx context.Context, req servicevault.ApprovalReq
 		summary = want
 		c.printf("summary: %s\n", want)
 	}
-	if req.Action == servicevault.ActionAdminRepin && !strings.Contains(string(req.Payload), "new_key") {
-		// The service filled in new_key (the connection's credential key
-		// now), so the payload it hashed is not the one given here.
-		c.printf("action_hash_check: skipped (the service filled in new_key; compare the key fingerprints with the admin)\n")
-	} else if h, err := servicevault.ActionHash(req.Action, summary, req.Payload); err != nil || h != ap.ActionHash {
+	if h, err := servicevault.ActionHash(req.Action, summary, hashPayload); err != nil || h != ap.ActionHash {
 		return ap.ID, errors.New("the action hash does not match the one computed here")
-	} else {
-		c.printf("action_hash_check: ok\n")
 	}
+	c.printf("action_hash_check: ok\n")
 	c.printf("%s", askBudgetLines(ap.AskBudget))
 	var told string // the remind-needed line last printed
 	err = c.follow(ctx, wait, func(ctx context.Context) (bool, error) {
@@ -531,9 +541,9 @@ func (c *cli) approveAndFollow(ctx context.Context, req servicevault.ApprovalReq
 	return ap.ID, err
 }
 
-// repinKeys is the two key fingerprints of an admin.repin summary: 16 hex
-// digits in 4 groups each.
-var repinKeys = regexp.MustCompile(`, old key [0-9a-f]{4}( [0-9a-f]{4}){3}, new key [0-9a-f]{4}( [0-9a-f]{4}){3}, connection `)
+// repinKeys is the new key's fingerprint of an admin.repin summary (16 hex
+// digits in 4 groups) and when the key changed (or that it is not recorded).
+var repinKeys = regexp.MustCompile(`, new key [0-9a-f]{4}( [0-9a-f]{4}){3}, (key changed [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2} UTC|key changed time not recorded), connection `)
 
 // addedKey is the key fingerprint of an admin_set.add summary: 16 hex
 // digits in 4 groups.

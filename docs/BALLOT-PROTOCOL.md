@@ -205,7 +205,20 @@ may now hold that credential. An admin whose key changed is re-pinned only
 by the other admins' approval, who first ask them out of band whether they
 recovered or replaced their vault's keys at the time the summary names; a
 member's app will show its own credential-key fingerprint in a later
-release. Its payload is the input
+release.
+
+The governance key is pinned at exactly these moments: when the
+connection first signs a response (the first sign-in), when
+`admin_set.add` is applied (the credential key whose fingerprint the
+approval showed, and only if it is still the connection's), when the
+bootstrap makes the first admin (only if none is pinned yet), and, for an
+admin from before the governance key existed, at the migration (the key of
+the earliest signed approval in the audit log, else the current credential
+key). Nothing else moves it but a rotation chain that starts at it and the
+other admins' `admin.repin`. Known limits: the migration can only use
+the approvals the audit log holds, so an admin who never approved is pinned
+to whatever key they hold then; and the fingerprints shown to the admins
+are 64 bits (16 hex digits) of a SHA-256. Its payload is the input
 in JCS form with every field present, parsed strictly (§2).
 
 Before creating, the service checks, in one step that no other request

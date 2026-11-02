@@ -28,14 +28,15 @@ import (
 // Record kinds the manager keeps in the peer's store (DynamoDB in a
 // deployment).
 const (
-	kindApproval = "apv"        // an approval
-	kindOpen     = "apv_open"   // approval id -> "" while it is pending
-	kindReq      = "apv_req"    // challenge request id -> approval id
-	kindSeen     = "apv_seen"   // peer event id -> "": an answer already handled
-	kindAdmins   = "admin_set"  // "admins" -> the admin set
-	kindBoot     = "admin_boot" // "state" -> the bootstrap state (bootState)
-	kindAsks     = "apv_asks"   // admin connection id -> its newest approval challenges (askLog)
-	kindUsed     = "apv_used"   // approval id -> when it was used (Consume); written once (IfAbsent), never changed
+	kindApproval = "apv"          // an approval
+	kindOpen     = "apv_open"     // approval id -> "" while it is pending
+	kindReq      = "apv_req"      // challenge request id -> approval id
+	kindSeen     = "apv_seen"     // peer event id -> "": an answer already handled
+	kindAdmins   = "admin_set"    // "admins" -> the admin set
+	kindBoot     = "admin_boot"   // "state" -> the bootstrap state (bootState)
+	kindAsks     = "apv_asks"     // admin connection id -> its newest approval challenges (askLog)
+	kindGovMig   = "gov_migrated" // "done" -> when the governance key migration finished (migrateGov)
+	kindUsed     = "apv_used"     // approval id -> when it was used (Consume); written once (IfAbsent), never changed
 	// HookKind is the kind of the approvals' webhook Outbox: an event
 	// waiting to be delivered.
 	HookKind = "apv_hook"
@@ -437,6 +438,17 @@ func (m *Manager) load(ctx context.Context, id string) (*record, error) {
 	r := &record{}
 	if err := json.Unmarshal(data, r); err != nil {
 		return nil, err
+	}
+	// An approval of a governance action stored before approvals carried
+	// Counted was never checked against a governance key: it never stands
+	// (and stays set aside once the record is saved again).
+	for i := range r.Approvals {
+		if a := &r.Approvals[i]; a.legacy {
+			a.legacy = false
+			if Governance(r.Action) {
+				a.Counted, a.Reason = false, ReasonLegacy
+			}
+		}
 	}
 	return r, nil
 }
@@ -983,7 +995,7 @@ func (m *Manager) Status(ctx context.Context, id string) (*Status, error) {
 		return nil, ErrNotFound
 	}
 	st := &Status{ID: r.ID, Action: r.Action, Summary: r.Summary, ActionHash: r.Hash, Status: r.Status, Reason: r.Reason,
-		Threshold: r.Threshold, Admins: r.Admins, Approvals: r.Approvals, Denials: r.Denials, CreatedAt: r.Created,
+		Payload: r.Payload, Threshold: r.Threshold, Admins: r.Admins, Approvals: r.Approvals, Denials: r.Denials, CreatedAt: r.Created,
 		ExpiresAt: r.Exp, Applied: r.Applied, RemindNeeded: []string{}}
 	if r.Action == ActionProposalCreate || r.Action == ActionVoteExtend {
 		if data, ok, err := m.Store.Get(ctx, kindUsed, id); err != nil {
@@ -1667,9 +1679,11 @@ func (m *Manager) bootstrap(ctx context.Context, connID string) error {
 		}
 		return nil
 	}
-	// Pinned now if it has a credential key; otherwise by its first sign-in.
+	// Pinned now if it has a credential key and no governance key yet (its
+	// first sign-in pinned one: a key signed in since is not pinned
+	// unseen); otherwise by its first sign-in.
 	if m.Peer != nil {
-		if _, err := m.Peer.PinGov(ctx, connID, nil, false); err != nil && !errors.Is(err, peer.ErrNotFound) {
+		if _, err := m.Peer.PinGov(ctx, connID, nil, true); err != nil && !errors.Is(err, peer.ErrNotFound) {
 			return err
 		}
 	}
@@ -1937,6 +1951,12 @@ func (m *Manager) migrateGov(ctx context.Context) error {
 	if m.Peer == nil || m.govDone {
 		return nil
 	}
+	if _, done, err := m.Store.Get(ctx, kindGovMig, govMigID); err != nil {
+		return err
+	} else if done {
+		m.govDone = true
+		return nil
+	}
 	set, err := m.admins(ctx)
 	if err != nil {
 		return err
@@ -1954,15 +1974,12 @@ func (m *Manager) migrateGov(ctx context.Context) error {
 			keys[a] = info.AuthKey
 		}
 	}
-	if len(todo) == 0 {
-		m.govDone = !notReady
-		return nil
+	var ev map[string]*govEvidence
+	if len(todo) > 0 {
+		if ev, err = m.govEvidence(ctx, todo); err != nil {
+			return err
+		}
 	}
-	ev, err := m.govEvidence(ctx, todo)
-	if err != nil {
-		return err
-	}
-	migrated := 0
 	for _, a := range todo {
 		key, why, changed := keys[a], ReasonNoEvidence, false
 		if e := ev[a]; e != nil && e.first != nil {
@@ -1978,7 +1995,6 @@ func (m *Manager) migrateGov(ctx context.Context) error {
 		if !ok {
 			continue
 		}
-		migrated++
 		b := m.batch(m.now())
 		if err := b.audit(&AuditEntry{Type: AuditGovKeyMigrated, ConnectionID: a, Reason: why, Key: key,
 			Fingerprint: compactFP(fingerprint(ckFPLabel, key)), KeyChangesSeen: changed}); err != nil {
@@ -1989,14 +2005,31 @@ func (m *Manager) migrateGov(ctx context.Context) error {
 		}
 		m.log().Info("governance key pinned", "connection_id", a, "reason", why, "key_is_current", bytes.Equal(key, keys[a]), "key_changes_seen", changed)
 	}
-	if migrated > 0 {
-		if err := m.expireGovPending(ctx); err != nil {
-			return err
-		}
+	if notReady {
+		return nil // the peer has not loaded every admin's connection yet: again at the next tick
 	}
-	m.govDone = !notReady
+	// Every admin is pinned: end what was counted before a governance key
+	// was checked, then record that the migration is done. A failure in
+	// between leaves no marker, so the next tick ends them again (a
+	// governance approval stored without Counted never stands meanwhile).
+	if err := m.expireLegacyGov(ctx); err != nil {
+		return err
+	}
+	b := m.batch(m.now())
+	if err := b.put(kindGovMig, govMigID, &struct {
+		At time.Time `json:"at"`
+	}{b.now.UTC()}, time.Time{}); err != nil {
+		return err
+	}
+	if err := b.apply(ctx); err != nil {
+		return err
+	}
+	m.govDone = true
 	return nil
 }
+
+// govMigID is the id of the stored marker that migrateGov has finished.
+const govMigID = "done"
 
 // govEvidence reads the audit log for the credential keys of conns' signed
 // approvals since each became an admin.
@@ -2034,10 +2067,13 @@ func (m *Manager) govEvidence(ctx context.Context, conns []string) (map[string]*
 	}
 }
 
-// expireGovPending ends the open governance approvals that hold approvals:
-// they were counted before a governance key was checked.
-func (m *Manager) expireGovPending(ctx context.Context) error {
-	open, err := m.Store.Load(ctx, kindOpen)
+// expireLegacyGov ends the governance approvals that were counted before
+// approvals were checked against a governance key: those still pending with
+// approvals, and the approved proposal.create and vote.extend not yet used
+// (Consume). The admins approve again. Records written since carry Counted
+// and are left alone.
+func (m *Manager) expireLegacyGov(ctx context.Context) error {
+	recs, err := m.Store.Load(ctx, kindApproval)
 	if err != nil {
 		return err
 	}
@@ -2045,12 +2081,23 @@ func (m *Manager) expireGovPending(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	for _, o := range open {
-		r, err := m.load(ctx, o.ID)
+	for _, rec := range recs {
+		r, err := m.load(ctx, rec.ID)
 		if err != nil {
 			return err
 		}
-		if r == nil || r.Status != StatusPending || !Governance(r.Action) || len(r.Approvals) == 0 {
+		if r == nil || !Governance(r.Action) || !slices.ContainsFunc(r.Approvals, func(a Approver) bool { return a.Reason == ReasonLegacy }) {
+			continue
+		}
+		switch {
+		case r.Status == StatusPending:
+		case r.Status == StatusApproved && (r.Action == ActionProposalCreate || r.Action == ActionVoteExtend):
+			if _, used, err := m.Store.Get(ctx, kindUsed, r.ID); err != nil {
+				return err
+			} else if used {
+				continue
+			}
+		default:
 			continue
 		}
 		b := m.batch(m.now())
@@ -2104,5 +2151,5 @@ func (m *Manager) Run(ctx context.Context) {
 // their webhook outbox included), for a migration that must touch them
 // all.
 func Kinds() []string {
-	return []string{kindApproval, kindOpen, kindReq, kindSeen, kindAdmins, kindBoot, kindAsks, kindUsed, KindAudit, HookKind}
+	return []string{kindApproval, kindOpen, kindReq, kindSeen, kindAdmins, kindBoot, kindAsks, kindUsed, kindGovMig, KindAudit, HookKind}
 }

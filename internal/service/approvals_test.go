@@ -209,6 +209,10 @@ func TestGovKeyMigrationAfterPeerLoads(t *testing.T) {
 		}
 	}
 
+	// The store is as before the migration existed: no marker either.
+	if err := st.Apply(ctx, []peer.Change{{Kind: "gov_migrated", ID: "done"}}); err != nil {
+		t.Fatal(err)
+	}
 	// A new process: the manager is up and ticking before the peer loads.
 	p2, err := peer.New(peer.Config{Keys: f.keys, Relay: f.w.View(f.keys.Relay), RelayURL: peertest.RelayURL, Store: st, Events: f.svc,
 		Now: f.clk.Now, Log: f.svc.Log, Profile: peer.Profile{FirstName: "VettID", LastName: "Member Service"}})
@@ -264,4 +268,35 @@ func countAudit(t *testing.T, m *approval.Manager, typ string) int {
 		}
 	}
 	return n
+}
+
+// The bootstrap pins the governance key only if none is pinned: a key that
+// signed in between the confirmation and the tick is not pinned unseen
+// over the key of the first sign-in.
+func TestBootstrapDoesNotPinALaterKey(t *testing.T) {
+	f := newFixture(t)
+	m := f.withApprovals(1, "admin-key")
+	ctx := context.Background()
+	admin, _ := f.connect(f.m, "admin-key")
+	pc, pfp, _ := m.BootstrapPending(ctx)
+	if err := m.ConfirmBootstrap(ctx, pc, pfp); err != nil {
+		t.Fatal(err)
+	}
+	// Two sign-ins before the tick: the member's own key, then another.
+	_, other, _ := ed25519.GenerateKey(nil)
+	for i, key := range []ed25519.PrivateKey{f.m.Cred, other} {
+		f.start("admin-key", "", "4"+string(rune('0'+i)))
+		f.pump()
+		f.sign(f.m, f.m.Challenges[len(f.m.Challenges)-1], key)
+	}
+	if err := m.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := m.Admins(ctx); len(a.Admins) != 1 || a.Admins[0] != admin {
+		t.Fatalf("admins %v", a.Admins)
+	}
+	ci, _ := f.p.Connection(admin)
+	if !ed25519.PublicKey(ci.AuthKey).Equal(other.Public()) || !ed25519.PublicKey(ci.GovKey).Equal(f.m.Cred.Public()) {
+		t.Fatalf("auth %x gov %x", ci.AuthKey, ci.GovKey)
+	}
 }
