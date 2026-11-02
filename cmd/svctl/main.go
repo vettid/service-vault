@@ -436,6 +436,7 @@ func (c *cli) approve(ctx context.Context, args []string) error {
 		return errors.New("the action hash does not match the one computed here")
 	}
 	c.printf("action_hash_check: ok\n")
+	c.printf("%s", askBudgetLines(ap.AskBudget))
 	var told string // the remind-needed line last printed
 	return c.follow(ctx, *wait, func(ctx context.Context) (bool, error) {
 		st, err := c.c.Approval(ctx, ap.ID)
@@ -472,7 +473,17 @@ func remindLine(st *servicevault.Approval) string {
 	if st.RemindAfter != nil && now().Before(*st.RemindAfter) {
 		cmd += " after " + st.RemindAfter.UTC().Format("15:04:05Z")
 	}
-	return fmt.Sprintf("remind needed: %s (%s)\n", strings.Join(st.RemindNeeded, ","), cmd)
+	return fmt.Sprintf("remind needed: %s (%s)\n", strings.Join(st.RemindNeeded, ","), cmd) + askBudgetLines(st.AskBudget)
+}
+
+// askBudgetLines says which admins were left out for the ask budget and
+// when each can be asked again; "" when there are none.
+func askBudgetLines(l []servicevault.AskBudget) string {
+	var sb strings.Builder
+	for _, a := range l {
+		fmt.Fprintf(&sb, "ask budget: %s can be asked after %s\n", a.ConnectionID, a.NextAskAt.UTC().Format(time.RFC3339))
+	}
+	return sb.String()
 }
 
 func (c *cli) printApproval(st *servicevault.Approval) {
@@ -541,6 +552,7 @@ func (c *cli) remind(ctx context.Context, args []string) error {
 	for _, id := range r.Reminded {
 		c.printf("reminded: %s\n", id)
 	}
+	c.printf("%s", askBudgetLines(r.AskBudget))
 	return nil
 }
 

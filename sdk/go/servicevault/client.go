@@ -283,6 +283,18 @@ type ApprovalCreated struct {
 	ActionHash string    `json:"action_hash"`
 	Status     string    `json:"status"`
 	ExpiresAt  time.Time `json:"expires_at"`
+	// AskBudget: the admins not asked because they have 5 approval
+	// challenges still counting, with when each can be asked again.
+	AskBudget []AskBudget `json:"ask_budget,omitempty"`
+}
+
+// AskBudget is an admin not asked because of the member vault's approval
+// ask budget (5 per 24 hours).
+type AskBudget struct {
+	ConnectionID string `json:"connection_id"`
+	// NextAskAt: the oldest challenge counted stops counting then (its
+	// expiry plus 24 hours plus the clock skew).
+	NextAskAt time.Time `json:"next_ask_at"`
 }
 
 // Approver is an admin's counted approval.
@@ -318,6 +330,8 @@ type Approval struct {
 	// hold no live challenge (it ran out after 10 minutes, or could not
 	// be sent); RemindApproval challenges them again.
 	RemindNeeded []string `json:"remind_needed"`
+	// AskBudget, while pending: those of RemindNeeded at the ask budget.
+	AskBudget []AskBudget `json:"ask_budget,omitempty"`
 	// RemindAfter, with RemindNeeded: the earliest RemindApproval is
 	// accepted; before it the answer is too_soon.
 	RemindAfter *time.Time `json:"remind_after,omitempty"`
@@ -330,6 +344,9 @@ type Approval struct {
 type Reminder struct {
 	ID       string   `json:"approval_id"`
 	Reminded []string `json:"reminded"` // the admins challenged again
+	// AskBudget: the admins left out because they have 5 approval
+	// challenges still counting.
+	AskBudget []AskBudget `json:"ask_budget,omitempty"`
 }
 
 // Admins is the admin set and the threshold m.

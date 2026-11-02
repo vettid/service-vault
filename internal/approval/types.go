@@ -143,6 +143,15 @@ type Created struct {
 	ActionHash string    `json:"action_hash"`
 	Status     string    `json:"status"`
 	ExpiresAt  time.Time `json:"expires_at"`
+	// AskBudget: the admins left out because of the ask budget (askBudget).
+	AskBudget []AskBudget `json:"ask_budget,omitempty"`
+}
+
+// AskBudget is an admin not asked because 5 approval challenges still
+// count (askBudget), and when that stops being so.
+type AskBudget struct {
+	ConnectionID string    `json:"connection_id"`
+	NextAskAt    time.Time `json:"next_ask_at"` // oldest counting challenge's exp + 24 h + clock skew
 }
 
 // Approver is an admin's counted approval.
@@ -175,6 +184,8 @@ type Status struct {
 	Denials    []Denier   `json:"denials"`
 	CreatedAt  time.Time  `json:"created_at"`
 	ExpiresAt  time.Time  `json:"expires_at"`
+	// AskBudget, while pending: those of RemindNeeded at the ask budget.
+	AskBudget []AskBudget `json:"ask_budget,omitempty"`
 	// RemindNeeded, while pending: the admins asked who have not answered
 	// and hold no live challenge (it ran out, or could not be sent), so
 	// they see nothing on the phone until a reminder.
@@ -192,6 +203,8 @@ type Status struct {
 type Reminder struct {
 	ID       string   `json:"approval_id"`
 	Reminded []string `json:"reminded"` // connection ids challenged again
+	// AskBudget: the admins left out because of the ask budget.
+	AskBudget []AskBudget `json:"ask_budget,omitempty"`
 }
 
 // Admins is the admin set.

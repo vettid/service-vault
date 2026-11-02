@@ -48,8 +48,9 @@ const (
 // counts each challenge it sends until its exp plus askWindow plus
 // peer.ClockSkew. Any 5 in one member window reached it within 24 hours
 // before the next one, so all 5 still count here when that one would be
-// sent: a forced reminder is refused before it could come back as a
-// delayed denial. A suppressed, lost or unsent challenge counts here and
+// sent: every send (a new approval, a reminder, a forced one) skips an
+// admin at the budget, and a forced one is refused, before it could come
+// back as a delayed denial. A suppressed, lost or unsent challenge counts here and
 // not there, which only refuses more.
 const (
 	askBudget = 5
@@ -61,6 +62,20 @@ const (
 // that count longest, at most askBudget, in increasing order.
 type askLog struct {
 	Exp []time.Time `json:"exp"`
+}
+
+// next is when a full log stops being full: its oldest counting entry's end.
+func (l *askLog) next() time.Time {
+	return l.Exp[len(l.Exp)-askBudget].Add(askWindow + peer.ClockSkew)
+}
+
+// budgetEntry reports connID as left out for the budget, if its log is full.
+func (m *Manager) budgetEntry(ctx context.Context, connID string) (AskBudget, bool) {
+	l, err := m.asks(ctx, connID)
+	if err != nil || !l.full(m.now()) {
+		return AskBudget{}, false
+	}
+	return AskBudget{ConnectionID: connID, NextAskAt: l.next().UTC()}, true
 }
 
 // counts reports whether a challenge with this exp still counts at now.
@@ -488,7 +503,7 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 		Threshold: th, Admins: slices.Clone(set), Created: now.UTC().Truncate(time.Millisecond),
 		Exp: now.Add(m.ttl()).UTC().Truncate(time.Second), LastSent: now, Pending: map[string]string{}}
 	b := m.batch(now)
-	sent := m.challenge(ctx, b, r, set, ctxt)
+	sent, skipped, _ := m.challenge(ctx, b, r, set, ctxt)
 	exp := r.Exp
 	if err := errors.Join(b.save(r), b.put(kindOpen, id, "", time.Time{}), b.audit(&AuditEntry{Type: AuditRequested,
 		ApprovalID: id, Action: r.Action, Summary: r.Summary, ActionHash: hash, Payload: payload, Threshold: th,
@@ -501,7 +516,7 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 	}
 	m.log().Info("approval requested", "approval_id", id, "action", r.Action, "threshold", th, "admins", len(set),
 		"challenged", len(sent))
-	return &Created{ID: id, ActionHash: hash, Status: StatusPending, ExpiresAt: r.Exp}, nil
+	return &Created{ID: id, ActionHash: hash, Status: StatusPending, ExpiresAt: r.Exp, AskBudget: skipped}, nil
 }
 
 // challengeTTL is the life of a challenge sent at now for r: the
@@ -517,8 +532,7 @@ func challengeTTL(r *record, now time.Time) time.Duration {
 // An admin who cannot be reached now is skipped (and can be reminded).
 // Each challenge is logged (logAsk) before it is sent; an admin whose log
 // is full or cannot be written is skipped too.
-func (m *Manager) challenge(ctx context.Context, b *batch, r *record, conns []string, ctxt string) []Challenge {
-	var sent []Challenge
+func (m *Manager) challenge(ctx context.Context, b *batch, r *record, conns []string, ctxt string) (sent []Challenge, skipped []AskBudget, full int) {
 	var ttl time.Duration // 0: the connauth default, 10 minutes
 	if m.LongChallenges {
 		ttl = challengeTTL(r, m.now())
@@ -529,6 +543,12 @@ func (m *Manager) challenge(ctx context.Context, b *batch, r *record, conns []st
 		exp := m.now().Add(max(ttl, peerwire.ConnAuthChallengeTTL) + askSlack)
 		if err := m.logAsk(ctx, c, exp); err != nil {
 			m.log().Warn("approval ask log", "approval_id", r.ID, "connection_id", c, "err", errName(err))
+			if errors.Is(err, errAskFull) {
+				full++
+				if e, ok := m.budgetEntry(ctx, c); ok {
+					skipped = append(skipped, e)
+				}
+			}
 			continue
 		}
 		reqID, err := m.Peer.Authenticate(ctx, c, ctxt, peerwire.PurposeApproval, ttl)
@@ -541,7 +561,7 @@ func (m *Manager) challenge(ctx context.Context, b *batch, r *record, conns []st
 			Expires: r.Exp.Add(reqRetention)})
 		sent = append(sent, Challenge{ConnectionID: c, RequestID: reqID})
 	}
-	return sent
+	return sent, skipped, full
 }
 
 // errAskFull is an admin whose askLog is full (askBudget).
@@ -653,6 +673,11 @@ func (m *Manager) Status(ctx context.Context, id string) (*Status, error) {
 				st.RemindNeeded = append(st.RemindNeeded, a)
 			}
 		}
+		for _, a := range st.RemindNeeded {
+			if e, ok := m.budgetEntry(ctx, a); ok {
+				st.AskBudget = append(st.AskBudget, e)
+			}
+		}
 		if len(st.RemindNeeded) > 0 {
 			ra := r.LastSent.Add(RemindInterval).UTC().Truncate(time.Second)
 			st.RemindAfter = &ra
@@ -717,9 +742,9 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 		if slices.Contains(conns, a) {
 			continue
 		}
-		if l, err := m.asks(ctx, a); err != nil {
+		if ok, err := m.canAsk(ctx, a, now); err != nil {
 			return nil, err
-		} else if l.full(now) {
+		} else if !ok {
 			return nil, errCode(CodeAskBudget)
 		}
 		// Forced: any live challenge is withdrawn and a new one sent,
@@ -730,6 +755,7 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 		}
 		conns = append(conns, a)
 	}
+	var skipped []AskBudget
 	cands, limited := 0, 0 // admins to remind; of those left out for a full or unreadable ask log
 	for _, a := range r.Admins {
 		if len(force) > 0 {
@@ -756,6 +782,9 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 		}
 		if !ok {
 			limited++
+			if e, ok := m.budgetEntry(ctx, a); ok {
+				skipped = append(skipped, e)
+			}
 			continue
 		}
 		if old := r.Pending[a]; old != "" && !m.LongChallenges {
@@ -782,7 +811,12 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 		r.Pending = map[string]string{}
 	}
 	b := m.batch(now)
-	sent := m.challenge(ctx, b, r, conns, ctxt)
+	sent, lost, full := m.challenge(ctx, b, r, conns, ctxt)
+	if len(force) == 0 && len(sent) == 0 && full > 0 {
+		// Every send lost a race for the last slot: as if refused.
+		return nil, errCode(CodeAskBudget)
+	}
+	skipped = append(skipped, lost...)
 	r.LastSent = now
 	if err := errors.Join(b.save(r), b.audit(&AuditEntry{Type: AuditReminded, ApprovalID: r.ID, Challenges: sent})); err != nil {
 		return nil, err
@@ -791,7 +825,7 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 		m.cancel(ctx, sent)
 		return nil, err
 	}
-	out := &Reminder{ID: r.ID, Reminded: []string{}}
+	out := &Reminder{ID: r.ID, Reminded: []string{}, AskBudget: skipped}
 	for _, c := range sent {
 		out.Reminded = append(out.Reminded, c.ConnectionID)
 	}

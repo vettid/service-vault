@@ -1509,7 +1509,7 @@ func TestAskLogUnreadable(t *testing.T) {
 			Expires: f.clk.Now().Add(time.Hour)}}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := f.m.Remind(ctx, c.ID, "c1"); err == nil || codeOf(err) != "" {
+		if _, err := f.m.Remind(ctx, c.ID, "c1"); err == nil || (how == "decode") != (codeOf(err) == CodeAskBudget) {
 			t.Fatalf("%s: force: %v", how, err)
 		}
 		if len(f.p.sent) != before || slices.Contains(f.p.cancelled, old.req) {
@@ -1716,5 +1716,88 @@ func TestAskLogStoreError(t *testing.T) {
 	}
 	if _, err := f.m.Remind(context.Background(), c.ID); err == nil || codeOf(err) != "" {
 		t.Fatalf("remind: %v", err)
+	}
+}
+
+// raceStore lets another task write an admin's ask log between this
+// manager's read and its conditional write.
+type raceStore struct {
+	*peer.MemStore
+	once  sync.Once
+	rival []byte
+}
+
+func (s *raceStore) Apply(ctx context.Context, changes []peer.Change) error {
+	for _, c := range changes {
+		if c.Kind == kindAsks {
+			s.once.Do(func() {
+				_ = s.MemStore.Apply(ctx, []peer.Change{{Kind: kindAsks, ID: c.ID, Data: s.rival, Expires: c.Expires}})
+			})
+		}
+	}
+	return s.MemStore.Apply(ctx, changes)
+}
+
+// A plain reminder whose every send loses the race for the last slot is
+// refused (ask_budget), without saving or auditing a reminder.
+func TestRemindLosesRace(t *testing.T) {
+	f := newFixture(t, 1, "c1")
+	c := f.create(ActionVoteOpen, "Open", `{}`)
+	f.clk.Advance(RemindInterval)
+	f.fillAsks("c1", askBudget-1)
+	rival := &askLog{}
+	for i := range askBudget {
+		rival.Exp = append(rival.Exp, f.clk.Now().Add(time.Duration(i+1)*time.Hour))
+	}
+	data, _ := marshal(rival)
+	f.m.Store = &raceStore{MemStore: f.st, rival: data}
+	before := len(f.p.sent)
+	if _, err := f.m.Remind(context.Background(), c.ID); codeOf(err) != CodeAskBudget {
+		t.Fatalf("%v", err)
+	}
+	if len(f.p.sent) != before {
+		t.Fatal("sent after losing the race")
+	}
+	if page, _ := f.m.Audit(context.Background(), "", 20); strings.Contains(fmt.Sprint(page.Entries), AuditReminded) {
+		t.Fatalf("a reminder audit entry: %+v", page.Entries)
+	}
+	if _, err := f.m.Remind(context.Background(), c.ID); codeOf(err) == CodeTooSoon {
+		t.Fatal("the lost race used up the interval")
+	}
+}
+
+// Create, Status and Remind list the admins left out for the budget, with
+// when each can be asked again: the oldest counting challenge's exp plus
+// 24 h plus the clock skew.
+func TestAskBudgetListsAdmins(t *testing.T) {
+	f := newFixture(t, 1, "c1", "c2")
+	f.fillAsks("c1", askBudget)
+	l, _ := f.m.asks(context.Background(), "c1")
+	want := l.Exp[0].Add(askWindow + peer.ClockSkew)
+	check := func(what string, got []AskBudget) {
+		t.Helper()
+		if len(got) != 1 || got[0].ConnectionID != "c1" || !got[0].NextAskAt.Equal(want) {
+			t.Fatalf("%s: %+v, want c1 at %v", what, got, want)
+		}
+	}
+	c, err := f.createErr()
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("create", c.AskBudget)
+	check("status", f.status(c.ID).AskBudget)
+	f.clk.Advance(RemindInterval)
+	f.m.LongChallenges = true
+	f.answerTo(f.p.last("c2"), "expire")
+	r, err := f.m.Remind(context.Background(), c.ID)
+	if err != nil || fmt.Sprint(r.Reminded) != "[c2]" {
+		t.Fatalf("%+v %v", r, err)
+	}
+	check("remind", r.AskBudget)
+	// Nothing left out: the field is omitted.
+	g := f.status(c.ID)
+	g.AskBudget = nil
+	if b, _ := json.Marshal(g); strings.Contains(string(b), "ask_budget") {
+		t.Fatalf("%s", b)
 	}
 }
