@@ -373,15 +373,15 @@ func TestConnectAndSignInAgainstDevStack(t *testing.T) {
 	if ad := call(t, srv, "GET", "/v1/admins", ""); fmt.Sprint(ad["admins"]) != "["+svcConn+"]" {
 		t.Fatalf("admins %v", ad)
 	}
-	ap := call(t, srv, "POST", "/v1/approvals", `{"action":"vote.open","summary":"Open the vote on proposal 7","payload":{"proposal":7}}`)
+	ap := call(t, srv, "POST", "/v1/approvals", `{"action":"contract_template.change","summary":"Open the vote on proposal 7","payload":{"proposal":7}}`)
 	apID, _ := ap["approval_id"].(string)
 	hash, _ := ap["action_hash"].(string)
-	if want, _ := servicevault.ActionHash("vote.open", "Open the vote on proposal 7", json.RawMessage(`{"proposal":7}`)); hash != want {
+	if want, _ := servicevault.ActionHash("contract_template.change", "Open the vote on proposal 7", json.RawMessage(`{"proposal":7}`)); hash != want {
 		t.Fatalf("action hash %q, want %q", hash, want)
 	}
 	pend = m.waitEvent("connection.authenticate.pending", func(b map[string]any) bool {
 		c, _ := b["context"].(string)
-		return b["connection_id"] == connID && strings.Contains(c, "ref "+hash[:8])
+		return b["connection_id"] == connID && strings.Contains(c, "ref "+hash[:16])
 	}, &seen)
 	t.Logf("approval challenge context: %q", pend["context"])
 	_, evs = m.request("connection.authenticate.approve", fmt.Sprintf(`{"request_id":%q}`, pend["request_id"]))

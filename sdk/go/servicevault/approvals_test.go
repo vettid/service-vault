@@ -27,7 +27,7 @@ func TestApprovalsAgainstAPI(t *testing.T) {
 	c := f.client(t)
 	ctx := context.Background()
 
-	if _, err := c.CreateApproval(ctx, servicevault.ApprovalRequest{Action: servicevault.ActionVoteOpen, Summary: "Open",
+	if _, err := c.CreateApproval(ctx, servicevault.ApprovalRequest{Action: servicevault.ActionContractTemplateChange, Summary: "Open",
 		Payload: json.RawMessage(`{}`)}); apiCode(err) != servicevault.CodeUnreachable {
 		t.Fatalf("no admins: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestApprovalsAgainstAPI(t *testing.T) {
 		t.Fatalf("event %#v", got.last())
 	}
 
-	req := servicevault.ApprovalRequest{Action: servicevault.ActionProposalCreate, Summary: "Create proposal 7",
+	req := servicevault.ApprovalRequest{Action: servicevault.ActionContractTemplateChange, Summary: "Create proposal 7",
 		Payload: json.RawMessage(`{ "title": "Bylaws", "id": 7 }`)}
 	cr, err := c.CreateApproval(ctx, req)
 	if err != nil {
@@ -79,7 +79,7 @@ func TestApprovalsAgainstAPI(t *testing.T) {
 		t.Fatalf("%+v %v", ap, err)
 	}
 	if ev, ok := got.last().(*servicevault.ApprovalApproved); !ok || ev.ApprovalID != cr.ID || ev.ActionHash != want ||
-		ev.Action != servicevault.ActionProposalCreate || ev.Applied != nil {
+		ev.Action != servicevault.ActionContractTemplateChange || ev.Applied != nil {
 		t.Fatalf("event %#v", got.last())
 	}
 	if _, err := c.RemindApproval(ctx, cr.ID); apiCode(err) != servicevault.CodeNotPending {
@@ -114,7 +114,7 @@ func TestApprovalsAgainstAPI(t *testing.T) {
 
 	// An open approval, then the admin's connection is removed: the set is
 	// empty and the approval can no longer be approved.
-	cr2, err := c.CreateApproval(ctx, servicevault.ApprovalRequest{Action: servicevault.ActionVoteClose, Summary: "Close",
+	cr2, err := c.CreateApproval(ctx, servicevault.ApprovalRequest{Action: servicevault.ActionContractTemplateChange, Summary: "Close",
 		Payload: json.RawMessage(`{}`)})
 	if err != nil {
 		t.Fatal(err)
@@ -129,7 +129,7 @@ func TestApprovalsAgainstAPI(t *testing.T) {
 		t.Fatalf("%+v %v", ap, err)
 	}
 	if ev, ok := got.last().(*servicevault.ApprovalChallengeExpired); !ok || ev.ApprovalID != cr2.ID || ev.ConnectionID != "c1" ||
-		ev.RequestID != "req2" || ev.Action != servicevault.ActionVoteClose || ev.ExpiresAt.IsZero() {
+		ev.RequestID != "req2" || ev.Action != servicevault.ActionContractTemplateChange || ev.ExpiresAt.IsZero() {
 		t.Fatalf("event %#v", got.last())
 	}
 	f.deliver(t, peer.Event{ID: "01JEVENTC", Type: peer.EventConnectionRemoved, ConnectionID: "c1", Direction: "in",

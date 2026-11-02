@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/vettid/service-vault/vote"
+	"time"
 )
 
 // Extensions (BALLOT-PROTOCOL §10.2): a relay outage of more than an hour
@@ -28,13 +29,26 @@ type ExtensionInput struct {
 	Outage   vote.Outage `json:"outage"`
 }
 
+// ExtendMargin is how long before the close an extension must be asked
+// for: one published later may not reach the close it extends in time
+// (§10.2), and the approval would be used for nothing. It is refused
+// before the approval is looked at, so that it stays usable. It is
+// CollectMargin, the margin the count already allows after the close.
+const ExtendMargin = CollectMargin
+
 // ErrTooLate is an extension asked for once the close it would extend has
 // passed.
 var ErrTooLate = errors.New("ballot: the close to extend has passed")
 
 // Extend publishes an extension and sends vote.extended to every eligible
 // member.
-func (m *Manager) Extend(ctx context.Context, id string, in ExtensionInput) (*vote.Extension, error) {
+//
+// It needs the admins' approval (a vote.extend approval) of exactly this
+// extension of this proposal, in its canonical form (CanonicalExtension),
+// and uses it up, after everything that can refuse the input has been
+// checked and before anything is published. A failure after that leaves
+// the approval used (the admins approve again).
+func (m *Manager) Extend(ctx context.Context, id, approvalID string, in ExtensionInput) (*vote.Extension, error) {
 	unlock, err := m.lock(ctx, id)
 	if err != nil {
 		return nil, err
@@ -55,7 +69,7 @@ func (m *Manager) Extend(ctx context.Context, id string, in ExtensionInput) (*vo
 	if err != nil {
 		return nil, err
 	}
-	if o.Published || m.Now().Unix() >= o.ClosesAt {
+	if o.Published || m.Now().Unix() >= o.ClosesAt-int64(ExtendMargin/time.Second) {
 		return nil, ErrTooLate
 	}
 	out := in.Outage
@@ -79,6 +93,16 @@ func (m *Manager) Extend(ctx context.Context, id string, in ExtensionInput) (*vo
 	msg, _ := vote.DocSigMsg(sum(o.Doc), doc)
 	sig, err := m.Sign(vote.LabelExtended, msg)
 	if err != nil {
+		return nil, err
+	}
+	payload, err := CanonicalExtension(id, in)
+	if err != nil {
+		return nil, &ErrInput{err}
+	}
+	if err := checkExtension(&ExtensionPayload{ProposalID: id, ClosesAt: in.ClosesAt, Outage: in.Outage}); err != nil {
+		return nil, &ErrInput{err}
+	}
+	if err := m.consume(ctx, approvalID, ActionVoteExtend, payload, Use{ProposalID: id, N: e.N}); err != nil {
 		return nil, err
 	}
 	bundle, err := ep.PublishExtension(ctx, id, e.N, doc, sig)

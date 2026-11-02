@@ -10,6 +10,7 @@ import (
 	"github.com/vettid/service-vault/vote"
 	"log/slog"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -58,6 +59,9 @@ type Manager struct {
 	Sender    Sender
 	Publisher Publisher
 	Catcher   Catcher
+	// Approvals checks and uses the admins' approvals; nil creates and
+	// extends nothing.
+	Approvals Approvals
 	NewID     func(time.Time) (string, error)
 	Now       func() time.Time
 	Log       *slog.Logger
@@ -82,12 +86,21 @@ func (m *Manager) lock(ctx context.Context, id string) (func(), error) {
 	}
 }
 
-// ProposalInput is what the application asks for (§3.1); the rest of the
-// proposal is the service's.
+// ChoiceInput is a choice the application lists: only its label. The
+// service assigns the ids (c1, c2, … in this order) and adds abstain.
+type ChoiceInput struct {
+	Label string `json:"label"`
+}
+
+// ProposalInput is what the application asks for (§3.1, §3.4); the rest
+// of the proposal is the service's. Of its fields the admins are shown
+// the title, the labels, binding, removed_may_vote, the times and the
+// quorum's min_ballots; text must be empty or the title, quorum.text must
+// be empty, and outage_rule must be empty or DefaultOutageRule.
 type ProposalInput struct {
 	Title          string        `json:"title"`
 	Text           string        `json:"text"`
-	Choices        []vote.Choice `json:"choices"`
+	Choices        []ChoiceInput `json:"choices"`
 	Quorum         vote.Quorum   `json:"quorum"`
 	Binding        bool          `json:"binding"`
 	RemovedMayVote bool          `json:"removed_may_vote"`
@@ -117,19 +130,38 @@ func (e *ErrInput) Unwrap() error { return e.Err }
 // Create makes a proposal from the roster at this moment, stores it,
 // publishes it and sends it to every eligible member. The choices get
 // abstain if they lack it.
-func (m *Manager) Create(ctx context.Context, in ProposalInput) (*Created, error) {
+//
+// It needs the admins' approval (a proposal.create approval) of exactly
+// in, in its canonical form (CanonicalProposal), and uses it up. The
+// order is: everything that can refuse the input is checked first, so
+// that a refusal leaves the approval usable; then the approval is
+// checked and used, once; then the proposal is stored, published and
+// sent. A failure after the approval was used leaves it used (the
+// admins approve again); a proposal stored and not published is
+// published by Publish.
+func (m *Manager) Create(ctx context.Context, approvalID string, in ProposalInput) (*Created, error) {
 	if m.Publisher == nil {
 		return nil, ErrNoPublisher
+	}
+	if err := checkInput(&in); err != nil {
+		return nil, &ErrInput{err}
+	}
+	payload, err := CanonicalProposal(in)
+	if err != nil {
+		return nil, &ErrInput{err}
 	}
 	now := m.Now()
 	id, err := m.NewID(now)
 	if err != nil {
 		return nil, err
 	}
-	choices := append([]vote.Choice{}, in.Choices...)
-	if !(&vote.Proposal{Choices: choices}).HasChoice(vote.AbstainID) {
-		choices = append(choices, vote.Choice{ID: vote.AbstainID, Label: "Abstain"})
+	// The ids are the service's: c1, c2, … in the order of the labels,
+	// then the reserved abstain.
+	choices := make([]vote.Choice, 0, len(in.Choices)+1)
+	for i, c := range in.Choices {
+		choices = append(choices, vote.Choice{ID: "c" + strconv.Itoa(i+1), Label: c.Label})
 	}
+	choices = append(choices, vote.Choice{ID: vote.AbstainID, Label: "Abstain"})
 	conns := m.Roster.Eligible()
 	if len(conns) == 0 {
 		// A member's vault refuses a proposal with no eligible member
@@ -153,15 +185,18 @@ func (m *Manager) Create(ctx context.Context, in ProposalInput) (*Created, error
 	}
 	sortTags(tags)
 	p := &vote.Proposal{V: 1, ProposalID: id, Service: m.IK, Title: in.Title, Text: in.Text, Choices: choices,
-		Quorum: in.Quorum, Binding: in.Binding, RemovedMayVote: in.RemovedMayVote,
+		Quorum: vote.Quorum{MinBallots: in.Quorum.MinBallots}, Binding: in.Binding, RemovedMayVote: in.RemovedMayVote,
 		RecordAt: now.Unix(), OpensAt: in.OpensAt, ClosesAt: in.ClosesAt,
-		Eligible: int64(len(tags)), RecordRoot: vote.Root(tags), OutageRule: in.OutageRule}
+		Eligible: int64(len(tags)), RecordRoot: vote.Root(tags), OutageRule: DefaultOutageRule}
 	doc, err := vote.EncodeProposal(p)
 	if err != nil {
 		return nil, &ErrInput{err}
 	}
 	sig, err := m.Sign(vote.LabelProposal, vote.ProposalSigMsg(doc))
 	if err != nil {
+		return nil, err
+	}
+	if err := m.consume(ctx, approvalID, ActionProposalCreate, payload, Use{ProposalID: id}); err != nil {
 		return nil, err
 	}
 	o := &OpenProposal{Doc: doc, Sig: sig, ClosesAt: p.ClosesAt, Members: members}

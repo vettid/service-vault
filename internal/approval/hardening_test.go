@@ -14,7 +14,7 @@ import (
 // action_hash.
 func TestAuditPayloadNotEscaped(t *testing.T) {
 	f := newFixture(t, 1, "c1")
-	f.create(ActionVoteOpen, "Open", `{"note":"<b>&"}`)
+	f.create(ActionContractTemplateChange, "Open", `{"note":"<b>&"}`)
 	recs, err := f.st.Page(context.Background(), KindAudit, "", 10)
 	if err != nil || len(recs) == 0 {
 		t.Fatalf("audit: %v %v", recs, err)

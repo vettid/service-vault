@@ -3,14 +3,21 @@ package approval
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"github.com/vettid/vettid-vault/vms/peerwire"
 	"log/slog"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
+	"github.com/vettid/service-vault/internal/ballot"
 	"github.com/vettid/service-vault/internal/peer"
 	"github.com/vettid/service-vault/internal/webhook"
 	"github.com/vettid/service-vault/sdk/go/servicevault"
@@ -27,6 +34,7 @@ const (
 	kindAdmins   = "admin_set"  // "admins" -> the admin set
 	kindBoot     = "admin_boot" // "state" -> the bootstrap state (bootState)
 	kindAsks     = "apv_asks"   // admin connection id -> its newest approval challenges (askLog)
+	kindUsed     = "apv_used"   // approval id -> when it was used (Consume); written once (IfAbsent), never changed
 	// HookKind is the kind of the approvals' webhook Outbox: an event
 	// waiting to be delivered.
 	HookKind = "apv_hook"
@@ -168,6 +176,9 @@ type Manager struct {
 	// in the signature shows it was an approval rather than a sign-in.
 	// Either way its entry has reason no_purpose.
 	AllowNoPurpose bool
+	// ProposalTitle returns the title of a stored proposal, for the summary
+	// of a vote.extend approval; nil refuses every extension.
+	ProposalTitle func(ctx context.Context, proposalID string) (title string, ok bool, err error)
 	// BootstrapKey is the email index key of SV_ADMIN_BOOTSTRAP_EMAIL
 	// ("" for none): while the admin set is empty and no bootstrap has
 	// happened, the connection bound to it becomes the first admin. The
@@ -299,6 +310,17 @@ func (b *batch) put(kind, id string, v any, exp time.Time) error {
 	return nil
 }
 
+// putNew writes a record that must not exist yet (IfAbsent): the whole
+// batch fails with peer.ErrConflict if it does.
+func (b *batch) putNew(kind, id string, v any) error {
+	data, err := marshal(v)
+	if err != nil {
+		return err
+	}
+	b.changes = append(b.changes, peer.Change{Kind: kind, ID: id, Data: data, IfAbsent: true})
+	return nil
+}
+
 func (b *batch) del(kind, id string) { b.changes = append(b.changes, peer.Change{Kind: kind, ID: id}) }
 
 func (b *batch) audit(e *AuditEntry) error {
@@ -424,24 +446,166 @@ func adminSetTarget(payload json.RawMessage) (string, error) {
 	return p.ConnectionID, nil
 }
 
+// MaxAdminName is the longest name shown for a connection added as an
+// admin; a longer one is refused, never cut.
+const MaxAdminName = 32
+
+// adminSetSummary is what the admins read for an admin_set.* action:
+//
+//	name given "<name>", connected <date>, key <fingerprint>, connection <id>
+//
+// The name is what the member's vault sent when it connected: the admins
+// are told it is self-declared (anyone the API key can invite can choose
+// any name), and the date, the fingerprint and the id are what the
+// service holds. The fingerprint is the first 16 hex digits, in the first
+// 4 of the 8 groups of 4 that apps show, of
+// SHA-256("vettid/vms/2/ik-fp" || ik) of the connection's pinned identity
+// key (VAULT-MESSAGING §10.8). The member's own app does not show its
+// vault's fingerprint; an admin connected to that member can compare it
+// with the vault key fingerprint on their own connection with them, since
+// the vault presents one ik everywhere. Nothing is cut or replaced: an added connection whose name is
+// over MaxAdminName characters or has characters outside printable ASCII
+// and Latin-1 letters, that is unknown or not active, or has no pinned
+// credential key (it has never signed in) or no identity key, is refused.
+// Removing a connection the service no longer knows names only its id.
+func (m *Manager) adminSetSummary(action string, payload []byte) (string, error) {
+	target, err := adminSetTarget(payload)
+	if err != nil {
+		return "", err
+	}
+	if len(target) > 40 || checkSummary(target) != nil || strings.ContainsAny(target, "\"") {
+		return "", errCode(CodeInvalidPayload)
+	}
+	if m.Peer == nil {
+		return "", errCode(CodeInvalidConnection)
+	}
+	info, ok := m.Peer.Connection(target)
+	add := action == ActionAdminSetAdd
+	if add && (!ok || info.State != peer.StateActive || len(info.AuthKey) == 0 || len(info.IK) != ed25519.PublicKeySize ||
+		info.Activated.IsZero()) {
+		return "", errCode(CodeInvalidConnection)
+	}
+	if !ok {
+		return "connection " + target, nil
+	}
+	name := "name not given"
+	if info.Name != "" {
+		if utf8.RuneCountInString(info.Name) > MaxAdminName || !adminNameOK(info.Name) {
+			if add {
+				return "", errCode(CodeFieldNotShown)
+			}
+			name = "name not shown"
+		} else {
+			name = "name given " + strconv.Quote(info.Name)
+		}
+	}
+	s := name
+	if !info.Activated.IsZero() {
+		s += ", connected " + info.Activated.UTC().Format("2006-01-02")
+	}
+	if len(info.IK) == ed25519.PublicKeySize {
+		fp := sha256.Sum256(append([]byte("vettid/vms/2/ik-fp"), info.IK...))
+		h := hex.EncodeToString(fp[:8])
+		s += ", key " + h[:4] + " " + h[4:8] + " " + h[8:12] + " " + h[12:]
+	}
+	s += ", connection " + target
+	if len(s) > MaxAdminSummary {
+		return "", errCode(CodeFieldNotShown)
+	}
+	return s, nil
+}
+
+// MaxAdminSummary bounds an admin_set.* summary, so that it is shown
+// whole in a challenge's context with the longest service name.
+const MaxAdminSummary = 165
+
+// adminNameOK accepts printable ASCII and Latin-1 letters only, with no
+// space at either end.
+func adminNameOK(n string) bool {
+	if n != strings.TrimSpace(n) {
+		return false
+	}
+	for _, r := range n {
+		if !(r >= 0x20 && r <= 0x7e || r >= 0xc0 && r <= 0xff && r != 0xd7 && r != 0xf7) {
+			return false
+		}
+	}
+	return true
+}
+
+// summaryError is the refusal of a payload whose summary can't be built.
+func summaryError(err error) error {
+	var ns *ballot.ErrNotShown
+	if errors.Is(err, ballot.ErrCharset) {
+		return errCode(CodeUnsupportedText)
+	}
+	if errors.As(err, &ns) {
+		return errCode(CodeFieldNotShown)
+	}
+	return errCode(CodeInvalidPayload)
+}
+
 // Create submits an action for approval: it is checked and hashed, and
 // a challenge goes to every admin. It returns the approval's id and hash.
 func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 	if !actions[req.Action] {
 		return nil, errCode(CodeInvalidAction)
 	}
-	if err := checkSummary(req.Summary); err != nil {
-		return nil, err
-	}
 	payload, err := servicevault.CanonicalJSON(req.Payload)
 	if err != nil || len(payload) == 0 || payload[0] != '{' || len(payload) > MaxPayload {
 		return nil, errCode(CodeInvalidPayload)
 	}
+	// The admins read a summary the service builds from the payload for
+	// the actions that start or extend a vote; the application supplies
+	// no text for them.
+	title := ""
+	if req.Action == ActionVoteExtend {
+		// The admins are shown the proposal's title, from the store.
+		id, err := ballot.ExtensionProposalID(payload)
+		if err != nil {
+			return nil, summaryError(err)
+		}
+		if m.ProposalTitle == nil {
+			return nil, errCode(CodeUnknownProposal)
+		}
+		t, ok, err := m.ProposalTitle(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, errCode(CodeUnknownProposal)
+		}
+		title = t
+	}
+	summary, built, err := ballot.SummaryFor(req.Action, payload, title)
+	if req.Action == ActionAdminSetAdd || req.Action == ActionAdminSetRemove {
+		// The admins are shown who is added or removed, as the service
+		// holds it, not text the application wrote.
+		if req.Summary != "" {
+			return nil, errCode(CodeInvalidSummary)
+		}
+		if summary, err = m.adminSetSummary(req.Action, payload); err != nil {
+			return nil, err
+		}
+		built, err = true, nil
+	}
+	switch {
+	case !built:
+		summary = req.Summary
+		if err := checkSummary(summary); err != nil {
+			return nil, err
+		}
+	case req.Summary != "":
+		return nil, errCode(CodeInvalidSummary)
+	case err != nil:
+		return nil, summaryError(err)
+	}
+	req.Summary = summary
 	hash, err := servicevault.ActionHash(req.Action, req.Summary, payload)
 	if err != nil {
 		return nil, errCode(CodeInvalidPayload)
 	}
-	ctxt, err := ChallengeContext(m.ServiceName, req.Summary, hash)
+	ctxt, err := ChallengeContext(m.ServiceName, req.Action, req.Summary, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -660,6 +824,17 @@ func (m *Manager) Status(ctx context.Context, id string) (*Status, error) {
 	st := &Status{ID: r.ID, Action: r.Action, Summary: r.Summary, ActionHash: r.Hash, Status: r.Status, Reason: r.Reason,
 		Threshold: r.Threshold, Admins: r.Admins, Approvals: r.Approvals, Denials: r.Denials, CreatedAt: r.Created,
 		ExpiresAt: r.Exp, Applied: r.Applied, RemindNeeded: []string{}}
+	if r.Action == ActionProposalCreate || r.Action == ActionVoteExtend {
+		if data, ok, err := m.Store.Get(ctx, kindUsed, id); err != nil {
+			return nil, err
+		} else if ok {
+			var u usedRecord
+			if err := json.Unmarshal(data, &u); err != nil {
+				return nil, err
+			}
+			st.Used = &Used{At: u.At, ProposalID: u.ProposalID, N: u.N}
+		}
+	}
 	if st.Status == StatusPending && !m.now().Before(r.Exp) {
 		st.Status = StatusExpired
 	}
@@ -803,7 +978,7 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 		return nil, errCode(CodeTooSoon)
 	}
 	m.cancel(ctx, to)
-	ctxt, err := ChallengeContext(m.ServiceName, r.Summary, r.Hash)
+	ctxt, err := ChallengeContext(m.ServiceName, r.Action, r.Summary, r.Hash)
 	if err != nil {
 		return nil, err
 	}
@@ -1416,5 +1591,5 @@ func (m *Manager) Run(ctx context.Context) {
 // their webhook outbox included), for a migration that must touch them
 // all.
 func Kinds() []string {
-	return []string{kindApproval, kindOpen, kindReq, kindSeen, kindAdmins, kindBoot, kindAsks, KindAudit, HookKind}
+	return []string{kindApproval, kindOpen, kindReq, kindSeen, kindAdmins, kindBoot, kindAsks, kindUsed, KindAudit, HookKind}
 }

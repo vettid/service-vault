@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -38,6 +39,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 
+	"github.com/vettid/service-vault/internal/approval"
+	"github.com/vettid/service-vault/internal/ballot"
 	"github.com/vettid/service-vault/sdk/go/servicevault"
 )
 
@@ -64,6 +67,8 @@ commands:
                                    skipped; does not wait for the answers; exit 1 if the
                                    run stopped early
   approve -action A -summary S -payload JSON
+                                   (no -summary for proposal.create, vote.extend, admin_set.add
+                                   and admin_set.remove: the service writes it from the payload)
                                    submit an action for admin approval, then follow it
                                    (ask_budget, exit 1, if fewer admins than the threshold
                                    can be asked: the others have 5 approval challenges
@@ -84,7 +89,12 @@ commands:
   admins                           print the admin set and the threshold
   audit [-since ID] [-limit N]     print a page of the audit log, one JSON entry per line
   anchor-key                       print GET /v1/anchor-key (for the votes site's service list)
-  proposal create -in FILE         create a proposal from its JSON input; print the answer
+  proposal create -in FILE [-wait D] [-approval ID]
+                                   ask the admins to approve the proposal input (they read a
+                                   summary built from it), wait for them, then create the
+                                   proposal with the approval (used up); print the answer
+  proposal extend ID -in FILE [-wait D] [-approval ID]
+                                   the same for an extension of the proposal's close
   proposal status|publish|close|results ID
                                    a proposal's status; retry its publication; count and
                                    publish its results; print them
@@ -408,37 +418,91 @@ func (c *cli) signinUnsigned(ctx context.Context) error {
 
 func (c *cli) approve(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("approve", flag.ContinueOnError)
-	action := fs.String("action", "", "the action, e.g. vote.open or admin_set.add")
+	action := fs.String("action", "", "the action, e.g. contract_template.change or admin_set.add")
 	summary := fs.String("summary", "", "what the admins read on the phone")
 	payload := fs.String("payload", "{}", "the action's payload, a JSON object")
 	wait := fs.Duration("wait", 30*time.Minute, "how long to follow the approval (0: not at all)")
 	if err := c.flags(fs, args, 0); err != nil {
 		return err
 	}
-	if *action == "" || *summary == "" {
+	built := approval.BuiltSummary(*action)
+	switch {
+	case *action == "" || *summary == "" && !built:
 		return usageError{errors.New("-action and -summary are required")}
+	case built && *summary != "":
+		return usageError{fmt.Errorf("%s takes no -summary: the service builds it from the payload", *action)}
 	}
 	if !json.Valid([]byte(*payload)) {
 		return usageError{errors.New("-payload is not JSON")}
 	}
 	req := servicevault.ApprovalRequest{Action: *action, Summary: *summary, Payload: json.RawMessage(*payload)}
+	_, err := c.approveAndFollow(ctx, req, *wait)
+	return err
+}
+
+// approveAndFollow submits req for approval, checks the hash the service
+// answers and follows the approval until it is decided (up to wait). It
+// returns the approval's id once it is approved; any other end is an
+// error (an outcome for denied or expired).
+//
+// For the actions whose summary the service builds from the payload
+// (ballot.SummaryFor), req.Summary is left empty; the summary the
+// service reports must be the one built here from the payload, and the
+// hash is checked with it.
+func (c *cli) approveAndFollow(ctx context.Context, req servicevault.ApprovalRequest, wait time.Duration) (string, error) {
 	ap, err := c.c.CreateApproval(ctx, req)
 	var ae *servicevault.APIError
 	if errors.As(err, &ae) && ae.Code == servicevault.CodeAskBudget {
-		return fmt.Errorf("approve: too few admins can be asked now: the others have 5 approval challenges still counting "+
+		return "", fmt.Errorf("approve: too few admins can be asked now: the others have 5 approval challenges still counting "+
 			"(each until its expiry plus 24 hours); nothing was sent (%w)", err)
 	}
 	if err != nil {
-		return err
+		return "", err
 	}
 	c.printf("approval_id: %s\naction_hash: %s\nexpires_at: %s\n", ap.ID, ap.ActionHash, ap.ExpiresAt.UTC().Format(time.RFC3339))
-	if h, err := servicevault.ActionHash(req.Action, req.Summary, req.Payload); err != nil || h != ap.ActionHash {
-		return errors.New("the action hash does not match the one computed here")
+	summary := req.Summary
+	title := ""
+	if req.Action == servicevault.ActionVoteExtend {
+		if title, err = c.proposalTitle(ctx, req.Payload); err != nil {
+			return "", err
+		}
+	}
+	if req.Action == servicevault.ActionAdminSetAdd || req.Action == servicevault.ActionAdminSetRemove {
+		// The summary is the service's: who is added or removed, from its
+		// own record of the connection. It must name the connection asked.
+		var p struct {
+			ConnectionID string `json:"connection_id"`
+		}
+		st, err := c.c.Approval(ctx, ap.ID)
+		if err != nil {
+			return ap.ID, err
+		}
+		if json.Unmarshal(req.Payload, &p) != nil || p.ConnectionID == "" || !strings.HasSuffix(st.Summary, ", connection "+p.ConnectionID) ||
+			(req.Action == servicevault.ActionAdminSetAdd && (!strings.Contains(st.Summary, ", connected ") || !addedKey.MatchString(st.Summary))) {
+			return ap.ID, errors.New("the summary the admins read does not name the connection asked for")
+		}
+		summary = st.Summary
+		c.printf("summary: %s\n", summary)
+	} else if want, built, err := ballot.SummaryFor(req.Action, req.Payload, title); err != nil {
+		return ap.ID, fmt.Errorf("the payload can't be summarized: %w", err)
+	} else if built {
+		st, err := c.c.Approval(ctx, ap.ID)
+		if err != nil {
+			return ap.ID, err
+		}
+		if st.Summary != want {
+			return ap.ID, errors.New("the summary the admins read does not match the one built here from the payload")
+		}
+		summary = want
+		c.printf("summary: %s\n", want)
+	}
+	if h, err := servicevault.ActionHash(req.Action, summary, req.Payload); err != nil || h != ap.ActionHash {
+		return ap.ID, errors.New("the action hash does not match the one computed here")
 	}
 	c.printf("action_hash_check: ok\n")
 	c.printf("%s", askBudgetLines(ap.AskBudget))
 	var told string // the remind-needed line last printed
-	return c.follow(ctx, *wait, func(ctx context.Context) (bool, error) {
+	err = c.follow(ctx, wait, func(ctx context.Context) (bool, error) {
 		st, err := c.c.Approval(ctx, ap.ID)
 		if err != nil {
 			return false, err
@@ -458,6 +522,47 @@ func (c *cli) approve(ctx context.Context, args []string) error {
 		}
 		return true, nil
 	})
+	return ap.ID, err
+}
+
+// addedKey is the key fingerprint of an admin_set.add summary: 16 hex
+// digits in 4 groups.
+var addedKey = regexp.MustCompile(`, key [0-9a-f]{4}( [0-9a-f]{4}){3}, connection `)
+
+// proposalTitle reads the title of the proposal a vote.extend payload is
+// for, as the service has it, to build the summary the admins read.
+func (c *cli) proposalTitle(ctx context.Context, payload []byte) (string, error) {
+	id, err := ballot.ExtensionProposalID(payload)
+	if err != nil {
+		return "", err
+	}
+	raw, err := c.c.Proposal(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	var st struct {
+		Proposal string `json:"proposal"`
+	}
+	var doc struct {
+		Title string `json:"title"`
+	}
+	if json.Unmarshal(raw, &st) != nil || json.Unmarshal([]byte(st.Proposal), &doc) != nil || doc.Title == "" {
+		return "", errors.New("the proposal's title can't be read")
+	}
+	return doc.Title, nil
+}
+
+// requireApproved fails unless approval id is approved now (after a wait
+// of 0, or one that ran out, it may still be pending).
+func (c *cli) requireApproved(ctx context.Context, id string) error {
+	st, err := c.c.Approval(ctx, id)
+	if err != nil {
+		return err
+	}
+	if st.Status != servicevault.ApprovalStatusApproved {
+		return fmt.Errorf("approval %s is %s: run again with -approval %s once it is approved", id, st.Status, id)
+	}
+	return nil
 }
 
 // now is the clock (replaced in tests).
@@ -611,7 +716,7 @@ func (c *cli) anchorKey(ctx context.Context, args []string) error {
 // proposal runs one proposal subcommand and prints the API's answer.
 func (c *cli) proposal(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return usageError{errors.New("want a subcommand: create, status, publish, close or results")}
+		return usageError{errors.New("want a subcommand: create, extend, status, publish, close or results")}
 	}
 	sub, args := args[0], args[1:]
 	var b json.RawMessage
@@ -620,6 +725,8 @@ func (c *cli) proposal(ctx context.Context, args []string) error {
 	case "create":
 		fs := flag.NewFlagSet("proposal create", flag.ContinueOnError)
 		in := fs.String("in", "", "the proposal input, a JSON file")
+		wait := fs.Duration("wait", 30*time.Minute, "how long to wait for the admins' approval (0: not at all)")
+		apv := fs.String("approval", "", "use this approved proposal.create approval of the input, instead of asking for one")
 		if err := c.flags(fs, args, 0); err != nil {
 			return err
 		}
@@ -630,10 +737,19 @@ func (c *cli) proposal(ctx context.Context, args []string) error {
 		if rerr != nil {
 			return rerr
 		}
-		if !json.Valid(raw) {
-			return usageError{fmt.Errorf("%s: not JSON", *in)}
+		var input ballot.ProposalInput
+		if err := decodeStrict(raw, &input); err != nil {
+			return usageError{fmt.Errorf("%s: %w", *in, err)}
 		}
-		b, err = c.c.CreateProposal(ctx, raw)
+		payload, perr := ballot.CanonicalProposal(input)
+		if perr != nil {
+			return usageError{perr}
+		}
+		id, aerr := c.approvedAction(ctx, servicevault.ActionProposalCreate, payload, *apv, *wait)
+		if aerr != nil {
+			return aerr
+		}
+		b, err = c.c.CreateProposal(ctx, id, payload)
 		if err == nil {
 			var made struct {
 				Unsigned int `json:"unsigned"`
@@ -645,6 +761,48 @@ func (c *cli) proposal(ctx context.Context, args []string) error {
 		var ae *servicevault.APIError
 		if errors.As(err, &ae) && ae.ProposalID != "" {
 			fmt.Fprintf(c.err, "proposal %s is kept but not published: retry with svctl proposal publish %s\n", ae.ProposalID, ae.ProposalID)
+		}
+		if err != nil {
+			fmt.Fprintf(c.err, "approval %s is used up whatever the outcome: a new proposal.create needs a new approval\n", id)
+		}
+	case "extend":
+		fs := flag.NewFlagSet("proposal extend", flag.ContinueOnError)
+		in := fs.String("in", "", "the extension, a JSON file: {closes_at, outage: {from, to, source}}")
+		wait := fs.Duration("wait", 30*time.Minute, "how long to wait for the admins' approval (0: not at all)")
+		apv := fs.String("approval", "", "use this approved vote.extend approval of the extension, instead of asking for one")
+		if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+			return usageError{errors.New("want the proposal id first")}
+		}
+		pid := args[0]
+		if err := c.flags(fs, args[1:], 0); err != nil {
+			return err
+		}
+		if *in == "" {
+			return usageError{errors.New("-in is required")}
+		}
+		raw, rerr := os.ReadFile(*in)
+		if rerr != nil {
+			return rerr
+		}
+		var input ballot.ExtensionInput
+		if err := decodeStrict(raw, &input); err != nil {
+			return usageError{fmt.Errorf("%s: %w", *in, err)}
+		}
+		payload, perr := ballot.CanonicalExtension(pid, input)
+		if perr != nil {
+			return usageError{perr}
+		}
+		id, aerr := c.approvedAction(ctx, servicevault.ActionVoteExtend, payload, *apv, *wait)
+		if aerr != nil {
+			return aerr
+		}
+		body, perr := json.Marshal(input)
+		if perr != nil {
+			return perr
+		}
+		b, err = c.c.ExtendProposal(ctx, pid, id, body)
+		if err != nil {
+			fmt.Fprintf(c.err, "approval %s may be used up whatever the outcome: a new vote.extend needs a new approval\n", id)
 		}
 	case "status", "publish", "close", "results":
 		if err := c.flags(flag.NewFlagSet("proposal "+sub, flag.ContinueOnError), args, 1); err != nil {
@@ -668,6 +826,41 @@ func (c *cli) proposal(ctx context.Context, args []string) error {
 		return err
 	}
 	return c.printJSON(b)
+}
+
+// decodeStrict decodes one JSON object into v: no duplicate names, no
+// unknown ones.
+func decodeStrict(raw []byte, v any) error {
+	if _, err := servicevault.CanonicalJSON(raw); err != nil {
+		return err
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	return dec.Decode(v)
+}
+
+// approvedAction returns the id of an approved approval of action with
+// payload: the one named (checked to be approved), or a new one that is
+// followed until the admins approve it.
+func (c *cli) approvedAction(ctx context.Context, action string, payload []byte, existing string, wait time.Duration) (string, error) {
+	if existing != "" {
+		st, err := c.c.Approval(ctx, existing)
+		if err != nil {
+			return "", err
+		}
+		if st.Action != action || st.Status != servicevault.ApprovalStatusApproved {
+			return "", fmt.Errorf("approval %s is %s for %s, not an approved %s", existing, st.Status, st.Action, action)
+		}
+		return existing, nil
+	}
+	id, err := c.approveAndFollow(ctx, servicevault.ApprovalRequest{Action: action, Payload: payload}, wait)
+	if err != nil {
+		return "", err
+	}
+	if err := c.requireApproved(ctx, id); err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
 // printJSON prints an answer indented.

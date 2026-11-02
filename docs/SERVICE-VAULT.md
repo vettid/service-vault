@@ -177,8 +177,33 @@ MEMBER-SERVICE-PLAN §4.5 and §5.2; the operator's view is in the README,
   configured threshold) must not exceed the admins there are. The
   approval records m and the admins asked, and a
   `connection.authenticate.challenge` whose context names the action and
-  the first 8 hex digits of the hash goes to each of them (10-minute
-  inner `exp`). Request, record and audit entry are written together.
+  the first 16 hex digits of the hash, after a label the service sets by
+  action (`New vote:`, `Extend vote:`, `Add admin:`, `Remove admin:`,
+  `Contract template:`, `Push assignment:`; for a vote and for `admin_set.*`
+  the summary is the service's, built from the payload and the connection's
+  self-declared name, activation date and identity-key fingerprint it
+  holds), goes to each of them
+  (10-minute inner `exp`); the service name is at most 32 bytes, and a
+  summary built from a payload is shown whole or refused, never cut. Request, record and audit entry are written together.
+  For `proposal.create` and `vote.extend` the application gives no
+  summary: the service builds it from the payload (binding or advisory,
+  window, quorum, choices and title; for an extension the proposal and
+  the new close), and refuses a payload that is not the canonical full
+  form of the input or whose text it cannot show whole.
+- **Using an approval** (`Manager.Consume`; `internal/ballot` calls it).
+  `POST /v1/proposals` and `/extend` need an approval of the exact
+  input, used once: under the manager's lock it must be approved (the
+  signatures of the admins in the set now still meet the threshold now),
+  for
+  that action (`proposal.create`; `vote.extend` with the proposal id in
+  its payload), not past its expiry, and its payload must equal the
+  canonical form of the input byte for byte. The use is one write: an
+  `apv_used` record with a condition that it does not exist, and an
+  `approval.consumed` audit entry. The order is check, consume, execute:
+  refusals of the input come first and leave the approval usable; a
+  failure after the use (storing, publishing, sending) leaves it used and
+  the admins approve again (fail closed). `/close` stays API-key only: it
+  counts a vote that has already closed.
 - **Answers** arrive as the peer's challenge outcomes, now carrying the
   evidence (context, credential key, signature, `signed_at`). Each answer
   is audited with it, together with a marker of the peer event, so a

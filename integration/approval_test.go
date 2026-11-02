@@ -24,7 +24,8 @@ type approvalPeer struct {
 }
 
 func (p *approvalPeer) Connection(id string) (peer.ConnectionInfo, bool) {
-	return peer.ConnectionInfo{ID: id, State: peer.StateActive}, id == "c1" || id == "c2" || id == "c3"
+	return peer.ConnectionInfo{ID: id, State: peer.StateActive, Name: "Member " + id, IK: make([]byte, 32),
+		AuthKey: make([]byte, 32), Activated: time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)}, id == "c1" || id == "c2" || id == "c3"
 }
 
 func (p *approvalPeer) Authenticate(_ context.Context, conn, _, _ string, _ time.Duration) (string, error) {
@@ -72,12 +73,12 @@ func TestApprovalsOnDynamoDB(t *testing.T) {
 		}
 	}
 	// Threshold 2 with one admin: unreachable. Lower it to add c2 and c3.
-	if _, err := m.Create(ctx, approval.Request{Action: approval.ActionVoteOpen, Summary: "x", Payload: json.RawMessage(`{}`)}); err == nil {
+	if _, err := m.Create(ctx, approval.Request{Action: approval.ActionContractTemplateChange, Summary: "x", Payload: json.RawMessage(`{}`)}); err == nil {
 		t.Fatal("m > n accepted")
 	}
 	m.Threshold = 1
 	for i, c := range []string{"c2", "c3"} {
-		cr, err := m.Create(ctx, approval.Request{Action: approval.ActionAdminSetAdd, Summary: "Add " + c,
+		cr, err := m.Create(ctx, approval.Request{Action: approval.ActionAdminSetAdd, Summary: "",
 			Payload: json.RawMessage(`{"connection_id":"` + c + `"}`)})
 		if err != nil {
 			t.Fatal(err)
@@ -93,7 +94,7 @@ func TestApprovalsOnDynamoDB(t *testing.T) {
 	if a, err := m.Admins(ctx); err != nil || len(a.Admins) != 3 {
 		t.Fatalf("admins after restart %+v %v", a, err)
 	}
-	cr, err := m.Create(ctx, approval.Request{Action: approval.ActionProposalCreate, Summary: "Create proposal 7",
+	cr, err := m.Create(ctx, approval.Request{Action: approval.ActionContractTemplateChange, Summary: "Create proposal 7",
 		Payload: json.RawMessage(`{"id":7}`)})
 	if err != nil {
 		t.Fatal(err)
