@@ -58,6 +58,9 @@ type Manager struct {
 	Sender    Sender
 	Publisher Publisher
 	Catcher   Catcher
+	// Approvals checks and uses the admins' approvals; nil creates and
+	// extends nothing.
+	Approvals Approvals
 	NewID     func(time.Time) (string, error)
 	Now       func() time.Time
 	Log       *slog.Logger
@@ -117,9 +120,22 @@ func (e *ErrInput) Unwrap() error { return e.Err }
 // Create makes a proposal from the roster at this moment, stores it,
 // publishes it and sends it to every eligible member. The choices get
 // abstain if they lack it.
-func (m *Manager) Create(ctx context.Context, in ProposalInput) (*Created, error) {
+//
+// It needs the admins' approval (a proposal.create approval) of exactly
+// in, in its canonical form (CanonicalProposal), and uses it up. The
+// order is: everything that can refuse the input is checked first, so
+// that a refusal leaves the approval usable; then the approval is
+// checked and used, once; then the proposal is stored, published and
+// sent. A failure after the approval was used leaves it used (the
+// admins approve again); a proposal stored and not published is
+// published by Publish.
+func (m *Manager) Create(ctx context.Context, approvalID string, in ProposalInput) (*Created, error) {
 	if m.Publisher == nil {
 		return nil, ErrNoPublisher
+	}
+	payload, err := CanonicalProposal(in)
+	if err != nil {
+		return nil, &ErrInput{err}
 	}
 	now := m.Now()
 	id, err := m.NewID(now)
@@ -162,6 +178,9 @@ func (m *Manager) Create(ctx context.Context, in ProposalInput) (*Created, error
 	}
 	sig, err := m.Sign(vote.LabelProposal, vote.ProposalSigMsg(doc))
 	if err != nil {
+		return nil, err
+	}
+	if err := m.consume(ctx, approvalID, ActionProposalCreate, payload); err != nil {
 		return nil, err
 	}
 	o := &OpenProposal{Doc: doc, Sig: sig, ClosesAt: p.ClosesAt, Members: members}

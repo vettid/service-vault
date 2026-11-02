@@ -23,8 +23,7 @@ import (
 // Actions an approval can be for (MEMBER-SERVICE-PLAN §4.5).
 const (
 	ActionProposalCreate         = "proposal.create"
-	ActionVoteOpen               = "vote.open"
-	ActionVoteClose              = "vote.close"
+	ActionVoteExtend             = "vote.extend"
 	ActionContractTemplateChange = "contract_template.change"
 	ActionAdminSetAdd            = "admin_set.add"
 	ActionAdminSetRemove         = "admin_set.remove"
@@ -32,7 +31,7 @@ const (
 )
 
 var actions = map[string]bool{
-	ActionProposalCreate: true, ActionVoteOpen: true, ActionVoteClose: true, ActionContractTemplateChange: true,
+	ActionProposalCreate: true, ActionVoteExtend: true, ActionContractTemplateChange: true,
 	ActionAdminSetAdd: true, ActionAdminSetRemove: true, ActionAssignmentPush: true,
 }
 
@@ -64,12 +63,15 @@ const (
 
 // Audit entry types.
 const (
-	AuditRequested       = "approval.requested"
-	AuditResponse        = "approval.response"
-	AuditReminded        = "approval.reminded"
-	AuditApproved        = "approval.approved"
-	AuditDenied          = "approval.denied"
-	AuditExpired         = "approval.expired"
+	AuditRequested = "approval.requested"
+	AuditResponse  = "approval.response"
+	AuditReminded  = "approval.reminded"
+	AuditApproved  = "approval.approved"
+	AuditDenied    = "approval.denied"
+	AuditExpired   = "approval.expired"
+	// AuditConsumed: an approved proposal.create or vote.extend was used,
+	// once, for the proposal or extension it approved.
+	AuditConsumed        = "approval.consumed"
 	AuditAdminSetChanged = "admin_set.changed"
 	// AuditBootstrapArmed: the operator armed a new one-shot bootstrap
 	// (`service-vault admin bootstrap`); the email is not recorded.
@@ -93,6 +95,11 @@ const (
 	ChangeApproval          = "approval"
 	ChangeConnectionRemoved = "connection_removed"
 )
+
+// RefLen is how many hex digits of the action hash the challenge shows
+// as its ref: 64 bits, so that a request crafted to collide with the ref
+// of another action is out of reach.
+const RefLen = 16
 
 // Limits.
 const (
@@ -121,6 +128,15 @@ const (
 	CodeAnswered          = "answered"          // remind force: the admin has answered
 	CodeNothingToRemind   = "nothing_to_remind" // every admin who has not answered holds a live challenge
 	CodeAskBudget         = "ask_budget"        // no send: the admins to ask have 5 approval challenges still counting (askBudget)
+
+	// Using an approval (Consume).
+	CodeApprovalRequired    = "approval_required"     // no approval id
+	CodeApprovalNotFound    = "approval_not_found"    // no such approval
+	CodeApprovalNotApproved = "approval_not_approved" // pending, denied or expired: the threshold was not met
+	CodeApprovalWrongAction = "approval_wrong_action" // approved for another action
+	CodeApprovalMismatch    = "approval_mismatch"     // approved for other input than the one asked for
+	CodeApprovalExpired     = "approval_expired"      // approved, but its life has run out
+	CodeApprovalUsed        = "approval_used"         // already used
 )
 
 // Error is a request the service refuses, with its API error code.
@@ -294,15 +310,15 @@ func isBidiControl(r rune) bool {
 }
 
 // ChallengeContext is the context of an approval challenge:
-// "Approve on <service>: <summary> — ref <first 8 hex of the hash>",
+// "Approve on <service>: <summary> — ref <first 16 hex of the hash>",
 // with the summary cut (on a character boundary, ending in "…") so that
 // the whole is at most MaxContext bytes.
 func ChallengeContext(serviceName, summary, actionHash string) (string, error) {
-	if len(actionHash) < 8 {
+	if len(actionHash) < RefLen {
 		return "", fmt.Errorf("approval: short action hash")
 	}
 	f := func(s string) string {
-		return fmt.Sprintf("Approve on %s: %s — ref %s", serviceName, s, actionHash[:8])
+		return fmt.Sprintf("Approve on %s: %s — ref %s", serviceName, s, actionHash[:RefLen])
 	}
 	if s := f(summary); len(s) <= MaxContext {
 		return s, nil

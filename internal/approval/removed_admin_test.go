@@ -11,7 +11,7 @@ import (
 // is not m, so the approval stays pending; c3's makes it.
 func TestRemovedAdminApprovalNotCounted(t *testing.T) {
 	f := newFixture(t, 2, "c1", "c2", "c3")
-	c := f.create(ActionVoteOpen, "Open", `{}`)
+	c := f.create(ActionContractTemplateChange, "Open", `{}`)
 	f.answer("c1", "approve")
 	if err := f.m.ConnectionRemoved(context.Background(), "c1"); err != nil {
 		t.Fatal(err)
@@ -30,7 +30,7 @@ func TestRemovedAdminApprovalNotCounted(t *testing.T) {
 // current approvals denies it.
 func TestRemovedAdminApprovalDeniesWhenUnreachable(t *testing.T) {
 	f := newFixture(t, 2, "c1", "c2", "c3")
-	c := f.create(ActionVoteOpen, "Open", `{}`)
+	c := f.create(ActionContractTemplateChange, "Open", `{}`)
 	f.answer("c1", "approve")
 	f.answer("c3", "deny")
 	if err := f.m.ConnectionRemoved(context.Background(), "c1"); err != nil {

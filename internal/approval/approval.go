@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vettid/service-vault/internal/ballot"
 	"github.com/vettid/service-vault/internal/peer"
 	"github.com/vettid/service-vault/internal/webhook"
 	"github.com/vettid/service-vault/sdk/go/servicevault"
@@ -27,6 +28,7 @@ const (
 	kindAdmins   = "admin_set"  // "admins" -> the admin set
 	kindBoot     = "admin_boot" // "state" -> the bootstrap state (bootState)
 	kindAsks     = "apv_asks"   // admin connection id -> its newest approval challenges (askLog)
+	kindUsed     = "apv_used"   // approval id -> when it was used (Consume); written once (IfAbsent), never changed
 	// HookKind is the kind of the approvals' webhook Outbox: an event
 	// waiting to be delivered.
 	HookKind = "apv_hook"
@@ -299,6 +301,17 @@ func (b *batch) put(kind, id string, v any, exp time.Time) error {
 	return nil
 }
 
+// putNew writes a record that must not exist yet (IfAbsent): the whole
+// batch fails with peer.ErrConflict if it does.
+func (b *batch) putNew(kind, id string, v any) error {
+	data, err := marshal(v)
+	if err != nil {
+		return err
+	}
+	b.changes = append(b.changes, peer.Change{Kind: kind, ID: id, Data: data, IfAbsent: true})
+	return nil
+}
+
 func (b *batch) del(kind, id string) { b.changes = append(b.changes, peer.Change{Kind: kind, ID: id}) }
 
 func (b *batch) audit(e *AuditEntry) error {
@@ -430,13 +443,26 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 	if !actions[req.Action] {
 		return nil, errCode(CodeInvalidAction)
 	}
-	if err := checkSummary(req.Summary); err != nil {
-		return nil, err
-	}
 	payload, err := servicevault.CanonicalJSON(req.Payload)
 	if err != nil || len(payload) == 0 || payload[0] != '{' || len(payload) > MaxPayload {
 		return nil, errCode(CodeInvalidPayload)
 	}
+	// The admins read a summary the service builds from the payload for
+	// the actions that start or extend a vote; the application supplies
+	// no text for them.
+	summary, built, err := ballot.SummaryFor(req.Action, payload)
+	switch {
+	case !built:
+		summary = req.Summary
+		if err := checkSummary(summary); err != nil {
+			return nil, err
+		}
+	case req.Summary != "":
+		return nil, errCode(CodeInvalidSummary)
+	case err != nil:
+		return nil, errCode(CodeInvalidPayload)
+	}
+	req.Summary = summary
 	hash, err := servicevault.ActionHash(req.Action, req.Summary, payload)
 	if err != nil {
 		return nil, errCode(CodeInvalidPayload)
@@ -1416,5 +1442,5 @@ func (m *Manager) Run(ctx context.Context) {
 // their webhook outbox included), for a migration that must touch them
 // all.
 func Kinds() []string {
-	return []string{kindApproval, kindOpen, kindReq, kindSeen, kindAdmins, kindBoot, kindAsks, KindAudit, HookKind}
+	return []string{kindApproval, kindOpen, kindReq, kindSeen, kindAdmins, kindBoot, kindAsks, kindUsed, KindAudit, HookKind}
 }

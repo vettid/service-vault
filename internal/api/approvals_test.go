@@ -92,24 +92,24 @@ func TestApprovalRoutes(t *testing.T) {
 		t.Fatalf("unauthenticated: %d", rec.Code)
 	}
 	payload := `{"text":"` + strings.Repeat("x", approval.MaxPayload-20) + `"}`
-	rec, m := do(t, h, "POST", "/v1/approvals", apiKey, `{"action":"vote.open","summary":"Open","payload":`+payload+`}`)
+	rec, m := do(t, h, "POST", "/v1/approvals", apiKey, `{"action":"contract_template.change","summary":"Open","payload":`+payload+`}`)
 	if rec.Code != 201 || m["approval_id"] != "a1" || m["status"] != "pending" || m["action_hash"] == nil || m["expires_at"] == nil {
 		t.Fatalf("%d %v", rec.Code, m)
 	}
-	if fa.last.Action != "vote.open" || string(fa.last.Payload) != payload {
+	if fa.last.Action != "contract_template.change" || string(fa.last.Payload) != payload {
 		t.Fatalf("request %+v", fa.last.Action)
 	}
 	for body, want := range map[string]int{
-		`{"action":"vote.open","summary":"unreachable","payload":{}}`:                                         422,
-		`{"action":"vote.open","summary":"bad","payload":{}}`:                                                 400,
-		`{"action":"vote.open","summary":"x","payload":{},"extra":1}`:                                         400,
-		`{"action":"vote.open","summary":"x","payload":"` + strings.Repeat("y", 3*approval.MaxPayload) + `"}`: 400,
+		`{"action":"contract_template.change","summary":"unreachable","payload":{}}`:                                         422,
+		`{"action":"contract_template.change","summary":"bad","payload":{}}`:                                                 400,
+		`{"action":"contract_template.change","summary":"x","payload":{},"extra":1}`:                                         400,
+		`{"action":"contract_template.change","summary":"x","payload":"` + strings.Repeat("y", 3*approval.MaxPayload) + `"}`: 400,
 	} {
 		if rec, m := do(t, h, "POST", "/v1/approvals", apiKey, body); rec.Code != want {
 			t.Errorf("%.60s: %d %v", body, rec.Code, m)
 		}
 	}
-	if _, m := do(t, h, "POST", "/v1/approvals", apiKey, `{"action":"vote.open","summary":"unreachable","payload":{}}`); m["error"] != "unreachable" {
+	if _, m := do(t, h, "POST", "/v1/approvals", apiKey, `{"action":"contract_template.change","summary":"unreachable","payload":{}}`); m["error"] != "unreachable" {
 		t.Fatalf("%v", m)
 	}
 	rec, m = do(t, h, "GET", "/v1/approvals/a1", apiKey, "")

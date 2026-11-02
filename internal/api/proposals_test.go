@@ -3,19 +3,24 @@ package api
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
+	"github.com/vettid/service-vault/internal/approval"
 	"github.com/vettid/service-vault/internal/ballot"
 	"github.com/vettid/service-vault/vote"
 )
 
 type fakeProposals struct {
-	last ballot.ProposalInput
-	err  error
+	last     ballot.ProposalInput
+	lastAppr string
+	created  int
+	err      error
 }
 
-func (f *fakeProposals) Create(_ context.Context, in ballot.ProposalInput) (*ballot.Created, error) {
-	f.last = in
+func (f *fakeProposals) Create(_ context.Context, approvalID string, in ballot.ProposalInput) (*ballot.Created, error) {
+	f.last, f.lastAppr = in, approvalID
+	f.created++
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -55,7 +60,10 @@ func (f *fakeProposals) Publish(_ context.Context, id string) (int, error) {
 	return 3, nil
 }
 
-func (f *fakeProposals) Extend(_ context.Context, id string, in ballot.ExtensionInput) (*vote.Extension, error) {
+func (f *fakeProposals) Extend(_ context.Context, id, approvalID string, in ballot.ExtensionInput) (*vote.Extension, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
 	switch id {
 	case "late":
 		return nil, ballot.ErrTooLate
@@ -78,12 +86,39 @@ func TestProposalRoutes(t *testing.T) {
 	if rec, _ := do(t, h, "POST", "/v1/proposals", "", `{}`); rec.Code != 401 {
 		t.Fatalf("unauthenticated: %d", rec.Code)
 	}
-	body := `{"title":"T","text":"x","choices":[{"id":"yes","label":"Yes"},{"id":"no","label":"No"}],"quorum":{"text":"q","min_ballots":1},"binding":false,"removed_may_vote":false,"opens_at":1,"closes_at":2,"outage_rule":"r"}`
+	body := `{"approval_id":"A1","title":"T","text":"x","choices":[{"id":"yes","label":"Yes"},{"id":"no","label":"No"}],"quorum":{"text":"q","min_ballots":1},"binding":false,"removed_may_vote":false,"opens_at":1,"closes_at":2,"outage_rule":"r"}`
 	rec, m := do(t, h, "POST", "/v1/proposals", apiKey, body)
-	if rec.Code != 201 || m["proposal_id"] != "01JBQZ0000000000000000000A" || m["eligible"] != float64(3) || m["unsigned"] != float64(1) || fp.last.Title != "T" || len(fp.last.Choices) != 2 {
+	if rec.Code != 201 || m["proposal_id"] != "01JBQZ0000000000000000000A" || m["eligible"] != float64(3) || m["unsigned"] != float64(1) || fp.last.Title != "T" || fp.lastAppr != "A1" || len(fp.last.Choices) != 2 {
 		t.Fatalf("%d %v", rec.Code, m)
 	}
-	if rec, _ := do(t, h, "POST", "/v1/proposals", apiKey, `{"title":"T","extra":1}`); rec.Code != 400 {
+	// Without approval_id nothing is created or extended.
+	n := fp.created
+	noApproval := strings.Replace(body, `"approval_id":"A1",`, "", 1)
+	if rec, m := do(t, h, "POST", "/v1/proposals", apiKey, noApproval); rec.Code != 400 || m["error"] != "approval_required" || fp.created != n {
+		t.Fatalf("create without approval_id: %d %v", rec.Code, m)
+	}
+	if rec, m := do(t, h, "POST", "/v1/proposals", apiKey, strings.Replace(body, `"A1"`, `""`, 1)); rec.Code != 400 || m["error"] != "approval_required" {
+		t.Fatalf("create with an empty approval_id: %d %v", rec.Code, m)
+	}
+	if rec, m := do(t, h, "POST", "/v1/proposals/ok/extend", apiKey, `{"closes_at":9,"outage":{"from":1,"to":5000,"source":"s"}}`); rec.Code != 400 || m["error"] != "approval_required" {
+		t.Fatalf("extend without approval_id: %d %v", rec.Code, m)
+	}
+	for code, want := range map[string]int{approval.CodeApprovalNotApproved: 403, approval.CodeApprovalMismatch: 403, approval.CodeApprovalWrongAction: 403,
+		approval.CodeApprovalNotFound: 403, approval.CodeApprovalExpired: 403, approval.CodeApprovalUsed: 409} {
+		fp.err = &approval.Error{Code: code}
+		if rec, m := do(t, h, "POST", "/v1/proposals", apiKey, body); rec.Code != want || m["error"] != code {
+			t.Errorf("create, %s: %d %v", code, rec.Code, m)
+		}
+		if rec, m := do(t, h, "POST", "/v1/proposals/ok/extend", apiKey, `{"approval_id":"A1","closes_at":9,"outage":{"from":1,"to":5000,"source":"s"}}`); rec.Code != want || m["error"] != code {
+			t.Errorf("extend, %s: %d %v", code, rec.Code, m)
+		}
+	}
+	fp.err = ballot.ErrNoApprovals
+	if rec, m := do(t, h, "POST", "/v1/proposals", apiKey, body); rec.Code != 503 || m["error"] != "approvals_not_configured" {
+		t.Fatalf("no approvals: %d %v", rec.Code, m)
+	}
+	fp.err = nil
+	if rec, _ := do(t, h, "POST", "/v1/proposals", apiKey, `{"approval_id":"A1","title":"T","extra":1}`); rec.Code != 400 {
 		t.Fatalf("unknown field: %d", rec.Code)
 	}
 	for err, want := range map[error]string{
@@ -117,7 +152,8 @@ func TestProposalRoutes(t *testing.T) {
 			t.Errorf("close %s: %d %v", id, rec.Code, m)
 		}
 	}
-	ext := `{"closes_at":9,"outage":{"from":1,"to":5000,"source":"https://status.vettid.org/"}}`
+	fp.err = nil
+	ext := `{"approval_id":"A1","closes_at":9,"outage":{"from":1,"to":5000,"source":"https://status.vettid.org/"}}`
 	for id, want := range map[string]int{"ok": 200, "late": 409, "bad": 400, "changed": 409} {
 		if rec, m := do(t, h, "POST", "/v1/proposals/"+id+"/extend", apiKey, ext); rec.Code != want {
 			t.Errorf("extend %s: %d %v", id, rec.Code, m)

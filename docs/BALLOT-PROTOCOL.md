@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.12.5 (2026-10-30)
+**Status:** 0.13.0 (2026-11-02)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -72,7 +72,7 @@ members' signatures, for the organisation.
 - **`proposal_id`** is a canonical upper-case ULID: 26 ASCII bytes.
 - **Documents** (the proposal, an extension, the results, the service
   list; §8.5) are JCS (RFC 8785). A verifier parses strictly
-  (VAULT-MESSAGING §5.3: no duplicate names), re-serializes per RFC 8785
+  (VAULT-MESSAGING §5.3: no duplicate names, byte order mark or unpaired surrogate escape), re-serializes per RFC 8785
   and refuses the document unless the bytes are identical. Each is
   signed with a detached signature over a string containing
   `H(document bytes)`. Times in them are Unix seconds; binary values
@@ -189,6 +189,26 @@ design: vettid/votes, docs/VOTES-SITE.md).
   the last 30 days, with their extensions. The app fetches it, with no
   session, on a fixed hourly schedule, and hands the vault the entries
   of its services.
+
+### 3.4 Who may create a proposal
+
+The service creates a proposal only with the admins' approval of exactly
+its input (MEMBER-SERVICE-PLAN §4.5, §5.2), and uses that approval once;
+holding the application's API key is not enough. The approval is for the
+action `proposal.create`, and it is approved when m distinct admins have
+signed the challenge (VAULT-MESSAGING §10.4). Its payload is the input
+(§3.1's fields the application chooses) in JCS form with every field
+present, parsed strictly (§2). Before creating, the service checks, in
+one step that no other request can interleave with, that the approval is
+approved, is for `proposal.create`, has not run out and has not been used,
+and that its payload equals, byte for byte, the JCS form of the input it
+is about to execute; no field of the proposal comes from anywhere but the
+approved payload. It then records the approval as used, and only then makes,
+publishes and sends the proposal. An approval used for a proposal that
+then fails to be made or published is not usable again; the admins approve
+again. The text the admins read is built by the service from the payload:
+whether the vote is binding, its window, its quorum, its choices and its
+title; the application writes none of it. **(chosen; not in the spec.)**
 
 ## 4. Messages
 
@@ -543,7 +563,12 @@ the window, the service may extend `closes_at` by the outage, rounded up
 to the hour, by extensions totalling at most 24 h. Each extension is
 published and anchored before the `closes_at` it extends, listed in the
 site's index, and sent as `vote.extended`; a vault also learns of it
-from the index. **(chosen; not in the spec.)**
+from the index. An extension needs the admins' approval, as creating a
+proposal does (§3.4): an approval of the action `vote.extend`, whose
+payload is `{proposal_id, closes_at, outage}` in JCS form, checked and
+used once before the extension is published. **(chosen; not in the
+spec.)** Counting the votes after the close (§7) needs no approval: it
+decides nothing that the window and the ballots have not.
 
 ## 11. Test vectors
 
@@ -586,13 +611,21 @@ item.
 8. **Refusals and status answers are signed** (§4.2).
 9. **JCS documents** are verified as exact bytes, with detached
    signatures (§2).
-10. **Extensions** of up to 24 h for relay outages (§10.2).
+10. **Extensions** of up to 24 h for relay outages (§10.2), and
+    proposals, each only with the admins' approval of the exact input,
+    used once (§3.4).
 11. **Receipt times are not published** (§7).
 12. **Accepted ballots are also kept outside the table,** write-once
     (§6).
 
 ## Changes
 
+- **0.13.0 (2026-11-02):** creating a proposal (§3.4) and extending one
+  (§10.2) need the admins' m-of-n approval of the exact input, used
+  once; the API key alone no longer starts or extends a vote. §2 says
+  what a strict parse refuses: duplicate names, a byte order mark and an
+  unpaired surrogate escape (VAULT-MESSAGING §5.3). No change to the
+  messages, the documents or the vectors.
 - **0.12.5 (2026-10-30):** §3.3: the service list has no limit on the
   number of services or keys (a list that only grows would have kept
   them forever), only a cap of 4,194,304 bytes; a vault given a list it

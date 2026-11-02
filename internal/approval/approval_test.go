@@ -312,15 +312,15 @@ const votePayload = `{"proposal": 7, "options": ["yes", "no"]}`
 // challenges are cancelled; a late answer is audited but does not count.
 func TestOneOfN(t *testing.T) {
 	f := newFixture(t, 1, "c1", "c2", "c3")
-	c := f.create(ActionVoteOpen, "Open the vote on proposal 7", votePayload)
-	want, _ := servicevault.ActionHash(ActionVoteOpen, "Open the vote on proposal 7", json.RawMessage(votePayload))
+	c := f.create(ActionContractTemplateChange, "Open the vote on proposal 7", votePayload)
+	want, _ := servicevault.ActionHash(ActionContractTemplateChange, "Open the vote on proposal 7", json.RawMessage(votePayload))
 	if c.Status != StatusPending || c.ActionHash != want || !c.ExpiresAt.Equal(f.clk.Now().Add(DefaultTTL)) {
 		t.Fatalf("created %+v", c)
 	}
 	if len(f.p.sent) != 3 {
 		t.Fatalf("%d challenges", len(f.p.sent))
 	}
-	wantCtx := "Approve on VettID Member Service: Open the vote on proposal 7 — ref " + want[:8]
+	wantCtx := "Approve on VettID Member Service: Open the vote on proposal 7 — ref " + want[:16]
 	for _, s := range f.p.sent {
 		if s.ctxt != wantCtx {
 			t.Fatalf("context %q", s.ctxt)
@@ -340,7 +340,7 @@ func TestOneOfN(t *testing.T) {
 	}
 	f.tick()
 	ap := f.hk.of(EventApproved)
-	if len(ap) != 1 || ap[0]["approval_id"] != c.ID || ap[0]["action_hash"] != want || ap[0]["action"] != ActionVoteOpen {
+	if len(ap) != 1 || ap[0]["approval_id"] != c.ID || ap[0]["action_hash"] != want || ap[0]["action"] != ActionContractTemplateChange {
 		t.Fatalf("webhooks %+v", ap)
 	}
 	// The audit log: the request, both answers with their evidence, the
@@ -353,7 +353,7 @@ func TestOneOfN(t *testing.T) {
 		t.Fatalf("audit %v", types)
 	}
 	logs := f.logs.String()
-	if strings.Contains(logs, "proposal 7") || strings.Contains(logs, want[:8]) ||
+	if strings.Contains(logs, "proposal 7") || strings.Contains(logs, want[:16]) ||
 		strings.Contains(logs, base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x22}, 64))[:16]) {
 		t.Fatalf("logs carry a context or signature:\n%s", logs)
 	}
@@ -363,7 +363,7 @@ func TestOneOfN(t *testing.T) {
 // a redelivered answer changes nothing; a bad signature does not count.
 func TestTwoOfN(t *testing.T) {
 	f := newFixture(t, 2, "c1", "c2", "c3")
-	c := f.create(ActionProposalCreate, "Create proposal: bylaws v2", `{"title":"Bylaws v2"}`)
+	c := f.create(ActionContractTemplateChange, "Create proposal: bylaws v2", `{"title":"Bylaws v2"}`)
 	e := f.answer("c1", "approve-changed")
 	f.deliver(e) // redelivered
 	if s := f.status(c.ID); s.Status != StatusPending || len(s.Approvals) != 1 || !s.Approvals[0].KeyChanged {
@@ -410,7 +410,7 @@ func TestTwoOfN(t *testing.T) {
 // A denial that leaves too few admins to reach m denies the approval.
 func TestDenyMakesUnreachable(t *testing.T) {
 	f := newFixture(t, 2, "c1", "c2", "c3")
-	c := f.create(ActionVoteClose, "Close the vote", `{}`)
+	c := f.create(ActionContractTemplateChange, "Close the vote", `{}`)
 	f.answer("c1", "deny")
 	if s := f.status(c.ID); s.Status != StatusPending {
 		t.Fatalf("%+v", s)
@@ -429,7 +429,7 @@ func TestDenyMakesUnreachable(t *testing.T) {
 	}
 	// 1-of-1: the only admin denies.
 	g := newFixture(t, 1, "c1")
-	c = g.create(ActionVoteClose, "Close the vote", `{}`)
+	c = g.create(ActionContractTemplateChange, "Close the vote", `{}`)
 	g.answer("c1", "deny")
 	if s := g.status(c.ID); s.Status != StatusDenied {
 		t.Fatalf("%+v", s)
@@ -439,12 +439,12 @@ func TestDenyMakesUnreachable(t *testing.T) {
 // m > n is refused at creation.
 func TestUnreachableAtCreation(t *testing.T) {
 	f := newFixture(t, 2, "c1")
-	_, err := f.m.Create(context.Background(), Request{Action: ActionVoteOpen, Summary: "x", Payload: json.RawMessage(`{}`)})
+	_, err := f.m.Create(context.Background(), Request{Action: ActionContractTemplateChange, Summary: "x", Payload: json.RawMessage(`{}`)})
 	if codeOf(err) != CodeUnreachable {
 		t.Fatalf("%v", err)
 	}
 	g := newFixture(t, 1)
-	_, err = g.m.Create(context.Background(), Request{Action: ActionVoteOpen, Summary: "x", Payload: json.RawMessage(`{}`)})
+	_, err = g.m.Create(context.Background(), Request{Action: ActionContractTemplateChange, Summary: "x", Payload: json.RawMessage(`{}`)})
 	if codeOf(err) != CodeUnreachable {
 		t.Fatalf("no admins: %v", err)
 	}
@@ -487,7 +487,7 @@ func TestExpiry(t *testing.T) {
 func TestRemindRateLimit(t *testing.T) {
 	f := newFixture(t, 2, "c1", "c2", "c3")
 	f.p.fail = map[string]error{"c3": peer.ErrNotFound} // not reachable at creation
-	c := f.create(ActionVoteOpen, "Open", `{}`)
+	c := f.create(ActionContractTemplateChange, "Open", `{}`)
 	if len(f.p.sent) != 2 {
 		t.Fatalf("%d sent", len(f.p.sent))
 	}
@@ -767,7 +767,7 @@ func TestLastAdminProtected(t *testing.T) {
 // one) and denies the approvals that can no longer reach m.
 func TestAdminConnectionRemoved(t *testing.T) {
 	f := newFixture(t, 2, "c1", "c2", "c3")
-	c := f.create(ActionVoteOpen, "Open", `{}`)
+	c := f.create(ActionContractTemplateChange, "Open", `{}`)
 	f.answer("c1", "deny")
 	ctx := context.Background()
 	if err := f.m.ConnectionRemoved(ctx, "c9"); err != nil {
@@ -805,24 +805,24 @@ func TestCreateRefuses(t *testing.T) {
 		code string
 	}{
 		{Request{Action: "vote.delete", Summary: "x", Payload: json.RawMessage(`{}`)}, CodeInvalidAction},
-		{Request{Action: ActionVoteOpen, Summary: "", Payload: json.RawMessage(`{}`)}, CodeInvalidSummary},
-		{Request{Action: ActionVoteOpen, Summary: strings.Repeat("x", MaxSummary+1), Payload: json.RawMessage(`{}`)}, CodeInvalidSummary},
-		{Request{Action: ActionVoteOpen, Summary: "a\nb", Payload: json.RawMessage(`{}`)}, CodeInvalidSummary},
-		{Request{Action: ActionVoteOpen, Summary: "a\u202eb", Payload: json.RawMessage(`{}`)}, CodeInvalidSummary},
-		{Request{Action: ActionVoteOpen, Summary: "a\u2066b", Payload: json.RawMessage(`{}`)}, CodeInvalidSummary},
-		{Request{Action: ActionVoteOpen, Summary: "a\u2028b", Payload: json.RawMessage(`{}`)}, CodeInvalidSummary},
-		{Request{Action: ActionVoteOpen, Summary: "a\x7fb", Payload: json.RawMessage(`{}`)}, CodeInvalidSummary},
-		{Request{Action: ActionVoteOpen, Summary: "\xffx", Payload: json.RawMessage(`{}`)}, CodeInvalidSummary},
-		{Request{Action: ActionVoteOpen, Summary: "x", Payload: json.RawMessage(`[]`)}, CodeInvalidPayload},
-		{Request{Action: ActionVoteOpen, Summary: "x", Payload: nil}, CodeInvalidPayload},
-		{Request{Action: ActionVoteOpen, Summary: "x", Payload: json.RawMessage(`{"a":1,"a":2}`)}, CodeInvalidPayload},
-		{Request{Action: ActionVoteOpen, Summary: "x", Payload: json.RawMessage(big)}, CodeInvalidPayload},
+		{Request{Action: ActionContractTemplateChange, Summary: "", Payload: json.RawMessage(`{}`)}, CodeInvalidSummary},
+		{Request{Action: ActionContractTemplateChange, Summary: strings.Repeat("x", MaxSummary+1), Payload: json.RawMessage(`{}`)}, CodeInvalidSummary},
+		{Request{Action: ActionContractTemplateChange, Summary: "a\nb", Payload: json.RawMessage(`{}`)}, CodeInvalidSummary},
+		{Request{Action: ActionContractTemplateChange, Summary: "a\u202eb", Payload: json.RawMessage(`{}`)}, CodeInvalidSummary},
+		{Request{Action: ActionContractTemplateChange, Summary: "a\u2066b", Payload: json.RawMessage(`{}`)}, CodeInvalidSummary},
+		{Request{Action: ActionContractTemplateChange, Summary: "a\u2028b", Payload: json.RawMessage(`{}`)}, CodeInvalidSummary},
+		{Request{Action: ActionContractTemplateChange, Summary: "a\x7fb", Payload: json.RawMessage(`{}`)}, CodeInvalidSummary},
+		{Request{Action: ActionContractTemplateChange, Summary: "\xffx", Payload: json.RawMessage(`{}`)}, CodeInvalidSummary},
+		{Request{Action: ActionContractTemplateChange, Summary: "x", Payload: json.RawMessage(`[]`)}, CodeInvalidPayload},
+		{Request{Action: ActionContractTemplateChange, Summary: "x", Payload: nil}, CodeInvalidPayload},
+		{Request{Action: ActionContractTemplateChange, Summary: "x", Payload: json.RawMessage(`{"a":1,"a":2}`)}, CodeInvalidPayload},
+		{Request{Action: ActionContractTemplateChange, Summary: "x", Payload: json.RawMessage(big)}, CodeInvalidPayload},
 	} {
 		if _, err := f.m.Create(context.Background(), c.req); codeOf(err) != c.code {
 			t.Errorf("%+v: %v, want %s", c.req.Summary, err, c.code)
 		}
 	}
-	f.create(ActionVoteOpen, "Tâche ✓ — d’accord", `{}`) // plain Unicode text is fine
+	f.create(ActionContractTemplateChange, "Tâche ✓ — d’accord", `{}`) // plain Unicode text is fine
 }
 
 func TestChallengeContext(t *testing.T) {
@@ -833,7 +833,7 @@ func TestChallengeContext(t *testing.T) {
 	}
 	long := strings.Repeat("Long Service Name ", 7)
 	s, err = ChallengeContext(long, strings.Repeat("é", 60), hash)
-	if err != nil || len(s) > MaxContext || !strings.HasSuffix(s, "… — ref abababab") || !strings.Contains(s, "é…") {
+	if err != nil || len(s) > MaxContext || !strings.HasSuffix(s, "… — ref abababababababab") || !strings.Contains(s, "é…") {
 		t.Fatalf("%d %q %v", len(s), s, err)
 	}
 	if _, err := ChallengeContext(strings.Repeat("x", MaxContext), "y", hash); err == nil {
@@ -846,7 +846,7 @@ func TestChallengeContext(t *testing.T) {
 func TestWebhookRetry(t *testing.T) {
 	f := newFixture(t, 1, "c1")
 	f.hk.failed = errors.New("down")
-	c := f.create(ActionVoteOpen, "Open", `{}`)
+	c := f.create(ActionContractTemplateChange, "Open", `{}`)
 	f.answer("c1", "approve")
 	f.tick()
 	if s := f.status(c.ID); s.Status != StatusApproved {
@@ -864,7 +864,7 @@ func TestWebhookRetry(t *testing.T) {
 func TestAuditIDsIncrease(t *testing.T) {
 	f := newFixture(t, 3, "c1", "c2", "c3")
 	for i := 0; i < 4; i++ {
-		f.create(ActionVoteOpen, fmt.Sprint("Open ", i), `{}`) // all in one millisecond
+		f.create(ActionContractTemplateChange, fmt.Sprint("Open ", i), `{}`) // all in one millisecond
 	}
 	es := f.audit()
 	if len(es) != 4 {
@@ -889,7 +889,7 @@ func TestAuditIDsIncrease(t *testing.T) {
 // in the approval bucket.
 func TestApprovalPurpose(t *testing.T) {
 	f := newFixture(t, 1, "c1", "c2")
-	f.create(ActionVoteOpen, "Open the vote", `{}`)
+	f.create(ActionContractTemplateChange, "Open the vote", `{}`)
 	if len(f.p.purposes) != 2 {
 		t.Fatalf("%d challenges", len(f.p.purposes))
 	}
@@ -907,7 +907,7 @@ func TestApprovalWithoutPurpose(t *testing.T) {
 	for _, allow := range []bool{false, true} {
 		f := newFixture(t, 1, "c1")
 		f.m.AllowNoPurpose = allow
-		a := f.create(ActionVoteOpen, "Open the vote", `{}`)
+		a := f.create(ActionContractTemplateChange, "Open the vote", `{}`)
 		f.answerTo(f.p.last("c1"), "approve-no-purpose")
 		got := f.status(a.ID)
 		if want := map[bool]string{false: StatusPending, true: StatusApproved}[allow]; got.Status != want {
@@ -930,7 +930,7 @@ func TestApprovalWithoutPurpose(t *testing.T) {
 // until a reminder sends a new one.
 func TestChallengeExpired(t *testing.T) {
 	f := newFixture(t, 2, "c1", "c2")
-	c := f.create(ActionVoteOpen, "Open", `{}`)
+	c := f.create(ActionContractTemplateChange, "Open", `{}`)
 	if s := f.status(c.ID); len(s.RemindNeeded) != 0 || s.RemindNeeded == nil {
 		t.Fatalf("remind_needed at creation: %#v", s.RemindNeeded)
 	}
@@ -944,7 +944,7 @@ func TestChallengeExpired(t *testing.T) {
 	}
 	d := evs[0]
 	st := f.status(c.ID)
-	if d["approval_id"] != c.ID || d["action"] != ActionVoteOpen || d["connection_id"] != "c1" || d["request_id"] != old.req ||
+	if d["approval_id"] != c.ID || d["action"] != ActionContractTemplateChange || d["connection_id"] != "c1" || d["request_id"] != old.req ||
 		d["expires_at"] != st.ExpiresAt.Format(time.RFC3339) || d["_connection_id"] != "c1" {
 		t.Fatalf("payload %+v", d)
 	}
@@ -978,12 +978,12 @@ func TestChallengeLife(t *testing.T) {
 	f := newFixture(t, 1, "c1")
 	f.m.LongChallenges = true
 	f.m.TTL = 6 * time.Hour
-	f.create(ActionVoteOpen, "Open", `{}`)
+	f.create(ActionContractTemplateChange, "Open", `{}`)
 	if got := f.p.last("c1").ttl; got != 6*time.Hour {
 		t.Fatalf("ttl %v", got)
 	}
 	f.p.fail = map[string]error{"c1": peer.ErrNotFound}
-	g := f.create(ActionVoteOpen, "Open again", `{}`)
+	g := f.create(ActionContractTemplateChange, "Open again", `{}`)
 	f.p.fail = nil
 	f.clk.Advance(2 * time.Hour)
 	if _, err := f.m.Remind(context.Background(), g.ID); err != nil {
@@ -998,15 +998,15 @@ func TestChallengeLife(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.m.TTL = 7 * 24 * time.Hour
-	f.create(ActionVoteOpen, "Third", `{}`)
+	f.create(ActionContractTemplateChange, "Third", `{}`)
 	if got := f.p.last("c1").ttl; got != peer.MaxApprovalChallengeTTL {
 		t.Fatalf("capped ttl %v", got)
 	}
 	f.m.TTL = 11 * time.Minute
-	f.create(ActionVoteOpen, "Fourth", `{}`)
+	f.create(ActionContractTemplateChange, "Fourth", `{}`)
 	f.clk.Advance(5 * time.Minute)
 	f.p.fail = map[string]error{"c1": peer.ErrNotFound}
-	h := f.create(ActionVoteOpen, "Fifth", `{}`)
+	h := f.create(ActionContractTemplateChange, "Fifth", `{}`)
 	f.p.fail = nil
 	f.clk.Advance(10 * time.Minute)
 	if _, err := f.m.Remind(context.Background(), h.ID); err != nil {
@@ -1023,7 +1023,7 @@ func TestChallengeEndsWithApproval(t *testing.T) {
 	f := newFixture(t, 1, "c1")
 	f.m.LongChallenges = true
 	f.m.TTL = time.Hour
-	c := f.create(ActionVoteOpen, "Open", `{}`)
+	c := f.create(ActionContractTemplateChange, "Open", `{}`)
 	ch := f.p.last("c1")
 	f.clk.Advance(time.Hour)
 	f.answerTo(ch, "expire")
@@ -1047,7 +1047,7 @@ func TestChallengeEndsWithApproval(t *testing.T) {
 func TestChallengeExpiresBeforeApproval(t *testing.T) {
 	f := newFixture(t, 1, "c1")
 	f.m.LongChallenges = true
-	c := f.create(ActionVoteOpen, "Open", `{}`)
+	c := f.create(ActionContractTemplateChange, "Open", `{}`)
 	ch := f.p.last("c1")
 	ch.ttl = 2 * time.Hour // as if it had been sent with less than the approval's life
 	f.clk.Advance(2 * time.Hour)
@@ -1066,7 +1066,7 @@ func TestChallengeExpiresBeforeApproval(t *testing.T) {
 func TestRemindNothingToRemind(t *testing.T) {
 	f := newFixture(t, 2, "c1", "c2")
 	f.m.LongChallenges = true
-	c := f.create(ActionVoteOpen, "Open", `{}`)
+	c := f.create(ActionContractTemplateChange, "Open", `{}`)
 	// Nothing to remind is answered before too_soon.
 	if _, err := f.m.Remind(context.Background(), c.ID); codeOf(err) != CodeNothingToRemind {
 		t.Fatalf("%v", err)
@@ -1085,7 +1085,7 @@ func TestRemindNothingToRemind(t *testing.T) {
 // outstanding challenge: answered, settled, or past the approval's time.
 func TestChallengeExpiredQuiet(t *testing.T) {
 	f := newFixture(t, 2, "c1", "c2")
-	c := f.create(ActionVoteOpen, "Open", `{}`)
+	c := f.create(ActionContractTemplateChange, "Open", `{}`)
 	first := f.p.last("c1")
 	f.answer("c1", "approve")
 	f.answerTo(first, "expire") // answered already
@@ -1104,7 +1104,7 @@ func TestChallengeExpiredQuiet(t *testing.T) {
 	// Past the approval's time, before the expiry is settled.
 	g := newFixture(t, 1, "c1")
 	g.m.TTL = time.Hour
-	d := g.create(ActionVoteOpen, "Open", `{}`)
+	d := g.create(ActionContractTemplateChange, "Open", `{}`)
 	g.clk.Advance(time.Hour)
 	g.answer("c1", "expire")
 	if n := len(g.hk.of(EventChallengeExpired)); n != 0 {
@@ -1122,7 +1122,7 @@ func TestChallengeExpiredQuiet(t *testing.T) {
 // of its challenge is not announced.
 func TestRemindNeededLeavesWithAdmin(t *testing.T) {
 	f := newFixture(t, 1, "c1", "c2")
-	c := f.create(ActionVoteOpen, "Open", `{}`)
+	c := f.create(ActionContractTemplateChange, "Open", `{}`)
 	old := f.p.last("c2")
 	if err := f.m.ConnectionRemoved(context.Background(), "c2"); err != nil {
 		t.Fatal(err)
@@ -1149,7 +1149,7 @@ func TestRemindNeededLeavesWithAdmin(t *testing.T) {
 func TestRemindNeededNotSent(t *testing.T) {
 	f := newFixture(t, 1, "c1", "c2")
 	f.p.fail = map[string]error{"c2": peer.ErrNotFound}
-	c := f.create(ActionVoteOpen, "Open", `{}`)
+	c := f.create(ActionContractTemplateChange, "Open", `{}`)
 	s := f.status(c.ID)
 	if strings.Join(s.RemindNeeded, ",") != "c2" || s.RemindAfter == nil ||
 		!s.RemindAfter.Equal(f.clk.Now().Add(RemindInterval)) {
@@ -1170,7 +1170,7 @@ func TestRemindNeededNotSent(t *testing.T) {
 // and a reminder that challenges every admin who has not answered.
 func TestChallengeShortWithoutGate(t *testing.T) {
 	f := newFixture(t, 2, "c1", "c2")
-	c := f.create(ActionVoteOpen, "Open", `{}`)
+	c := f.create(ActionContractTemplateChange, "Open", `{}`)
 	ch := f.p.last("c1")
 	if ch.ttl != RemindInterval {
 		t.Fatalf("ttl %v", ch.ttl)
@@ -1200,9 +1200,9 @@ func TestChallengeShortWithoutGate(t *testing.T) {
 func TestThirdConcurrentLongChallenge(t *testing.T) {
 	f := newFixture(t, 1, "c1")
 	f.m.LongChallenges = true
-	f.create(ActionVoteOpen, "One", `{}`)
-	f.create(ActionVoteOpen, "Two", `{}`)
-	third := f.create(ActionVoteOpen, "Three", `{}`)
+	f.create(ActionContractTemplateChange, "One", `{}`)
+	f.create(ActionContractTemplateChange, "Two", `{}`)
+	third := f.create(ActionContractTemplateChange, "Three", `{}`)
 	ch := f.p.last("c1")
 	if ch.ttl != RemindInterval {
 		t.Fatalf("third ttl %v", ch.ttl)
@@ -1228,7 +1228,7 @@ func TestRemindForce(t *testing.T) {
 	for _, gate := range []bool{true, false} {
 		f := newFixture(t, 2, "c1", "c2")
 		f.m.LongChallenges = gate
-		c := f.create(ActionVoteOpen, "Open", `{}`)
+		c := f.create(ActionContractTemplateChange, "Open", `{}`)
 		ctx := context.Background()
 		old1, old2 := f.p.last("c1"), f.p.last("c2")
 		if _, err := f.m.Remind(ctx, c.ID, "c1"); codeOf(err) != CodeTooSoon {
@@ -1273,10 +1273,10 @@ func TestRemindForce(t *testing.T) {
 func TestRemindForcePlaceLimit(t *testing.T) {
 	f := newFixture(t, 1, "c1")
 	f.m.LongChallenges = true
-	a := f.create(ActionVoteOpen, "One", `{}`)
-	f.create(ActionVoteOpen, "Two", `{}`)
+	a := f.create(ActionContractTemplateChange, "One", `{}`)
+	f.create(ActionContractTemplateChange, "Two", `{}`)
 	f.clk.Advance(RemindInterval)
-	f.create(ActionVoteOpen, "Three", `{}`) // the places are taken: 10 minutes
+	f.create(ActionContractTemplateChange, "Three", `{}`) // the places are taken: 10 minutes
 	if got := f.p.last("c1").ttl; got != RemindInterval {
 		t.Fatalf("third %v", got)
 	}
@@ -1302,7 +1302,7 @@ func TestRemindForceAskBudget(t *testing.T) {
 		ctx := context.Background()
 		var ids []string
 		for i := range askBudget {
-			ids = append(ids, f.create(ActionVoteOpen, fmt.Sprint("Open ", i), `{}`).ID)
+			ids = append(ids, f.create(ActionContractTemplateChange, fmt.Sprint("Open ", i), `{}`).ID)
 			f.clk.Advance(time.Hour)
 		}
 		l, err := f.m.asks(ctx, "c1")
@@ -1351,7 +1351,7 @@ func TestRemindForceAskBudgetLateDelivery(t *testing.T) {
 	ctx := context.Background()
 	var ids []string
 	for i := range askBudget {
-		ids = append(ids, f.create(ActionVoteOpen, fmt.Sprint("Open ", i), `{}`).ID)
+		ids = append(ids, f.create(ActionContractTemplateChange, fmt.Sprint("Open ", i), `{}`).ID)
 	}
 	// Each is logged with the life asked for (24 h), even one the peer
 	// sends shorter for want of a long place: counting longer only refuses
@@ -1379,7 +1379,7 @@ func TestRemindForceAskBudgetAnyNamed(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	c := f.create(ActionVoteOpen, "Open", `{}`)
+	c := f.create(ActionContractTemplateChange, "Open", `{}`)
 	f.clk.Advance(RemindInterval)
 	old2 := f.p.last("c2")
 	before := len(f.p.sent)
@@ -1425,7 +1425,7 @@ func TestAskLogBeforeSend(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t, 1, "c1")
 	f.m.Store = &failStore{Store: f.st, kind: kindApproval}
-	if _, err := f.m.Create(ctx, Request{Action: ActionVoteOpen, Summary: "Open", Payload: json.RawMessage(`{}`)}); err == nil {
+	if _, err := f.m.Create(ctx, Request{Action: ActionContractTemplateChange, Summary: "Open", Payload: json.RawMessage(`{}`)}); err == nil {
 		t.Fatal("created with the store down")
 	}
 	if len(f.p.sent) != 1 {
@@ -1436,7 +1436,7 @@ func TestAskLogBeforeSend(t *testing.T) {
 	}
 	f = newFixture(t, 1, "c1")
 	f.m.Store = &failStore{Store: f.st, kind: kindAsks}
-	f.create(ActionVoteOpen, "Open", `{}`)
+	f.create(ActionContractTemplateChange, "Open", `{}`)
 	if len(f.p.sent) != 0 {
 		t.Fatalf("sent %d without logging", len(f.p.sent))
 	}
@@ -1448,7 +1448,7 @@ func TestAskLogBeforeSend(t *testing.T) {
 func TestAskLogBounded(t *testing.T) {
 	f := newFixture(t, 1, "c1")
 	ctx := context.Background()
-	c := f.create(ActionVoteOpen, "Open", `{}`)
+	c := f.create(ActionContractTemplateChange, "Open", `{}`)
 	for range askBudget - 1 {
 		f.clk.Advance(RemindInterval)
 		if _, err := f.m.Remind(ctx, c.ID); err != nil {
@@ -1499,7 +1499,7 @@ func TestAskLogUnreadable(t *testing.T) {
 	ctx := context.Background()
 	for _, how := range []string{"get", "decode"} {
 		f := newFixture(t, 1, "c1")
-		c := f.create(ActionVoteOpen, "Open", `{}`)
+		c := f.create(ActionContractTemplateChange, "Open", `{}`)
 		f.clk.Advance(RemindInterval)
 		old := f.p.last("c1")
 		before := len(f.p.sent)
@@ -1559,7 +1559,7 @@ func (f *fixture) openCount() int {
 }
 
 func (f *fixture) createErr() (*Created, error) {
-	return f.m.Create(context.Background(), Request{Action: ActionVoteOpen, Summary: "Open", Payload: json.RawMessage(`{}`)})
+	return f.m.Create(context.Background(), Request{Action: ActionContractTemplateChange, Summary: "Open", Payload: json.RawMessage(`{}`)})
 }
 
 // A new approval is refused (ask_budget) when fewer admins than the
@@ -1601,7 +1601,7 @@ func TestCreateAskBudgetRefused(t *testing.T) {
 func TestCreateSkipsFullAdmin(t *testing.T) {
 	f := newFixture(t, 1, "c1", "c2")
 	f.fillAsks("c1", askBudget)
-	c := f.create(ActionVoteOpen, "Open", `{}`)
+	c := f.create(ActionContractTemplateChange, "Open", `{}`)
 	if f.p.last("c1").req != "" || f.p.last("c2").req == "" {
 		t.Fatalf("sent %+v", f.p.sent)
 	}
@@ -1617,7 +1617,7 @@ func TestRemindAskBudget(t *testing.T) {
 	for _, gate := range []bool{true, false} {
 		f := newFixture(t, 1, "c1", "c2")
 		f.m.LongChallenges = gate
-		c := f.create(ActionVoteOpen, "Open", `{}`)
+		c := f.create(ActionContractTemplateChange, "Open", `{}`)
 		if gate {
 			f.answerTo(f.p.last("c1"), "expire")
 			f.answerTo(f.p.last("c2"), "expire")
@@ -1690,7 +1690,7 @@ func TestAskLogTwoManagers(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := m.Create(context.Background(), Request{Action: ActionVoteOpen, Summary: "Open",
+			if _, err := m.Create(context.Background(), Request{Action: ActionContractTemplateChange, Summary: "Open",
 				Payload: json.RawMessage(`{}`)}); err != nil && codeOf(err) != CodeAskBudget {
 				t.Error(err)
 			}
@@ -1708,7 +1708,7 @@ func TestAskLogTwoManagers(t *testing.T) {
 // A transient read error is an error, not ask_budget.
 func TestAskLogStoreError(t *testing.T) {
 	f := newFixture(t, 1, "c1")
-	c := f.create(ActionVoteOpen, "Open", `{}`)
+	c := f.create(ActionContractTemplateChange, "Open", `{}`)
 	f.clk.Advance(RemindInterval)
 	f.m.Store = &failStore{Store: f.st, getKind: kindAsks}
 	if _, err := f.createErr(); err == nil || codeOf(err) != "" {
@@ -1742,7 +1742,7 @@ func (s *raceStore) Apply(ctx context.Context, changes []peer.Change) error {
 // refused (ask_budget), without saving or auditing a reminder.
 func TestRemindLosesRace(t *testing.T) {
 	f := newFixture(t, 1, "c1")
-	c := f.create(ActionVoteOpen, "Open", `{}`)
+	c := f.create(ActionContractTemplateChange, "Open", `{}`)
 	f.clk.Advance(RemindInterval)
 	f.fillAsks("c1", askBudget-1)
 	rival := &askLog{}

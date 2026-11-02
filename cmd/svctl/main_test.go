@@ -122,6 +122,12 @@ type fakeApprovals struct {
 func (f *fakeApprovals) Create(_ context.Context, r approval.Request) (*approval.Created, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if sum, built, err := ballot.SummaryFor(r.Action, r.Payload); built {
+		if err != nil || r.Summary != "" {
+			return nil, &approval.Error{Code: approval.CodeInvalidPayload}
+		}
+		r.Summary = sum
+	}
 	f.req = r
 	if r.Action == "nope" {
 		return nil, &approval.Error{Code: approval.CodeInvalidAction}
@@ -143,7 +149,7 @@ func (f *fakeApprovals) Status(_ context.Context, id string) (*approval.Status, 
 		return nil, approval.ErrNotFound
 	}
 	f.n++
-	st := &approval.Status{ID: id, Action: f.req.Action, Status: approval.StatusPending, Threshold: 1, Admins: []string{"c1"}, RemindNeeded: []string{"c1"}, RemindAfter: &exp}
+	st := &approval.Status{ID: id, Action: f.req.Action, Summary: f.req.Summary, Status: approval.StatusPending, Threshold: 1, Admins: []string{"c1"}, RemindNeeded: []string{"c1"}, RemindAfter: &exp}
 	if f.n > 1 {
 		st.RemindNeeded = []string{}
 		st.Status = approval.StatusApproved
@@ -331,17 +337,22 @@ func TestSignIn(t *testing.T) {
 
 func TestApprove(t *testing.T) {
 	f := newFixture(t)
-	code, out, errOut := f.run(t, "approve", "-action", "vote.open", "-summary", "Open the vote on proposal 7", "-payload", `{"proposal":7}`)
-	h, _ := servicevault.ActionHash("vote.open", "Open the vote on proposal 7", []byte(`{"proposal":7}`))
+	code, out, errOut := f.run(t, "approve", "-action", "contract_template.change", "-summary", "Open the vote on proposal 7", "-payload", `{"proposal":7}`)
+	h, _ := servicevault.ActionHash("contract_template.change", "Open the vote on proposal 7", []byte(`{"proposal":7}`))
 	want := "approval_id: a1\naction_hash: " + h + "\nexpires_at: 2026-10-27T12:10:00Z\naction_hash_check: ok\n" + "remind needed: c1 (svctl remind a1)\n" +
 		"status: approved\nthreshold: 1\napproved_by: c1 key_changed=false\n"
 	if code != exitOK || out != want {
 		t.Fatalf("exit %d\n%s\nstderr %s", code, out, errOut)
 	}
+	// The summary of proposal.create and vote.extend is the service's:
+	// none is given.
+	if code, _, errOut := newFixture(t).run(t, "approve", "-action", "proposal.create", "-summary", "x", "-payload", "{}"); code != exitUsage || !strings.Contains(errOut, "takes no -summary") {
+		t.Fatalf("exit %d %s", code, errOut)
+	}
 	// A hash that does not match the request is an error.
 	f = newFixture(t)
 	f.apv.badHash = true
-	if code, _, errOut := f.run(t, "approve", "-action", "vote.open", "-summary", "x"); code != exitError || !strings.Contains(errOut, "does not match") {
+	if code, _, errOut := f.run(t, "approve", "-action", "contract_template.change", "-summary", "x"); code != exitError || !strings.Contains(errOut, "does not match") {
 		t.Fatalf("exit %d %s", code, errOut)
 	}
 	// The API's refusal is reported with its code.
@@ -457,8 +468,8 @@ func TestConfig(t *testing.T) {
 		{nil, []string{"-api-key", "x", "health"}},
 		{nil, []string{"invite"}},
 		{nil, []string{"signin"}},
-		{nil, []string{"approve", "-action", "vote.open"}},
-		{nil, []string{"approve", "-action", "vote.open", "-summary", "x", "-payload", "{"}},
+		{nil, []string{"approve", "-action", "contract_template.change"}},
+		{nil, []string{"approve", "-action", "contract_template.change", "-summary", "x", "-payload", "{"}},
 		{nil, []string{"remind"}},
 		{nil, []string{"approval"}},
 		{nil, []string{"admins", "extra"}},
@@ -505,16 +516,28 @@ func TestRenderQR(t *testing.T) {
 	}
 }
 
+// proposalFile is a proposal input a file can hold; the extension file
+// is an extension of it.
+const (
+	proposalFile  = `{"title":"T","text":"x","choices":[{"id":"yes","label":"Yes"}],"quorum":{"text":"q","min_ballots":1},"binding":true,"opens_at":1793520000,"closes_at":1793606400,"outage_rule":"r"}`
+	extensionFile = `{"closes_at":1793613600,"outage":{"from":1793600000,"to":1793605400,"source":"s"}}`
+)
+
 // fakeProposals answers the proposal routes: the first create is kept
 // but not published, and a close before the relay is caught up is
 // collecting.
 type fakeProposals struct {
-	created  int
-	caught   bool
-	unsigned int
+	approvals []string // the approval ids the calls carried
+	created   int
+	caught    bool
+	unsigned  int
 }
 
-func (p *fakeProposals) Create(_ context.Context, in ballot.ProposalInput) (*ballot.Created, error) {
+func (p *fakeProposals) Create(_ context.Context, approvalID string, in ballot.ProposalInput) (*ballot.Created, error) {
+	p.approvals = append(p.approvals, approvalID)
+	if approvalID != "a1" {
+		return nil, &approval.Error{Code: approval.CodeApprovalNotApproved}
+	}
 	p.created++
 	if in.Title == "" {
 		return nil, &ballot.ErrInput{Err: errors.New("title")}
@@ -543,8 +566,12 @@ func (p *fakeProposals) Results(context.Context, string) (*ballot.PublishedResul
 	return nil, nil
 }
 
-func (p *fakeProposals) Extend(context.Context, string, ballot.ExtensionInput) (*vote.Extension, error) {
-	return nil, errors.New("not here")
+func (p *fakeProposals) Extend(_ context.Context, id, approvalID string, in ballot.ExtensionInput) (*vote.Extension, error) {
+	p.approvals = append(p.approvals, approvalID)
+	if approvalID != "a1" {
+		return nil, &approval.Error{Code: approval.CodeApprovalNotApproved}
+	}
+	return &vote.Extension{V: 1, ProposalID: id, N: 1, ClosesAt: in.ClosesAt, Outage: in.Outage}, nil
 }
 
 func (p *fakeProposals) Publish(context.Context, string) (int, error) { return 3, nil }
@@ -559,7 +586,7 @@ func TestProposalCommands(t *testing.T) {
 		s.AnchorKey = &api.AnchorKey{Key: []byte{1}, Cert: []byte{2}, IK: []byte{3}, Sigstore: "staging"}
 	})
 	in := filepath.Join(t.TempDir(), "proposal.json")
-	if err := os.WriteFile(in, []byte(`{"title":"T","choices":[]}`), 0o600); err != nil {
+	if err := os.WriteFile(in, []byte(proposalFile), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	code, _, errOut := f.run(t, "proposal", "create", "-in", in)
@@ -605,7 +632,7 @@ func TestProposalCreateWarnsUnsigned(t *testing.T) {
 	fp := &fakeProposals{created: 1} // the first create would be kept, not published
 	f.serve(t, func(s *api.Server) { s.Proposals = fp })
 	in := filepath.Join(t.TempDir(), "proposal.json")
-	if err := os.WriteFile(in, []byte(`{"title":"T","choices":[]}`), 0o600); err != nil {
+	if err := os.WriteFile(in, []byte(proposalFile), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	code, out, errOut := f.run(t, "proposal", "create", "-in", in)
@@ -665,5 +692,60 @@ func TestSignInUnsignedTestOnly(t *testing.T) {
 	}
 	if f.si.unsignedCalls != 0 {
 		t.Fatal("a run was started")
+	}
+}
+
+// Creating or extending a proposal first has the admins approve exactly
+// its input, then calls with the approval.
+func TestProposalNeedsApproval(t *testing.T) {
+	f := newFixture(t)
+	fp := &fakeProposals{created: 1}
+	f.serve(t, func(s *api.Server) { s.Proposals = fp })
+	dir := t.TempDir()
+	in := filepath.Join(dir, "proposal.json")
+	ext := filepath.Join(dir, "extension.json")
+	for p, c := range map[string]string{in: proposalFile, ext: extensionFile} {
+		if err := os.WriteFile(p, []byte(c), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	code, out, errOut := f.run(t, "proposal", "create", "-in", in)
+	if code != exitOK || !strings.Contains(out, "approval_id: a1\n") || !strings.Contains(out, "summary: BINDING vote opens 2026-11-01") ||
+		!strings.Contains(out, "action_hash_check: ok") || !strings.Contains(out, `"proposal_id": "01Q"`) || strings.Join(fp.approvals, ",") != "a1" {
+		t.Fatalf("create: exit %d\n%s\n%s", code, out, errOut)
+	}
+	if f.apv.req.Action != "proposal.create" || f.apv.req.Summary == "" {
+		t.Fatalf("approval request %+v", f.apv.req)
+	}
+	// The payload is the input in canonical full form.
+	want, _ := ballot.CanonicalProposal(ballot.ProposalInput{Title: "T", Text: "x", Choices: []vote.Choice{{ID: "yes", Label: "Yes"}},
+		Quorum: vote.Quorum{Text: "q", MinBallots: 1}, Binding: true, OpensAt: 1793520000, ClosesAt: 1793606400, OutageRule: "r"})
+	if string(f.apv.req.Payload) != string(want) {
+		t.Fatalf("payload %s", f.apv.req.Payload)
+	}
+	// Not approved within -wait: nothing is called.
+	n := len(fp.approvals)
+	f.apv.n = -100
+	if code, _, errOut := f.run(t, "proposal", "create", "-in", in, "-wait", "0"); code != exitError || !strings.Contains(errOut, "pending") || len(fp.approvals) != n {
+		t.Fatalf("pending: exit %d %s, %d calls", code, errOut, len(fp.approvals))
+	}
+	f.apv.n = 0
+	// An input with a name the proposal doesn't have is refused here.
+	bad := filepath.Join(dir, "bad.json")
+	_ = os.WriteFile(bad, []byte(`{"title":"T","extra":1}`), 0o600)
+	if code, _, _ := f.run(t, "proposal", "create", "-in", bad); code != exitUsage || len(fp.approvals) != n {
+		t.Fatalf("unknown name: exit %d", code)
+	}
+	// Extend.
+	code, out, errOut = f.run(t, "proposal", "extend", "01JBQZ0000000000000000000A", "-in", ext)
+	if code != exitOK || !strings.Contains(out, "summary: EXTEND vote 01JBQZ0000000000000000000A") || !strings.Contains(out, "approval_id: a1") || !strings.Contains(out, `"closes_at": 1793613600`) {
+		t.Fatalf("extend: exit %d\n%s\n%s", code, out, errOut)
+	}
+	if f.apv.req.Action != "vote.extend" {
+		t.Fatalf("approval request %+v", f.apv.req)
+	}
+	// An existing approval of another action is not used.
+	if code, _, errOut := f.run(t, "proposal", "create", "-in", in, "-approval", "a1"); code != exitError || !strings.Contains(errOut, "not an approved proposal.create") {
+		t.Fatalf("exit %d %s", code, errOut)
 	}
 }

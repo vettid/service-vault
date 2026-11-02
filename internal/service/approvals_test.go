@@ -37,7 +37,7 @@ func TestApprovalEndToEnd(t *testing.T) {
 	}
 
 	payload := `{"proposal":7}`
-	c, err := m.Create(ctx, approval.Request{Action: approval.ActionVoteOpen, Summary: "Open the vote on proposal 7",
+	c, err := m.Create(ctx, approval.Request{Action: approval.ActionContractTemplateChange, Summary: "Open the vote on proposal 7",
 		Payload: json.RawMessage(payload)})
 	if err != nil {
 		t.Fatal(err)
@@ -47,8 +47,8 @@ func TestApprovalEndToEnd(t *testing.T) {
 		t.Fatalf("%d challenges", len(f.m.Challenges))
 	}
 	ch := f.m.Challenges[0]
-	hash, _ := servicevault.ActionHash(approval.ActionVoteOpen, "Open the vote on proposal 7", json.RawMessage(payload))
-	if c.ActionHash != hash || ch.Context != "Approve on VettID Member Service: Open the vote on proposal 7 — ref "+hash[:8] {
+	hash, _ := servicevault.ActionHash(approval.ActionContractTemplateChange, "Open the vote on proposal 7", json.RawMessage(payload))
+	if c.ActionHash != hash || ch.Context != "Approve on VettID Member Service: Open the vote on proposal 7 — ref "+hash[:16] {
 		t.Fatalf("context %q", ch.Context)
 	}
 	f.sign(f.m, ch, f.m.Cred)
@@ -86,7 +86,7 @@ func TestApprovalEndToEnd(t *testing.T) {
 		Key: ed25519.PublicKey(resp.Key), Sig: resp.Signature, Purpose: resp.Purpose}, f.keys.IKPublic(), f.m.IK.Public().(ed25519.PublicKey), ch) != nil {
 		t.Fatal("audited signature does not verify")
 	}
-	if logs := f.logs.String(); strings.Contains(logs, "proposal 7") || strings.Contains(logs, hash[:8]) {
+	if logs := f.logs.String(); strings.Contains(logs, "proposal 7") || strings.Contains(logs, hash[:16]) {
 		t.Fatalf("logs carry the context:\n%s", logs)
 	}
 

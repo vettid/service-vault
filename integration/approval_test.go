@@ -72,7 +72,7 @@ func TestApprovalsOnDynamoDB(t *testing.T) {
 		}
 	}
 	// Threshold 2 with one admin: unreachable. Lower it to add c2 and c3.
-	if _, err := m.Create(ctx, approval.Request{Action: approval.ActionVoteOpen, Summary: "x", Payload: json.RawMessage(`{}`)}); err == nil {
+	if _, err := m.Create(ctx, approval.Request{Action: approval.ActionContractTemplateChange, Summary: "x", Payload: json.RawMessage(`{}`)}); err == nil {
 		t.Fatal("m > n accepted")
 	}
 	m.Threshold = 1
@@ -93,7 +93,7 @@ func TestApprovalsOnDynamoDB(t *testing.T) {
 	if a, err := m.Admins(ctx); err != nil || len(a.Admins) != 3 {
 		t.Fatalf("admins after restart %+v %v", a, err)
 	}
-	cr, err := m.Create(ctx, approval.Request{Action: approval.ActionProposalCreate, Summary: "Create proposal 7",
+	cr, err := m.Create(ctx, approval.Request{Action: approval.ActionContractTemplateChange, Summary: "Create proposal 7",
 		Payload: json.RawMessage(`{"id":7}`)})
 	if err != nil {
 		t.Fatal(err)

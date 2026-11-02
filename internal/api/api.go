@@ -167,15 +167,18 @@ type Approvals interface {
 
 // Proposals creates and reports votes' proposals (ballot.Manager).
 type Proposals interface {
-	Create(ctx context.Context, in ballot.ProposalInput) (*ballot.Created, error)
+	// Create makes a proposal from the input an approval approved
+	// (proposal.create), and uses the approval up.
+	Create(ctx context.Context, approvalID string, in ballot.ProposalInput) (*ballot.Created, error)
 	// Status reports a proposal, or nil for an unknown id.
 	Status(ctx context.Context, id string) (*ballot.ProposalStatus, error)
 	// Close counts a vote and publishes its results, or reports them.
 	Close(ctx context.Context, id string) (*ballot.ResultsSummary, error)
 	// Results returns a vote's results once counted, or nil.
 	Results(ctx context.Context, id string) (*ballot.PublishedResults, error)
-	// Extend publishes an extension for a relay outage.
-	Extend(ctx context.Context, id string, in ballot.ExtensionInput) (*vote.Extension, error)
+	// Extend publishes an extension for a relay outage, as an approval
+	// (vote.extend) approved, and uses the approval up.
+	Extend(ctx context.Context, id, approvalID string, in ballot.ExtensionInput) (*vote.Extension, error)
 	// Publish publishes a proposal if it isn't yet, sends it to every
 	// eligible member, and returns how many it sent.
 	Publish(ctx context.Context, id string) (int, error)
@@ -563,18 +566,70 @@ func (s *Server) approvalError(w http.ResponseWriter, what string, err error) {
 // title and the choices, with room for JSON escaping.
 const maxProposalBody = 64 << 10
 
+// proposalBody is POST /v1/proposals: the proposal input and the
+// approval_id of the admins' proposal.create approval of exactly that
+// input.
+type proposalBody struct {
+	ApprovalID string `json:"approval_id"`
+	ballot.ProposalInput
+}
+
+// extensionBody is POST /v1/proposals/{id}/extend: the extension and the
+// approval_id of the admins' vote.extend approval of exactly that
+// extension of that proposal.
+type extensionBody struct {
+	ApprovalID string `json:"approval_id"`
+	ballot.ExtensionInput
+}
+
+// approvalProblem answers an approval that can't be used for a proposal
+// or an extension, and reports whether err was one.
+func approvalProblem(w http.ResponseWriter, err error) bool {
+	if errors.Is(err, ballot.ErrNoApprovals) {
+		writeError(w, http.StatusServiceUnavailable, "approvals_not_configured")
+		return true
+	}
+	var ae *approval.Error
+	if !errors.As(err, &ae) {
+		return false
+	}
+	code, ok := consumeStatusCodes[ae.Code]
+	if !ok {
+		code = http.StatusForbidden
+	}
+	writeError(w, code, ae.Code)
+	return true
+}
+
+// consumeStatusCodes maps the codes of using an approval to statuses.
+var consumeStatusCodes = map[string]int{
+	approval.CodeApprovalRequired:    http.StatusBadRequest,
+	approval.CodeApprovalNotFound:    http.StatusForbidden,
+	approval.CodeApprovalNotApproved: http.StatusForbidden,
+	approval.CodeApprovalWrongAction: http.StatusForbidden,
+	approval.CodeApprovalMismatch:    http.StatusForbidden,
+	approval.CodeApprovalExpired:     http.StatusForbidden,
+	approval.CodeApprovalUsed:        http.StatusConflict,
+}
+
 // createProposal serves POST /v1/proposals (BALLOT-PROTOCOL §3): the
 // proposal is made from the roster at this moment, published and sent to
-// every eligible member.
+// every eligible member. It needs approval_id: the admins' approval of
+// exactly this input, which it uses up.
 func (s *Server) createProposal(w http.ResponseWriter, r *http.Request) {
-	var b ballot.ProposalInput
+	var b proposalBody
 	if !readJSONMax(w, r, &b, maxProposalBody) {
 		return
 	}
-	c, err := s.Proposals.Create(r.Context(), b)
+	if b.ApprovalID == "" {
+		writeError(w, http.StatusBadRequest, approval.CodeApprovalRequired)
+		return
+	}
+	c, err := s.Proposals.Create(r.Context(), b.ApprovalID, b.ProposalInput)
 	var ei *ballot.ErrInput
 	var np *ballot.ErrNotPublished
 	switch {
+	case approvalProblem(w, err):
 	case errors.As(err, &np):
 		// Kept, but not published: POST /v1/proposals/{id}/publish retries.
 		s.log().Error("create proposal: not published", "proposal_id", np.ProposalID, "err", err)
@@ -627,15 +682,22 @@ func (s *Server) publishProposal(w http.ResponseWriter, r *http.Request) {
 }
 
 // extendProposal serves POST /v1/proposals/{id}/extend (BALLOT-PROTOCOL
-// §10.2): {closes_at, outage: {from, to, source}}.
+// §10.2): {approval_id, closes_at, outage: {from, to, source}}. The
+// approval is the admins' vote.extend approval of exactly this extension
+// of this proposal; it is used up.
 func (s *Server) extendProposal(w http.ResponseWriter, r *http.Request) {
-	var b ballot.ExtensionInput
+	var b extensionBody
 	if !readJSONMax(w, r, &b, maxBody) {
 		return
 	}
-	e, err := s.Proposals.Extend(r.Context(), r.PathValue("id"), b)
+	if b.ApprovalID == "" {
+		writeError(w, http.StatusBadRequest, approval.CodeApprovalRequired)
+		return
+	}
+	e, err := s.Proposals.Extend(r.Context(), r.PathValue("id"), b.ApprovalID, b.ExtensionInput)
 	var ei *ballot.ErrInput
 	switch {
+	case approvalProblem(w, err):
 	case errors.Is(err, ballot.ErrUnknownProposal):
 		writeError(w, http.StatusNotFound, "not_found")
 	case errors.As(err, &ei):

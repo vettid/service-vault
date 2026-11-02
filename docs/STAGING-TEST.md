@@ -92,7 +92,8 @@ a real service's members sign in themselves.
    match code. The app shows an unrequested sign-in with "Only approve
    if you are signing in right now"; the member authenticates as in
    step 3 above only if the code matches. A challenge lives 5 minutes.
-3. Operator: `sv proposal create` prints a warning on stderr, and
+3. Operator: `sv proposal create -in FILE` (after the approval of step 4
+   of section 4, which it asks for itself) prints a warning on stderr, and
    `unsigned` above 0 in its answer, if a connection is still unsigned;
    run step 1 again and have that member authenticate before the vote
    opens.
@@ -100,12 +101,32 @@ a real service's members sign in themselves.
 ## 4. Admin approval
 
 1. Operator:
-   `sv approve -action proposal.create -summary "Staging test proposal" -payload '{"test":true}'`
+   `sv approve -action contract_template.change -summary "Staging test change" -payload '{"test":true}'`
 2. Member: the note reads *Approve on VettID Member Service: Staging test
-   proposal — ref xxxxxxxx*; the ref matches the first 8 hex digits of the
-   `action_hash` `svctl` printed. Authenticate.
+   change — ref xxxxxxxxxxxxxxxx*; the ref matches the first 16 hex digits
+   of the `action_hash` `svctl` printed. Authenticate.
 3. Operator: `status: approved`; `sv audit` shows the request and the
    signed answer.
+
+### Creating and extending a vote needs an approval
+
+1. Operator: `sv proposal create -in proposal.json` (the input of
+   README "Votes"). It sends a `proposal.create` approval whose payload is
+   the input, and prints the summary the service built from it and
+   `action_hash_check: ok`. It takes no `-summary`.
+2. Member: the note reads *Approve on VettID Member Service: BINDING (or
+   ADVISORY) vote opens … closes …, quorum …, choices …, title … — ref
+   xxxxxxxxxxxxxxxx*, from the input and nothing else. Check the window
+   and the title, then authenticate.
+3. Operator: once `status: approved`, svctl creates the proposal with the
+   approval and prints the answer. Run it again with the same
+   `-approval <id>` (`sv proposal create -in proposal.json -approval ID`):
+   it fails with `approval_used` (409) and nothing is created; an input
+   that differs by a byte fails with `approval_mismatch` (403).
+4. The same for an extension: `sv proposal extend <proposal id> -in
+   extension.json` (a `vote.extend` approval; the note reads *EXTEND vote
+   … new close …*). `sv audit` shows an `approval.consumed` entry for each
+   use. `sv proposal close` needs no approval.
 
 On staging an approval lasts at most 1 hour (`SV_CHANNEL=staging`, which
 the stack sets; a staging run outside it must set it itself, the default

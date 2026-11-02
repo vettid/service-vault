@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/vettid/service-vault/vote"
+	"sync"
 	"testing"
 	"time"
 
@@ -66,6 +67,50 @@ func (p *fakePublisher) PublishProposal(_ context.Context, id string, doc, sig [
 	return json.RawMessage(`{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}`), nil
 }
 
+// fakeApprovals stands for the approval manager: with auto it accepts
+// any approval once per call; otherwise only the approvals added, each
+// once, as approval.Manager.Consume does.
+type fakeApprovals struct {
+	mu       sync.Mutex
+	auto     bool
+	approved map[string]fakeApproval
+	used     map[string]bool
+	consumed int
+}
+
+type fakeApproval struct {
+	action  string
+	payload []byte
+	status  string // "" is approved
+}
+
+func (f *fakeApprovals) Consume(_ context.Context, id, action string, payload []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.auto {
+		f.consumed++
+		return nil
+	}
+	a, ok := f.approved[id]
+	switch {
+	case !ok || a.status != "":
+		return errors.New("not approved")
+	case a.action != action || !bytes.Equal(a.payload, payload):
+		return errors.New("mismatch")
+	case f.used[id]:
+		return errors.New("used")
+	}
+	f.used[id] = true
+	f.consumed++
+	return nil
+}
+
+func (f *fakeApprovals) add(id, action string, payload []byte, status string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.approved[id] = fakeApproval{action, payload, status}
+}
+
 func newManager(t *testing.T) (*Manager, *fakeSender, *fakePublisher) {
 	t.Helper()
 	ik := ed25519.NewKeyFromSeed(digest("service ik"))
@@ -75,7 +120,7 @@ func newManager(t *testing.T) (*Manager, *fakeSender, *fakePublisher) {
 		Store: &RecordStore{Records: peer.NewMemStore(), Copy: &MemCopy{}},
 		Sign:  func(label string, msg []byte) ([]byte, error) { return suite.Sign(ik, label, msg) },
 		IK:    ik.Public().(ed25519.PublicKey), Roster: fakeRoster{"c2", "c0", "c1"}, Sender: s, Publisher: p,
-		NewID: envelope.NewULID, Now: func() time.Time { return clock },
+		NewID: envelope.NewULID, Now: func() time.Time { return clock }, Approvals: &fakeApprovals{auto: true},
 	}, s, p
 }
 
@@ -91,7 +136,7 @@ func input() ProposalInput {
 func TestCreateProposal(t *testing.T) {
 	ctx := context.Background()
 	m, s, pub := newManager(t)
-	c, err := m.Create(ctx, input())
+	c, err := m.Create(ctx, "apv", input())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,23 +208,23 @@ func TestCreateRefusals(t *testing.T) {
 	bad := input()
 	bad.ClosesAt = bad.OpensAt + vote.MaxWindow + 1
 	var ei *ErrInput
-	if _, err := m.Create(ctx, bad); !errors.As(err, &ei) {
+	if _, err := m.Create(ctx, "apv", bad); !errors.As(err, &ei) {
 		t.Fatalf("a window over 7 days: %v", err)
 	}
 	roster := m.Roster
 	m.Roster = fakeRoster{}
-	if _, err := m.Create(ctx, input()); !errors.As(err, &ei) {
+	if _, err := m.Create(ctx, "apv", input()); !errors.As(err, &ei) {
 		t.Fatalf("no eligible members: %v", err)
 	}
 	m.Roster = roster
 	m.Publisher = nil
-	if _, err := m.Create(ctx, input()); !errors.Is(err, ErrNoPublisher) {
+	if _, err := m.Create(ctx, "apv", input()); !errors.Is(err, ErrNoPublisher) {
 		t.Fatalf("no publisher: %v", err)
 	}
 	// Publishing fails: nothing is sent; a later Publish finishes.
 	m.Publisher = pub
 	pub.fail = true
-	c, err := m.Create(ctx, input())
+	c, err := m.Create(ctx, "apv", input())
 	var np *ErrNotPublished
 	if !errors.As(err, &np) || c == nil || np.ProposalID != c.ProposalID {
 		t.Fatalf("created while Rekor is down: %v", err)
@@ -252,7 +297,7 @@ func TestClose(t *testing.T) {
 	m, s, pub := newManager(t)
 	ct := &fakeCatcher{}
 	m.Catcher = ct
-	c, err := m.Create(ctx, input())
+	c, err := m.Create(ctx, "apv", input())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +372,7 @@ func TestExtend(t *testing.T) {
 	ctx := context.Background()
 	m, s, _ := newManager(t)
 	m.Catcher = &fakeCatcher{caught: true}
-	c, err := m.Create(ctx, input())
+	c, err := m.Create(ctx, "apv", input())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,12 +387,12 @@ func TestExtend(t *testing.T) {
 		"not later":      {ClosesAt: in.ClosesAt, Outage: outage},
 		"outside window": {ClosesAt: in.ClosesAt + 3600, Outage: vote.Outage{From: in.OpensAt - 7200, To: in.OpensAt - 1800, Source: "x"}},
 	} {
-		if _, err := m.Extend(ctx, c.ProposalID, x); !errors.As(err, &ei) {
+		if _, err := m.Extend(ctx, c.ProposalID, "apv", x); !errors.As(err, &ei) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
 	s.sent = nil
-	e, err := m.Extend(ctx, c.ProposalID, ExtensionInput{ClosesAt: in.ClosesAt + 7200, Outage: outage})
+	e, err := m.Extend(ctx, c.ProposalID, "apv", ExtensionInput{ClosesAt: in.ClosesAt + 7200, Outage: outage})
 	if err != nil || e.N != 1 {
 		t.Fatalf("Extend: %v", err)
 	}
@@ -360,7 +405,7 @@ func TestExtend(t *testing.T) {
 	}
 	// After the extended close: too late to extend.
 	clock = time.Unix(in.ClosesAt+7200+120, 0)
-	if _, err := m.Extend(ctx, c.ProposalID, ExtensionInput{ClosesAt: in.ClosesAt + 4*3600, Outage: outage}); !errors.Is(err, ErrTooLate) {
+	if _, err := m.Extend(ctx, c.ProposalID, "apv", ExtensionInput{ClosesAt: in.ClosesAt + 4*3600, Outage: outage}); !errors.Is(err, ErrTooLate) {
 		t.Fatalf("after the close: %v", err)
 	}
 	sum, err := m.Close(ctx, c.ProposalID)
@@ -380,7 +425,7 @@ func TestExtendHoldsTheProposal(t *testing.T) {
 	ctx := context.Background()
 	m, _, pub := newManager(t)
 	m.Catcher = &fakeCatcher{caught: true}
-	c, err := m.Create(ctx, input())
+	c, err := m.Create(ctx, "apv", input())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,7 +435,7 @@ func TestExtendHoldsTheProposal(t *testing.T) {
 	pub.started, pub.release = make(chan struct{}), make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		_, err := m.Extend(ctx, c.ProposalID, ExtensionInput{ClosesAt: in.ClosesAt + 7200, Outage: outage})
+		_, err := m.Extend(ctx, c.ProposalID, "apv", ExtensionInput{ClosesAt: in.ClosesAt + 7200, Outage: outage})
 		done <- err
 	}()
 	<-pub.started
@@ -398,7 +443,7 @@ func TestExtendHoldsTheProposal(t *testing.T) {
 		"close":   func(ctx context.Context) error { _, err := m.Close(ctx, c.ProposalID); return err },
 		"publish": func(ctx context.Context) error { _, err := m.Publish(ctx, c.ProposalID); return err },
 		"extend": func(ctx context.Context) error {
-			_, err := m.Extend(ctx, c.ProposalID, ExtensionInput{ClosesAt: in.ClosesAt + 3600, Outage: outage})
+			_, err := m.Extend(ctx, c.ProposalID, "apv", ExtensionInput{ClosesAt: in.ClosesAt + 3600, Outage: outage})
 			return err
 		},
 	} {
@@ -422,7 +467,7 @@ func TestExtendHoldsTheProposal(t *testing.T) {
 func TestRebuildAll(t *testing.T) {
 	ctx := context.Background()
 	m, _, _ := newManager(t)
-	c, err := m.Create(ctx, input())
+	c, err := m.Create(ctx, "apv", input())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -444,7 +489,7 @@ func TestTwoTasksSaveByVersion(t *testing.T) {
 	ctx := context.Background()
 	m1, _, pub := newManager(t)
 	m1.Catcher = &fakeCatcher{caught: true}
-	c, err := m1.Create(ctx, input())
+	c, err := m1.Create(ctx, "apv", input())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -456,7 +501,7 @@ func TestTwoTasksSaveByVersion(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		outage := vote.Outage{From: in.ClosesAt - 7200, To: in.ClosesAt - 7200 + 5400, Source: "https://status.vettid.org/"}
-		_, err := m1.Extend(ctx, c.ProposalID, ExtensionInput{ClosesAt: in.ClosesAt + 7200, Outage: outage})
+		_, err := m1.Extend(ctx, c.ProposalID, "apv", ExtensionInput{ClosesAt: in.ClosesAt + 7200, Outage: outage})
 		done <- err
 	}()
 	<-pub.started
@@ -478,7 +523,7 @@ func TestTwoTasksSaveByVersion(t *testing.T) {
 func TestExtendPublishedTooLate(t *testing.T) {
 	ctx := context.Background()
 	m, _, pub := newManager(t)
-	c, err := m.Create(ctx, input())
+	c, err := m.Create(ctx, "apv", input())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -488,7 +533,7 @@ func TestExtendPublishedTooLate(t *testing.T) {
 	pub.started, pub.release = make(chan struct{}, 1), make(chan struct{})
 	go func() { <-pub.started; now = time.Unix(in.ClosesAt, 0); close(pub.release) }()
 	outage := vote.Outage{From: in.ClosesAt - 7200, To: in.ClosesAt - 7200 + 5400, Source: "https://status.vettid.org/"}
-	if _, err := m.Extend(ctx, c.ProposalID, ExtensionInput{ClosesAt: in.ClosesAt + 7200, Outage: outage}); !errors.Is(err, ErrTooLate) {
+	if _, err := m.Extend(ctx, c.ProposalID, "apv", ExtensionInput{ClosesAt: in.ClosesAt + 7200, Outage: outage}); !errors.Is(err, ErrTooLate) {
 		t.Fatalf("published past the close: %v", err)
 	}
 	if o, _ := m.Store.OpenProposal(ctx, c.ProposalID); o.ClosesAt != in.ClosesAt || len(o.Extensions) != 0 {
@@ -501,7 +546,7 @@ func TestExtendPublishedTooLate(t *testing.T) {
 func TestCreateCountsUnsigned(t *testing.T) {
 	m, _, _ := newManager(t)
 	m.Roster = unsignedRoster{fakeRoster{"c0", "c1", "c2"}, []string{"c1", "c2", "gone"}}
-	c, err := m.Create(context.Background(), input())
+	c, err := m.Create(context.Background(), "apv", input())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -509,7 +554,7 @@ func TestCreateCountsUnsigned(t *testing.T) {
 		t.Fatalf("eligible %d unsigned %d, want 3 and 2", c.Eligible, c.Unsigned)
 	}
 	m2, _, _ := newManager(t)
-	if c, err = m2.Create(context.Background(), input()); err != nil || c.Unsigned != 0 {
+	if c, err = m2.Create(context.Background(), "apv", input()); err != nil || c.Unsigned != 0 {
 		t.Fatalf("all pinned: %+v, %v", c, err)
 	}
 }

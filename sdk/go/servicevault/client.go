@@ -249,8 +249,7 @@ type SignInStatus struct {
 // Actions an approval can be for (MEMBER-SERVICE-PLAN §4.5).
 const (
 	ActionProposalCreate         = "proposal.create"
-	ActionVoteOpen               = "vote.open"
-	ActionVoteClose              = "vote.close"
+	ActionVoteExtend             = "vote.extend"
 	ActionContractTemplateChange = "contract_template.change"
 	ActionAdminSetAdd            = "admin_set.add"    // payload {"connection_id": "..."}; applied by the service vault
 	ActionAdminSetRemove         = "admin_set.remove" // payload {"connection_id": "..."}; applied by the service vault
@@ -687,13 +686,62 @@ func (c *Client) AnchorKey(ctx context.Context) (json.RawMessage, error) {
 	return out, c.do(ctx, http.MethodGet, "/v1/anchor-key", nil, true, &out)
 }
 
-// CreateProposal posts a proposal input (POST /v1/proposals). It is not
-// retried: a retry would make a second proposal. A proposal kept but not
-// published is an *APIError with Code "not_published" and its
-// ProposalID, for PublishProposal.
-func (c *Client) CreateProposal(ctx context.Context, in json.RawMessage) (json.RawMessage, error) {
+// CreateProposal posts a proposal input (POST /v1/proposals) with the id
+// of the admins' approval of it. The approval is an ActionProposalCreate
+// approval whose payload is the input in canonical form with every field
+// present (no summary: the service builds what the admins read from the
+// payload); it must be approved, and it is used up by this call, even if
+// the proposal then fails to publish. It is not retried: a retry would
+// make a second proposal. A proposal kept but not published is an
+// *APIError with Code "not_published" and its ProposalID, for
+// PublishProposal.
+func (c *Client) CreateProposal(ctx context.Context, approvalID string, in json.RawMessage) (json.RawMessage, error) {
+	body, err := withApproval(approvalID, in)
+	if err != nil {
+		return nil, err
+	}
 	var out json.RawMessage
-	return out, c.do(ctx, http.MethodPost, "/v1/proposals", in, true, &out)
+	return out, c.do(ctx, http.MethodPost, "/v1/proposals", body, true, &out)
+}
+
+// ExtendProposal posts an extension of a proposal's close (POST
+// /v1/proposals/{id}/extend: {closes_at, outage: {from, to, source}}) with
+// the id of the admins' approval of it. The approval is an
+// ActionVoteExtend approval whose payload is {"proposal_id", "closes_at",
+// "outage"} in canonical form (no summary); it is used up by this call.
+// It is not retried.
+func (c *Client) ExtendProposal(ctx context.Context, id, approvalID string, in json.RawMessage) (json.RawMessage, error) {
+	if id == "" {
+		return nil, errors.New("servicevault: empty proposal id")
+	}
+	body, err := withApproval(approvalID, in)
+	if err != nil {
+		return nil, err
+	}
+	var out json.RawMessage
+	return out, c.do(ctx, http.MethodPost, "/v1/proposals/"+url.PathEscape(id)+"/extend", body, true, &out)
+}
+
+// withApproval adds approval_id to a JSON object; the object may not
+// carry one, nor repeat a name.
+func withApproval(approvalID string, in json.RawMessage) (json.RawMessage, error) {
+	if approvalID == "" {
+		return nil, errors.New("servicevault: an approval id is required")
+	}
+	canon, err := CanonicalJSON(in)
+	if err != nil || len(canon) == 0 || canon[0] != '{' {
+		return nil, errors.New("servicevault: the input is not a JSON object")
+	}
+	m := map[string]json.RawMessage{}
+	if err := json.Unmarshal(canon, &m); err != nil {
+		return nil, err
+	}
+	if _, dup := m["approval_id"]; dup {
+		return nil, errors.New("servicevault: the input has an approval_id")
+	}
+	id, _ := json.Marshal(approvalID)
+	m["approval_id"] = id
+	return json.Marshal(m)
 }
 
 // Proposal returns GET /v1/proposals/{id}.

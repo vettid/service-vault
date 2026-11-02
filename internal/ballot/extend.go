@@ -34,7 +34,13 @@ var ErrTooLate = errors.New("ballot: the close to extend has passed")
 
 // Extend publishes an extension and sends vote.extended to every eligible
 // member.
-func (m *Manager) Extend(ctx context.Context, id string, in ExtensionInput) (*vote.Extension, error) {
+//
+// It needs the admins' approval (a vote.extend approval) of exactly this
+// extension of this proposal, in its canonical form (CanonicalExtension),
+// and uses it up, after everything that can refuse the input has been
+// checked and before anything is published. A failure after that leaves
+// the approval used (the admins approve again).
+func (m *Manager) Extend(ctx context.Context, id, approvalID string, in ExtensionInput) (*vote.Extension, error) {
 	unlock, err := m.lock(ctx, id)
 	if err != nil {
 		return nil, err
@@ -79,6 +85,13 @@ func (m *Manager) Extend(ctx context.Context, id string, in ExtensionInput) (*vo
 	msg, _ := vote.DocSigMsg(sum(o.Doc), doc)
 	sig, err := m.Sign(vote.LabelExtended, msg)
 	if err != nil {
+		return nil, err
+	}
+	payload, err := CanonicalExtension(id, in)
+	if err != nil {
+		return nil, &ErrInput{err}
+	}
+	if err := m.consume(ctx, approvalID, ActionVoteExtend, payload); err != nil {
 		return nil, err
 	}
 	bundle, err := ep.PublishExtension(ctx, id, e.N, doc, sig)
