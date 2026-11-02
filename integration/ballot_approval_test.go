@@ -67,9 +67,7 @@ func runProposalApproval(t *testing.T, ctx context.Context, st peer.Store, pager
 	if err := m.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.Tick(ctx); err != nil { // c1 is the first admin
-		t.Fatal(err)
-	}
+	bootstrapAdmin(t, ctx, m, st, p, "c1") // c1 is the first admin, once the operator confirms
 	n := 0
 	answer := func(conn string) {
 		t.Helper()
