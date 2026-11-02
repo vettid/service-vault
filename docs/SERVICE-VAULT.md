@@ -201,7 +201,13 @@ MEMBER-SERVICE-PLAN §4.5 and §5.2; the operator's view is in the README,
   (ids only), queues the `approval.challenge_expired` webhook with the
   save, and the approval's status lists the admin in `remind_needed`
   (admins asked, not answered, holding no live challenge) until a
-  reminder sends a new one.
+  reminder sends a new one. An admin with 5 approval challenges still
+  counting (the member vault's ask gate) is skipped by every send and
+  shows in `remind_needed`, and in an optional `ask_budget` list
+  (`[{connection_id, next_ask_at}]`, on the create, remind and status
+  answers) with when it can be asked again; creating an approval answers `ask_budget`
+  (409) when fewer admins than the threshold can be asked, and a plain
+  reminder when none can, before anything is sent or withdrawn.
 - **Periodic work** (every 15 s and at once after a change): bootstrap,
   expiry (`expired`), re-checking open approvals after admins left, and
   webhook delivery. Webhooks are written to an outbox in the same write

@@ -65,11 +65,16 @@ commands:
                                    run stopped early
   approve -action A -summary S -payload JSON
                                    submit an action for admin approval, then follow it
+                                   (ask_budget, exit 1, if fewer admins than the threshold
+                                   can be asked: the others have 5 approval challenges
+                                   still counting; nothing is sent)
   approval ID                      print an approval's status; "remind needed" lists admins with no live challenge
   remind [-force CONN,...] ID      challenge again the admins who have not answered (with long
                                    approval challenges, only those holding no live challenge;
                                    exit 0 and "nothing to remind" if there are none; exit 1 on
-                                   too_soon). -force names admins to challenge again even with a
+                                   too_soon; an admin with 5 approval challenges still
+                                   counting is left out, and if that leaves none to
+                                   challenge, ask_budget, exit 1). -force names admins to challenge again even with a
                                    live challenge (the old one is withdrawn); each forced re-send
                                    spends one of that admin's 5 approval asks per 24 h, and a
                                    force naming an admin with 5 approval challenges still
@@ -418,6 +423,11 @@ func (c *cli) approve(ctx context.Context, args []string) error {
 	}
 	req := servicevault.ApprovalRequest{Action: *action, Summary: *summary, Payload: json.RawMessage(*payload)}
 	ap, err := c.c.CreateApproval(ctx, req)
+	var ae *servicevault.APIError
+	if errors.As(err, &ae) && ae.Code == servicevault.CodeAskBudget {
+		return fmt.Errorf("approve: too few admins can be asked now: the others have 5 approval challenges still counting "+
+			"(each until its expiry plus 24 hours); nothing was sent (%w)", err)
+	}
 	if err != nil {
 		return err
 	}
@@ -426,6 +436,7 @@ func (c *cli) approve(ctx context.Context, args []string) error {
 		return errors.New("the action hash does not match the one computed here")
 	}
 	c.printf("action_hash_check: ok\n")
+	c.printf("%s", askBudgetLines(ap.AskBudget))
 	var told string // the remind-needed line last printed
 	return c.follow(ctx, *wait, func(ctx context.Context) (bool, error) {
 		st, err := c.c.Approval(ctx, ap.ID)
@@ -462,7 +473,17 @@ func remindLine(st *servicevault.Approval) string {
 	if st.RemindAfter != nil && now().Before(*st.RemindAfter) {
 		cmd += " after " + st.RemindAfter.UTC().Format("15:04:05Z")
 	}
-	return fmt.Sprintf("remind needed: %s (%s)\n", strings.Join(st.RemindNeeded, ","), cmd)
+	return fmt.Sprintf("remind needed: %s (%s)\n", strings.Join(st.RemindNeeded, ","), cmd) + askBudgetLines(st.AskBudget)
+}
+
+// askBudgetLines says which admins were left out for the ask budget and
+// when each can be asked again; "" when there are none.
+func askBudgetLines(l []servicevault.AskBudget) string {
+	var sb strings.Builder
+	for _, a := range l {
+		fmt.Fprintf(&sb, "ask budget: %s can be asked after %s\n", a.ConnectionID, a.NextAskAt.UTC().Format(time.RFC3339))
+	}
+	return sb.String()
 }
 
 func (c *cli) printApproval(st *servicevault.Approval) {
@@ -517,8 +538,12 @@ func (c *cli) remind(ctx context.Context, args []string) error {
 		return nil
 	}
 	if errors.As(err, &ae) && ae.Code == servicevault.CodeAskBudget {
-		return fmt.Errorf("remind: a named admin has 5 approval challenges still counting (each until its expiry plus 24 hours); "+
-			"a sixth would come back as a denial (%w)", err)
+		if len(named) > 0 {
+			return fmt.Errorf("remind: a named admin has 5 approval challenges still counting (each until its expiry plus 24 hours); "+
+				"a sixth would come back as a denial (%w)", err)
+		}
+		return fmt.Errorf("remind: no admin to challenge is within the budget: each has 5 approval challenges still counting "+
+			"(each until its expiry plus 24 hours) or an ask log that cannot be read; nothing was sent or withdrawn (%w)", err)
 	}
 	if err != nil {
 		return err
@@ -527,6 +552,7 @@ func (c *cli) remind(ctx context.Context, args []string) error {
 	for _, id := range r.Reminded {
 		c.printf("reminded: %s\n", id)
 	}
+	c.printf("%s", askBudgetLines(r.AskBudget))
 	return nil
 }
 

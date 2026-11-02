@@ -128,7 +128,10 @@ their live challenge and sends a new one (once per 10 minutes); each
 forced re-send spends one of that admin's 5 approval asks per 24 hours.
 A force is refused (`ask_budget`) for an admin already sent 5 approval
 challenges that still count (each until its expiry plus 24 hours), since
-a sixth would come back as a delayed denial. The count starts empty when
+a sixth would come back as a delayed denial. A new approval and a plain
+reminder skip such an admin too (shown in `remind_needed`), and answer
+`ask_budget` when too few admins can be asked (a new approval: fewer than
+the threshold; nothing is sent or stored) or none can (a plain reminder). The count starts empty when
 this version is first deployed: for a day or so after, challenges sent
 before it are not counted. If the withdraw was lost the member may see
 two requests for the same approval: approve the newest (the older one's

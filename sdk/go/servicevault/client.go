@@ -138,7 +138,7 @@ const (
 	CodeNotAdmin          = "not_admin"          // remind force: not an admin of the approval, or no longer in the set (422)
 	CodeAnswered          = "answered"           // remind force: the admin has answered (409)
 	CodeNothingToRemind   = "nothing_to_remind"  // every admin who has not answered holds a live challenge (409)
-	CodeAskBudget         = "ask_budget"         // remind force: the admin has 5 approval challenges still counting (409)
+	CodeAskBudget         = "ask_budget"         // create or remind: too few admins can be asked, 5 approval challenges still counting each (409)
 )
 
 // APIError is a non-2xx answer from the API.
@@ -283,6 +283,18 @@ type ApprovalCreated struct {
 	ActionHash string    `json:"action_hash"`
 	Status     string    `json:"status"`
 	ExpiresAt  time.Time `json:"expires_at"`
+	// AskBudget: the admins not asked because they have 5 approval
+	// challenges still counting, with when each can be asked again.
+	AskBudget []AskBudget `json:"ask_budget,omitempty"`
+}
+
+// AskBudget is an admin not asked because of the member vault's approval
+// ask budget (5 per 24 hours).
+type AskBudget struct {
+	ConnectionID string `json:"connection_id"`
+	// NextAskAt: the oldest challenge counted stops counting then (its
+	// expiry plus 24 hours plus the clock skew).
+	NextAskAt time.Time `json:"next_ask_at"`
 }
 
 // Approver is an admin's counted approval.
@@ -318,6 +330,8 @@ type Approval struct {
 	// hold no live challenge (it ran out after 10 minutes, or could not
 	// be sent); RemindApproval challenges them again.
 	RemindNeeded []string `json:"remind_needed"`
+	// AskBudget, while pending: those of RemindNeeded at the ask budget.
+	AskBudget []AskBudget `json:"ask_budget,omitempty"`
 	// RemindAfter, with RemindNeeded: the earliest RemindApproval is
 	// accepted; before it the answer is too_soon.
 	RemindAfter *time.Time `json:"remind_after,omitempty"`
@@ -330,6 +344,9 @@ type Approval struct {
 type Reminder struct {
 	ID       string   `json:"approval_id"`
 	Reminded []string `json:"reminded"` // the admins challenged again
+	// AskBudget: the admins left out because they have 5 approval
+	// challenges still counting.
+	AskBudget []AskBudget `json:"ask_budget,omitempty"`
 }
 
 // Admins is the admin set and the threshold m.
@@ -414,7 +431,9 @@ func (c *Client) Approval(ctx context.Context, id string) (*Approval, error) {
 // a sixth would come back as a delayed denial, so a force naming an admin
 // already sent 5 approval challenges that still count (each until its
 // expiry plus 24 hours) is refused (CodeAskBudget): use it only when an
-// admin reports not seeing the request.
+// admin reports not seeing the request. Without force, an admin with 5
+// such challenges is left out (they stay in RemindNeeded), and if that
+// leaves none to challenge, nothing is withdrawn or sent (CodeAskBudget).
 func (c *Client) RemindApproval(ctx context.Context, id string, force ...string) (*Reminder, error) {
 	if id == "" {
 		return nil, errors.New("servicevault: empty approval id")

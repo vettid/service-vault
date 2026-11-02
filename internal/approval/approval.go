@@ -48,8 +48,9 @@ const (
 // counts each challenge it sends until its exp plus askWindow plus
 // peer.ClockSkew. Any 5 in one member window reached it within 24 hours
 // before the next one, so all 5 still count here when that one would be
-// sent: a forced reminder is refused before it could come back as a
-// delayed denial. A suppressed, lost or unsent challenge counts here and
+// sent: every send (a new approval, a reminder, a forced one) skips an
+// admin at the budget, and a forced one is refused, before it could come
+// back as a delayed denial. A suppressed, lost or unsent challenge counts here and
 // not there, which only refuses more.
 const (
 	askBudget = 5
@@ -63,6 +64,20 @@ type askLog struct {
 	Exp []time.Time `json:"exp"`
 }
 
+// next is when a full log stops being full: its oldest counting entry's end.
+func (l *askLog) next() time.Time {
+	return l.Exp[len(l.Exp)-askBudget].Add(askWindow + peer.ClockSkew)
+}
+
+// budgetEntry reports connID as left out for the budget, if its log is full.
+func (m *Manager) budgetEntry(ctx context.Context, connID string) (AskBudget, bool) {
+	l, err := m.asks(ctx, connID)
+	if err != nil || !l.full(m.now()) {
+		return AskBudget{}, false
+	}
+	return AskBudget{ConnectionID: connID, NextAskAt: l.next().UTC()}, true
+}
+
 // counts reports whether a challenge with this exp still counts at now.
 func counts(exp, now time.Time) bool { return now.Before(exp.Add(askWindow + peer.ClockSkew)) }
 
@@ -72,18 +87,39 @@ func (l *askLog) full(now time.Time) bool {
 }
 
 func (m *Manager) asks(ctx context.Context, connID string) (*askLog, error) {
+	l, _, err := m.asksVersion(ctx, connID)
+	return l, err
+}
+
+// errAskUndecodable is an ask log that is stored but does not decode.
+var errAskUndecodable = errors.New("approval: ask log undecodable")
+
+// asksVersion is asks with the stored record's version (0: absent, or the
+// store has no versions).
+func (m *Manager) asksVersion(ctx context.Context, connID string) (*askLog, uint64, error) {
 	l := &askLog{}
-	data, ok, err := m.Store.Get(ctx, kindAsks, connID)
-	if err != nil || !ok {
-		return l, err
+	var data []byte
+	var ver uint64
+	if rg, ok := m.Store.(peer.RecordGetter); ok {
+		rec, found, err := rg.GetRecord(ctx, kindAsks, connID)
+		if err != nil || !found {
+			return l, 0, err
+		}
+		data, ver = rec.Data, rec.Version
+	} else {
+		d, found, err := m.Store.Get(ctx, kindAsks, connID)
+		if err != nil || !found {
+			return l, 0, err
+		}
+		data = d
 	}
 	if err := json.Unmarshal(data, l); err != nil {
 		// Fails closed: that admin is neither challenged nor forced until
 		// the record expires.
 		m.log().Error("approval ask log unreadable", "connection_id", connID)
-		return nil, err
+		return nil, 0, errAskUndecodable
 	}
-	return l, nil
+	return l, ver, nil
 }
 
 // Peer is the part of peer.Peer the manager uses.
@@ -444,6 +480,21 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 		return nil, errCode(CodeUnreachable)
 	}
 	now := m.now()
+	// Before anything is sent or stored: too few admins can be asked now
+	// (canAsk) for the threshold to be met.
+	askable := 0
+	for _, a := range set {
+		ok, err := m.canAsk(ctx, a, now)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			askable++
+		}
+	}
+	if askable < th {
+		return nil, errCode(CodeAskBudget)
+	}
 	id, err := envelope.NewULID(now)
 	if err != nil {
 		return nil, err
@@ -452,7 +503,7 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 		Threshold: th, Admins: slices.Clone(set), Created: now.UTC().Truncate(time.Millisecond),
 		Exp: now.Add(m.ttl()).UTC().Truncate(time.Second), LastSent: now, Pending: map[string]string{}}
 	b := m.batch(now)
-	sent := m.challenge(ctx, b, r, set, ctxt)
+	sent, skipped, _ := m.challenge(ctx, b, r, set, ctxt)
 	exp := r.Exp
 	if err := errors.Join(b.save(r), b.put(kindOpen, id, "", time.Time{}), b.audit(&AuditEntry{Type: AuditRequested,
 		ApprovalID: id, Action: r.Action, Summary: r.Summary, ActionHash: hash, Payload: payload, Threshold: th,
@@ -465,7 +516,7 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 	}
 	m.log().Info("approval requested", "approval_id", id, "action", r.Action, "threshold", th, "admins", len(set),
 		"challenged", len(sent))
-	return &Created{ID: id, ActionHash: hash, Status: StatusPending, ExpiresAt: r.Exp}, nil
+	return &Created{ID: id, ActionHash: hash, Status: StatusPending, ExpiresAt: r.Exp, AskBudget: skipped}, nil
 }
 
 // challengeTTL is the life of a challenge sent at now for r: the
@@ -480,9 +531,8 @@ func challengeTTL(r *record, now time.Time) time.Duration {
 // as long as the approval (challengeTTL), and records the request ids.
 // An admin who cannot be reached now is skipped (and can be reminded).
 // Each challenge is logged (logAsk) before it is sent; an admin whose log
-// cannot be written is skipped too.
-func (m *Manager) challenge(ctx context.Context, b *batch, r *record, conns []string, ctxt string) []Challenge {
-	var sent []Challenge
+// is full or cannot be written is skipped too.
+func (m *Manager) challenge(ctx context.Context, b *batch, r *record, conns []string, ctxt string) (sent []Challenge, skipped []AskBudget, full int) {
 	var ttl time.Duration // 0: the connauth default, 10 minutes
 	if m.LongChallenges {
 		ttl = challengeTTL(r, m.now())
@@ -493,6 +543,12 @@ func (m *Manager) challenge(ctx context.Context, b *batch, r *record, conns []st
 		exp := m.now().Add(max(ttl, peerwire.ConnAuthChallengeTTL) + askSlack)
 		if err := m.logAsk(ctx, c, exp); err != nil {
 			m.log().Warn("approval ask log", "approval_id", r.ID, "connection_id", c, "err", errName(err))
+			if errors.Is(err, errAskFull) {
+				full++
+				if e, ok := m.budgetEntry(ctx, c); ok {
+					skipped = append(skipped, e)
+				}
+			}
 			continue
 		}
 		reqID, err := m.Peer.Authenticate(ctx, c, ctxt, peerwire.PurposeApproval, ttl)
@@ -505,7 +561,26 @@ func (m *Manager) challenge(ctx context.Context, b *batch, r *record, conns []st
 			Expires: r.Exp.Add(reqRetention)})
 		sent = append(sent, Challenge{ConnectionID: c, RequestID: reqID})
 	}
-	return sent
+	return sent, skipped, full
+}
+
+// errAskFull is an admin whose askLog is full (askBudget).
+var errAskFull = errors.New("approval: ask budget full")
+
+// canAsk reports whether another challenge to connID is within the
+// member's budget at now. An admin whose log is full, or is stored but
+// does not decode, is not askable; a store error is returned. m.mu is
+// held across the check and the logAsk that follows, and logAsk's write
+// is conditional, so no other send can fill the log in between.
+func (m *Manager) canAsk(ctx context.Context, connID string, now time.Time) (bool, error) {
+	l, err := m.asks(ctx, connID)
+	if errors.Is(err, errAskUndecodable) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return !l.full(now), nil
 }
 
 // logAsk adds a challenge to connID's askLog, with exp (at least the
@@ -514,11 +589,15 @@ func (m *Manager) challenge(ctx context.Context, b *batch, r *record, conns []st
 // send or the approval's batch then fails (counting one never sent only
 // refuses more). So sends that fail before going out (an admin not
 // reachable now, the peer's limits) still fill the log, and may refuse a
-// later forced reminder to that admin; nothing else reads it.
+// later forced reminder to that admin. It refuses (errAskFull) when the
+// log is already full, so no send is a sixth.
 func (m *Manager) logAsk(ctx context.Context, connID string, exp time.Time) error {
-	l, err := m.asks(ctx, connID)
+	l, ver, err := m.asksVersion(ctx, connID)
 	if err != nil {
 		return err
+	}
+	if l.full(m.now()) {
+		return errAskFull
 	}
 	l.Exp = append(l.Exp, exp.UTC().Truncate(time.Millisecond).Add(time.Millisecond))
 	slices.SortFunc(l.Exp, time.Time.Compare)
@@ -530,8 +609,21 @@ func (m *Manager) logAsk(ctx context.Context, connID string, exp time.Time) erro
 		return err
 	}
 	last := l.Exp[len(l.Exp)-1]
-	return m.Store.Apply(ctx, []peer.Change{{Kind: kindAsks, ID: connID, Data: data,
-		Expires: last.Add(askWindow + peer.ClockSkew)}})
+	c := peer.Change{Kind: kindAsks, ID: connID, Data: data, Expires: last.Add(askWindow + peer.ClockSkew)}
+	if _, ok := m.Store.(peer.RecordGetter); ok {
+		// Another task (a deploy overlaps two) may have written since the
+		// read: that is a log that may be full, so fail closed.
+		if ver == 0 {
+			c.IfAbsent = true
+		} else {
+			c.IfVersion = ver
+		}
+	}
+	if err := m.Store.Apply(ctx, []peer.Change{c}); errors.Is(err, peer.ErrConflict) {
+		return errAskFull
+	} else {
+		return err
+	}
 }
 
 func (m *Manager) cancel(ctx context.Context, chs []Challenge) {
@@ -550,6 +642,8 @@ func errName(err error) string {
 		return "not_found"
 	case errors.Is(err, peer.ErrNotStarted):
 		return "not_started"
+	case errors.Is(err, errAskFull):
+		return "ask_budget"
 	}
 	return "error"
 }
@@ -579,6 +673,11 @@ func (m *Manager) Status(ctx context.Context, id string) (*Status, error) {
 				st.RemindNeeded = append(st.RemindNeeded, a)
 			}
 		}
+		for _, a := range st.RemindNeeded {
+			if e, ok := m.budgetEntry(ctx, a); ok {
+				st.AskBudget = append(st.AskBudget, e)
+			}
+		}
 		if len(st.RemindNeeded) > 0 {
 			ra := r.LastSent.Add(RemindInterval).UTC().Truncate(time.Second)
 			st.RemindAfter = &ra
@@ -602,6 +701,9 @@ var ErrNotFound = errors.New("approval: not found")
 // remind_needed ones), each lasting as long as the approval, and
 // CodeNothingToRemind when there are none (checked before the interval).
 // Otherwise to every admin who has not answered, replacing their challenge.
+// An admin sent 5 approval challenges that still count is left out, with
+// their challenge not withdrawn; CodeAskBudget when that leaves nobody
+// to send to (checked before anything is withdrawn).
 // With force, only to the named admins (CodeNotAdmin for one outside the
 // approval's admins or the current set, CodeAnswered for one who has
 // answered, CodeAskBudget for one sent 5 approval challenges that still
@@ -640,9 +742,9 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 		if slices.Contains(conns, a) {
 			continue
 		}
-		if l, err := m.asks(ctx, a); err != nil {
+		if ok, err := m.canAsk(ctx, a, now); err != nil {
 			return nil, err
-		} else if l.full(now) {
+		} else if !ok {
 			return nil, errCode(CodeAskBudget)
 		}
 		// Forced: any live challenge is withdrawn and a new one sent,
@@ -653,6 +755,8 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 		}
 		conns = append(conns, a)
 	}
+	var skipped []AskBudget
+	cands, limited := 0, 0 // admins to remind; of those left out for a full or unreadable ask log
 	for _, a := range r.Admins {
 		if len(force) > 0 {
 			break // only the named admins
@@ -668,14 +772,32 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 			if r.Pending[a] != "" {
 				continue
 			}
-		} else if old := r.Pending[a]; old != "" {
+		}
+		cands++
+		// Before anything is withdrawn: an admin at the budget keeps the
+		// challenge they hold, and stays in remind_needed if they hold none.
+		ok, err := m.canAsk(ctx, a, now)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			limited++
+			if e, ok := m.budgetEntry(ctx, a); ok {
+				skipped = append(skipped, e)
+			}
+			continue
+		}
+		if old := r.Pending[a]; old != "" && !m.LongChallenges {
 			to = append(to, Challenge{ConnectionID: a, RequestID: old})
 			delete(r.Pending, a)
 		}
 		conns = append(conns, a)
 	}
-	if len(force) == 0 && m.LongChallenges && len(conns) == 0 {
+	if len(force) == 0 && m.LongChallenges && cands == 0 {
 		return nil, errCode(CodeNothingToRemind)
+	}
+	if len(force) == 0 && len(conns) == 0 && limited > 0 {
+		return nil, errCode(CodeAskBudget)
 	}
 	if now.Before(r.LastSent.Add(RemindInterval)) {
 		return nil, errCode(CodeTooSoon)
@@ -689,7 +811,12 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 		r.Pending = map[string]string{}
 	}
 	b := m.batch(now)
-	sent := m.challenge(ctx, b, r, conns, ctxt)
+	sent, lost, full := m.challenge(ctx, b, r, conns, ctxt)
+	if len(force) == 0 && len(sent) == 0 && full > 0 {
+		// Every send lost a race for the last slot: as if refused.
+		return nil, errCode(CodeAskBudget)
+	}
+	skipped = append(skipped, lost...)
 	r.LastSent = now
 	if err := errors.Join(b.save(r), b.audit(&AuditEntry{Type: AuditReminded, ApprovalID: r.ID, Challenges: sent})); err != nil {
 		return nil, err
@@ -698,7 +825,7 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 		m.cancel(ctx, sent)
 		return nil, err
 	}
-	out := &Reminder{ID: r.ID, Reminded: []string{}}
+	out := &Reminder{ID: r.ID, Reminded: []string{}, AskBudget: skipped}
 	for _, c := range sent {
 		out.Reminded = append(out.Reminded, c.ConnectionID)
 	}
