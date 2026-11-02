@@ -49,9 +49,9 @@ func (p *fakePeer) Connection(id string) (peer.ConnectionInfo, bool) {
 }
 
 func (p *fakePeer) Authenticate(_ context.Context, conn, ctxt, purpose string, ttl time.Duration) (string, error) {
-	p.purposes = append(p.purposes, purpose)
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.purposes = append(p.purposes, purpose)
 	if err := p.fail[conn]; err != nil {
 		return "", err
 	}
@@ -1359,9 +1359,9 @@ func TestRemindForceAskBudgetLateDelivery(t *testing.T) {
 	if _, err := f.m.Remind(ctx, ids[0], "c1"); codeOf(err) != CodeAskBudget {
 		t.Fatalf("25 h later: %v", err)
 	}
-	f.clk.Advance(23*time.Hour + peer.ClockSkew + time.Millisecond)
+	f.clk.Advance(23*time.Hour + askSlack + peer.ClockSkew + time.Millisecond)
 	if _, err := f.m.Remind(ctx, ids[0], "c1"); err != nil {
-		t.Fatalf("after exp + 24 h + skew: %v", err)
+		t.Fatalf("after exp + slack + 24 h + skew: %v", err)
 	}
 }
 

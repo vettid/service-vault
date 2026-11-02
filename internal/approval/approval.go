@@ -54,6 +54,7 @@ const (
 const (
 	askBudget = 5
 	askWindow = 24 * time.Hour
+	askSlack  = time.Minute // added to a logged exp (challenge)
 )
 
 // askLog is the exps of the approval challenges sent to one connection
@@ -481,7 +482,10 @@ func (m *Manager) challenge(ctx context.Context, b *batch, r *record, conns []st
 		ttl = challengeTTL(r, m.now())
 	}
 	for _, c := range conns {
-		if err := m.logAsk(ctx, c, m.now().Add(max(ttl, peerwire.ConnAuthChallengeTTL))); err != nil {
+		// A minute of slack: the peer sets the challenge's exp from its own
+		// clock a little later, after this write.
+		exp := m.now().Add(max(ttl, peerwire.ConnAuthChallengeTTL) + askSlack)
+		if err := m.logAsk(ctx, c, exp); err != nil {
 			m.log().Warn("approval ask log", "approval_id", r.ID, "connection_id", c, "err", errName(err))
 			continue
 		}
@@ -502,7 +506,9 @@ func (m *Manager) challenge(ctx context.Context, b *batch, r *record, conns []st
 // challenge's own, so it counts at least as long), and writes the log at
 // once, on its own: a challenge is counted before it is sent, even if the
 // send or the approval's batch then fails (counting one never sent only
-// refuses more).
+// refuses more). So sends that fail before going out (an admin not
+// reachable now, the peer's limits) still fill the log, and may refuse a
+// later forced reminder to that admin; nothing else reads it.
 func (m *Manager) logAsk(ctx context.Context, connID string, exp time.Time) error {
 	l, err := m.asks(ctx, connID)
 	if err != nil {
@@ -593,8 +599,9 @@ var ErrNotFound = errors.New("approval: not found")
 // With force, only to the named admins (CodeNotAdmin for one outside the
 // approval's admins or the current set, CodeAnswered for one who has
 // answered, CodeAskBudget for one sent 5 approval challenges that still
-// count, see askBudget): each one's live challenge is withdrawn and a new one sent,
-// whatever the gate says, still at most once per RemindInterval. Each
+// count, see askBudget): each one's live challenge is withdrawn and a new
+// one sent, whatever the gate says, still at most once per
+// RemindInterval. Each
 // forced re-send uses one of the member's approval asks (VAULT-MESSAGING
 // §10.4.1). (chosen; not in the spec)
 func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Reminder, error) {

@@ -413,8 +413,8 @@ func (c *Client) Approval(ctx context.Context, id string) (*Approval, error) {
 // the member's 5 approval asks per 24 hours (VAULT-MESSAGING §10.4.1), and
 // a sixth would come back as a delayed denial, so a force naming an admin
 // already sent 5 approval challenges that still count (each until its
-// expiry plus 24 hours) is refused (CodeAskBudget): use it only when an admin reports not seeing the
-// request.
+// expiry plus 24 hours) is refused (CodeAskBudget): use it only when an
+// admin reports not seeing the request.
 func (c *Client) RemindApproval(ctx context.Context, id string, force ...string) (*Reminder, error) {
 	if id == "" {
 		return nil, errors.New("servicevault: empty approval id")
