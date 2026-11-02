@@ -444,6 +444,17 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 		return nil, errCode(CodeUnreachable)
 	}
 	now := m.now()
+	// Before anything is sent or stored: too few admins can be asked now
+	// (canAsk) for the threshold to be met.
+	askable := 0
+	for _, a := range set {
+		if ok, _ := m.canAsk(ctx, a, now); ok {
+			askable++
+		}
+	}
+	if askable < th {
+		return nil, errCode(CodeAskBudget)
+	}
 	id, err := envelope.NewULID(now)
 	if err != nil {
 		return nil, err
@@ -480,7 +491,7 @@ func challengeTTL(r *record, now time.Time) time.Duration {
 // as long as the approval (challengeTTL), and records the request ids.
 // An admin who cannot be reached now is skipped (and can be reminded).
 // Each challenge is logged (logAsk) before it is sent; an admin whose log
-// cannot be written is skipped too.
+// is full or cannot be written is skipped too.
 func (m *Manager) challenge(ctx context.Context, b *batch, r *record, conns []string, ctxt string) []Challenge {
 	var sent []Challenge
 	var ttl time.Duration // 0: the connauth default, 10 minutes
@@ -508,17 +519,41 @@ func (m *Manager) challenge(ctx context.Context, b *batch, r *record, conns []st
 	return sent
 }
 
+// errAskFull is an admin whose askLog is full (askBudget).
+var errAskFull = errors.New("approval: ask budget full")
+
+// canAsk reports whether another challenge to connID is within the
+// member's budget at now. An admin whose log cannot be read is not
+// askable (full is false then). m.mu is held across the check and the
+// logAsk that follows, and the manager is the only writer, so no other
+// send can fill the log in between.
+func (m *Manager) canAsk(ctx context.Context, connID string, now time.Time) (ok, full bool) {
+	l, err := m.asks(ctx, connID)
+	if err != nil {
+		m.log().Warn("approval ask log", "connection_id", connID, "err", errName(err))
+		return false, false
+	}
+	if l.full(now) {
+		return false, true
+	}
+	return true, false
+}
+
 // logAsk adds a challenge to connID's askLog, with exp (at least the
 // challenge's own, so it counts at least as long), and writes the log at
 // once, on its own: a challenge is counted before it is sent, even if the
 // send or the approval's batch then fails (counting one never sent only
 // refuses more). So sends that fail before going out (an admin not
 // reachable now, the peer's limits) still fill the log, and may refuse a
-// later forced reminder to that admin; nothing else reads it.
+// later forced reminder to that admin. It refuses (errAskFull) when the
+// log is already full, so no send is a sixth.
 func (m *Manager) logAsk(ctx context.Context, connID string, exp time.Time) error {
 	l, err := m.asks(ctx, connID)
 	if err != nil {
 		return err
+	}
+	if l.full(m.now()) {
+		return errAskFull
 	}
 	l.Exp = append(l.Exp, exp.UTC().Truncate(time.Millisecond).Add(time.Millisecond))
 	slices.SortFunc(l.Exp, time.Time.Compare)
@@ -602,6 +637,9 @@ var ErrNotFound = errors.New("approval: not found")
 // remind_needed ones), each lasting as long as the approval, and
 // CodeNothingToRemind when there are none (checked before the interval).
 // Otherwise to every admin who has not answered, replacing their challenge.
+// An admin sent 5 approval challenges that still count is left out, with
+// their challenge not withdrawn; CodeAskBudget when that leaves nobody
+// to send to (checked before anything is withdrawn).
 // With force, only to the named admins (CodeNotAdmin for one outside the
 // approval's admins or the current set, CodeAnswered for one who has
 // answered, CodeAskBudget for one sent 5 approval challenges that still
@@ -653,6 +691,7 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 		}
 		conns = append(conns, a)
 	}
+	cands, limited := 0, 0 // admins to remind; of those left out for a full ask log
 	for _, a := range r.Admins {
 		if len(force) > 0 {
 			break // only the named admins
@@ -668,14 +707,27 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 			if r.Pending[a] != "" {
 				continue
 			}
-		} else if old := r.Pending[a]; old != "" {
+		}
+		cands++
+		// Before anything is withdrawn: an admin at the budget keeps the
+		// challenge they hold, and stays in remind_needed if they hold none.
+		if ok, full := m.canAsk(ctx, a, now); !ok {
+			if full {
+				limited++
+			}
+			continue
+		}
+		if old := r.Pending[a]; old != "" && !m.LongChallenges {
 			to = append(to, Challenge{ConnectionID: a, RequestID: old})
 			delete(r.Pending, a)
 		}
 		conns = append(conns, a)
 	}
-	if len(force) == 0 && m.LongChallenges && len(conns) == 0 {
+	if len(force) == 0 && m.LongChallenges && cands == 0 {
 		return nil, errCode(CodeNothingToRemind)
+	}
+	if len(force) == 0 && len(conns) == 0 && limited > 0 {
+		return nil, errCode(CodeAskBudget)
 	}
 	if now.Before(r.LastSent.Add(RemindInterval)) {
 		return nil, errCode(CodeTooSoon)

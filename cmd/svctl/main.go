@@ -65,11 +65,16 @@ commands:
                                    run stopped early
   approve -action A -summary S -payload JSON
                                    submit an action for admin approval, then follow it
+                                   (ask_budget, exit 1, if fewer admins than the threshold
+                                   can be asked: the others have 5 approval challenges
+                                   still counting; nothing is sent)
   approval ID                      print an approval's status; "remind needed" lists admins with no live challenge
   remind [-force CONN,...] ID      challenge again the admins who have not answered (with long
                                    approval challenges, only those holding no live challenge;
                                    exit 0 and "nothing to remind" if there are none; exit 1 on
-                                   too_soon). -force names admins to challenge again even with a
+                                   too_soon; an admin with 5 approval challenges still
+                                   counting is left out, and if that leaves none to
+                                   challenge, ask_budget, exit 1). -force names admins to challenge again even with a
                                    live challenge (the old one is withdrawn); each forced re-send
                                    spends one of that admin's 5 approval asks per 24 h, and a
                                    force naming an admin with 5 approval challenges still
@@ -418,6 +423,11 @@ func (c *cli) approve(ctx context.Context, args []string) error {
 	}
 	req := servicevault.ApprovalRequest{Action: *action, Summary: *summary, Payload: json.RawMessage(*payload)}
 	ap, err := c.c.CreateApproval(ctx, req)
+	var ae *servicevault.APIError
+	if errors.As(err, &ae) && ae.Code == servicevault.CodeAskBudget {
+		return fmt.Errorf("approve: too few admins can be asked now: the others have 5 approval challenges still counting "+
+			"(each until its expiry plus 24 hours); nothing was sent (%w)", err)
+	}
 	if err != nil {
 		return err
 	}
@@ -517,8 +527,8 @@ func (c *cli) remind(ctx context.Context, args []string) error {
 		return nil
 	}
 	if errors.As(err, &ae) && ae.Code == servicevault.CodeAskBudget {
-		return fmt.Errorf("remind: a named admin has 5 approval challenges still counting (each until its expiry plus 24 hours); "+
-			"a sixth would come back as a denial (%w)", err)
+		return fmt.Errorf("remind: no admin to challenge is within the budget: each has 5 approval challenges still counting "+
+			"(each until its expiry plus 24 hours), and a sixth would come back as a denial; nothing was sent (%w)", err)
 	}
 	if err != nil {
 		return err

@@ -120,7 +120,7 @@ const (
 	CodeNotAdmin          = "not_admin"         // remind force: not an admin of the approval, or no longer in the set
 	CodeAnswered          = "answered"          // remind force: the admin has answered
 	CodeNothingToRemind   = "nothing_to_remind" // every admin who has not answered holds a live challenge
-	CodeAskBudget         = "ask_budget"        // remind force: the admin has 5 approval challenges still counting (askBudget)
+	CodeAskBudget         = "ask_budget"        // no send: the admins to ask have 5 approval challenges still counting (askBudget)
 )
 
 // Error is a request the service refuses, with its API error code.
