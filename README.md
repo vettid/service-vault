@@ -131,8 +131,56 @@ ECS's own events for this cluster (task state changes and the service's
 deployments) go to a log group of their own, kept a month, for
 `task_stopped` and `deploy_failed`. Each EventBridge rule that writes to
 a log group adds an account-wide CloudWatch Logs resource policy
-(10 per region): this stack has two, the key changes' and the ECS
-events'.
+(10 per region): this stack has three, the key changes', the ECS
+events' and the control-plane rules' below (one policy for all seven),
+so staging and prod in one account and region use 6 of the 10.
+
+**Control-plane alarms.** Someone with AWS access to the account (not the
+enclave) could run a task under the task role and read the keystore, or
+move the TLS pin. These alarms watch the API calls that make that
+possible. They need CloudTrail management events (read and write)
+delivered to EventBridge in this region from the account's or the
+organization's trail; this stack assumes one and creates none (a second
+trail would be a second cost, and without any trail the alarms never
+fire). The trail must log read and write management events and must not
+exclude KMS (`ExcludeManagementEventSources` must not list
+`kms.amazonaws.com`): `Decrypt` and `ReEncrypt` are read-only events,
+which reach only a rule in the state
+`ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS` (the `keystore_decrypt`
+rule is in it; the others are write events). Matches are kept a year in a log group of their own. Verify them
+once on staging by making each call.
+
+| Alarm | Fires on | In a deploy? |
+|---|---|---|
+| `notice-taskdef_registered` | `ecs:RegisterTaskDefinition` for this service's family | **Yes**, every deploy that changes the task definition (new image, setting) |
+| `notice-service_updated` | `ecs:UpdateService` on this service | **Yes**, every deploy that changes the service, and a manual scale or force-new-deployment |
+| `run_task` | `ecs:RunTask` or `ecs:StartTask` in this cluster | No: never normal (the service scheduler starts its tasks without a RunTask call by the operator) |
+| `taskrole_use` | the task role used outside the service: `RegisterTaskDefinition` naming the task role (ARN or short name) in another family; `RunTask`, `StartTask`, `CreateService` or `CreateTaskSet` naming this family (any cluster); `UpdateService` naming this family on another service, in another cluster or in the default cluster; a `RunTask` or `StartTask` override of the task role | Once, on the first create or when CloudFormation replaces the service (its own `CreateService` names the family); not on ordinary deploys |
+| `keystore_decrypt` | `kms:Decrypt`, `ReEncrypt` on the keystore key by any caller but a session of the task role | No (the operator's `table restore` does not use the key) |
+| `tls_pin_change` | `ssm:PutParameter`, `DeleteParameter`, `DeleteParameters` on the TLS pin parameter by any caller but a session of the task role | Once, on the first deploy, when CloudFormation creates the parameter; and whenever a CloudFormation update touches the `TlsPin` resource, which rewrites its value |
+| `taskrole_policy_change` | `iam:UpdateAssumeRolePolicy`, `AttachRolePolicy`, `PutRolePolicy` on the task role (us-east-1 only, see Limits) | Yes, a deploy that changes the task role's permissions (CloudFormation puts its policy); otherwise never |
+
+The two `notice-` alarms are the operator's own deploy and are expected
+with it: a change in either with no deploy under way is the alert. The
+others are never expected. Limits:
+
+- `iam:PassRole` is not a CloudTrail event (CloudTrail records the call
+  that uses the passed role), so `taskrole_use` watches the places the
+  role is passed instead: registering any task definition with it,
+  or running, starting or creating a service from this one.
+- `keystore_decrypt` and `tls_pin_change` exclude by the role that
+  issued the session, so code running under the task role elsewhere
+  looks like the service. `run_task` and `taskrole_use` are the alarms
+  for how it would get there; nothing here tells a task role session on
+  another network from the service's own.
+- IAM events reach EventBridge only in us-east-1, so
+  `taskrole_policy_change` (the trust policy, which lets another
+  principal assume the task role without any task) is created only when
+  the stack is in us-east-1. In another region it does not exist and
+  the trust policy is not watched.
+- The CloudTrail event reaches EventBridge a few minutes late, and a
+  caller who can stop the trail, or the EventBridge rules or alarms, is
+  not watched by these; keep those out of reach in the same way.
 
 **What it creates.** A VPC with public subnets in two AZs, no NAT gateway,
 the free DynamoDB gateway endpoint and no interface endpoints. An ECS
