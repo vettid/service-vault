@@ -369,7 +369,7 @@ describe('alarms', () => {
       TreatMissingData: 'breaching',
     });
     const alarms = Object.values<any>(t.findResources('AWS::CloudWatch::Alarm'));
-    expect(alarms).toHaveLength(Object.keys(ALARMS).length + 11); // + key_change, errors, task_stopped, deploy_failed, down, 6 control-plane
+    expect(alarms).toHaveLength(Object.keys(ALARMS).length + 12); // + key_change, errors, task_stopped, deploy_failed, down, 7 control-plane
     for (const a of alarms) expect(a.Properties.AlarmActions).toEqual([base.alarmTopicArn]);
   });
 
@@ -439,6 +439,7 @@ describe('alarms', () => {
       ['taskrole_use', 'alarm', 'vettid-service-vault-test-taskrole_use'],
       ['keystore_decrypt', 'alarm', 'vettid-service-vault-test-keystore_decrypt'],
       ['tls_pin_change', 'alarm', 'vettid-service-vault-test-tls_pin_change'],
+      ['taskrole_policy_change', 'alarm', 'vettid-service-vault-test-taskrole_policy_change'],
     ])('%s (%s): CloudTrail rule, labelled log target, metric filter and an alarm to the topic', (name, severity, alarmName) => {
       expect(rule(name).Description).toContain(severity);
       expect(rule(name).EventPattern['detail-type']).toEqual(['AWS API Call via CloudTrail']);
@@ -477,14 +478,33 @@ describe('alarms', () => {
     });
 
     test('taskrole_use (PassRole is not a CloudTrail event): task role in another family, our task definition run or created, task role override', () => {
-      const [reg, run, override] = anyOf('taskrole_use');
+      const [reg, run, upd, override] = anyOf('taskrole_use');
       expect(reg.eventName).toEqual(['RegisterTaskDefinition']);
+      expect(reg.requestParameters.taskRoleArn).toHaveLength(2); // ARN and short name
       expect(s(reg.requestParameters.taskRoleArn)).toContain('TaskTaskRole');
+      expect(s(reg.requestParameters.taskRoleArn)).toContain('Ref');
       expect(reg.requestParameters.family).toEqual([{ 'anything-but': ['SVTask29F9D9C1'] }]);
-      expect(run.eventName).toEqual(['RunTask', 'StartTask', 'CreateService']);
+      expect(run.eventName).toEqual(['RunTask', 'StartTask', 'CreateService', 'CreateTaskSet']);
       expect(run.requestParameters.taskDefinition).toContainEqual({ prefix: 'SVTask29F9D9C1:' });
+      expect(run.requestParameters.taskDefinition).toContain('SVTask29F9D9C1');
+      expect(s(run.requestParameters.taskDefinition)).toContain('task-definition/');
+      expect(upd.eventName).toEqual(['UpdateService']);
+      expect(upd.requestParameters.taskDefinition).toEqual(run.requestParameters.taskDefinition);
+      expect(upd.requestParameters.service[0]['anything-but']).toHaveLength(2);
+      expect(s(upd.requestParameters.service)).toContain('vettid-service-vault-test');
       expect(override.eventName).toEqual(['RunTask', 'StartTask']);
+      expect(override.requestParameters.overrides.taskRoleArn).toHaveLength(2);
       expect(s(override.requestParameters.overrides.taskRoleArn)).toContain('TaskTaskRole');
+    });
+
+    test('taskrole_policy_change: IAM trust policy and policy changes on the task role (us-east-1 only)', () => {
+      const r = rule('taskrole_policy_change');
+      expect(r.EventPattern.source).toEqual(['aws.iam']);
+      expect(r.EventPattern.detail.eventName).toEqual(['UpdateAssumeRolePolicy', 'AttachRolePolicy', 'PutRolePolicy']);
+      expect(s(r.EventPattern.detail.requestParameters.roleName)).toContain('TaskTaskRole');
+      const other = Object.values<any>(synth({ env: { account: '123456789012', region: 'eu-west-1' } }).findResources('AWS::Events::Rule'));
+      expect(other.find((x: any) => x.Properties.Description.includes('taskrole_policy_change'))).toBeUndefined();
+      expect(other.find((x: any) => x.Properties.Description.includes('taskrole_use'))).toBeDefined();
     });
 
     // Callers other than the task role's own sessions: not role sessions at all, or role sessions of another issuer.
@@ -499,7 +519,9 @@ describe('alarms', () => {
     test('keystore_decrypt: Decrypt and ReEncrypt on the keystore key by anyone but the task role', () => {
       const d = rule('keystore_decrypt').EventPattern.detail;
       expect(rule('keystore_decrypt').EventPattern.source).toEqual(['aws.kms']);
-      expect(d.eventName).toEqual(['Decrypt', 'ReEncryptFrom', 'ReEncryptTo']);
+      expect(d.eventName).toEqual(['Decrypt', 'ReEncrypt']);
+      expect(rule('keystore_decrypt').State).toBe('ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS');
+      for (const n of ['run_task', 'tls_pin_change', 'taskrole_use']) expect(rule(n).State).toBe('ENABLED');
       expect(s(d.resources)).toContain('KeystoreKey');
       notTaskRole(d.$or);
     });
@@ -515,9 +537,10 @@ describe('alarms', () => {
       notTaskRole([branches[2], branches[3]]);
     });
 
-    test('one resource policy serves the six rules, and the task role gains nothing', () => {
+    test('one resource policy serves the seven rules, limited to their ARNs, and the task role gains nothing', () => {
       t.resourceCountIs('AWS::Logs::ResourcePolicy', 1);
       t.hasResourceProperties('AWS::Logs::ResourcePolicy', { PolicyName: 'vettid-service-vault-test-security-events' });
+      expect(s(Object.values<any>(t.findResources('AWS::Logs::ResourcePolicy'))[0].Properties.PolicyDocument)).toContain('ArnEquals');
       expect(taskRoleStatements().map((st: any) => st.Sid)).toEqual(['Table', 'Ballots', 'KeystoreKey', 'PublishTlsPin']);
     });
   });

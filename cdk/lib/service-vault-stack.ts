@@ -726,21 +726,15 @@ export class ServiceVaultStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
     const secEventsArn = this.formatArn({ service: 'logs', resource: 'log-group', resourceName: secEvents.logGroupName, arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME });
-    new logs.ResourcePolicy(this, 'SecurityEventsPolicy', {
-      resourcePolicyName: `${prefix}-security-events`,
-      policyStatements: [new iam.PolicyStatement({
-        principals: [new iam.ServicePrincipal('events.amazonaws.com')],
-        actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
-        resources: [secEvents.logGroupArn],
-        conditions: { StringEquals: { 'aws:SourceAccount': this.account } },
-      })],
-    });
     const taskRoleArn = taskDef.taskRole.roleArn;
+    // RegisterTaskDefinition and RunTask record the role as given: the ARN or the short name.
+    const taskRoleNames = [taskRoleArn, taskDef.taskRole.roleName];
+    const secRules: events.Rule[] = [];
     const family = taskDef.family;
     const familyArn = this.formatArn({ service: 'ecs', resource: 'task-definition', resourceName: family });
     // A task definition as RunTask/CreateService name it: family, family:revision or its ARN.
     const ourTaskDef = events.Match.anyOf(
-      events.Match.exactString(family), events.Match.prefix(`${family}:`), events.Match.prefix(`${familyArn}:`),
+      events.Match.exactString(family), events.Match.exactString(familyArn), events.Match.prefix(`${family}:`), events.Match.prefix(`${familyArn}:`),
     );
     const notTaskRole = { 'anything-but': [taskRoleArn] };
     // Anything but the task role's own sessions. anything-but needs the
@@ -750,13 +744,16 @@ export class ServiceVaultStack extends cdk.Stack {
       { userIdentity: { type: [{ 'anything-but': ['AssumedRole'] }] } },
       { userIdentity: { type: ['AssumedRole'], sessionContext: { sessionIssuer: { arn: [notTaskRole] } } } },
     ];
-    const secRule = (name: string, severity: 'notice' | 'alarm', description: string, alarmDescription: string, source: string, detail: object) => {
+    const secRule = (name: string, severity: 'notice' | 'alarm', description: string, alarmDescription: string, source: string, detail: object, readOnly = false) => {
       // The targets are written out (not CloudWatchLogGroup targets) so that
-      // one resource policy (account-wide, 10 per region) serves all six rules.
+      // one resource policy (account-wide, 10 per region) serves all seven rules.
       const rule = new events.Rule(this, `Sec-${name}-rule`, {
         description: `${description} (${name} ${severity})`,
         eventPattern: { source: [source], detailType: ['AWS API Call via CloudTrail'], detail },
       });
+      secRules.push(rule);
+      // Read-only management events (KMS Decrypt) reach only a rule in this state.
+      if (readOnly) (rule.node.defaultChild as events.CfnRule).state = 'ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS';
       (rule.node.defaultChild as events.CfnRule).targets = [{
         id: 'Target0',
         arn: secEventsArn,
@@ -801,18 +798,19 @@ export class ServiceVaultStack extends cdk.Stack {
       'The service vault task role or task definition was named in a run, start, create-service or a task definition of another family: someone is running code under the task role',
       'aws.ecs', {
         $or: [
-          { eventName: ['RegisterTaskDefinition'], requestParameters: { taskRoleArn: [taskRoleArn], family: [{ 'anything-but': [family] }] } },
-          { eventName: ['RunTask', 'StartTask', 'CreateService'], requestParameters: { taskDefinition: ourTaskDef } },
-          { eventName: ['RunTask', 'StartTask'], requestParameters: { overrides: { taskRoleArn: [taskRoleArn] } } },
+          { eventName: ['RegisterTaskDefinition'], requestParameters: { taskRoleArn: taskRoleNames, family: [{ 'anything-but': [family] }] } },
+          { eventName: ['RunTask', 'StartTask', 'CreateService', 'CreateTaskSet'], requestParameters: { taskDefinition: ourTaskDef } },
+          { eventName: ['UpdateService'], requestParameters: { taskDefinition: ourTaskDef, service: [{ 'anything-but': [prefix, this.service.serviceArn] }] } },
+          { eventName: ['RunTask', 'StartTask'], requestParameters: { overrides: { taskRoleArn: taskRoleNames } } },
         ],
       });
     secRule('keystore_decrypt', 'alarm', 'The keystore key was used to decrypt or re-encrypt by a principal other than the task role',
       'The keystore KMS key was used (Decrypt, ReEncrypt) by something other than the service vault task role',
       'aws.kms', {
-        eventName: ['Decrypt', 'ReEncryptFrom', 'ReEncryptTo'],
+        eventName: ['Decrypt', 'ReEncrypt'],
         resources: { ARN: [this.key.keyArn] },
         $or: notTaskRoleSession,
-      });
+      }, true);
     secRule('tls_pin_change', 'alarm', 'The TLS pin parameter was written or deleted by a principal other than the task role',
       'The service vault TLS pin parameter was written or deleted by something other than the task role (a deploy that creates the parameter fires it once)',
       'aws.ssm', {
@@ -823,6 +821,26 @@ export class ServiceVaultStack extends cdk.Stack {
           { eventName: ['DeleteParameters'], requestParameters: { names: [tlsPin.parameterName] }, userIdentity: notTaskRoleSession[1].userIdentity },
         ],
       });
+    // The task role's trust policy and permissions: a way to the role that
+    // needs no task at all. IAM events reach EventBridge in us-east-1 only,
+    // so elsewhere this rule is not created (README "Limits").
+    if (this.region === 'us-east-1') {
+      secRule('taskrole_policy_change', 'alarm', 'The task role\'s trust policy or permissions were changed',
+        'The service vault task role\'s trust policy or permissions were changed (UpdateAssumeRolePolicy, AttachRolePolicy, PutRolePolicy): CloudFormation does this only in a deploy that changes the role',
+        'aws.iam', {
+          eventName: ['UpdateAssumeRolePolicy', 'AttachRolePolicy', 'PutRolePolicy'],
+          requestParameters: { roleName: [taskDef.taskRole.roleName] },
+        });
+    }
+    new logs.ResourcePolicy(this, 'SecurityEventsPolicy', {
+      resourcePolicyName: `${prefix}-security-events`,
+      policyStatements: [new iam.PolicyStatement({
+        principals: [new iam.ServicePrincipal('events.amazonaws.com')],
+        actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
+        resources: [secEvents.logGroupArn],
+        conditions: { ArnEquals: { 'aws:SourceArn': secRules.map((r) => r.ruleArn) } },
+      })],
+    });
 
     // Down: ECS reports the service's CPU every minute while a task runs
     // (without Container Insights too); no data for 10 minutes means no
