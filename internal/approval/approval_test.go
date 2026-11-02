@@ -33,6 +33,20 @@ type fakePeer struct {
 	now       func() time.Time
 	names     map[string]string // connection id -> the member's name
 	states    map[string]string // connection id -> a state other than active (known, not active)
+	noAuth    map[string]bool   // connection id -> no pinned credential key
+}
+
+// fakeIK is a connection's identity key in the tests: its id's last
+// byte, 32 times.
+func fakeIK(id string) []byte { return bytes.Repeat([]byte(id[len(id)-1:]), 32) }
+
+func (p *fakePeer) info(id, state string) peer.ConnectionInfo {
+	ci := peer.ConnectionInfo{ID: id, State: state, Name: p.names[id], IK: fakeIK(id),
+		Activated: time.Date(2026, 11, 2, 9, 30, 0, 0, time.UTC)}
+	if !p.noAuth[id] {
+		ci.AuthKey = bytes.Repeat([]byte{7}, 32)
+	}
+	return ci
 }
 
 type sent struct {
@@ -45,12 +59,12 @@ func (p *fakePeer) Connection(id string) (peer.ConnectionInfo, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if st := p.states[id]; st != "" {
-		return peer.ConnectionInfo{ID: id, State: st, Name: p.names[id]}, true
+		return p.info(id, st), true
 	}
 	if !p.active[id] {
 		return peer.ConnectionInfo{}, false
 	}
-	return peer.ConnectionInfo{ID: id, State: peer.StateActive, Name: p.names[id]}, true
+	return p.info(id, peer.StateActive), true
 }
 
 func (p *fakePeer) Authenticate(_ context.Context, conn, ctxt, purpose string, ttl time.Duration) (string, error) {

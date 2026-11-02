@@ -689,10 +689,19 @@ admin's connection.
   (`admin_set.remove`), `Contract template:` (`contract_template.change`),
   `Push assignment:` (`assignment.push`). For `admin_set.add` and
   `admin_set.remove` the application gives no `summary` (`invalid_summary`):
-  the service writes `"<the connection's name>", connection <id>`, the name
-  as it holds it (cut to 24 characters, anything outside printable ASCII
-  and Latin-1 letters shown as `?`), and refuses an added connection that
-  is unknown or not active (`invalid_connection`). An application's summary can't
+  the service writes `name given "<name>", connected <date>, key <8 hex
+  digits>, connection <id>` for the connection. The name is the one the
+  member's vault sent when it connected, so the wording says it is
+  self-declared; it is shown whole, at most 32 characters of printable
+  ASCII and Latin-1 letters, or the approval is refused (`field_not_shown`).
+  The date is when the connection was activated. The key is the first two
+  groups of 4 of the fingerprint of the connection's identity key,
+  `SHA-256("vettid/vms/2/ik-fp" || ik)` (VAULT-MESSAGING §10.8), which the
+  member's app shows on the connection's details, so the member can read
+  it out. An added connection that is unknown, not active, or has no
+  pinned credential key (it has never signed in) is refused
+  (`invalid_connection`); removing a connection the service no longer
+  knows names only its id. An application's summary can't
   start with a label's words or with `BINDING`, `ADVISORY` or `EXTEND`
   (`invalid_summary`). `SV_SERVICE_NAME` is at most 32 bytes (the service
   vault refuses to start with a longer one), so that a summary built from

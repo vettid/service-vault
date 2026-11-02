@@ -476,7 +476,8 @@ func (c *cli) approveAndFollow(ctx context.Context, req servicevault.ApprovalReq
 		if err != nil {
 			return ap.ID, err
 		}
-		if json.Unmarshal(req.Payload, &p) != nil || p.ConnectionID == "" || !strings.HasSuffix(st.Summary, ", connection "+p.ConnectionID) {
+		if json.Unmarshal(req.Payload, &p) != nil || p.ConnectionID == "" || !strings.HasSuffix(st.Summary, ", connection "+p.ConnectionID) ||
+			(req.Action == servicevault.ActionAdminSetAdd && (!strings.Contains(st.Summary, ", connected ") || !strings.Contains(st.Summary, ", key "))) {
 			return ap.ID, errors.New("the summary the admins read does not name the connection asked for")
 		}
 		summary = st.Summary

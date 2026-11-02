@@ -350,6 +350,11 @@ type ConnectionInfo struct {
 	InviteID  string
 	Tag       string
 	Activated time.Time
+	// IK is the member's identity key, as pinned at the handshake, and
+	// AuthKey the credential key pinned at its first signed
+	// connection.authenticate.response (empty before one).
+	IK      []byte
+	AuthKey []byte
 }
 
 // Connection returns a connection by id.
@@ -360,7 +365,8 @@ func (p *Peer) Connection(id string) (ConnectionInfo, bool) {
 	if c == nil {
 		return ConnectionInfo{}, false
 	}
-	return ConnectionInfo{ID: c.ID, State: c.State, Name: c.Name(), InviteID: c.InviteID, Tag: c.Tag, Activated: c.Activated}, true
+	return ConnectionInfo{ID: c.ID, State: c.State, Name: c.Name(), InviteID: c.InviteID, Tag: c.Tag, Activated: c.Activated,
+		IK: append([]byte(nil), c.Peer.IK...), AuthKey: append([]byte(nil), c.AuthKey...)}, true
 }
 
 // housekeeping runs before each batch and every minute: invitations,

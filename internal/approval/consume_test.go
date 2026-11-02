@@ -2,6 +2,8 @@ package approval
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"regexp"
 	"strings"
@@ -386,13 +388,19 @@ func TestConsumeRecounts(t *testing.T) {
 	}
 }
 
-// admin_set.* summaries are built from the payload: who is added or
-// removed, as the service holds it. The application writes none.
+// admin_set.* summaries are built from the payload: the name the member
+// gave (marked so), when the connection was made, the key's fingerprint
+// and the id. The application writes none.
 func TestAdminSetSummaryBuilt(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t, 1, "c1", "c2")
-	f.p.names = map[string]string{"c2": "Ann \u0410nn \"Q\"", "c1": "Bob"}
+	f.p.names = map[string]string{"c2": "Ann \"Q\" \u00c9lise", "c1": "Bob"}
 	f.p.active["c3"] = true
+	f.p.active["c5"], f.p.active["c6"], f.p.active["c7"], f.p.active["c8"] = true, true, true, true
+	f.p.names["c5"] = strings.Repeat("n", MaxAdminName+1)
+	f.p.names["c6"] = "Ann \u0410nn"
+	f.p.names["c7"] = " Ann"
+	f.p.noAuth = map[string]bool{"c8": true}
 	f.p.states = map[string]string{"c4": "suspended"}
 	for _, a := range []string{ActionAdminSetAdd, ActionAdminSetRemove} {
 		_, err := f.m.Create(ctx, Request{Action: a, Summary: "Open the vote", Payload: json.RawMessage(`{"connection_id":"c3"}`)})
@@ -402,7 +410,9 @@ func TestAdminSetSummaryBuilt(t *testing.T) {
 	}
 	n := len(f.p.sent)
 	for name, p := range map[string]string{"unknown": `{"connection_id":"c9"}`, "inactive": `{"connection_id":"c4"}`,
-		"already admin": `{"connection_id":"c2"}`, "quote": `{"connection_id":"c\"3"}`, "long": `{"connection_id":"` + strings.Repeat("c", 41) + `"}`} {
+		"already admin": `{"connection_id":"c2"}`, "quote": `{"connection_id":"c\"3"}`, "long id": `{"connection_id":"` + strings.Repeat("c", 41) + `"}`,
+		"long name": `{"connection_id":"c5"}`, "cyrillic name": `{"connection_id":"c6"}`, "padded name": `{"connection_id":"c7"}`,
+		"no credential key": `{"connection_id":"c8"}`} {
 		if _, err := f.m.Create(ctx, Request{Action: ActionAdminSetAdd, Payload: json.RawMessage(p)}); err == nil {
 			t.Errorf("add %s accepted", name)
 		}
@@ -410,15 +420,24 @@ func TestAdminSetSummaryBuilt(t *testing.T) {
 	if len(f.p.sent) != n {
 		t.Fatal("a refused approval was sent")
 	}
+	fp := sha256.Sum256(append([]byte("vettid/vms/2/ik-fp"), fakeIK("c3")...))
+	h := hex.EncodeToString(fp[:4])
+	want := "name not given, connected 2026-11-02, key " + h[:4] + " " + h[4:] + ", connection c3"
 	c := f.create(ActionAdminSetAdd, "", `{"connection_id":"c3"}`)
-	if s := f.status(c.ID).Summary; s != `"no name", connection c3` {
-		t.Fatalf("%q", s)
+	if s := f.status(c.ID).Summary; s != want {
+		t.Fatalf("%q, want %q", s, want)
 	}
-	if ctxt := f.p.last("c1").ctxt; !strings.Contains(ctxt, "Add admin: \"no name\", connection c3 — ref ") {
+	if ctxt := f.p.last("c1").ctxt; !strings.Contains(ctxt, "Add admin: "+want+" — ref ") {
 		t.Fatalf("%q", ctxt)
 	}
+	f.p.names["c3"] = "Jane Doe, treasurer"
+	g := f.create(ActionAdminSetAdd, "", `{"connection_id":"c3"}`)
+	if s := f.status(g.ID).Summary; !strings.HasPrefix(s, `name given "Jane Doe, treasurer", connected 2026-11-02, key `) {
+		t.Fatalf("%q", s)
+	}
+	// Removing: the same, and an unknown connection names only its id.
 	r := f.create(ActionAdminSetRemove, "", `{"connection_id":"c2"}`)
-	if s := f.status(r.ID).Summary; s != `"Ann ?nn \"Q\"", connection c2` {
+	if s := f.status(r.ID).Summary; !strings.HasPrefix(s, "name given \"Ann \\\"Q\\\" \u00c9lise\", connected ") || !strings.HasSuffix(s, ", connection c2") {
 		t.Fatalf("%q", s)
 	}
 	if ctxt := f.p.last("c1").ctxt; !strings.Contains(ctxt, "Remove admin: ") {

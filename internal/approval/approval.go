@@ -3,9 +3,11 @@ package approval
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"github.com/vettid/vettid-vault/vms/peerwire"
 	"log/slog"
 	"slices"
@@ -13,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/vettid/service-vault/internal/ballot"
 	"github.com/vettid/service-vault/internal/peer"
@@ -443,10 +446,26 @@ func adminSetTarget(payload json.RawMessage) (string, error) {
 	return p.ConnectionID, nil
 }
 
+// MaxAdminName is the longest name shown for a connection added as an
+// admin; a longer one is refused, never cut.
+const MaxAdminName = 32
+
 // adminSetSummary is what the admins read for an admin_set.* action:
-// the target connection's name as the service holds it (cleaned to
-// printable ASCII and Latin-1 letters, at most 24 characters, quoted) and
-// its connection id. An added connection must be known and active.
+//
+//	name given "<name>", connected <date>, key <fingerprint>, connection <id>
+//
+// The name is what the member's vault sent when it connected: the admins
+// are told it is self-declared (anyone the API key can invite can choose
+// any name), and the date, the fingerprint and the id are what the
+// service holds. The fingerprint is the first 8 hex digits, in the two
+// groups of 4 the app shows, of SHA-256("vettid/vms/2/ik-fp" || ik) of the
+// connection's pinned identity key (VAULT-MESSAGING §10.8), which the
+// member's app shows on the connection's details (as the first two of its
+// 8 groups of 4). Nothing is cut or replaced: an added connection whose name is
+// over MaxAdminName characters or has characters outside printable ASCII
+// and Latin-1 letters, that is unknown or not active, or has no pinned
+// credential key (it has never signed in) or no identity key, is refused.
+// Removing a connection the service no longer knows names only its id.
 func (m *Manager) adminSetSummary(action string, payload []byte) (string, error) {
 	target, err := adminSetTarget(payload)
 	if err != nil {
@@ -459,35 +478,57 @@ func (m *Manager) adminSetSummary(action string, payload []byte) (string, error)
 		return "", errCode(CodeInvalidConnection)
 	}
 	info, ok := m.Peer.Connection(target)
-	if action == ActionAdminSetAdd && (!ok || info.State != peer.StateActive) {
+	add := action == ActionAdminSetAdd
+	if add && (!ok || info.State != peer.StateActive || len(info.AuthKey) == 0 || len(info.IK) != ed25519.PublicKeySize ||
+		info.Activated.IsZero()) {
 		return "", errCode(CodeInvalidConnection)
 	}
-	name := cleanName(info.Name)
-	if name == "" {
-		name = "no name"
+	if !ok {
+		return "connection " + target, nil
 	}
-	return fmt.Sprintf("%s, connection %s", strconv.Quote(name), target), nil
+	name := "name not given"
+	if info.Name != "" {
+		if utf8.RuneCountInString(info.Name) > MaxAdminName || !adminNameOK(info.Name) {
+			if add {
+				return "", errCode(CodeFieldNotShown)
+			}
+			name = "name not shown"
+		} else {
+			name = "name given " + strconv.Quote(info.Name)
+		}
+	}
+	s := name
+	if !info.Activated.IsZero() {
+		s += ", connected " + info.Activated.UTC().Format("2006-01-02")
+	}
+	if len(info.IK) == ed25519.PublicKeySize {
+		fp := sha256.Sum256(append([]byte("vettid/vms/2/ik-fp"), info.IK...))
+		h := hex.EncodeToString(fp[:4])
+		s += ", key " + h[:4] + " " + h[4:]
+	}
+	s += ", connection " + target
+	if len(s) > MaxAdminSummary {
+		return "", errCode(CodeFieldNotShown)
+	}
+	return s, nil
 }
 
-// cleanName reduces a member's profile name, which the member chose, to
-// printable ASCII and Latin-1 letters (anything else becomes "?"), at most
-// 24 characters (cut marked with "…").
-func cleanName(n string) string {
-	var b strings.Builder
-	cnt := 0
-	for _, r := range strings.TrimSpace(n) {
-		if cnt == 24 {
-			b.WriteString("…")
-			break
-		}
-		if r >= 0x20 && r <= 0x7e || r >= 0xc0 && r <= 0xff && r != 0xd7 && r != 0xf7 {
-			b.WriteRune(r)
-		} else {
-			b.WriteByte('?')
-		}
-		cnt++
+// MaxAdminSummary bounds an admin_set.* summary, so that it is shown
+// whole in a challenge's context with the longest service name.
+const MaxAdminSummary = 165
+
+// adminNameOK accepts printable ASCII and Latin-1 letters only, with no
+// space at either end.
+func adminNameOK(n string) bool {
+	if n != strings.TrimSpace(n) {
+		return false
 	}
-	return b.String()
+	for _, r := range n {
+		if !(r >= 0x20 && r <= 0x7e || r >= 0xc0 && r <= 0xff && r != 0xd7 && r != 0xf7) {
+			return false
+		}
+	}
+	return true
 }
 
 // summaryError is the refusal of a payload whose summary can't be built.

@@ -24,7 +24,8 @@ type approvalPeer struct {
 }
 
 func (p *approvalPeer) Connection(id string) (peer.ConnectionInfo, bool) {
-	return peer.ConnectionInfo{ID: id, State: peer.StateActive}, id == "c1" || id == "c2" || id == "c3"
+	return peer.ConnectionInfo{ID: id, State: peer.StateActive, Name: "Member " + id, IK: make([]byte, 32),
+		AuthKey: make([]byte, 32), Activated: time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)}, id == "c1" || id == "c2" || id == "c3"
 }
 
 func (p *approvalPeer) Authenticate(_ context.Context, conn, _, _ string, _ time.Duration) (string, error) {
