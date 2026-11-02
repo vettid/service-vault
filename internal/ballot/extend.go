@@ -1,11 +1,13 @@
 package ballot
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/vettid/service-vault/vote"
+	"strconv"
 	"time"
 )
 
@@ -37,17 +39,51 @@ type ExtensionInput struct {
 const ExtendMargin = CollectMargin
 
 // ErrTooLate is an extension asked for once the close it would extend has
-// passed.
+// passed, or one whose Rekor time is not before that close.
 var ErrTooLate = errors.New("ballot: the close to extend has passed")
+
+// ErrExtensionPending is a new extension asked for while another is signed
+// and stored but not yet in effect: it is finished (the same request
+// again) or settled by Close first.
+var ErrExtensionPending = errors.New("ballot: another extension is pending")
+
+// IntegratedTime returns the time (Unix seconds) at which the transparency
+// log integrated the bundle's single entry: the time that decides whether
+// an extension came before the close it extends. It fails closed on a
+// bundle without exactly one entry carrying a time.
+func IntegratedTime(bundle json.RawMessage) (int64, error) {
+	var b struct {
+		VerificationMaterial struct {
+			TlogEntries []struct {
+				IntegratedTime string `json:"integratedTime"`
+			} `json:"tlogEntries"`
+		} `json:"verificationMaterial"`
+	}
+	if err := json.Unmarshal(bundle, &b); err != nil || len(b.VerificationMaterial.TlogEntries) != 1 {
+		return 0, errors.New("ballot: the bundle has no single log entry")
+	}
+	t, err := strconv.ParseInt(b.VerificationMaterial.TlogEntries[0].IntegratedTime, 10, 64)
+	if err != nil || t <= 0 {
+		return 0, errors.New("ballot: the bundle's log time is unreadable")
+	}
+	return t, nil
+}
 
 // Extend publishes an extension and sends vote.extended to every eligible
 // member.
 //
 // It needs the admins' approval (a vote.extend approval) of exactly this
-// extension of this proposal, in its canonical form (CanonicalExtension),
-// and uses it up, after everything that can refuse the input has been
-// checked and before anything is published. A failure after that leaves
-// the approval used (the admins approve again).
+// extension of this proposal, in its canonical form (CanonicalExtension).
+// The order is: refusals, use the approval, store the signed extension as
+// pending (conditional on the record's version), publish it, mark it in
+// effect. The site's copy is write-once, so what is published must be
+// stored first: a failure after the publish leaves the pending extension,
+// and the same request again (with the same approval, which is not used
+// again) publishes the same bytes and finishes. A failure between the use
+// and the store leaves the approval used (the admins approve again).
+//
+// Whether the extension is in effect is decided by the log time in its
+// bundle: before the close it extends, or it does not apply (ErrTooLate).
 func (m *Manager) Extend(ctx context.Context, id, approvalID string, in ExtensionInput) (*vote.Extension, error) {
 	unlock, err := m.lock(ctx, id)
 	if err != nil {
@@ -69,7 +105,10 @@ func (m *Manager) Extend(ctx context.Context, id, approvalID string, in Extensio
 	if err != nil {
 		return nil, err
 	}
-	if o.Published || m.Now().Unix() >= o.ClosesAt-int64(ExtendMargin/time.Second) {
+	now := m.Now().Unix()
+	// A retry of a pending extension may run up to the close; a new one
+	// must leave the margin.
+	if o.Published || now >= o.ClosesAt || o.Pending == nil && now >= o.ClosesAt-int64(ExtendMargin/time.Second) {
 		return nil, ErrTooLate
 	}
 	out := in.Outage
@@ -90,11 +129,6 @@ func (m *Manager) Extend(ctx context.Context, id, approvalID string, in Extensio
 	if err != nil {
 		return nil, &ErrInput{err}
 	}
-	msg, _ := vote.DocSigMsg(sum(o.Doc), doc)
-	sig, err := m.Sign(vote.LabelExtended, msg)
-	if err != nil {
-		return nil, err
-	}
 	payload, err := CanonicalExtension(id, in)
 	if err != nil {
 		return nil, &ErrInput{err}
@@ -102,20 +136,45 @@ func (m *Manager) Extend(ctx context.Context, id, approvalID string, in Extensio
 	if err := checkExtension(&ExtensionPayload{ProposalID: id, ClosesAt: in.ClosesAt, Outage: in.Outage}); err != nil {
 		return nil, &ErrInput{err}
 	}
-	if err := m.consume(ctx, approvalID, ActionVoteExtend, payload, Use{ProposalID: id, N: e.N}); err != nil {
-		return nil, err
+	var sig []byte
+	if pe := o.Pending; pe != nil {
+		// Only the same request, with the approval already used for it,
+		// finishes the pending extension; nothing else is accepted while
+		// it is pending.
+		if !bytes.Equal(pe.Doc, doc) || pe.ApprovalID != approvalID {
+			return nil, ErrExtensionPending
+		}
+		doc, sig = pe.Doc, pe.Sig
+	} else {
+		msg, _ := vote.DocSigMsg(sum(o.Doc), doc)
+		if sig, err = m.Sign(vote.LabelExtended, msg); err != nil {
+			return nil, err
+		}
+		use := Use{ProposalID: id, N: e.N}
+		if err := m.consume(ctx, approvalID, ActionVoteExtend, payload, use); err != nil {
+			return nil, err
+		}
+		o.Pending = &PendingExtension{Doc: doc, Sig: sig, ApprovalID: approvalID, Use: use}
+		if err := m.Store.SaveProposal(ctx, o, false); err != nil {
+			return nil, err
+		}
 	}
 	bundle, err := ep.PublishExtension(ctx, id, e.N, doc, sig)
 	if err != nil {
 		return nil, fmt.Errorf("ballot: publish extension %d of %s: %w", e.N, id, err)
 	}
 	// Each extension is published before the close it extends (§10.2):
-	// one whose publication ran past it doesn't take effect.
-	if m.Now().Unix() >= o.ClosesAt {
+	// the log's time for it decides, not this clock.
+	at, err := IntegratedTime(bundle)
+	if err != nil {
+		return nil, err
+	}
+	if at >= o.ClosesAt {
 		return nil, ErrTooLate
 	}
 	o.Extensions = append(o.Extensions, vote.Signed{Doc: doc, Sig: sig})
 	o.ClosesAt = e.ClosesAt
+	o.Pending = nil
 	if err := m.Store.SaveProposal(ctx, o, false); err != nil {
 		return nil, err
 	}

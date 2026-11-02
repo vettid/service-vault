@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.13.0 (2026-11-02)
+**Status:** 0.13.1 (2026-11-02)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -185,6 +185,15 @@ design: vettid/votes, docs/VOTES-SITE.md).
 - **Write-once:** each document has one path; the site accepts the same
   bytes again, refuses different bytes, and never changes or removes a
   document.
+- **The upload's answer (the publisher contract):** `201` or `200` counts
+  as published. The answer may carry `index_updated`: if it is `false`,
+  the document is written but the index update failed, and the service
+  uploads the identical bytes again until it is `true` (the only repair:
+  nothing rebuilds the index from the documents); a missing field means
+  updated, as older sites send none. `409` is a different document at
+  that path. The service never depends on the index to find a document:
+  it reads `extension-<n+1>` until a 404, when it reconciles and at the
+  close (§10.2).
 - **Discovery:** the site keeps an index of proposals open or closed in
   the last 30 days, with their extensions. The app fetches it, with no
   session, on a fixed hourly schedule, and hands the vault the entries
@@ -627,7 +636,30 @@ internationalised look-alike domain), shown to the admins whole. An
 extension asked for less than 1 minute before the close it extends (the
 `CollectMargin` that the count already allows after the close) is refused
 as too late (`too_late`) before the approval is looked at, so that the
-approval stays usable: one published later may not reach the close in time. **(chosen; not in the
+approval stays usable: one published later may not reach the close in time.
+
+The extension is **stored before it is published**, because the site's
+copy is write-once. After the approval is used, the service stores the
+signed extension as *pending* on the proposal record (a write conditional
+on the record's version), then publishes it, then marks it in effect
+(appended to the extensions, `closes_at` moved, pending cleared). A
+retry, or a restart, publishes the same bytes, never a new signature,
+and uses no second approval; while one is pending a different extension
+is refused (`extension_pending`, 409). **Whether an extension is in
+effect is decided by the integrated time of the log entry in its Sigstore
+bundle**, not by the service's clock: it must be before the `closes_at`
+it extends, or it does not apply (`too_late`). Before counting, the close
+**reconciles** the store with the site: it reads `extension-1`,
+`extension-2`, … to the first 404, and a pending extension the site has
+is put in effect; one the site has and the store lacks is adopted only if
+it carries the service's signature, this proposal, the next number, the
+24 h limit and a log time before the close it extends; a pending one the
+site lacks is dropped once the close and the margin have passed. Any
+other difference (the store holds an extension the site lacks or has
+other bytes; the site's extension doesn't verify) is refused: nothing is
+counted and the error is logged (`site_mismatch`, 409). If the index
+lists fewer extensions than the files, the last is uploaded again
+(§3.3) to finish it. **(chosen; not in the
 spec.)** Counting the votes after the close (§7) needs no approval: it
 decides nothing that the window and the ballots have not.
 
@@ -681,6 +713,11 @@ item.
 
 ## Changes
 
+- **0.13.1 (2026-11-02):** §10.2: an extension is stored (pending) before
+  it is published, a retry publishes the same bytes, the log time of its
+  bundle decides whether it applies, and the close reconciles with the
+  site before counting. §3.3: the publisher contract for the upload's
+  answer (`index_updated`). No change to the messages or documents.
 - **0.13.0 (2026-11-02):** creating a proposal (§3.4) and extending one
   (§10.2) need the admins' m-of-n approval of the exact input, used
   once; the API key alone no longer starts or extends a vote. §2 says

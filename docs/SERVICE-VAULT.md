@@ -202,7 +202,7 @@ MEMBER-SERVICE-PLAN §4.5 and §5.2; the operator's view is in the README,
   `approval.consumed` audit entry. The order is check, consume, execute:
   refusals of the input come first and leave the approval usable; a
   failure after the use (storing, publishing, sending) leaves it used and
-  the admins approve again (fail closed). `/close` stays API-key only: it
+  the admins approve again (fail closed). For `vote.extend` the order is: refusals, use the approval, store the signed extension as pending on the proposal (conditional on its version), publish, mark in effect (BALLOT-PROTOCOL §10.2): a failure after the store leaves it pending, and the same request again publishes the same bytes without using the approval again; the log time of its bundle, not the clock, decides whether it applies. `/close` reconciles the extensions with the site's files before it counts and refuses (`site_mismatch`) while they differ in a way that can't be resolved. `/close` stays API-key only: it
   counts a vote that has already closed.
 - **Answers** arrive as the peer's challenge outcomes, now carrying the
   evidence (context, credential key, signature, `signed_at`). Each answer

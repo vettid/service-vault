@@ -67,7 +67,9 @@ func (m *Manager) Close(ctx context.Context, id string) (*ResultsSummary, error)
 	}
 	defer unlock()
 	rp, ok := m.Publisher.(ResultsPublisher)
-	if m.Publisher == nil || !ok {
+	sr, ok2 := m.Publisher.(SiteReader)
+	ep, ok3 := m.Publisher.(ExtensionPublisher)
+	if m.Publisher == nil || !ok || !ok2 || !ok3 {
 		return nil, ErrNoPublisher
 	}
 	o, err := m.Store.OpenProposal(ctx, id)
@@ -83,6 +85,16 @@ func (m *Manager) Close(ctx context.Context, id string) (*ResultsSummary, error)
 	}
 	if pr == nil {
 		end := time.Unix(o.ClosesAt, 0).Add(CollectMargin)
+		if m.Now().Before(end) {
+			return nil, ErrNotClosed
+		}
+		// Before counting: the extensions are the site's (an extension
+		// published but not stored moves the close). Nothing is counted
+		// while they can't be reconciled.
+		if err := m.reconcile(ctx, sr, ep, o); err != nil {
+			return nil, err
+		}
+		end = time.Unix(o.ClosesAt, 0).Add(CollectMargin)
 		if m.Now().Before(end) {
 			return nil, ErrNotClosed
 		}

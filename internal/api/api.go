@@ -707,6 +707,8 @@ func (s *Server) extendProposal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_extension")
 	case errors.Is(err, ballot.ErrTooLate):
 		writeError(w, http.StatusConflict, "too_late")
+	case errors.Is(err, ballot.ErrExtensionPending):
+		writeError(w, http.StatusConflict, "extension_pending")
 	case errors.Is(err, ballot.ErrNoPublisher):
 		writeError(w, http.StatusServiceUnavailable, "publication_not_configured")
 	case errors.Is(err, ballot.ErrProposalChanged):
@@ -731,6 +733,9 @@ func (s *Server) closeProposal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "not_closed")
 	case errors.Is(err, ballot.ErrNotCaught):
 		writeError(w, http.StatusServiceUnavailable, "collecting")
+	case errors.Is(err, ballot.ErrSiteMismatch):
+		s.log().Error("close proposal", "err", err)
+		writeError(w, http.StatusConflict, "site_mismatch")
 	case errors.Is(err, ballot.ErrNoPublisher):
 		writeError(w, http.StatusServiceUnavailable, "publication_not_configured")
 	case errors.Is(err, ballot.ErrProposalChanged):

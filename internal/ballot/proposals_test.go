@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/vettid/service-vault/vote"
 	"sync"
 	"testing"
@@ -57,6 +58,29 @@ type fakePublisher struct {
 	// started and release, when set, hold an extension's publication
 	// until release is closed, after telling started.
 	started, release chan struct{}
+	// integrated is the log time of a bundle made; failAfter writes to the
+	// site and then reports an error (a lost answer); site is what the
+	// site holds; indexed is the index's count (-1: no entry).
+	integrated func() int64
+	failAfter  bool
+	site       map[int64]*SiteExtension
+	indexed    *int
+	published  [][]byte // the extension documents sent, in order
+}
+
+func (p *fakePublisher) bundle() json.RawMessage {
+	return json.RawMessage(fmt.Sprintf(`{"verificationMaterial":{"tlogEntries":[{"integratedTime":"%d"}]}}`, p.integrated()))
+}
+
+func (p *fakePublisher) Extension(_ context.Context, _ string, n int64) (*SiteExtension, error) {
+	return p.site[n], nil
+}
+
+func (p *fakePublisher) ExtensionCount(_ context.Context, _ string) (int, bool, error) {
+	if p.indexed != nil {
+		return *p.indexed, true, nil
+	}
+	return len(p.site), len(p.site) > 0, nil
 }
 
 func (p *fakePublisher) PublishProposal(_ context.Context, id string, doc, sig []byte) (json.RawMessage, error) {
@@ -121,12 +145,14 @@ func newManager(t *testing.T) (*Manager, *fakeSender, *fakePublisher) {
 	ik := ed25519.NewKeyFromSeed(digest("service ik"))
 	clock := time.Unix(1793500000, 0)
 	s, p := &fakeSender{down: map[string]bool{}}, &fakePublisher{}
-	return &Manager{
+	m := &Manager{
 		Store: &RecordStore{Records: peer.NewMemStore(), Copy: &MemCopy{}},
 		Sign:  func(label string, msg []byte) ([]byte, error) { return suite.Sign(ik, label, msg) },
 		IK:    ik.Public().(ed25519.PublicKey), Roster: fakeRoster{"c2", "c0", "c1"}, Sender: s, Publisher: p,
 		NewID: envelope.NewULID, Now: func() time.Time { return clock }, Approvals: &fakeApprovals{auto: true},
-	}, s, p
+	}
+	p.integrated = func() int64 { return m.Now().Unix() }
+	return m, s, p
 }
 
 func input() ProposalInput {
@@ -370,7 +396,20 @@ func (p *fakePublisher) PublishExtension(_ context.Context, id string, n int64, 
 	if p.fail {
 		return nil, errors.New("rekor down")
 	}
-	return json.RawMessage(`{}`), nil
+	p.published = append(p.published, doc)
+	if old := p.site[n]; old != nil && !bytes.Equal(old.Doc, doc) {
+		return nil, errors.New("409")
+	}
+	if p.site == nil {
+		p.site = map[int64]*SiteExtension{}
+	}
+	if p.site[n] == nil {
+		p.site[n] = &SiteExtension{Doc: doc, Sig: sig, Bundle: p.bundle()}
+	}
+	if p.failAfter {
+		return nil, errors.New("answer lost")
+	}
+	return p.site[n].Bundle, nil
 }
 
 func TestExtend(t *testing.T) {
@@ -500,7 +539,7 @@ func TestTwoTasksSaveByVersion(t *testing.T) {
 	}
 	in := input()
 	m1.Now = func() time.Time { return time.Unix(in.ClosesAt-600, 0) }
-	m2 := &Manager{Store: m1.Store, Sign: m1.Sign, IK: m1.IK, Roster: m1.Roster, Sender: m1.Sender, Publisher: &fakePublisher{},
+	m2 := &Manager{Store: m1.Store, Sign: m1.Sign, IK: m1.IK, Roster: m1.Roster, Sender: m1.Sender, Publisher: pub,
 		Catcher: &fakeCatcher{caught: true}, NewID: m1.NewID, Now: func() time.Time { return time.Unix(in.ClosesAt, 0).Add(2 * CollectMargin) }}
 	pub.started, pub.release = make(chan struct{}), make(chan struct{})
 	done := make(chan error, 1)

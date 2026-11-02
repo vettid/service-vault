@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -155,6 +156,16 @@ func (p *Publisher) publish(ctx context.Context, id, name string, doc, sig, rows
 	out, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	switch resp.StatusCode {
 	case http.StatusCreated, http.StatusOK:
+		// The document is written. "index_updated": false says the index
+		// update failed: published all the same, and the identical upload
+		// again (reconcile does it for an extension) finishes the index.
+		// A site that sends no such field is not saying it failed.
+		var a struct {
+			IndexUpdated *bool `json:"index_updated"`
+		}
+		if json.Unmarshal(out, &a) == nil && a.IndexUpdated != nil && !*a.IndexUpdated {
+			slog.Warn("publish: the site's index is not updated", "proposal_id", id, "name", name)
+		}
 		return bundle, nil
 	}
 	var e struct {
@@ -176,4 +187,77 @@ func (p *Publisher) Check() error {
 		return errNoURL
 	}
 	return nil
+}
+
+var _ ballot.SiteReader = (*Publisher)(nil)
+
+// get fetches a path of the site's read side (/v1/...), or nil on 404.
+func (p *Publisher) get(ctx context.Context, path string, max int64) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(p.URL, "/")+"/v1/"+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := p.Client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		b, err := io.ReadAll(io.LimitReader(resp.Body, max+1))
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(b)) > max {
+			return nil, fmt.Errorf("publish: %s is over %d bytes", path, max)
+		}
+		return b, nil
+	case http.StatusNotFound:
+		return nil, nil
+	}
+	return nil, fmt.Errorf("publish: votes.vettid.org answered %d for %s", resp.StatusCode, path)
+}
+
+// Extension implements ballot.SiteReader. The site writes the document
+// last, so a document without its signature or bundle is an error, not
+// a missing extension.
+func (p *Publisher) Extension(ctx context.Context, id string, n int64) (*ballot.SiteExtension, error) {
+	base := "p/" + id + "/extension-" + strconv.FormatInt(n, 10)
+	doc, err := p.get(ctx, base+".json", 4096)
+	if err != nil || doc == nil {
+		return nil, err
+	}
+	sig, err := p.get(ctx, base+".sig", 256)
+	if err != nil {
+		return nil, err
+	}
+	bundle, err := p.get(ctx, base+".sigstore.json", 64<<10)
+	if err != nil {
+		return nil, err
+	}
+	if sig == nil || bundle == nil {
+		return nil, fmt.Errorf("publish: extension %d of %s has no signature or bundle on the site", n, id)
+	}
+	return &ballot.SiteExtension{Doc: doc, Sig: sig, Bundle: bundle}, nil
+}
+
+// ExtensionCount implements ballot.SiteReader, from the site's index.
+func (p *Publisher) ExtensionCount(ctx context.Context, id string) (int, bool, error) {
+	b, err := p.get(ctx, "index.json", 8<<20)
+	if err != nil || b == nil {
+		return 0, false, err
+	}
+	var all []struct {
+		ProposalID string `json:"proposal_id"`
+		Extended   int    `json:"extended"`
+	}
+	if err := json.Unmarshal(b, &all); err != nil {
+		return 0, false, err
+	}
+	for _, e := range all {
+		if e.ProposalID == id {
+			return e.Extended, true, nil
+		}
+	}
+	return 0, false, nil
 }
