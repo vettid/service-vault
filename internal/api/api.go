@@ -538,6 +538,8 @@ var approvalStatusCodes = map[string]int{
 	approval.CodeInvalidAction:     http.StatusBadRequest,
 	approval.CodeInvalidSummary:    http.StatusBadRequest,
 	approval.CodeInvalidPayload:    http.StatusBadRequest,
+	approval.CodeFieldNotShown:     http.StatusBadRequest,
+	approval.CodeUnknownProposal:   http.StatusUnprocessableEntity,
 	approval.CodeInvalidConnection: http.StatusUnprocessableEntity,
 	approval.CodeUnreachable:       http.StatusUnprocessableEntity,
 	approval.CodeLastAdmin:         http.StatusUnprocessableEntity,

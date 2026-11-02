@@ -98,7 +98,7 @@ The proposal is a document (§8.5).
 | `proposal_id` | A ULID. |
 | `service` | The service identity key that signs it. |
 | `title`, `text` | UTF-8; `title` 1–200 bytes, `text` at most 16,384 bytes. |
-| `choices` | 3–17 entries `{id, label}`, in display order, with `id` matching `[a-z0-9-]{1,32}` and unique and `label` UTF-8 of 1–200 bytes: at least two real choices (16 at most), and `abstain`, reserved and always present, for a member who wants to be counted without choosing. |
+| `choices` | 3–17 entries `{id, label}`, in display order, with `id` matching `[a-z0-9-]{1,32}` and unique and `label` UTF-8 of 1–200 bytes: at least two real choices (16 at most), and `abstain`, reserved and always present, for a member who wants to be counted without choosing. The service vault assigns the ids itself (`c1`, `c2`, …, §3.4) and always adds `abstain`; a member's vault checks only this grammar. |
 | `quorum` | The quorum rule, as text (UTF-8, at most 1,024 bytes, may be empty), and the number of ballots it needs (`min_ballots`, at least 0). `abstain` counts toward it. |
 | `binding` | Whether the organisation treats the result as binding. The protocol is the same either way. |
 | `removed_may_vote` | Whether a member removed or suspended after `record_at` may still vote. |
@@ -190,25 +190,58 @@ design: vettid/votes, docs/VOTES-SITE.md).
   session, on a fixed hourly schedule, and hands the vault the entries
   of its services.
 
-### 3.4 Who may create a proposal
+### 3.4 Who may create a proposal, and what an approval carries
 
 The service creates a proposal only with the admins' approval of exactly
 its input (MEMBER-SERVICE-PLAN §4.5, §5.2), and uses that approval once;
 holding the application's API key is not enough. The approval is for the
 action `proposal.create`, and it is approved when m distinct admins have
 signed the challenge (VAULT-MESSAGING §10.4). Its payload is the input
-(§3.1's fields the application chooses) in JCS form with every field
-present, parsed strictly (§2). Before creating, the service checks, in
-one step that no other request can interleave with, that the approval is
-approved, is for `proposal.create`, has not run out and has not been used,
-and that its payload equals, byte for byte, the JCS form of the input it
-is about to execute; no field of the proposal comes from anywhere but the
-approved payload. It then records the approval as used, and only then makes,
-publishes and sends the proposal. An approval used for a proposal that
-then fails to be made or published is not usable again; the admins approve
-again. The text the admins read is built by the service from the payload:
-whether the vote is binding, its window, its quorum, its choices and its
-title; the application writes none of it. **(chosen; not in the spec.)**
+in JCS form with every field present, parsed strictly (§2).
+
+Before creating, the service checks, in one step that no other request
+can interleave with, that the approval is approved (counting again the
+signatures of the admins in the set now, against the threshold now),
+is for `proposal.create`, has not run out and has not been used, and
+that its payload equals, byte for byte, the JCS form of the input it is
+about to execute. It then records the approval as used, and only then
+makes, publishes and sends the proposal. An approval used for a proposal
+that then fails to be made or published is not usable again; the admins
+approve again.
+
+**What the admins read.** The challenge's context (VAULT-MESSAGING
+§10.4, at most 256 bytes) is
+`Approve on <service>: New vote: <summary> — ref <16 hex of the action hash>`.
+The label `New vote:` is the service's, put before every summary of this
+action (and `Extend vote:` before an extension's); the application
+writes no text of either. The summary is built from the payload: binding
+or advisory, the window, the quorum's minimum, the choices' labels and
+the title (cut to fit, marked with `…`); the rest is shown whole or the
+approval is refused. For an extension it is the proposal (its title, from
+the service's copy, and its id), the new close, the outage and its source.
+
+**Every field of the executed proposal is shown, set by the service, or
+refused:**
+
+| Field | In the approval | Executed |
+|---|---|---|
+| `title` | shown | as approved |
+| `choices` | shown: the labels, in order, each at most 24 characters, distinct (also ignoring case) and none `Abstain`; an `id` is refused | the service assigns `c1`, `c2`, … in that order (matching §3.1's id grammar) and adds `abstain` (label `Abstain`) last, always |
+| `binding`, `removed_may_vote` | shown | as approved |
+| `opens_at`, `closes_at` | shown | as approved |
+| `quorum.min_ballots` | shown | as approved |
+| `quorum.text` | refused unless empty | empty |
+| `text` | refused unless empty or equal to `title` (the motion is the title) | as approved |
+| `outage_rule` | refused unless empty or the rule of §10.2 ("Extended by a relay outage over 1 hour, 24 h at most.") | always that rule |
+| `proposal_id`, `service`, `record_at`, `eligible`, `record_root` | not in it: the service's, at the moment of use | the roster at the moment of use (§3.2), the time of use |
+| the tags and secrets | not in it | drawn at the moment of use |
+
+A refused field makes the approval request fail (`field_not_shown`, or
+`invalid_payload`), and the proposal request fail with nothing made and
+the approval unused. A longer motion, a quorum text or another outage
+rule can be put to the admins only once approval challenges carry the
+full document; until then the service refuses them. **(chosen; not in
+the spec.)**
 
 ## 4. Messages
 
@@ -566,7 +599,8 @@ site's index, and sent as `vote.extended`; a vault also learns of it
 from the index. An extension needs the admins' approval, as creating a
 proposal does (§3.4): an approval of the action `vote.extend`, whose
 payload is `{proposal_id, closes_at, outage}` in JCS form, checked and
-used once before the extension is published. **(chosen; not in the
+used once before the extension is published; the outage's `source` is an
+`https://` URL of at most 32 bytes, shown to the admins whole. **(chosen; not in the
 spec.)** Counting the votes after the close (§7) needs no approval: it
 decides nothing that the window and the ballots have not.
 
@@ -625,7 +659,12 @@ item.
   once; the API key alone no longer starts or extends a vote. §2 says
   what a strict parse refuses: duplicate names, a byte order mark and an
   unpaired surrogate escape (VAULT-MESSAGING §5.3). No change to the
-  messages, the documents or the vectors.
+  messages, the documents or the vectors. §3.4 lists, field by field,
+  what the admins are shown, what the service sets (the choice ids
+  `c1`, `c2`, … and `abstain`, `outage_rule`, `record_at`, the roster)
+  and what it refuses (`text` other than the title, `quorum.text`, any
+  other `outage_rule`, labels over 24 characters); every approval's
+  challenge starts with a label the service sets.
 - **0.12.5 (2026-10-30):** §3.3: the service list has no limit on the
   number of services or keys (a list that only grows would have kept
   them forever), only a cap of 4,194,304 bytes; a vault given a list it

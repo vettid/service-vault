@@ -303,7 +303,7 @@ func TestProposalSummaryFromPayload(t *testing.T) {
 		t.Errorf("%q", s)
 	}
 	// A long title is cut, never the rest.
-	in.Title = strings.Repeat("Budget ", 40)
+	in.Title = strings.Repeat("Budget ", 25)
 	s, err = ProposalSummary(mustCanon(t, in))
 	if err != nil || len(s) > maxSummary || !strings.Contains(s, "…") || !strings.Contains(s, "closes "+closes) {
 		t.Errorf("%d %q %v", len(s), s, err)
@@ -316,13 +316,22 @@ func TestProposalSummaryFromPayload(t *testing.T) {
 		"bidi label":    func(i *ProposalInput) { i.Choices[0].Label = "Y\u2066es" },
 		"time":          func(i *ProposalInput) { i.OpensAt = 5 },
 		"many choices": func(i *ProposalInput) {
-			for range 12 {
-				i.Choices = append(i.Choices, vote.Choice{ID: "x", Label: strings.Repeat("l", 30)})
+			for k := range 12 {
+				i.Choices = append(i.Choices, ChoiceInput{Label: strings.Repeat("l", 10) + string(rune('a'+k))})
 			}
 		},
+		"text":           func(i *ProposalInput) { i.Text = "A different motion" },
+		"quorum text":    func(i *ProposalInput) { i.Quorum.Text = "A third" },
+		"outage rule":    func(i *ProposalInput) { i.OutageRule = "Never extended" },
+		"long label":     func(i *ProposalInput) { i.Choices[0].Label = strings.Repeat("l", 25) },
+		"abstain label":  func(i *ProposalInput) { i.Choices[0].Label = "ABSTAIN" },
+		"repeated label": func(i *ProposalInput) { i.Choices[1].Label = "yes" },
+		"padded label":   func(i *ProposalInput) { i.Choices[1].Label = "No " },
+		"one choice":     func(i *ProposalInput) { i.Choices = i.Choices[:1] },
+		"seventeen":      func(i *ProposalInput) { i.Choices = make([]ChoiceInput, 17) },
 	} {
 		x := input()
-		x.Choices = append([]vote.Choice{}, x.Choices...)
+		x.Choices = append([]ChoiceInput{}, x.Choices...)
 		mod(&x)
 		if _, err := ProposalSummary(mustCanon(t, x)); err == nil {
 			t.Errorf("%s: summarized", name)
@@ -344,17 +353,87 @@ func TestProposalSummaryFromPayload(t *testing.T) {
 }
 
 func TestExtensionSummaryFromPayload(t *testing.T) {
-	x := ExtensionInput{ClosesAt: 1793527200, Outage: vote.Outage{From: 1793512800, To: 1793518200, Source: "s"}}
+	x := ExtensionInput{ClosesAt: 1793527200, Outage: vote.Outage{From: 1793512800, To: 1793518200, Source: "https://status.vettid.org/"}}
 	pid := "01JBQZ0000000000000000000A"
-	s, err := ExtensionSummary(mustExt(t, pid, x))
+	s, err := ExtensionSummary(mustExt(t, pid, x), "Adopt the budget")
 	closes, _ := when(x.ClosesAt)
-	if err != nil || !strings.Contains(s, pid) || !strings.Contains(s, "new close "+closes) || !strings.HasPrefix(s, "EXTEND") {
+	if err != nil || !strings.Contains(s, pid) || !strings.Contains(s, "new close "+closes) || !strings.HasPrefix(s, `"Adopt the budget"`) || !strings.Contains(s, "status.vettid.org") || len(s) > maxSummary {
 		t.Fatalf("%q %v", s, err)
 	}
-	if _, err := ExtensionSummary([]byte(`{"closes_at":1}`)); err == nil {
+	for _, src := range []string{"s", "http://status.vettid.org/", "https://status.vettid.org/long/long/long", "https://a b/"} {
+		y := x
+		y.Outage.Source = src
+		if _, err := ExtensionSummary(mustExt(t, pid, y), "T"); err == nil {
+			t.Errorf("source %q accepted", src)
+		}
+	}
+	if _, err := ExtensionSummary([]byte(`{"closes_at":1}`), "T"); err == nil {
 		t.Fatal("accepted a partial payload")
 	}
-	if _, err := ExtensionSummary(mustExt(t, "short", x)); err == nil {
+	if _, err := ExtensionSummary(mustExt(t, "short", x), "T"); err == nil {
 		t.Fatal("accepted a bad proposal id")
+	}
+}
+
+// Only what the admins' phones show is executed: a field outside that
+// is refused, and nothing is created or used.
+func TestCreateRefusesFieldsNotShown(t *testing.T) {
+	ctx := context.Background()
+	for name, mod := range map[string]func(*ProposalInput){
+		"text":        func(i *ProposalInput) { i.Text = "A different motion" },
+		"quorum text": func(i *ProposalInput) { i.Quorum.Text = "A third" },
+		"outage rule": func(i *ProposalInput) { i.OutageRule = "Never extended" },
+		"long label":  func(i *ProposalInput) { i.Choices[0].Label = strings.Repeat("l", 25) },
+		"abstain":     func(i *ProposalInput) { i.Choices[1].Label = "Abstain" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			m, s, pub, a := strictManager(t)
+			in := input()
+			in.Choices = append([]ChoiceInput{}, in.Choices...)
+			mod(&in)
+			a.add("a", ActionProposalCreate, mustCanon(t, in), "")
+			var ei *ErrInput
+			if _, err := m.Create(ctx, "a", in); !errors.As(err, &ei) {
+				t.Fatalf("%v", err)
+			}
+			if stored(t, m) != 0 || pub.calls != 0 || len(s.sent) != 0 || a.consumed != 0 {
+				t.Fatal("something was done")
+			}
+		})
+	}
+	// The motion may be the title, or empty; the rule the default or empty.
+	m, _, _ := newManager(t)
+	in := input()
+	in.Text, in.OutageRule = in.Title, ""
+	if _, err := m.Create(ctx, "a", in); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The service assigns the ids: c1, c2, … in the order of the labels, then
+// abstain; the executed rule is the default.
+func TestCreateAssignsChoiceIDs(t *testing.T) {
+	ctx := context.Background()
+	m, _, _ := newManager(t)
+	in := input()
+	in.Choices = append(in.Choices, ChoiceInput{Label: "Maybe"})
+	in.OutageRule = ""
+	c, err := m.Create(ctx, "a", in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, _ := m.Store.OpenProposal(ctx, c.ProposalID)
+	p, _ := o.Parsed()
+	var ids []string
+	for _, ch := range p.Choices {
+		ids = append(ids, ch.ID+"="+ch.Label)
+	}
+	if got := strings.Join(ids, ","); got != "c1=Yes,c2=No,c3=Maybe,abstain=Abstain" || p.OutageRule != DefaultOutageRule || p.Quorum.Text != "" {
+		t.Fatalf("%s, %q", got, p.OutageRule)
+	}
+	// An application-supplied id is not a field of the input.
+	var x ProposalInput
+	if err := parseCanonical([]byte(`{"binding":false,"choices":[{"id":"abstain","label":"Yes"}]}`), &x); err == nil {
+		t.Fatal("accepted an id")
 	}
 }

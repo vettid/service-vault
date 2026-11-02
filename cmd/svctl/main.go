@@ -421,7 +421,7 @@ func (c *cli) approve(ctx context.Context, args []string) error {
 	if err := c.flags(fs, args, 0); err != nil {
 		return err
 	}
-	_, built, _ := ballot.SummaryFor(*action, nil)
+	_, built, _ := ballot.SummaryFor(*action, nil, "")
 	switch {
 	case *action == "" || *summary == "" && !built:
 		return usageError{errors.New("-action and -summary are required")}
@@ -457,7 +457,13 @@ func (c *cli) approveAndFollow(ctx context.Context, req servicevault.ApprovalReq
 	}
 	c.printf("approval_id: %s\naction_hash: %s\nexpires_at: %s\n", ap.ID, ap.ActionHash, ap.ExpiresAt.UTC().Format(time.RFC3339))
 	summary := req.Summary
-	if want, built, err := ballot.SummaryFor(req.Action, req.Payload); err != nil {
+	title := ""
+	if req.Action == servicevault.ActionVoteExtend {
+		if title, err = c.proposalTitle(ctx, req.Payload); err != nil {
+			return "", err
+		}
+	}
+	if want, built, err := ballot.SummaryFor(req.Action, req.Payload, title); err != nil {
 		return ap.ID, fmt.Errorf("the payload can't be summarized: %w", err)
 	} else if built {
 		st, err := c.c.Approval(ctx, ap.ID)
@@ -497,6 +503,29 @@ func (c *cli) approveAndFollow(ctx context.Context, req servicevault.ApprovalReq
 		return true, nil
 	})
 	return ap.ID, err
+}
+
+// proposalTitle reads the title of the proposal a vote.extend payload is
+// for, as the service has it, to build the summary the admins read.
+func (c *cli) proposalTitle(ctx context.Context, payload []byte) (string, error) {
+	id, err := ballot.ExtensionProposalID(payload)
+	if err != nil {
+		return "", err
+	}
+	raw, err := c.c.Proposal(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	var st struct {
+		Proposal string `json:"proposal"`
+	}
+	var doc struct {
+		Title string `json:"title"`
+	}
+	if json.Unmarshal(raw, &st) != nil || json.Unmarshal([]byte(st.Proposal), &doc) != nil || doc.Title == "" {
+		return "", errors.New("the proposal's title can't be read")
+	}
+	return doc.Title, nil
 }
 
 // requireApproved fails unless approval id is approved now (after a wait

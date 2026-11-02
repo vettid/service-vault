@@ -170,6 +170,9 @@ type Manager struct {
 	// in the signature shows it was an approval rather than a sign-in.
 	// Either way its entry has reason no_purpose.
 	AllowNoPurpose bool
+	// ProposalTitle returns the title of a stored proposal, for the summary
+	// of a vote.extend approval; nil refuses every extension.
+	ProposalTitle func(ctx context.Context, proposalID string) (title string, ok bool, err error)
 	// BootstrapKey is the email index key of SV_ADMIN_BOOTSTRAP_EMAIL
 	// ("" for none): while the admin set is empty and no bootstrap has
 	// happened, the connection bound to it becomes the first admin. The
@@ -437,6 +440,15 @@ func adminSetTarget(payload json.RawMessage) (string, error) {
 	return p.ConnectionID, nil
 }
 
+// summaryError is the refusal of a payload whose summary can't be built.
+func summaryError(err error) error {
+	var ns *ballot.ErrNotShown
+	if errors.As(err, &ns) {
+		return errCode(CodeFieldNotShown)
+	}
+	return errCode(CodeInvalidPayload)
+}
+
 // Create submits an action for approval: it is checked and hashed, and
 // a challenge goes to every admin. It returns the approval's id and hash.
 func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
@@ -450,7 +462,26 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 	// The admins read a summary the service builds from the payload for
 	// the actions that start or extend a vote; the application supplies
 	// no text for them.
-	summary, built, err := ballot.SummaryFor(req.Action, payload)
+	title := ""
+	if req.Action == ActionVoteExtend {
+		// The admins are shown the proposal's title, from the store.
+		id, err := ballot.ExtensionProposalID(payload)
+		if err != nil {
+			return nil, summaryError(err)
+		}
+		if m.ProposalTitle == nil {
+			return nil, errCode(CodeUnknownProposal)
+		}
+		t, ok, err := m.ProposalTitle(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, errCode(CodeUnknownProposal)
+		}
+		title = t
+	}
+	summary, built, err := ballot.SummaryFor(req.Action, payload, title)
 	switch {
 	case !built:
 		summary = req.Summary
@@ -460,14 +491,14 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 	case req.Summary != "":
 		return nil, errCode(CodeInvalidSummary)
 	case err != nil:
-		return nil, errCode(CodeInvalidPayload)
+		return nil, summaryError(err)
 	}
 	req.Summary = summary
 	hash, err := servicevault.ActionHash(req.Action, req.Summary, payload)
 	if err != nil {
 		return nil, errCode(CodeInvalidPayload)
 	}
-	ctxt, err := ChallengeContext(m.ServiceName, req.Summary, hash)
+	ctxt, err := ChallengeContext(m.ServiceName, req.Action, req.Summary, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -829,7 +860,7 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 		return nil, errCode(CodeTooSoon)
 	}
 	m.cancel(ctx, to)
-	ctxt, err := ChallengeContext(m.ServiceName, r.Summary, r.Hash)
+	ctxt, err := ChallengeContext(m.ServiceName, r.Action, r.Summary, r.Hash)
 	if err != nil {
 		return nil, err
 	}

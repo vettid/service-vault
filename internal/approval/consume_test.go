@@ -14,10 +14,10 @@ import (
 )
 
 func proposalInput() ballot.ProposalInput {
-	return ballot.ProposalInput{Title: "Adopt the 2027 budget", Text: "As circulated.",
-		Choices: []vote.Choice{{ID: "yes", Label: "Yes"}, {ID: "no", Label: "No"}},
-		Quorum:  vote.Quorum{Text: "A third", MinBallots: 1}, Binding: true, OpensAt: 1793520000, ClosesAt: 1793520000 + 86400,
-		OutageRule: "Extended by a relay outage over 1 hour, 24 h at most."}
+	return ballot.ProposalInput{Title: "Adopt the 2027 budget",
+		Choices: []ballot.ChoiceInput{{Label: "Yes"}, {Label: "No"}},
+		Quorum:  vote.Quorum{MinBallots: 1}, Binding: true, OpensAt: 1793520000, ClosesAt: 1793520000 + 86400,
+		OutageRule: ballot.DefaultOutageRule}
 }
 
 func extensionInput() ballot.ExtensionInput {
@@ -49,6 +49,9 @@ func canonExtension(t *testing.T, in ballot.ExtensionInput) []byte {
 // its payload.
 func (f *fixture) built(action string, payload []byte) *Created {
 	f.t.Helper()
+	f.m.ProposalTitle = func(_ context.Context, id string) (string, bool, error) {
+		return "Adopt the 2027 budget", id == extProposal, nil
+	}
 	return f.create(action, "", string(payload))
 }
 
@@ -81,7 +84,7 @@ func TestBuiltSummary(t *testing.T) {
 		t.Fatalf("summary %q, want %q", st.Summary, want)
 	}
 	ctxt := f.p.sent[0].ctxt
-	if !strings.Contains(ctxt, want) || !regexp.MustCompile(` — ref [0-9a-f]{16}$`).MatchString(ctxt) || !strings.HasSuffix(ctxt, c.ActionHash[:16]) {
+	if !strings.Contains(ctxt, "New vote: "+want) || !regexp.MustCompile(` — ref [0-9a-f]{16}$`).MatchString(ctxt) || !strings.HasSuffix(ctxt, c.ActionHash[:16]) {
 		t.Fatalf("context %q", ctxt)
 	}
 	// The summary is in the audit entry, as built.
@@ -97,13 +100,14 @@ func TestBuiltSummary(t *testing.T) {
 	}
 	// Extension.
 	h := f.built(ActionVoteExtend, canonExtension(t, extensionInput()))
-	if s := f.status(h.ID).Summary; !strings.HasPrefix(s, "EXTEND vote "+extProposal) || !strings.Contains(s, "new close ") {
+	if s := f.status(h.ID).Summary; !strings.HasPrefix(s, `"Adopt the 2027 budget" (`+extProposal+`)`) || !strings.Contains(s, "new close ") ||
+		!strings.Contains(f.p.last("c1").ctxt, "Extend vote: \"Adopt") {
 		t.Fatalf("summary %q", s)
 	}
 	// No text from the application, and only an exact full-form payload.
 	for name, req := range map[string]Request{
 		"a summary":   {Action: ActionProposalCreate, Summary: "Routine", Payload: json.RawMessage(pl)},
-		"spaced":      {Action: ActionProposalCreate, Payload: json.RawMessage(strings.ReplaceAll(string(pl), ",", ", "))},
+		"spaced":      {Action: ActionProposalCreate, Payload: json.RawMessage(strings.ReplaceAll(string(pl), `":`, `": `))},
 		"partial":     {Action: ActionProposalCreate, Payload: json.RawMessage(`{"title":"T"}`)},
 		"ext partial": {Action: ActionVoteExtend, Payload: json.RawMessage(`{"closes_at":1}`)},
 		"ext summary": {Action: ActionVoteExtend, Summary: "x", Payload: json.RawMessage(canonExtension(t, extensionInput()))},
@@ -121,7 +125,7 @@ func TestChallengeRefIs16Hex(t *testing.T) {
 	if m := regexp.MustCompile(`ref ([0-9a-f]+)$`).FindStringSubmatch(f.p.sent[0].ctxt); m == nil || len(m[1]) < 16 || m[1] != c.ActionHash[:len(m[1])] {
 		t.Fatalf("context %q", f.p.sent[0].ctxt)
 	}
-	if _, err := ChallengeContext("S", "x", "abcdef01"); err == nil {
+	if _, err := ChallengeContext("S", ActionAdminSetAdd, "x", "abcdef01"); err == nil {
 		t.Fatal("a ref of 8 digits")
 	}
 }
@@ -263,5 +267,117 @@ func TestConsumeExpired(t *testing.T) {
 	}
 	if _, used, _ := f.st.Get(context.Background(), kindUsed, a.ID); used {
 		t.Fatal("used")
+	}
+}
+
+// A summary an application writes can't start as the service's own do,
+// and every context starts with the action's label.
+func TestReservedSummaryStarts(t *testing.T) {
+	f := newFixture(t, 1, "c1")
+	for _, s := range []string{"BINDING vote", "binding", "Advisory: x", "EXTEND vote x", " extend", "New vote: x", "Add admin: c9",
+		"remove admin c1", "Contract template: x", "push assignment"} {
+		_, err := f.m.Create(context.Background(), Request{Action: ActionContractTemplateChange, Summary: s, Payload: json.RawMessage(`{}`)})
+		if codeOf(err) != CodeInvalidSummary {
+			t.Errorf("%q: %v", s, err)
+		}
+	}
+	for action, label := range ActionLabels {
+		if action == ActionProposalCreate || action == ActionVoteExtend {
+			continue
+		}
+		g := newFixture(t, 1, "c1", "c9")
+		payload := `{}`
+		if strings.HasPrefix(action, "admin_set") {
+			payload = `{"connection_id":"c9"}`
+		}
+		_, err := g.m.Create(context.Background(), Request{Action: action, Summary: "Routine", Payload: json.RawMessage(payload)})
+		if err != nil && action != ActionAdminSetAdd {
+			t.Fatalf("%s: %v", action, err)
+		}
+		if err == nil && !strings.Contains(g.p.sent[0].ctxt, ": "+label+" Routine — ref ") {
+			t.Errorf("%s: %q", action, g.p.sent[0].ctxt)
+		}
+	}
+}
+
+// A field the phones would not show is refused when the approval is
+// asked for, with nothing sent; so is an extension of an unknown
+// proposal.
+func TestFieldsNotShownRefused(t *testing.T) {
+	f := newFixture(t, 1, "c1")
+	f.m.ProposalTitle = func(_ context.Context, id string) (string, bool, error) { return "T", id == extProposal, nil }
+	for name, mod := range map[string]func(*ballot.ProposalInput){
+		"text":        func(i *ballot.ProposalInput) { i.Text = "A longer motion than the title" },
+		"quorum text": func(i *ballot.ProposalInput) { i.Quorum.Text = "A third of the members" },
+		"outage rule": func(i *ballot.ProposalInput) { i.OutageRule = "No extension, ever" },
+	} {
+		in := proposalInput()
+		mod(&in)
+		_, err := f.m.Create(context.Background(), Request{Action: ActionProposalCreate, Payload: json.RawMessage(canonProposal(t, in))})
+		if codeOf(err) != CodeFieldNotShown {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	// The motion may be the title; the rule may be empty.
+	in := proposalInput()
+	in.Text, in.OutageRule = in.Title, ""
+	f.built(ActionProposalCreate, canonProposal(t, in))
+	n := len(f.p.sent)
+	for name, mod := range map[string]func(*ballot.ExtensionInput){
+		"source":    func(x *ballot.ExtensionInput) { x.Outage.Source = "see the relay's status page" },
+		"long":      func(x *ballot.ExtensionInput) { x.Outage.Source = "https://status.vettid.org/a/very/long/path" },
+		"not https": func(x *ballot.ExtensionInput) { x.Outage.Source = "http://status.vettid.org/" },
+	} {
+		x := extensionInput()
+		mod(&x)
+		_, err := f.m.Create(context.Background(), Request{Action: ActionVoteExtend, Payload: json.RawMessage(canonExtension(t, x))})
+		if codeOf(err) != CodeFieldNotShown {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	other, _ := ballot.CanonicalExtension("01JBQZ0000000000000000000B", extensionInput())
+	if _, err := f.m.Create(context.Background(), Request{Action: ActionVoteExtend, Payload: json.RawMessage(other)}); codeOf(err) != CodeUnknownProposal {
+		t.Errorf("unknown proposal: %v", err)
+	}
+	f.m.ProposalTitle = nil
+	if _, err := f.m.Create(context.Background(), Request{Action: ActionVoteExtend, Payload: json.RawMessage(canonExtension(t, extensionInput()))}); codeOf(err) != CodeUnknownProposal {
+		t.Errorf("no lookup: %v", err)
+	}
+	if len(f.p.sent) != n {
+		t.Fatal("a refused approval was sent to the admins")
+	}
+}
+
+// Consume counts again: with m = 2, an approval whose signatures are no
+// longer m from the admins now in the set is not usable.
+func TestConsumeRecounts(t *testing.T) {
+	f := newFixture(t, 2, "c1", "c2", "c3")
+	pl := canonProposal(t, proposalInput())
+	a := f.built(ActionProposalCreate, pl)
+	f.answer("c1", "approve")
+	f.answer("c2", "approve")
+	if s := f.status(a.ID); s.Status != StatusApproved {
+		t.Fatalf("status %s", s.Status)
+	}
+	if err := f.m.ConnectionRemoved(context.Background(), "c1"); err != nil {
+		t.Fatal(err)
+	}
+	if code := codeOf(f.consume(a.ID, ActionProposalCreate, pl)); code != CodeApprovalNotApproved {
+		t.Fatalf("after an approver was removed: %q", code)
+	}
+	if _, used, _ := f.st.Get(context.Background(), kindUsed, a.ID); used {
+		t.Fatal("used")
+	}
+	// A raised threshold counts too.
+	g := newFixture(t, 1, "c1", "c2")
+	b := g.built(ActionProposalCreate, pl)
+	g.answer("c1", "approve")
+	g.m.Threshold = 2
+	if code := codeOf(g.consume(b.ID, ActionProposalCreate, pl)); code != CodeApprovalNotApproved {
+		t.Fatalf("threshold raised: %q", code)
+	}
+	g.m.Threshold = 1
+	if err := g.consume(b.ID, ActionProposalCreate, pl); err != nil {
+		t.Fatal(err)
 	}
 }

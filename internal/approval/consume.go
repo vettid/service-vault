@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/vettid/service-vault/internal/peer"
@@ -17,7 +18,7 @@ type usedRecord struct {
 // Consume uses an approved proposal.create or vote.extend approval, once,
 // for the exact input it approved (BALLOT-PROTOCOL §3, §10.2). Under the
 // manager's lock it checks that the approval is approved (its threshold
-// met), is for this action, carries exactly payload (the canonical bytes
+// met by the admins still in the set), is for this action, carries exactly payload (the canonical bytes
 // of the input about to be executed, compared byte for byte) and has not
 // run out; then it writes the apv_used record with IfAbsent together with
 // an approval.consumed audit entry, in one batch. Of any number of
@@ -53,6 +54,22 @@ func (m *Manager) Consume(ctx context.Context, id, action string, payload []byte
 		return errCode(CodeApprovalMismatch)
 	case !now.Before(r.Exp):
 		return errCode(CodeApprovalExpired)
+	}
+	// Recount: an admin removed since approving no longer stands behind
+	// the action, so the signatures of the current admin set must still
+	// meet the threshold, the approval's own or the current one if higher.
+	set, err := m.admins(ctx)
+	if err != nil {
+		return err
+	}
+	n := 0
+	for _, a := range r.Approvals {
+		if slices.Contains(set, a.ConnectionID) {
+			n++
+		}
+	}
+	if n < max(r.Threshold, m.threshold()) {
+		return errCode(CodeApprovalNotApproved)
 	}
 	if _, used, err := m.Store.Get(ctx, kindUsed, id); err != nil {
 		return err

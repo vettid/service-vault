@@ -91,6 +91,9 @@ func (m *Manager) Extend(ctx context.Context, id, approvalID string, in Extensio
 	if err != nil {
 		return nil, &ErrInput{err}
 	}
+	if err := checkExtension(&ExtensionPayload{ProposalID: id, ClosesAt: in.ClosesAt, Outage: in.Outage}); err != nil {
+		return nil, &ErrInput{err}
+	}
 	if err := m.consume(ctx, approvalID, ActionVoteExtend, payload); err != nil {
 		return nil, err
 	}

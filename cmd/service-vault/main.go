@@ -262,8 +262,8 @@ func configFromEnv(getenv func(string) string) (*Config, error) {
 		}
 		c.RecordKeyVersion = uint32(n)
 	}
-	if _, err := approval.ChallengeContext(c.ServiceName, "x", strings.Repeat("0", 64)); err != nil {
-		return nil, errors.New("SV_SERVICE_NAME: too long for an approval challenge's context")
+	if err := approval.CheckServiceName(c.ServiceName); err != nil {
+		return nil, fmt.Errorf("SV_SERVICE_NAME: %w", err)
 	}
 	return c, nil
 }
@@ -460,6 +460,17 @@ func serve(args []string) error {
 		anchorInfo = &api.AnchorKey{Key: spki, Cert: cert, IK: keys.IKPublic(), Sigstore: cfg.Sigstore}
 		mgr := &ballot.Manager{Store: ballots, Sign: signIK, IK: keys.IKPublic(), Roster: p, Sender: p,
 			Catcher: p, Approvals: approvals, NewID: envelope.NewULID, Now: time.Now, Log: log}
+		approvals.ProposalTitle = func(ctx context.Context, id string) (string, bool, error) {
+			o, err := ballots.OpenProposal(ctx, id)
+			if err != nil || o == nil {
+				return "", false, err
+			}
+			pr, err := o.Parsed()
+			if err != nil {
+				return "", false, err
+			}
+			return pr.Title, true, nil
+		}
 		if cfg.VotesURL != "" {
 			anc, err := anchor.New(cfg.Sigstore, akPriv)
 			if err != nil {

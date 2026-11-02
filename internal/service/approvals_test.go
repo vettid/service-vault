@@ -48,7 +48,7 @@ func TestApprovalEndToEnd(t *testing.T) {
 	}
 	ch := f.m.Challenges[0]
 	hash, _ := servicevault.ActionHash(approval.ActionContractTemplateChange, "Open the vote on proposal 7", json.RawMessage(payload))
-	if c.ActionHash != hash || ch.Context != "Approve on VettID Member Service: Open the vote on proposal 7 — ref "+hash[:16] {
+	if c.ActionHash != hash || ch.Context != "Approve on VettID Member Service: Contract template: Open the vote on proposal 7 — ref "+hash[:16] {
 		t.Fatalf("context %q", ch.Context)
 	}
 	f.sign(f.m, ch, f.m.Cred)

@@ -486,7 +486,7 @@ billed.
 | `POST /v1/approvals/{id}/remind` | `{approval_id, reminded: [connection_id]}`: the challenge again to the admins who have not answered and hold no live challenge (the `remind_needed` ones); `too_soon` (429) within 10 minutes of the last, `not_pending` (409) once settled, `nothing_to_remind` (409) when every admin who has not answered still holds a live challenge. An optional body `{"force": [connection_id, ...]}` (chosen; not in the spec) challenges only the named admins again, each even with a live challenge (the old one is withdrawn first): `not_admin` (422) for one outside the approval's admins or the current set, `answered` (409) for one who has answered, `ask_budget` (409) for one the service has sent 5 approval challenges, from any approval, that still count (each until its expiry plus 24 hours, since the member's vault may receive it as late as its expiry; a sixth would come back as a delayed denial); still `too_soon` within 10 minutes of the last. The answer carries the same `ask_budget` list (omitted when empty), and so does `GET /v1/approvals/{id}` for the `remind_needed` admins at the budget. Without a body, an admin at that budget is left out (and stays in `remind_needed`), and `ask_budget` (409) answers when that leaves nobody to challenge (an admin whose ask log cannot be read counts as at the budget), checked before `too_soon` and before anything is withdrawn. Each forced re-send spends one of that admin's 5 approval asks per 24 h (§10.4.1): use it only when the admin reports not seeing the request |
 | `GET /v1/admins` | `{admins: [connection_id], threshold}` |
 | `GET /v1/audit?since=&limit=` | `{entries: [...], next?}`: the audit log after entry `since`, oldest first, `limit` 1–100 (default 100); pass `next` as `since` for the next page |
-| `POST /v1/proposals` `{approval_id, title, text, choices, quorum, binding, removed_may_vote, opens_at, closes_at, outage_rule}` | Needs `approval_id`: the admins' `proposal.create` approval of exactly this input (see "Admin approvals"); it is checked and used up once (`approval_required` 400 without one; `approval_not_found`, `approval_not_approved`, `approval_wrong_action`, `approval_mismatch`, `approval_expired` 403; `approval_used` 409). `201 {proposal_id, proposal_hash, eligible, unsigned, sent}`: the proposal is made from the active connections at this moment whose vault advertised the vote feature (BALLOT-PROTOCOL §3.2), published and sent to each (BALLOT-PROTOCOL §3); `abstain` is added to the choices if they lack it. `unsigned` is how many of the `eligible` connections have no pinned credential key: their member has never signed in on the connection, and their vault refuses `vote.cast` with `not_signed_in` until they do (VAULT-MESSAGING §10.19.5); members sign in to the service themselves (on a test deployment only, `POST /v1/signins/unsigned`, `svctl signin -unsigned`). `invalid_proposal` (400) for one outside the bounds of BALLOT-PROTOCOL §3.1 (member vaults refuse those) or with no such connection; `publication_not_configured` (503) until publication is configured; `503 {error: not_published, proposal_id}` when it was kept but its publication failed (retry with `/publish`). Served with `SV_BALLOTS_TABLE` |
+| `POST /v1/proposals` `{approval_id, title, text, choices, quorum, binding, removed_may_vote, opens_at, closes_at, outage_rule}` | Needs `approval_id`: the admins' `proposal.create` approval of exactly this input (see "Admin approvals"); it is checked and used up once (`approval_required` 400 without one; `approval_not_found`, `approval_not_approved`, `approval_wrong_action`, `approval_mismatch`, `approval_expired` 403; `approval_used` 409). `201 {proposal_id, proposal_hash, eligible, unsigned, sent}`: the proposal is made from the active connections at this moment whose vault advertised the vote feature (BALLOT-PROTOCOL §3.2), published and sent to each (BALLOT-PROTOCOL §3); choices are `{label}` only: the service assigns the ids `c1`, `c2`, … and always adds `abstain`; `text` is empty or the title, `quorum.text` empty, `outage_rule` empty or the default (see "Admin approvals"). `unsigned` is how many of the `eligible` connections have no pinned credential key: their member has never signed in on the connection, and their vault refuses `vote.cast` with `not_signed_in` until they do (VAULT-MESSAGING §10.19.5); members sign in to the service themselves (on a test deployment only, `POST /v1/signins/unsigned`, `svctl signin -unsigned`). `invalid_proposal` (400) for one outside the bounds of BALLOT-PROTOCOL §3.1 (member vaults refuse those) or with no such connection; `publication_not_configured` (503) until publication is configured; `503 {error: not_published, proposal_id}` when it was kept but its publication failed (retry with `/publish`). Served with `SV_BALLOTS_TABLE` |
 | `GET /v1/proposals/{id}` | `{proposal_id, proposal, proposal_hash, eligible, opens_at, closes_at, published}`: nothing that counts ballots before the results |
 | `POST /v1/proposals/{id}/publish` | `{sent}`: publishes a proposal whose publication failed, and sends it again to each eligible member. A proposal not published is no member's: a cast on it is `not_eligible`, `vote.status` `unknown_proposal`. `not_found` (404) |
 | `POST /v1/proposals/{id}/extend` `{approval_id, closes_at, outage: {from, to, source}}` | Needs `approval_id`: the admins' `vote.extend` approval of exactly this extension of this proposal, used up once (the same errors as creating). The extension (BALLOT-PROTOCOL §10.2), published and sent to each member: for a relay outage of over an hour within the window, by its length rounded up to the hour, 24 h in all at most. `invalid_extension` (400), `too_late` (409) once the close has passed |
@@ -682,15 +682,30 @@ admin's connection.
   bytes, without control characters, line separators or bidirectional
   controls; `payload` is a JSON object of at most 16 KiB in canonical
   form. Every admin gets a challenge whose context is
-  `Approve on <service name>: <summary> — ref <first 16 hex of action_hash>`
-  (at most 256 bytes; a long summary is cut and ends in `…`).
+  `Approve on <service name>: <label> <summary> — ref <first 16 hex of action_hash>`
+  (at most 256 bytes; a long summary is cut and ends in `…`). The label is
+  the service's, by action: `New vote:` (`proposal.create`), `Extend vote:`
+  (`vote.extend`), `Add admin:` (`admin_set.add`), `Remove admin:`
+  (`admin_set.remove`), `Contract template:` (`contract_template.change`),
+  `Push assignment:` (`assignment.push`). An application's summary can't
+  start with a label's words or with `BINDING`, `ADVISORY` or `EXTEND`
+  (`invalid_summary`). `SV_SERVICE_NAME` is at most 32 bytes (the service
+  vault refuses to start with a longer one), so that a summary built from
+  a payload is always shown whole.
 - *Proposals and extensions.* A binding vote is started or extended only
   with an approval, used once.
   - `proposal.create`'s payload is the proposal input of `POST
     /v1/proposals` (without `approval_id`) and `vote.extend`'s is
     `{proposal_id, closes_at, outage: {from, to, source}}`, each in
     canonical form (JCS, above) with every field present and exactly
-    cased; the service refuses any other form (`invalid_payload`). These
+    cased; the service refuses any other form (`invalid_payload`). The
+    choices are `{label}` only: the service assigns the ids `c1`, `c2`, …
+    in order and adds `abstain` (the ids a vote's ballots name). `text`
+    must be empty or the title, `quorum.text` empty, `outage_rule` empty
+    or the default (`field_not_shown`); a label is at most 24 characters,
+    distinct and not `Abstain`; an extension's `outage.source` is an
+    `https://` URL of at most 32 bytes, and its proposal must exist (the
+    admins read its title: `unknown_proposal`). These
     two approvals take no `summary` (`invalid_summary` if one is given):
     the service builds what the admins read from the payload: `BINDING` or
     `ADVISORY`, the window, the quorum's minimum, the choice labels and
@@ -700,7 +715,8 @@ admin's connection.
     long labels, times outside the years 2000–2200) is refused.
   - `POST /v1/proposals` and `/extend` take `approval_id`. Under the
     approval manager's lock the service checks that the approval is
-    approved (its threshold met) and has not run out (`SV_APPROVAL_TTL`
+    approved (its threshold met by the admins in the set now, counted
+    again, so an approver removed since no longer counts) and has not run out (`SV_APPROVAL_TTL`
     from its creation), is for that action, and that its payload equals,
     byte for byte, the canonical form of the input in the request, so no
     field comes from the request that was not approved. Then it records

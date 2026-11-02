@@ -102,7 +102,7 @@ a real service's members sign in themselves.
 
 1. Operator:
    `sv approve -action contract_template.change -summary "Staging test change" -payload '{"test":true}'`
-2. Member: the note reads *Approve on VettID Member Service: Staging test
+2. Member: the note reads *Approve on VettID Member Service: Contract template: Staging test
    change — ref xxxxxxxxxxxxxxxx*; the ref matches the first 16 hex digits
    of the `action_hash` `svctl` printed. Authenticate.
 3. Operator: `status: approved`; `sv audit` shows the request and the
@@ -114,9 +114,9 @@ a real service's members sign in themselves.
    README "Votes"). It sends a `proposal.create` approval whose payload is
    the input, and prints the summary the service built from it and
    `action_hash_check: ok`. It takes no `-summary`.
-2. Member: the note reads *Approve on VettID Member Service: BINDING (or
-   ADVISORY) vote opens … closes …, quorum …, choices …, title … — ref
-   xxxxxxxxxxxxxxxx*, from the input and nothing else. Check the window
+2. Member: the note reads *Approve on VettID Member Service: New vote:
+   BINDING (or ADVISORY), opens …, closes …, quorum …, choices …, title … —
+   ref xxxxxxxxxxxxxxxx*, from the input and nothing else. Check the window
    and the title, then authenticate.
 3. Operator: once `status: approved`, svctl creates the proposal with the
    approval and prints the answer. Run it again with the same
@@ -124,8 +124,8 @@ a real service's members sign in themselves.
    it fails with `approval_used` (409) and nothing is created; an input
    that differs by a byte fails with `approval_mismatch` (403).
 4. The same for an extension: `sv proposal extend <proposal id> -in
-   extension.json` (a `vote.extend` approval; the note reads *EXTEND vote
-   … new close …*). `sv audit` shows an `approval.consumed` entry for each
+   extension.json` (a `vote.extend` approval; the note reads *Extend vote: "title" (id)
+   new close …, outage … to …, source …*). `sv audit` shows an `approval.consumed` entry for each
    use. `sv proposal close` needs no approval.
 
 On staging an approval lasts at most 1 hour (`SV_CHANNEL=staging`, which

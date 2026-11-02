@@ -122,7 +122,7 @@ type fakeApprovals struct {
 func (f *fakeApprovals) Create(_ context.Context, r approval.Request) (*approval.Created, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if sum, built, err := ballot.SummaryFor(r.Action, r.Payload); built {
+	if sum, built, err := ballot.SummaryFor(r.Action, r.Payload, "T"); built {
 		if err != nil || r.Summary != "" {
 			return nil, &approval.Error{Code: approval.CodeInvalidPayload}
 		}
@@ -519,8 +519,8 @@ func TestRenderQR(t *testing.T) {
 // proposalFile is a proposal input a file can hold; the extension file
 // is an extension of it.
 const (
-	proposalFile  = `{"title":"T","text":"x","choices":[{"id":"yes","label":"Yes"}],"quorum":{"text":"q","min_ballots":1},"binding":true,"opens_at":1793520000,"closes_at":1793606400,"outage_rule":"r"}`
-	extensionFile = `{"closes_at":1793613600,"outage":{"from":1793600000,"to":1793605400,"source":"s"}}`
+	proposalFile  = `{"title":"T","text":"","choices":[{"label":"Yes"},{"label":"No"}],"quorum":{"text":"","min_ballots":1},"binding":true,"opens_at":1793520000,"closes_at":1793606400,"outage_rule":""}`
+	extensionFile = `{"closes_at":1793613600,"outage":{"from":1793600000,"to":1793605400,"source":"https://status.vettid.org/"}}`
 )
 
 // fakeProposals answers the proposal routes: the first create is kept
@@ -549,6 +549,9 @@ func (p *fakeProposals) Create(_ context.Context, approvalID string, in ballot.P
 }
 
 func (p *fakeProposals) Status(_ context.Context, id string) (*ballot.ProposalStatus, error) {
+	if id == "01JBQZ0000000000000000000A" {
+		return &ballot.ProposalStatus{ProposalID: id, Proposal: `{"title":"T"}`}, nil
+	}
 	if id != "01P" {
 		return nil, nil
 	}
@@ -710,7 +713,7 @@ func TestProposalNeedsApproval(t *testing.T) {
 		}
 	}
 	code, out, errOut := f.run(t, "proposal", "create", "-in", in)
-	if code != exitOK || !strings.Contains(out, "approval_id: a1\n") || !strings.Contains(out, "summary: BINDING vote opens 2026-11-01") ||
+	if code != exitOK || !strings.Contains(out, "approval_id: a1\n") || !strings.Contains(out, "summary: BINDING, opens 2026-11-01") ||
 		!strings.Contains(out, "action_hash_check: ok") || !strings.Contains(out, `"proposal_id": "01Q"`) || strings.Join(fp.approvals, ",") != "a1" {
 		t.Fatalf("create: exit %d\n%s\n%s", code, out, errOut)
 	}
@@ -718,8 +721,8 @@ func TestProposalNeedsApproval(t *testing.T) {
 		t.Fatalf("approval request %+v", f.apv.req)
 	}
 	// The payload is the input in canonical full form.
-	want, _ := ballot.CanonicalProposal(ballot.ProposalInput{Title: "T", Text: "x", Choices: []vote.Choice{{ID: "yes", Label: "Yes"}},
-		Quorum: vote.Quorum{Text: "q", MinBallots: 1}, Binding: true, OpensAt: 1793520000, ClosesAt: 1793606400, OutageRule: "r"})
+	want, _ := ballot.CanonicalProposal(ballot.ProposalInput{Title: "T", Choices: []ballot.ChoiceInput{{Label: "Yes"}, {Label: "No"}},
+		Quorum: vote.Quorum{MinBallots: 1}, Binding: true, OpensAt: 1793520000, ClosesAt: 1793606400})
 	if string(f.apv.req.Payload) != string(want) {
 		t.Fatalf("payload %s", f.apv.req.Payload)
 	}
@@ -738,7 +741,7 @@ func TestProposalNeedsApproval(t *testing.T) {
 	}
 	// Extend.
 	code, out, errOut = f.run(t, "proposal", "extend", "01JBQZ0000000000000000000A", "-in", ext)
-	if code != exitOK || !strings.Contains(out, "summary: EXTEND vote 01JBQZ0000000000000000000A") || !strings.Contains(out, "approval_id: a1") || !strings.Contains(out, `"closes_at": 1793613600`) {
+	if code != exitOK || !strings.Contains(out, "summary: \"T\" (01JBQZ0000000000000000000A)") || !strings.Contains(out, "approval_id: a1") || !strings.Contains(out, `"closes_at": 1793613600`) {
 		t.Fatalf("extend: exit %d\n%s\n%s", code, out, errOut)
 	}
 	if f.apv.req.Action != "vote.extend" {

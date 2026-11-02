@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -97,9 +98,43 @@ const (
 )
 
 // RefLen is how many hex digits of the action hash the challenge shows
-// as its ref: 64 bits, so that a request crafted to collide with the ref
-// of another action is out of reach.
+// as its ref: 64 bits. That is about 2^32 work to find two actions with
+// the same ref (a birthday collision), which someone who writes both
+// payloads could do; it holds against someone who must match a ref
+// already shown (2^64). The approval itself is bound to the whole
+// 256-bit payload, not to the ref.
 const RefLen = 16
+
+// MaxServiceName is the longest service name: the context holds 256
+// bytes, and the name, the action's label and the framing leave room for
+// a summary built from a payload to be shown whole.
+const MaxServiceName = 32
+
+// CheckServiceName refuses a name that is empty, too long or not plain.
+func CheckServiceName(name string) error {
+	if name == "" || len(name) > MaxServiceName || checkSummary(name) != nil {
+		return fmt.Errorf("approval: a service name is 1 to %d plain bytes", MaxServiceName)
+	}
+	return nil
+}
+
+// ActionLabels are put by the service at the front of every approval's
+// challenge context, so that whatever follows is read as that kind of
+// action: an application's summary for one action can't pass as another.
+var ActionLabels = map[string]string{
+	ActionProposalCreate:         "New vote:",
+	ActionVoteExtend:             "Extend vote:",
+	ActionAdminSetAdd:            "Add admin:",
+	ActionAdminSetRemove:         "Remove admin:",
+	ActionContractTemplateChange: "Contract template:",
+	ActionAssignmentPush:         "Push assignment:",
+}
+
+// builtSummary reports whether the service builds the action's summary
+// from its payload, and so shows it whole (never cut).
+func builtSummary(action string) bool {
+	return action == ActionProposalCreate || action == ActionVoteExtend
+}
 
 // Limits.
 const (
@@ -119,6 +154,8 @@ const (
 	CodeInvalidAction     = "invalid_action"
 	CodeInvalidSummary    = "invalid_summary"
 	CodeInvalidPayload    = "invalid_payload"
+	CodeFieldNotShown     = "field_not_shown"    // proposal.create, vote.extend: a field the admins' phones would not show
+	CodeUnknownProposal   = "unknown_proposal"   // vote.extend: no such proposal
 	CodeInvalidConnection = "invalid_connection" // admin_set.*: not an active connection, not an admin, or already one
 	CodeUnreachable       = "unreachable"        // the threshold is more than the admins there are (or would be)
 	CodeLastAdmin         = "last_admin"         // admin_set.remove of the only admin
@@ -294,7 +331,24 @@ func checkSummary(s string) error {
 			return errCode(CodeInvalidSummary)
 		}
 	}
+	// What the service itself writes at the front of a vote's summary, and
+	// the labels it puts before every summary, are not for an application
+	// to start its own with.
+	low := strings.ToLower(strings.TrimSpace(s))
+	for _, w := range reservedStarts() {
+		if strings.HasPrefix(low, w) {
+			return errCode(CodeInvalidSummary)
+		}
+	}
 	return nil
+}
+
+func reservedStarts() []string {
+	out := []string{"binding", "advisory", "extend"}
+	for _, l := range ActionLabels {
+		out = append(out, strings.ToLower(strings.TrimSuffix(l, ":")))
+	}
+	return out
 }
 
 func isBidiControl(r rune) bool {
@@ -310,18 +364,27 @@ func isBidiControl(r rune) bool {
 }
 
 // ChallengeContext is the context of an approval challenge:
-// "Approve on <service>: <summary> — ref <first 16 hex of the hash>",
-// with the summary cut (on a character boundary, ending in "…") so that
-// the whole is at most MaxContext bytes.
-func ChallengeContext(serviceName, summary, actionHash string) (string, error) {
+// "Approve on <service>: <label> <summary> — ref <first 16 hex of the
+// hash>", the label being the action's (ActionLabels). An application's
+// summary is cut (on a character boundary, ending in "…") so that the
+// whole is at most MaxContext bytes; a summary the service built from a
+// payload is never cut: if it does not fit, that is an error.
+func ChallengeContext(serviceName, action, summary, actionHash string) (string, error) {
 	if len(actionHash) < RefLen {
 		return "", fmt.Errorf("approval: short action hash")
 	}
+	label := ActionLabels[action]
+	if label == "" {
+		return "", fmt.Errorf("approval: no label for action %q", action)
+	}
 	f := func(s string) string {
-		return fmt.Sprintf("Approve on %s: %s — ref %s", serviceName, s, actionHash[:RefLen])
+		return fmt.Sprintf("Approve on %s: %s %s — ref %s", serviceName, label, s, actionHash[:RefLen])
 	}
 	if s := f(summary); len(s) <= MaxContext {
 		return s, nil
+	}
+	if builtSummary(action) {
+		return "", fmt.Errorf("approval: the summary does not fit the challenge's context")
 	}
 	const ell = "…"
 	room := MaxContext - len(f("")) - len(ell)

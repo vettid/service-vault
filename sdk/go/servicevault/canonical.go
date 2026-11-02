@@ -74,7 +74,7 @@ func CanonicalAction(action, summary string, payload json.RawMessage) ([]byte, e
 }
 
 // ActionHash is the hex SHA-256 of CanonicalAction: the hash the service
-// vault returns for an approval and puts (its first 8 hex digits) in the
+// vault returns for an approval and puts (its first 16 hex digits) in the
 // admins' challenge, so the application can check that the approval is
 // for exactly the action it submitted.
 func ActionHash(action, summary string, payload json.RawMessage) (string, error) {

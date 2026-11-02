@@ -89,16 +89,43 @@ func parseCanonical(payload []byte, v any) error {
 	return nil
 }
 
-// Limits of the summary the admins read (a challenge's context holds 256
-// bytes, VAULT-MESSAGING §10.4; the service's name, the ref and the
-// framing take some).
+// What a proposal.create approval's payload carries, field by field
+// (BALLOT-PROTOCOL §3.4): the fields shown to the admins (title, choices'
+// labels, binding, removed_may_vote, opens_at, closes_at, quorum's
+// min_ballots), the fields the service sets (the choice ids, the default
+// abstain choice, outage_rule, record_at, the roster) and the fields it
+// refuses unless they say what the service would set anyway (text, quorum
+// text, outage_rule).
 const (
-	maxSummaryFixed = 150 // everything but the title
-	maxSummary      = 190 // the whole; the title is cut to fit
-	maxLabelRunes   = 24
+	// DefaultOutageRule is the outage_rule of every proposal (§10.2): the
+	// only value accepted, or empty.
+	DefaultOutageRule = "Extended by a relay outage over 1 hour, 24 h at most."
+	// MaxLabelRunes is the longest choice label (the admins read it whole).
+	MaxLabelRunes = 24
+	// MaxSource is the longest outage source of an extension (the admins
+	// read it whole).
+	MaxSource = 32
+	// MaxRealChoices is the most choices an application may list; the
+	// service adds abstain.
+	MaxRealChoices = 16
+)
+
+// Limits of the summary the admins read: a challenge's context holds 256
+// bytes (VAULT-MESSAGING §10.4), and the service's name (at most
+// approval.MaxServiceName), the action's label, the framing and the ref
+// take the rest. A summary is shown whole or refused, never cut.
+const (
+	maxSummaryFixed = 115 // everything but the title
+	maxSummary      = 165 // the whole; the title is cut to fit
 )
 
 var errTooLong = errors.New("ballot: too long to show the admins")
+
+// ErrNotShown is a field the admins' phones would not show, and that is
+// not what the service sets: it can't be part of an approved action.
+type ErrNotShown struct{ Field string }
+
+func (e *ErrNotShown) Error() string { return "ballot: " + e.Field + " is not shown to the admins" }
 
 // plain accepts text that can be shown: valid UTF-8 with no control,
 // line-separator or bidirectional-control characters.
@@ -107,20 +134,12 @@ func plain(s string) bool {
 		return false
 	}
 	for _, r := range s {
-		if unicode.IsControl(r) || r == ' ' || r == ' ' || r == '؜' || r == '‎' || r == '‏' ||
-			r >= '‪' && r <= '‮' || r >= '⁦' && r <= '⁩' {
+		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' || r == '\u061c' || r == '\u200e' || r == '\u200f' ||
+			r >= '\u202a' && r <= '\u202e' || r >= '\u2066' && r <= '\u2069' {
 			return false
 		}
 	}
 	return true
-}
-
-func cutRunes(s string, n int) string {
-	if utf8.RuneCountInString(s) <= n {
-		return s
-	}
-	r := []rune(s)
-	return string(r[:n]) + "…"
 }
 
 func when(t int64) (string, error) {
@@ -130,13 +149,59 @@ func when(t int64) (string, error) {
 	return time.Unix(t, 0).UTC().Format("2006-01-02 15:04Z"), nil
 }
 
+// checkInput refuses what an approval can't carry: a field the admins
+// would not see that isn't the service's own, choice labels that can't be
+// shown whole or that the admins could mix up, or a time the summary can't
+// print. Create and the summary both call it, so what is approved is
+// what can be executed.
+func checkInput(in *ProposalInput) error {
+	if !plain(in.Title) || strings.TrimSpace(in.Title) == "" || len(in.Title) > 200 {
+		return errors.New("ballot: the title can't be shown")
+	}
+	if in.Text != "" && in.Text != in.Title {
+		return &ErrNotShown{"text"}
+	}
+	if in.Quorum.Text != "" {
+		return &ErrNotShown{"quorum.text"}
+	}
+	if in.OutageRule != "" && in.OutageRule != DefaultOutageRule {
+		return &ErrNotShown{"outage_rule"}
+	}
+	if len(in.Choices) < 2 || len(in.Choices) > MaxRealChoices {
+		return errors.New("ballot: two to sixteen choices")
+	}
+	seen := map[string]bool{}
+	for _, c := range in.Choices {
+		l := c.Label
+		key := strings.ToLower(l)
+		switch {
+		case !plain(l) || l == "" || l != strings.TrimSpace(l):
+			return errors.New("ballot: a choice label can't be shown")
+		case utf8.RuneCountInString(l) > MaxLabelRunes:
+			return errors.New("ballot: a choice label is over 24 characters")
+		case key == "abstain" || seen[key]:
+			return errors.New("ballot: choice labels must be distinct, and none is Abstain")
+		}
+		seen[key] = true
+	}
+	if in.Quorum.MinBallots < 0 {
+		return errors.New("ballot: negative quorum")
+	}
+	return nil
+}
+
 // ProposalSummary is what the admins read when asked to approve a
 // proposal.create payload: whether the vote is binding, its window, its
-// quorum, its choices and its title, all taken from the payload. It is an
-// error unless the payload is the canonical full form of a proposal input.
+// quorum, its choices and its title, all taken from the payload, after
+// the action's label (approval.ActionLabel). It is an error unless the
+// payload is the canonical full form of a proposal input that checkInput
+// accepts.
 func ProposalSummary(payload []byte) (string, error) {
 	var in ProposalInput
 	if err := parseCanonical(payload, &in); err != nil {
+		return "", err
+	}
+	if err := checkInput(&in); err != nil {
 		return "", err
 	}
 	opens, err := when(in.OpensAt)
@@ -147,36 +212,39 @@ func ProposalSummary(payload []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !plain(in.Title) || strings.TrimSpace(in.Title) == "" {
-		return "", errors.New("ballot: the title can't be shown")
-	}
 	labels := make([]string, 0, len(in.Choices))
 	for _, c := range in.Choices {
-		if !plain(c.Label) || c.Label == "" {
-			return "", errors.New("ballot: a choice label can't be shown")
-		}
-		labels = append(labels, strconv.Quote(cutRunes(c.Label, maxLabelRunes)))
+		labels = append(labels, strconv.Quote(c.Label))
 	}
 	kind := "ADVISORY"
 	if in.Binding {
 		kind = "BINDING"
 	}
-	head := fmt.Sprintf("%s vote opens %s closes %s, quorum %d, choices %s", kind, opens, closes, in.Quorum.MinBallots,
+	head := fmt.Sprintf("%s, opens %s, closes %s, quorum %d, choices %s", kind, opens, closes, in.Quorum.MinBallots,
 		strings.Join(labels, "/"))
 	if in.RemovedMayVote {
-		head += ", removed members may vote"
+		head += ", removed may vote"
 	}
 	head += ", title "
 	if len(head) > maxSummaryFixed {
 		return "", errTooLong
 	}
-	title := strconv.Quote(in.Title)
-	if len(head)+len(title) > maxSummary {
-		room := maxSummary - len(head) - len(`"…"`)
-		title = strconv.Quote(cutBytes(in.Title, room))
-		title = strings.TrimSuffix(title, `"`) + `…"`
+	return head + quoteFit(in.Title, maxSummary-len(head)), nil
+}
+
+// quoteFit is s quoted, its end cut (and marked with …) so that the
+// whole is at most n bytes.
+func quoteFit(s string, n int) string {
+	if q := strconv.Quote(s); len(q) <= n {
+		return q
 	}
-	return head + title, nil
+	for room := n; room > 0; room-- {
+		c := strings.TrimSuffix(strconv.Quote(cutBytes(s, room)), `"`) + `…"`
+		if len(c) <= n {
+			return c
+		}
+	}
+	return `"…"`
 }
 
 // cutBytes cuts s to at most n bytes on a character boundary.
@@ -193,15 +261,46 @@ func cutBytes(s string, n int) string {
 	return s[:n]
 }
 
-// ExtensionSummary is what the admins read when asked to approve a
-// vote.extend payload: the proposal and the new close, from the payload.
-func ExtensionSummary(payload []byte) (string, error) {
+// ExtensionProposalID is the proposal a vote.extend payload is for.
+func ExtensionProposalID(payload []byte) (string, error) {
 	var x ExtensionPayload
 	if err := parseCanonical(payload, &x); err != nil {
 		return "", err
 	}
-	if len(x.ProposalID) != 26 || !plain(x.ProposalID) || strings.ContainsAny(x.ProposalID, " \"") {
-		return "", errors.New("ballot: bad proposal id")
+	if err := checkExtension(&x); err != nil {
+		return "", err
+	}
+	return x.ProposalID, nil
+}
+
+func checkExtension(x *ExtensionPayload) error {
+	if len(x.ProposalID) != 26 || strings.Trim(x.ProposalID, "0123456789ABCDEFGHJKMNPQRSTVWXYZ") != "" {
+		return errors.New("ballot: bad proposal id")
+	}
+	src := x.Outage.Source
+	if !strings.HasPrefix(src, "https://") || !plain(src) || strings.ContainsAny(src, " \"") {
+		return &ErrNotShown{"outage.source"}
+	}
+	if len(src) > MaxSource {
+		return &ErrNotShown{"outage.source"}
+	}
+	return nil
+}
+
+// ExtensionSummary is what the admins read when asked to approve a
+// vote.extend payload for the proposal titled title: the proposal (its
+// title, quoted, and its id), the new close, the outage and its source,
+// from the payload and the stored proposal.
+func ExtensionSummary(payload []byte, title string) (string, error) {
+	var x ExtensionPayload
+	if err := parseCanonical(payload, &x); err != nil {
+		return "", err
+	}
+	if err := checkExtension(&x); err != nil {
+		return "", err
+	}
+	if !plain(title) || title == "" {
+		return "", errors.New("ballot: the proposal's title can't be shown")
 	}
 	closes, err := when(x.ClosesAt)
 	if err != nil {
@@ -215,17 +314,22 @@ func ExtensionSummary(payload []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("EXTEND vote %s: new close %s, for an outage from %s to %s", x.ProposalID, closes, from, to), nil
+	tail := fmt.Sprintf(" (%s) new close %s, outage %s to %s, source %s", x.ProposalID, closes, from, to, x.Outage.Source)
+	if len(tail) > maxSummaryFixed+MaxSource {
+		return "", errTooLong
+	}
+	return quoteFit(title, maxSummary-len(tail)) + tail, nil
 }
 
-// SummaryFor builds the summary of an approval for action from payload;
-// ok is false for an action whose summary the application writes.
-func SummaryFor(action string, payload []byte) (summary string, ok bool, err error) {
+// SummaryFor builds the summary of an approval for action from payload
+// (and, for vote.extend, the proposal's title); ok is false for an
+// action whose summary the application writes.
+func SummaryFor(action string, payload []byte, title string) (summary string, ok bool, err error) {
 	switch action {
 	case ActionProposalCreate:
 		summary, err = ProposalSummary(payload)
 	case ActionVoteExtend:
-		summary, err = ExtensionSummary(payload)
+		summary, err = ExtensionSummary(payload, title)
 	default:
 		return "", false, nil
 	}

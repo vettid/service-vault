@@ -320,7 +320,7 @@ func TestOneOfN(t *testing.T) {
 	if len(f.p.sent) != 3 {
 		t.Fatalf("%d challenges", len(f.p.sent))
 	}
-	wantCtx := "Approve on VettID Member Service: Open the vote on proposal 7 — ref " + want[:16]
+	wantCtx := "Approve on VettID Member Service: Contract template: Open the vote on proposal 7 — ref " + want[:16]
 	for _, s := range f.p.sent {
 		if s.ctxt != wantCtx {
 			t.Fatalf("context %q", s.ctxt)
@@ -456,7 +456,7 @@ func TestUnreachableAtCreation(t *testing.T) {
 func TestExpiry(t *testing.T) {
 	f := newFixture(t, 1, "c1", "c2")
 	f.m.TTL = time.Hour
-	c := f.create(ActionAssignmentPush, "Push assignment 3", `{"assignment":3}`)
+	c := f.create(ActionAssignmentPush, "Assignment 3", `{"assignment":3}`)
 	f.answer("c1", "expire") // the 10-minute challenge ran out: the admin can be reminded
 	f.clk.Advance(time.Hour)
 	if s := f.status(c.ID); s.Status != StatusExpired {
@@ -827,17 +827,38 @@ func TestCreateRefuses(t *testing.T) {
 
 func TestChallengeContext(t *testing.T) {
 	hash := strings.Repeat("ab", 32)
-	s, err := ChallengeContext("VettID Member Service", strings.Repeat("é", 60), hash)
-	if err != nil || len(s) > MaxContext {
+	const act = ActionContractTemplateChange
+	s, err := ChallengeContext("VettID Member Service", act, strings.Repeat("é", 60), hash)
+	if err != nil || len(s) > MaxContext || !strings.HasPrefix(s, "Approve on VettID Member Service: Contract template: ") {
 		t.Fatalf("%q %v", s, err)
 	}
 	long := strings.Repeat("Long Service Name ", 7)
-	s, err = ChallengeContext(long, strings.Repeat("é", 60), hash)
+	s, err = ChallengeContext(long, act, strings.Repeat("é", 60), hash)
 	if err != nil || len(s) > MaxContext || !strings.HasSuffix(s, "… — ref abababababababab") || !strings.Contains(s, "é…") {
 		t.Fatalf("%d %q %v", len(s), s, err)
 	}
-	if _, err := ChallengeContext(strings.Repeat("x", MaxContext), "y", hash); err == nil {
+	if _, err := ChallengeContext(strings.Repeat("x", MaxContext), act, "y", hash); err == nil {
 		t.Fatal("no room")
+	}
+	if _, err := ChallengeContext("S", "vote.open", "y", hash); err == nil {
+		t.Fatal("a label for an unknown action")
+	}
+	// A summary the service built is shown whole or not at all.
+	for action, label := range map[string]string{ActionProposalCreate: "New vote:", ActionVoteExtend: "Extend vote:"} {
+		whole := strings.Repeat("w", 150)
+		s, err := ChallengeContext(strings.Repeat("n", MaxServiceName), action, whole, hash)
+		if err != nil || !strings.Contains(s, label+" "+whole+" — ref ") || len(s) > MaxContext {
+			t.Fatalf("%s: %d %v", action, len(s), err)
+		}
+		if _, err := ChallengeContext("Service", action, strings.Repeat("w", 250), hash); err == nil {
+			t.Fatalf("%s: a built summary was cut", action)
+		}
+	}
+	if CheckServiceName(strings.Repeat("x", MaxServiceName)) != nil || CheckServiceName(strings.Repeat("x", MaxServiceName+1)) == nil {
+		t.Fatal("service name check")
+	}
+	if CheckServiceName("") == nil || CheckServiceName("a\nb") == nil {
+		t.Fatal("service name check")
 	}
 }
 

@@ -125,10 +125,10 @@ func newManager(t *testing.T) (*Manager, *fakeSender, *fakePublisher) {
 }
 
 func input() ProposalInput {
-	return ProposalInput{Title: "Adopt the 2027 budget", Text: "As circulated.",
-		Choices: []vote.Choice{{ID: "yes", Label: "Yes"}, {ID: "no", Label: "No"}},
-		Quorum:  vote.Quorum{Text: "A third", MinBallots: 1}, OpensAt: 1793520000, ClosesAt: 1793520000 + 86400,
-		OutageRule: "Extended by a relay outage over 1 hour, 24 h at most."}
+	return ProposalInput{Title: "Adopt the 2027 budget", Text: "",
+		Choices: []ChoiceInput{{Label: "Yes"}, {Label: "No"}},
+		Quorum:  vote.Quorum{MinBallots: 1}, OpensAt: 1793520000, ClosesAt: 1793520000 + 86400,
+		OutageRule: DefaultOutageRule}
 }
 
 // Create makes a proposal from the roster, publishes it and sends each
@@ -184,7 +184,7 @@ func TestCreateProposal(t *testing.T) {
 	mem := o.Members["c0"]
 	vk := ed25519.NewKeyFromSeed(digest("vk"))
 	cred := ed25519.NewKeyFromSeed(digest("cred"))
-	bal := vote.Ballot{RecordTag: mem.Tag, VK: vk.Public().(ed25519.PublicKey), ChoiceID: "no"}
+	bal := vote.Ballot{RecordTag: mem.Tag, VK: vk.Public().(ed25519.PublicKey), ChoiceID: "c2"}
 	msg, _ := bal.Msg(c.ProposalHash)
 	bal.BallotSig, _ = suite.Sign(vk, vote.LabelBallot, msg)
 	leaf, _ := bal.Leaf()
@@ -193,7 +193,7 @@ func TestCreateProposal(t *testing.T) {
 	body, _ := json.Marshal(map[string][]byte{"record_tag": bal.RecordTag, "vk": bal.VK, "ballot_sig": bal.BallotSig, "cast_sig": csig})
 	var asMap map[string]any
 	_ = json.Unmarshal(body, &asMap)
-	asMap["proposal_id"], asMap["choice_id"] = c.ProposalID, "no"
+	asMap["proposal_id"], asMap["choice_id"] = c.ProposalID, "c2"
 	body, _ = json.Marshal(asMap)
 	a, err := box.Vote(ctx, &peer.VoteRequest{ConnectionID: "c0", PeerIK: m.IK, CredentialKey: cred.Public().(ed25519.PublicKey),
 		Active: true, Type: TypeCast, Body: body, MsgMS: uint64(input().OpensAt)*1000 + 1})
@@ -302,7 +302,7 @@ func TestClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	during := uint64(input().OpensAt)*1000 + 1
-	if castFor(t, m, c.ProposalID, "c0", "yes", during) != "" || castFor(t, m, c.ProposalID, "c1", "no", during) != "" {
+	if castFor(t, m, c.ProposalID, "c0", "c1", during) != "" || castFor(t, m, c.ProposalID, "c1", "c2", during) != "" {
 		t.Fatal("casts refused")
 	}
 	clock := time.Unix(input().ClosesAt, 0)
@@ -332,7 +332,7 @@ func TestClose(t *testing.T) {
 	if sum1.Counts.Unhandled != 2 {
 		t.Fatalf("unhandled %d", sum1.Counts.Unhandled)
 	}
-	if sum1.Counts.Ballots != 2 || sum1.Counts.Eligible != 3 || sum1.Tally["yes"] != 1 || sum1.Tally["no"] != 1 || sum1.Tally[vote.AbstainID] != 0 {
+	if sum1.Counts.Ballots != 2 || sum1.Counts.Eligible != 3 || sum1.Tally["c1"] != 1 || sum1.Tally["c2"] != 1 || sum1.Tally[vote.AbstainID] != 0 {
 		t.Fatalf("summary %+v", sum1)
 	}
 	closed := 0
@@ -400,7 +400,7 @@ func TestExtend(t *testing.T) {
 		t.Fatalf("vote.extended sent %d", len(s.sent))
 	}
 	// A cast after the first close, inside the extension, counts.
-	if code := castFor(t, m, c.ProposalID, "c0", "yes", uint64(in.ClosesAt)*1000+60000); code != "" {
+	if code := castFor(t, m, c.ProposalID, "c0", "c1", uint64(in.ClosesAt)*1000+60000); code != "" {
 		t.Fatalf("a cast inside the extension: %q", code)
 	}
 	// After the extended close: too late to extend.
@@ -471,7 +471,7 @@ func TestRebuildAll(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	castFor(t, m, c.ProposalID, "c1", "no", uint64(input().OpensAt)*1000+1)
+	castFor(t, m, c.ProposalID, "c1", "c2", uint64(input().OpensAt)*1000+1)
 	// The table loses the ballot (a restore); the proposal stays.
 	recs, _ := m.Store.Records.Load(ctx, KindProposal)
 	fresh := peer.NewMemStore()
