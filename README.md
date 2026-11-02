@@ -692,7 +692,7 @@ admin's connection.
   m = 2 the other one re-pins after asking out of band; never fewer than
   one, counted among the admins in the set when it settles and is
   applied, so removing admins to lower it takes `admin_set.remove`
-  approvals at the full m); they alone are asked and their own approval
+  approvals at the full m, or an admin leaving on their own); they alone are asked and their own approval
   never counts for their own re-pin; the approvals count as above, and is applied (`admin.repinned` audited) only if `new_key` is
   still the connection's credential key. The application gives no
   `summary`; the service writes `name given "<name>", new key <16 hex

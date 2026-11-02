@@ -225,7 +225,7 @@ the threshold or all the other admins who are admins at that moment,
 whichever is fewer (never fewer than one; owner decision of 2026-11-02):
 with two admins at m = 2 the other admin alone re-pins, after asking out
 of band. Removing admins to lower that number takes `admin_set.remove`
-approvals at the full threshold, and the approvals of the removed no
+approvals at the full threshold, or an admin leaving on their own, and the approvals of the removed no
 longer count. A sole admin cannot be re-pinned this way (`sole_admin`).
 
 The `proposal.create` approval's payload is the input
