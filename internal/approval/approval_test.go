@@ -1213,3 +1213,45 @@ func TestThirdConcurrentLongChallenge(t *testing.T) {
 		t.Fatalf("%+v %v", r, err)
 	}
 }
+
+// A forced re-send challenges the named admins again, withdrawing a live
+// challenge first, whatever the gate says; only admins who have not
+// answered; still at most once per RemindInterval.
+func TestRemindForce(t *testing.T) {
+	for _, gate := range []bool{true, false} {
+		f := newFixture(t, 2, "c1", "c2")
+		f.m.LongChallenges = gate
+		c := f.create(ActionVoteOpen, "Open", `{}`)
+		ctx := context.Background()
+		old1, old2 := f.p.last("c1"), f.p.last("c2")
+		if _, err := f.m.Remind(ctx, c.ID, "c1"); codeOf(err) != CodeTooSoon {
+			t.Fatalf("gate %v: too soon: %v", gate, err)
+		}
+		f.clk.Advance(RemindInterval)
+		if _, err := f.m.Remind(ctx, c.ID, "c9"); codeOf(err) != CodeNotAdmin {
+			t.Fatalf("gate %v: not an admin: %v", gate, err)
+		}
+		r, err := f.m.Remind(ctx, c.ID, "c1")
+		if err != nil || strings.Join(r.Reminded, ",") != "c1" {
+			t.Fatalf("gate %v: %+v %v", gate, r, err)
+		}
+		if !slices.Contains(f.p.cancelled, old1.req) || slices.Contains(f.p.cancelled, old2.req) {
+			t.Fatalf("gate %v: cancelled %v", gate, f.p.cancelled)
+		}
+		if now := f.p.last("c1"); now.req == old1.req || f.p.last("c2").req != old2.req {
+			t.Fatalf("gate %v: new challenge to c1 only", gate)
+		}
+		// The new challenge is the one that counts.
+		f.answerTo(f.p.last("c1"), "approve")
+		if s := f.status(c.ID); len(s.Approvals) != 1 {
+			t.Fatalf("gate %v: %+v", gate, s)
+		}
+		f.clk.Advance(RemindInterval)
+		if _, err := f.m.Remind(ctx, c.ID, "c1"); codeOf(err) != CodeAnswered {
+			t.Fatalf("gate %v: answered: %v", gate, err)
+		}
+		if _, err := f.m.Remind(ctx, c.ID, "c2", "c2"); err != nil {
+			t.Fatalf("gate %v: %v", gate, err)
+		}
+	}
+}

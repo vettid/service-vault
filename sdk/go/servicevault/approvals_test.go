@@ -57,6 +57,13 @@ func TestApprovalsAgainstAPI(t *testing.T) {
 	if _, err := c.RemindApproval(ctx, cr.ID); apiCode(err) != servicevault.CodeTooSoon {
 		t.Fatalf("remind: %v", err)
 	}
+	// A forced re-send: only an admin of the approval, and still not too soon.
+	if _, err := c.RemindApproval(ctx, cr.ID, "c9"); apiCode(err) != servicevault.CodeNotAdmin {
+		t.Fatalf("forced remind of a non-admin: %v", err)
+	}
+	if _, err := c.RemindApproval(ctx, cr.ID, "c1"); apiCode(err) != servicevault.CodeTooSoon {
+		t.Fatalf("forced remind too soon: %v", err)
+	}
 	ap, err := c.Approval(ctx, cr.ID)
 	if err != nil || ap.Status != servicevault.ApprovalStatusPending || len(ap.Admins) != 1 || ap.Threshold != 1 {
 		t.Fatalf("%+v %v", ap, err)

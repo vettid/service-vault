@@ -435,7 +435,7 @@ billed.
 | `POST /v1/signins/unsigned` | For testing only: `403 {error: test_only}` and nothing sent unless `SV_TEST_SIGNINS=true`. Otherwise `200 {signins: [{connection_id, signin_id?, match_code?, skipped?}], more, stopped?}`: one sign-in challenge to each eligible connection (active, vault advertises the vote feature) that has no pinned credential key, i.e. whose member has never signed in on it, so that its vault does not refuse their vote with `not_signed_in` (VAULT-MESSAGING §10.19.5). A call goes through the connections in id order until it has sent 10 challenges or looked at 100 connections; a skipped connection counts only toward the 100, so connections skipped for long do not keep the call from the ones after them. `more` is the number not yet looked at (call again). Within the member vault's limits (§10.4.1): never a second challenge to a connection with a sign-in pending, none within an hour of a decline, at most 10 in 24 h (a challenge that expires unanswered counts; they live 5 minutes); a connection left out says `skipped`: `pending`, `declined`, `daily_limit`, `not_sent`, or `not_recorded` (sent, with its `match_code`, but no `signin_id` to read). An error or the call's 8-second deadline ends it early with `stopped` (`error` or `timeout`) and the entries done so far, still status 200; the call goes on server-side if the client gives up. Each `signin_id` is read at `GET /v1/signins/{id}`, and its outcome is a `signin.*` webhook: the application did not start these sign-ins, so it will see webhooks for ids it does not know. A member's app tells them to approve a sign-in only if they are signing in right now, and one they did not start teaches the opposite, so a real service must not use this: its members sign in themselves. For test connections (`svctl signin -unsigned`) |
 | `POST /v1/approvals` `{action, summary, payload}` | `201 {approval_id, action_hash, status: "pending", expires_at}`; refused with `invalid_action`, `invalid_summary`, `invalid_payload` (400), `invalid_connection`, `unreachable`, `last_admin` (422) |
 | `GET /v1/approvals/{id}` | `{approval_id, action, summary, action_hash, status, reason?, threshold, admins, approvals: [{connection_id, at, key_changed}], denials: [{connection_id, at}], created_at, expires_at, remind_needed: [connection_id], remind_after?, applied?}`; `status` is `pending`, `approved`, `denied` or `expired`; `remind_needed`, while pending, lists the admins who have not answered and hold no live challenge (it ran out, or could not be sent); `remind_after` comes with it: the earliest a reminder is accepted |
-| `POST /v1/approvals/{id}/remind` | `{approval_id, reminded: [connection_id]}`: the challenge again to the admins who have not answered and hold no live challenge (the `remind_needed` ones); `too_soon` (429) within 10 minutes of the last, `not_pending` (409) once settled, `nothing_to_remind` (409) when every admin who has not answered still holds a live challenge |
+| `POST /v1/approvals/{id}/remind` | `{approval_id, reminded: [connection_id]}`: the challenge again to the admins who have not answered and hold no live challenge (the `remind_needed` ones); `too_soon` (429) within 10 minutes of the last, `not_pending` (409) once settled, `nothing_to_remind` (409) when every admin who has not answered still holds a live challenge. An optional body `{"force": [connection_id, ...]}` (chosen; not in the spec) challenges only the named admins again, each even with a live challenge (the old one is withdrawn first): `not_admin` (422) for one outside the approval's admins or the current set, `answered` (409) for one who has answered; still `too_soon` within 10 minutes of the last. Each forced re-send spends one of that admin's 5 approval asks per 24 h (§10.4.1) and a sixth comes back as a delayed denial: use it only when the admin reports not seeing the request |
 | `GET /v1/admins` | `{admins: [connection_id], threshold}` |
 | `GET /v1/audit?since=&limit=` | `{entries: [...], next?}`: the audit log after entry `since`, oldest first, `limit` 1–100 (default 100); pass `next` as `since` for the next page |
 | `POST /v1/proposals` `{title, text, choices, quorum, binding, removed_may_vote, opens_at, closes_at, outage_rule}` | `201 {proposal_id, proposal_hash, eligible, unsigned, sent}`: the proposal is made from the active connections at this moment whose vault advertised the vote feature (BALLOT-PROTOCOL §3.2), published and sent to each (BALLOT-PROTOCOL §3); `abstain` is added to the choices if they lack it. `unsigned` is how many of the `eligible` connections have no pinned credential key: their member has never signed in on the connection, and their vault refuses `vote.cast` with `not_signed_in` until they do (VAULT-MESSAGING §10.19.5); members sign in to the service themselves (on a test deployment only, `POST /v1/signins/unsigned`, `svctl signin -unsigned`). `invalid_proposal` (400) for one outside the bounds of BALLOT-PROTOCOL §3.1 (member vaults refuse those) or with no such connection; `publication_not_configured` (503) until publication is configured; `503 {error: not_published, proposal_id}` when it was kept but its publication failed (retry with `/publish`). Served with `SV_BALLOTS_TABLE` |
@@ -671,10 +671,19 @@ admin's connection.
     member vault's limit of 4 challenges held per connection: a long
     challenge sent while 4 are held (live ones and withdraws not queued,
     counted until their expiry plus a minute for clock skew) goes with 10
-    minutes. Known limit: a challenge the member vault loses for another
-    reason (a vault restore, a deposit refused for good) leaves that admin
+    minutes. Known limits: a withdraw that reaches a held member vault
+    before its challenge is ignored there, so the member keeps the
+    challenge and its place until its expiry while the service has freed
+    them; and a challenge the member vault loses for another reason (a
+    vault restore, a deposit refused for good) leaves that admin
     unremindable until the challenge's expiry, at most 24 h (1 h on
-    staging); there is no forced re-send.
+    staging). For these, `svctl remind -force <connection_id>` (`POST
+    /v1/approvals/{id}/remind` with `{"force": [...]}`) withdraws that
+    admin's live challenge and sends a new one, once per 10 minutes per
+    approval. Each forced re-send spends one of the admin's 5 approval asks
+    per 24 hours (§10.4.1) and a sixth comes back as a delayed denial,
+    which counts as a denial: use it only when the admin reports not
+    seeing the request.
   - Without it (the default, for member vaults before release 26) each
     challenge lives 10 minutes and the service vault reports a run-out challenge as below. When a
     challenge runs out while the approval is open the service vault sends
@@ -769,7 +778,7 @@ ap, err := c.CreateApproval(ctx, servicevault.ApprovalRequest{
 	Action: servicevault.ActionVoteOpen, Summary: "Open the vote on proposal 7",
 	Payload: json.RawMessage(`{"proposal":7}`)})   // POST /v1/approvals
 st2, err := c.Approval(ctx, ap.ID)                  // GET /v1/approvals/{id}
-rm, err := c.RemindApproval(ctx, ap.ID)             // POST /v1/approvals/{id}/remind
+rm, err := c.RemindApproval(ctx, ap.ID)             // POST /v1/approvals/{id}/remind (extra args: force these admins)
 ad, err := c.Admins(ctx)                            // GET /v1/admins
 pg, err := c.Audit(ctx, since, 100)                 // GET /v1/audit
 h, err := servicevault.ActionHash(action, summary, payload) // compare with ap.ActionHash
@@ -861,7 +870,7 @@ svctl signin -email E [-source S] [-wait 3m]
 svctl signin -unsigned
 svctl approve -action vote.open -summary "Open the vote" -payload '{"proposal":7}' [-wait 30m]
 svctl approval <approval id>
-svctl remind <approval id>
+svctl remind [-force <connection id>,...] <approval id>
 svctl admins
 svctl audit [-since <entry id>] [-limit 100]
 svctl anchor-key

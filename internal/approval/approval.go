@@ -520,7 +520,13 @@ var ErrNotFound = errors.New("approval: not found")
 // remind_needed ones), each lasting as long as the approval, and
 // CodeNothingToRemind when there are none (checked before the interval).
 // Otherwise to every admin who has not answered, replacing their challenge.
-func (m *Manager) Remind(ctx context.Context, id string) (*Reminder, error) {
+// With force, only to the named admins (CodeNotAdmin for one outside the
+// approval's admins or the current set, CodeAnswered for one who has
+// answered): each one's live challenge is withdrawn and a new one sent,
+// whatever the gate says, still at most once per RemindInterval. Each
+// forced re-send uses one of the member's approval asks (VAULT-MESSAGING
+// §10.4.1). (chosen; not in the spec)
+func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Reminder, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	r, err := m.load(ctx, id)
@@ -540,7 +546,28 @@ func (m *Manager) Remind(ctx context.Context, id string) (*Reminder, error) {
 	}
 	var to []Challenge
 	var conns []string
+	for _, a := range force {
+		if !slices.Contains(r.Admins, a) || !slices.Contains(set, a) {
+			return nil, errCode(CodeNotAdmin)
+		}
+		if r.answered(a) {
+			return nil, errCode(CodeAnswered)
+		}
+		if slices.Contains(conns, a) {
+			continue
+		}
+		// Forced: any live challenge is withdrawn and a new one sent,
+		// whatever the gate says (the member vault may have lost it).
+		if old := r.Pending[a]; old != "" {
+			to = append(to, Challenge{ConnectionID: a, RequestID: old})
+			delete(r.Pending, a)
+		}
+		conns = append(conns, a)
+	}
 	for _, a := range r.Admins {
+		if len(force) > 0 {
+			break // only the named admins
+		}
 		if !slices.Contains(set, a) || r.answered(a) {
 			continue
 		}
@@ -558,7 +585,7 @@ func (m *Manager) Remind(ctx context.Context, id string) (*Reminder, error) {
 		}
 		conns = append(conns, a)
 	}
-	if m.LongChallenges && len(conns) == 0 {
+	if len(force) == 0 && m.LongChallenges && len(conns) == 0 {
 		return nil, errCode(CodeNothingToRemind)
 	}
 	if now.Before(r.LastSent.Add(RemindInterval)) {
@@ -586,7 +613,7 @@ func (m *Manager) Remind(ctx context.Context, id string) (*Reminder, error) {
 	for _, c := range sent {
 		out.Reminded = append(out.Reminded, c.ConnectionID)
 	}
-	m.log().Info("approval reminded", "approval_id", r.ID, "challenged", len(sent))
+	m.log().Info("approval reminded", "approval_id", r.ID, "challenged", len(sent), "forced", len(conns) > 0 && len(force) > 0)
 	return out, nil
 }
 

@@ -117,10 +117,15 @@ that comes within the hour; `sv remind <approval_id>` sends only to an
 admin holding no live challenge, and otherwise says there is nothing to
 remind. The service vault cannot see a member vault shorten a challenge,
 so it sends at most 2 long ones per connection at a time (and none while
-4 are held). A challenge the member vault loses for another reason (a
-vault restore, a deposit refused for good) leaves that admin unremindable
-until the challenge's expiry, at most 1 hour here; there is no forced
-re-send. Without the flag
+4 are held). A withdraw that reaches a held vault before its challenge is
+ignored there, and a challenge the member vault loses for another reason
+(a vault restore, a deposit refused for good) is not seen by the service:
+the admin stays unremindable until the challenge's expiry, at most 1 hour
+here. If the admin reports not seeing the request, `sv remind -force
+<connection_id> <approval_id>` withdraws their live challenge and sends a
+new one (once per 10 minutes); each forced re-send spends one of that
+admin's 5 approval asks per 24 hours, and a sixth comes back as a delayed
+denial. Without the flag
 (older member vaults) the challenge lives 10 minutes and a held vault
 misses it: `sv approval <approval_id>` prints `remind needed:
 <connection_id> (svctl remind <approval_id>)` and the service vault sends

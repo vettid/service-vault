@@ -117,6 +117,8 @@ const (
 	CodeLastAdmin         = "last_admin"         // admin_set.remove of the only admin
 	CodeNotPending        = "not_pending"
 	CodeTooSoon           = "too_soon"
+	CodeNotAdmin          = "not_admin"         // remind force: not an admin of the approval, or no longer in the set
+	CodeAnswered          = "answered"          // remind force: the admin has answered
 	CodeNothingToRemind   = "nothing_to_remind" // every admin who has not answered holds a live challenge
 )
 

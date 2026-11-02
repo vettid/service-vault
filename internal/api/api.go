@@ -159,7 +159,7 @@ type SignInStatus struct {
 type Approvals interface {
 	Create(ctx context.Context, req approval.Request) (*approval.Created, error)
 	Status(ctx context.Context, id string) (*approval.Status, error)
-	Remind(ctx context.Context, id string) (*approval.Reminder, error)
+	Remind(ctx context.Context, id string, force ...string) (*approval.Reminder, error)
 	Admins(ctx context.Context) (*approval.Admins, error)
 	Audit(ctx context.Context, since string, limit int) (*approval.AuditPage, error)
 }
@@ -454,8 +454,27 @@ func (s *Server) approvalStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, st)
 }
 
+// Bounds of POST /v1/approvals/{id}/remind.
+const (
+	maxRemindBody  = 4 << 10
+	maxRemindForce = 64
+)
+
 func (s *Server) remindApproval(w http.ResponseWriter, r *http.Request) {
-	rm, err := s.Approvals.Remind(r.Context(), r.PathValue("id"))
+	// An optional body {"force": [connection_id, ...]} names admins to
+	// challenge again even if they hold a live challenge (chosen; not in
+	// the spec).
+	var b struct {
+		Force []string `json:"force"`
+	}
+	if r.ContentLength != 0 && !readJSONMax(w, r, &b, maxRemindBody) {
+		return
+	}
+	if len(b.Force) > maxRemindForce {
+		writeError(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	rm, err := s.Approvals.Remind(r.Context(), r.PathValue("id"), b.Force...)
 	if err != nil {
 		s.approvalError(w, "approval remind", err)
 		return
@@ -508,6 +527,8 @@ var approvalStatusCodes = map[string]int{
 	approval.CodeNotPending:        http.StatusConflict,
 	approval.CodeTooSoon:           http.StatusTooManyRequests,
 	approval.CodeNothingToRemind:   http.StatusConflict,
+	approval.CodeNotAdmin:          http.StatusUnprocessableEntity,
+	approval.CodeAnswered:          http.StatusConflict,
 }
 
 func (s *Server) approvalError(w http.ResponseWriter, what string, err error) {

@@ -135,6 +135,8 @@ const (
 	CodeLastAdmin         = "last_admin"         // admin_set.remove of the only admin (422)
 	CodeNotPending        = "not_pending"        // the approval is settled or expired (409)
 	CodeTooSoon           = "too_soon"           // a reminder within 10 minutes of the last challenges (429)
+	CodeNotAdmin          = "not_admin"          // remind force: not an admin of the approval, or no longer in the set (422)
+	CodeAnswered          = "answered"           // remind force: the admin has answered (409)
 	CodeNothingToRemind   = "nothing_to_remind"  // every admin who has not answered holds a live challenge (409)
 )
 
@@ -403,12 +405,23 @@ func (c *Client) Approval(ctx context.Context, id string) (*Approval, error) {
 // RemindApproval challenges again the admins who have not answered, at
 // most once per 10 minutes per approval (CodeTooSoon otherwise). Admins
 // who hold a live challenge are skipped; CodeNothingToRemind if none is left.
-func (c *Client) RemindApproval(ctx context.Context, id string) (*Reminder, error) {
+//
+// With force, only the named admins (connection ids) are challenged, each
+// even if it holds a live challenge, the old one being withdrawn first
+// (CodeNotAdmin, CodeAnswered otherwise). Each forced re-send uses one of
+// the member's 5 approval asks per 24 hours (VAULT-MESSAGING §10.4.1), and
+// a sixth comes back as a delayed denial: use it only when an admin reports
+// not seeing the request.
+func (c *Client) RemindApproval(ctx context.Context, id string, force ...string) (*Reminder, error) {
 	if id == "" {
 		return nil, errors.New("servicevault: empty approval id")
 	}
+	var in any
+	if len(force) > 0 {
+		in = map[string][]string{"force": force}
+	}
 	out := &Reminder{}
-	if err := c.do(ctx, http.MethodPost, "/v1/approvals/"+url.PathEscape(id)+"/remind", nil, true, out); err != nil {
+	if err := c.do(ctx, http.MethodPost, "/v1/approvals/"+url.PathEscape(id)+"/remind", in, true, out); err != nil {
 		return nil, err
 	}
 	return out, nil
