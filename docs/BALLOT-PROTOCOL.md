@@ -642,10 +642,15 @@ as too late (`too_late`) before the approval is looked at, so that the
 approval stays usable: one published later may not reach the close in time.
 
 The extension is **stored before it is published**, because the site's
-copy is write-once. After the approval is used, the service stores the
-signed extension as *pending* on the proposal record (a write conditional
-on the record's version), then publishes it, then marks it in effect
-(appended to the extensions, `closes_at` moved, pending cleared). A
+copy is write-once. The service signs the extension and stores it as *pending* on the
+proposal record (a write conditional on the record's version) **before the
+approval is used**; if that store fails (a conflict), nothing is used and
+the request can be retried; if the approval is then refused, the pending
+extension is cleared and the approval is as it was. It then uses the
+approval, publishes the extension, and marks it in effect (appended to the
+extensions, `closes_at` moved, pending cleared). A retry repeats the use
+of the same approval for the same extension, which the approvals accept
+once (never a second use). A
 retry, or a restart, publishes the same bytes, never a new signature,
 and uses no second approval; while one is pending a different extension
 is refused (`extension_pending`, 409). **Whether an extension is in
@@ -653,7 +658,17 @@ effect is decided by the RFC 3161 time (`genTime`) in the Sigstore bundle
 the service anchored for it**, as the site decides (VOTES-SITE §4) and a
 vault does (VAULT-MESSAGING §10.19.6): before the `closes_at` it extends,
 or it does not apply (`too_late`). The service reads that time only from
-the bundle it kept itself, never from the one the site serves. A retry
+the bundle it kept itself, never from the one the site serves, and only
+after verifying the token: its message imprint is SHA-256 of the bundle's
+message signature (the ECDSA signature the anchor timestamps), the bundle's
+message digest is SHA-256 of the document, and the CMS signature chains
+from the TSA's certificate to a root pinned in the release (per Sigstore
+instance's Sigstore trusted root; judged at the token's own time, which must fall in that authority's `validFor`), as an end-entity certificate
+with the single, critical time-stamping usage. Anything that doesn't
+verify applies nothing. The site also refuses a first upload by its own
+clock, once the close it extends has passed there, whatever the bundle
+says (`too_late`, which the service treats as `too_late`, not as an
+outage). A retry
 that was never anchored must leave the 1-minute margin; one with a kept
 bundle is judged by its time. Before counting, the close **reconciles**
 the store with the site: it reads `extension-1`, `extension-2`, … to the
@@ -670,8 +685,19 @@ nothing is dropped. Any other difference (the store holds an extension
 the site lacks or has other bytes; the site's extension doesn't verify)
 is refused: nothing is counted and the error is logged (`site_mismatch`,
 409). The last extension is uploaded again at each reconcile, which also
-finishes the index (§3.3). **(chosen; not in the
-spec.)** Counting the votes after the close (§7) needs no approval: it
+finishes the index (§3.3).
+
+**Known limits.** (1) A 404 on an extension's signature or bundle file
+(cached) can delay a close by the CDN's error time to live: liveness
+only. (2) An extension with no bundle of the service's own is never
+adopted. (3) A probe answered `422` with a code other than `too_late`
+(`bad_anchor`, `unknown_service`) is an error: every close fails, and
+nothing is dropped or counted, until the site accepts the document. The
+operator corrects the cause at the site (for instance the service list
+entry naming the anchor key) and closes again; if the site can never
+accept it, the pending extension has to be removed from the proposal's
+record by hand (there is no API for it), after which the close counts
+without it. **(chosen; not in the spec.)** Counting the votes after the close (§7) needs no approval: it
 decides nothing that the window and the ballots have not.
 
 ## 11. Test vectors
@@ -725,8 +751,8 @@ item.
 ## Changes
 
 - **0.13.1 (2026-11-02):** §10.2: an extension is stored (pending) before
-  it is published, a retry publishes the same bytes, the
-  bundle's RFC 3161 time (read from the service's own kept bundle)
+  it is published (and before its approval is used), a retry publishes the
+  same bytes, the verified bundle's RFC 3161 time (read from the service's own kept bundle)
   decides whether it applies, and the close reconciles with the site
   before counting, probing before it drops a pending extension. §3.3: the publisher contract for the upload's
   answer (`index_updated`). No change to the messages or documents.

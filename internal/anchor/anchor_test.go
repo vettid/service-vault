@@ -2,6 +2,7 @@ package anchor
 
 import (
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -10,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/digitorus/timestamp"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -70,8 +72,7 @@ func (f *fakeSigstore) handler(t *testing.T) http.Handler {
 			return
 		}
 		b, _ := io.ReadAll(r.Body)
-		var req tsReq
-		if _, err := asn1.Unmarshal(b, &req); err != nil || !req.MessageImprint.HashAlgorithm.Algorithm.Equal(oidSHA256) {
+		if req, err := timestamp.ParseRequest(b); err != nil || req.HashAlgorithm != crypto.SHA256 || req.Certificates {
 			t.Errorf("timestamp request: %v", err)
 		}
 		token, _ := asn1.Marshal(asn1.RawValue{Tag: asn1.TagSequence, IsCompound: true, Bytes: []byte{0x05, 0x00}})

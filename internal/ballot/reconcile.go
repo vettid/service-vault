@@ -26,7 +26,9 @@ type SiteReader interface {
 	// Extension returns extension n (p/<id>/extension-<n>.json, with
 	// .json.sig and .json.sigstore.json), or nil if the site answers 404.
 	// A 404 can be a cached one: it finds extensions, and is never proof
-	// that one is absent.
+	// that one is absent. (A cached 404 of a .sig or .sigstore.json, read
+	// as an error since the document is written last, can delay a close
+	// by the CDN's error TTL: liveness only.)
 	Extension(ctx context.Context, proposalID string, n int64) (*SiteExtension, error)
 }
 
@@ -55,7 +57,10 @@ const MaxSiteExtensions = 24
 //     it, and it is adopted; 422 too_late says it doesn't, and it is
 //     dropped; anything else is an error and nothing is dropped. The site
 //     skips its time check for a document it already holds, so the probe
-//     changes nothing there.
+//     changes nothing there. Known limit: a 422 with another code
+//     (bad_anchor, unknown_service) is an error here, so every close fails
+//     with nothing dropped, until the site accepts the document or an
+//     operator clears the pending extension (BALLOT-PROTOCOL §10.2).
 //   - The last extension is uploaded again to finish the site's index if
 //     it missed it (index_updated false), as the answer says.
 //
@@ -189,7 +194,7 @@ func (m *Manager) verifySiteExtension(o *OpenProposal, p *vote.Proposal, closes,
 	case e.ClosesAt <= closes || e.ClosesAt-p.ClosesAt > vote.MaxExtension:
 		return errors.New("out of order or over 24 h")
 	}
-	at, err := TSATime(own)
+	at, err := m.tsaTime(own, doc)
 	if err != nil {
 		return err
 	}

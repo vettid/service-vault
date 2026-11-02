@@ -46,6 +46,11 @@ type Approvals interface {
 type Use struct {
 	ProposalID string `json:"proposal_id"`
 	N          int64  `json:"n"`
+	// Retry says this repeats a use whose outcome the caller doesn't know
+	// (a pending extension finished after a failure): if the approval was
+	// already used for exactly this proposal and number, Consume returns
+	// nil. Without it a used approval is always refused.
+	Retry bool `json:"-"`
 }
 
 // ErrNoApprovals is a service vault with no way to check approvals: it

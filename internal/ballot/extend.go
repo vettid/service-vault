@@ -74,20 +74,22 @@ var ErrTooLate = errors.New("ballot: the close to extend has passed")
 var ErrExtensionPending = errors.New("ballot: another extension is pending")
 
 // Extend publishes an extension and sends vote.extended to every eligible
-// member.
+// member. The site also refuses a first upload by its own clock (once the
+// close it extends has passed on the site), whatever the bundle says.
 //
 // It needs the admins' approval (a vote.extend approval) of exactly this
 // extension of this proposal, in its canonical form (CanonicalExtension).
-// The order is: refusals, use the approval, store the signed extension as
-// pending (conditional on the record's version), publish it, mark it in
-// effect. The site's copy is write-once, so what is published must be
-// stored first: a failure after the publish leaves the pending extension,
-// and the same request again (with the same approval, which is not used
-// again) publishes the same bytes and finishes. A failure between the use
-// and the store leaves the approval used (the admins approve again).
+// The order is: refusals, sign, store the signed extension as pending
+// (conditional on the record's version), use the approval, publish it,
+// mark it in effect. The site's copy is write-once, so what is published
+// must be stored first: a failure after the store leaves the pending
+// extension, and the same request again (with the same approval, whose use
+// is repeated, never doubled) publishes the same bytes and finishes. If
+// the approval is refused the pending extension is cleared and the approval
+// is as it was.
 //
 // Whether the extension is in effect is decided by the RFC 3161 time in
-// the bundle this service anchored for it (TSATime), as the site decides:
+// the bundle this service anchored for it (Manager.Timestamp), as the site decides:
 // before the close it extends, or it does not apply (ErrTooLate).
 func (m *Manager) Extend(ctx context.Context, id, approvalID string, in ExtensionInput) (*vote.Extension, error) {
 	unlock, err := m.lock(ctx, id)
@@ -155,15 +157,20 @@ func (m *Manager) Extend(ctx context.Context, id, approvalID string, in Extensio
 	}
 	var sig []byte
 	if pe := o.Pending; pe != nil {
-		// Only the same request, with the approval already used for it,
-		// finishes the pending extension; nothing else is accepted while
-		// it is pending.
+		// Only the same request, with the same approval, finishes the
+		// pending extension; nothing else is accepted while it is
+		// pending. The approval's use is repeated, and the approvals
+		// accept the repeat of the same use (it may or may not have been
+		// recorded before the failure), so it is never used twice.
 		if !bytes.Equal(pe.Doc, doc) || pe.ApprovalID != approvalID {
 			return nil, ErrExtensionPending
 		}
+		if err := m.consume(ctx, approvalID, ActionVoteExtend, payload, Use{ProposalID: pe.Use.ProposalID, N: pe.Use.N, Retry: true}); err != nil {
+			return nil, err
+		}
 		doc, sig = pe.Doc, pe.Sig
 		if kept != nil {
-			if at, err := TSATime(kept); err != nil {
+			if at, err := m.tsaTime(kept, o.Pending.Doc); err != nil {
 				return nil, err
 			} else if at >= o.ClosesAt {
 				return nil, ErrTooLate
@@ -174,16 +181,28 @@ func (m *Manager) Extend(ctx context.Context, id, approvalID string, in Extensio
 		if sig, err = m.Sign(vote.LabelExtended, msg); err != nil {
 			return nil, err
 		}
+		// Stored before the approval is used: a conflict or a failure
+		// here uses nothing, and "retry" is honest. If the use then fails,
+		// the pending extension is cleared and the approval stays usable.
 		use := Use{ProposalID: id, N: e.N}
-		if err := m.consume(ctx, approvalID, ActionVoteExtend, payload, use); err != nil {
-			return nil, err
-		}
 		o.Pending = &PendingExtension{Doc: doc, Sig: sig, ApprovalID: approvalID, Use: use}
 		if err := m.Store.SaveProposal(ctx, o, false); err != nil {
 			return nil, err
 		}
+		if err := m.consume(ctx, approvalID, ActionVoteExtend, payload, use); err != nil {
+			o.Pending = nil
+			if cerr := m.Store.SaveProposal(ctx, o, false); cerr != nil {
+				m.log().Error("pending extension not cleared after a refused approval", "proposal_id", id, "err", cerr.Error())
+			}
+			return nil, err
+		}
 	}
 	rc, err := ep.PublishExtension(ctx, id, e.N, doc, sig)
+	var ref *ErrPublishRefused
+	if errors.As(err, &ref) && ref.Status == 422 && ref.Code == "too_late" {
+		// The site won't take it: not a failure to retry.
+		return nil, ErrTooLate
+	}
 	if err != nil {
 		return nil, fmt.Errorf("ballot: publish extension %d of %s: %w", e.N, id, err)
 	}
@@ -193,7 +212,7 @@ func (m *Manager) Extend(ctx context.Context, id, approvalID string, in Extensio
 	}
 	// Each extension is published before the close it extends (§10.2):
 	// the bundle's RFC 3161 time decides, not this clock.
-	at, err := TSATime(bundle)
+	at, err := m.tsaTime(bundle, doc)
 	if err != nil {
 		return nil, err
 	}

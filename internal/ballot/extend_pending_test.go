@@ -408,3 +408,60 @@ func TestCloseRefusesDisagreement(t *testing.T) {
 		t.Fatalf("agreeing: %v", err)
 	}
 }
+
+// The pending extension is stored before the approval is used: a failed
+// store uses nothing, and a refused approval clears the pending extension
+// and leaves the approval usable.
+func TestExtendStoresPendingBeforeConsume(t *testing.T) {
+	ctx := context.Background()
+	m, _, pub := newManager(t)
+	fs := &failSave{MemStore: peer.NewMemStore()}
+	m.Store.Records = fs
+	m.Catcher = &fakeCatcher{caught: true}
+	c, err := m.Create(ctx, "apv", input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := input()
+	m.Now = func() time.Time { return time.Unix(in.ClosesAt-600, 0) }
+	ap := m.Approvals.(*fakeApprovals)
+	base := ap.consumed
+	outage := vote.Outage{From: in.ClosesAt - 7200, To: in.ClosesAt - 7200 + 5400, Source: "https://status.vettid.org/"}
+	req := ExtensionInput{ClosesAt: in.ClosesAt + 7200, Outage: outage}
+
+	// The store of the pending extension fails (a conflict): nothing used.
+	fs.armed = true
+	if _, err := m.Extend(ctx, c.ProposalID, "apv", req); err == nil {
+		t.Fatal("expected the failed store")
+	}
+	if ap.consumed != base || len(pub.published) != 0 {
+		t.Fatalf("approvals used %d, published %d", ap.consumed-base, len(pub.published))
+	}
+	// The approval is refused: the pending extension is cleared.
+	ap.fail = errors.New("not approved")
+	if _, err := m.Extend(ctx, c.ProposalID, "apv", req); err == nil {
+		t.Fatal("expected the refused approval")
+	}
+	o, _ := m.Store.OpenProposal(ctx, c.ProposalID)
+	if o.Pending != nil || ap.consumed != base || len(pub.published) != 0 {
+		t.Fatalf("after the refusal: pending %v, used %d", o.Pending != nil, ap.consumed-base)
+	}
+	// The same approval, now accepted, works: it was never used.
+	ap.fail = nil
+	if _, err := m.Extend(ctx, c.ProposalID, "apv", req); err != nil || ap.consumed-base != 1 {
+		t.Fatalf("after the refusals: %v, used %d", err, ap.consumed-base)
+	}
+}
+
+// The site refusing a retry as too late is ErrTooLate, not a failure to
+// retry; the pending extension stays for the close to settle.
+func TestExtendRefusedTooLateBySite(t *testing.T) {
+	e := newExtEnv(t)
+	e.pub.refuse = &ErrPublishRefused{Status: 422, Code: "too_late"}
+	if _, err := e.m.Extend(context.Background(), e.id, "apv", e.req(7200)); !errors.Is(err, ErrTooLate) {
+		t.Fatalf("site's too_late: %v", err)
+	}
+	if e.open(t).Pending == nil {
+		t.Fatal("pending was dropped")
+	}
+}

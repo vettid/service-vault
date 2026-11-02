@@ -114,6 +114,8 @@ type fakeApprovals struct {
 	used     map[string]bool
 	consumed int
 	uses     []Use
+	seen     map[Use]bool
+	fail     error // Consume fails with it
 }
 
 type fakeApproval struct {
@@ -123,12 +125,24 @@ type fakeApproval struct {
 }
 
 func (f *fakeApprovals) Consume(_ context.Context, id, action string, payload []byte, use Use) error {
+	retry := use.Retry
 	if use.ProposalID == "" {
 		return errors.New("no use")
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.fail != nil {
+		return f.fail
+	}
+	if f.seen == nil {
+		f.seen = map[Use]bool{}
+	}
+	use.Retry = false
+	if f.seen[use] && retry { // a repeat of the same use
+		return nil
+	}
 	if f.auto {
+		f.seen[use] = true
 		f.consumed++
 		return nil
 	}
@@ -142,6 +156,7 @@ func (f *fakeApprovals) Consume(_ context.Context, id, action string, payload []
 		return errors.New("used")
 	}
 	f.used[id] = true
+	f.seen[use] = true
 	f.consumed++
 	f.uses = append(f.uses, use)
 	return nil
@@ -162,7 +177,7 @@ func newManager(t *testing.T) (*Manager, *fakeSender, *fakePublisher) {
 		Store: &RecordStore{Records: peer.NewMemStore(), Copy: &MemCopy{}},
 		Sign:  func(label string, msg []byte) ([]byte, error) { return suite.Sign(ik, label, msg) },
 		IK:    ik.Public().(ed25519.PublicKey), Roster: fakeRoster{"c2", "c0", "c1"}, Sender: s, Publisher: p,
-		NewID: envelope.NewULID, Now: func() time.Time { return clock }, Approvals: &fakeApprovals{auto: true},
+		NewID: envelope.NewULID, Now: func() time.Time { return clock }, Approvals: &fakeApprovals{auto: true}, Timestamp: ballottest.Time,
 	}
 	p.integrated = func() int64 { return m.Now().Unix() }
 	return m, s, p

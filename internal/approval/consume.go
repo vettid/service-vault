@@ -3,6 +3,7 @@ package approval
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"time"
@@ -27,7 +28,9 @@ type usedRecord struct {
 // of the input about to be executed, compared byte for byte) and has not
 // run out; then it writes the apv_used record with IfAbsent together with
 // an approval.consumed audit entry, in one batch. Of any number of
-// concurrent calls for one approval, one succeeds.
+// concurrent calls for one approval, one succeeds. A call with use.Retry
+// for the same proposal and number of an approval already used for them
+// returns nil: it is a retry of that use, and nothing more is written.
 //
 // The caller executes only after Consume returns nil. Whatever fails
 // after that leaves the approval used (fail closed): the admins approve
@@ -62,7 +65,21 @@ func (m *Manager) Consume(ctx context.Context, id, action string, payload []byte
 		return errCode(CodeApprovalWrongAction)
 	case len(payload) == 0 || !bytes.Equal(r.Payload, payload):
 		return errCode(CodeApprovalMismatch)
-	case !now.Before(r.Exp):
+	}
+	// A caller that says it repeats a use (use.Retry) and finds the
+	// approval already used for exactly that proposal and number has the
+	// same use, not a second one.
+	if use.Retry {
+		if u, used, err := m.usedBy(ctx, id); err != nil {
+			return err
+		} else if used {
+			if u.ProposalID == use.ProposalID && u.N == use.N {
+				return nil
+			}
+			return errCode(CodeApprovalUsed)
+		}
+	}
+	if !now.Before(r.Exp) {
 		return errCode(CodeApprovalExpired)
 	}
 	// Recount: an admin removed since approving no longer stands behind
@@ -125,4 +142,17 @@ func (m *Manager) Consume(ctx context.Context, id, action string, payload []byte
 	}
 	m.log().Info("approval used", "approval_id", id, "action", action)
 	return nil
+}
+
+// usedBy returns the use recorded for an approval already used.
+func (m *Manager) usedBy(ctx context.Context, id string) (usedRecord, bool, error) {
+	var u usedRecord
+	data, ok, err := m.Store.Get(ctx, kindUsed, id)
+	if err != nil || !ok {
+		return u, false, err
+	}
+	if err := json.Unmarshal(data, &u); err != nil {
+		return u, false, err
+	}
+	return u, true, nil
 }

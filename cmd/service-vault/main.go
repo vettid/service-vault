@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -475,6 +476,9 @@ func serve(args []string) error {
 			anc, err := anchor.New(cfg.Sigstore, akPriv)
 			if err != nil {
 				return err
+			}
+			mgr.Timestamp = func(bundle json.RawMessage, doc []byte) (int64, error) {
+				return anchor.TimestampTime(cfg.Sigstore, bundle, doc)
 			}
 			mgr.Publisher = &publish.Publisher{URL: cfg.VotesURL, Anchor: anc, Client: anchor.Client(time.Minute), Records: records, Log: log}
 		}

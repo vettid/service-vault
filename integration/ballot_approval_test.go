@@ -94,7 +94,7 @@ func runProposalApproval(t *testing.T, ctx context.Context, st peer.Store, pager
 	ik := ed25519.NewKeyFromSeed(sha256Bytes("service ik"))
 	bm := &ballot.Manager{Store: &ballot.RecordStore{Records: st, Copy: &ballot.MemCopy{}}, IK: ik.Public().(ed25519.PublicKey),
 		Sign:   func(label string, msg []byte) ([]byte, error) { return suite.Sign(ik, label, msg) },
-		Roster: roster{"c1", "c2", "c3"}, Sender: sink{}, Publisher: site{}, Approvals: m, NewID: envelope.NewULID, Now: time.Now}
+		Roster: roster{"c1", "c2", "c3"}, Sender: sink{}, Publisher: site{}, Approvals: m, NewID: envelope.NewULID, Now: time.Now, Timestamp: ballottest.Time}
 	m.ProposalTitle = func(ctx context.Context, id string) (string, bool, error) {
 		o, err := bm.Store.OpenProposal(ctx, id)
 		if err != nil || o == nil {
