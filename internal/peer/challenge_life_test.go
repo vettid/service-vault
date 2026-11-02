@@ -103,7 +103,6 @@ func TestLongLivedChallengeLimit(t *testing.T) {
 	f.pump()
 	if n := len(m.Received(peerwire.TypeConnAuthWithdraw)); n != 2 {
 		t.Fatalf("%d withdraws", n)
-		t.Fatalf("%d withdraws", n)
 	}
 	if _, d := send(long); d != short {
 		t.Fatalf("with an undelivered withdraw %v", d)

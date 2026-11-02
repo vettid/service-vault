@@ -285,11 +285,18 @@ func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 func readJSONMax(w http.ResponseWriter, r *http.Request, v any, max int64) bool {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, max))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil || dec.More() {
+	if err := dec.Decode(v); err != nil || !atEOF(dec) {
 		writeError(w, http.StatusBadRequest, "bad_request")
 		return false
 	}
 	return true
+}
+
+// atEOF reports whether nothing but whitespace follows the value dec
+// decoded: dec.More alone is false before a stray ']' or '}'.
+func atEOF(dec *json.Decoder) bool {
+	_, err := dec.Token()
+	return errors.Is(err, io.EOF)
 }
 
 type inviteBody struct {
@@ -472,7 +479,7 @@ func (s *Server) remindApproval(w http.ResponseWriter, r *http.Request) {
 		// An empty body (also when sent chunked) is no body.
 		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRemindBody))
 		dec.DisallowUnknownFields()
-		if err := dec.Decode(&b); err != nil && !errors.Is(err, io.EOF) || err == nil && dec.More() {
+		if err := dec.Decode(&b); err != nil && !errors.Is(err, io.EOF) || err == nil && !atEOF(dec) {
 			writeError(w, http.StatusBadRequest, "bad_request")
 			return
 		}
@@ -536,6 +543,7 @@ var approvalStatusCodes = map[string]int{
 	approval.CodeNothingToRemind:   http.StatusConflict,
 	approval.CodeNotAdmin:          http.StatusUnprocessableEntity,
 	approval.CodeAnswered:          http.StatusConflict,
+	approval.CodeAskBudget:         http.StatusConflict,
 }
 
 func (s *Server) approvalError(w http.ResponseWriter, what string, err error) {
