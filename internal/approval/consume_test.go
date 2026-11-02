@@ -421,8 +421,8 @@ func TestAdminSetSummaryBuilt(t *testing.T) {
 		t.Fatal("a refused approval was sent")
 	}
 	fp := sha256.Sum256(append([]byte("vettid/vms/2/ik-fp"), fakeIK("c3")...))
-	h := hex.EncodeToString(fp[:4])
-	want := "name not given, connected 2026-11-02, key " + h[:4] + " " + h[4:] + ", connection c3"
+	h := hex.EncodeToString(fp[:8])
+	want := "name not given, connected 2026-11-02, key " + h[:4] + " " + h[4:8] + " " + h[8:12] + " " + h[12:] + ", connection c3"
 	c := f.create(ActionAdminSetAdd, "", `{"connection_id":"c3"}`)
 	if s := f.status(c.ID).Summary; s != want {
 		t.Fatalf("%q, want %q", s, want)
@@ -442,5 +442,24 @@ func TestAdminSetSummaryBuilt(t *testing.T) {
 	}
 	if ctxt := f.p.last("c1").ctxt; !strings.Contains(ctxt, "Remove admin: ") {
 		t.Fatalf("%q", ctxt)
+	}
+}
+
+// The longest admin_set summary fits the context whole, with the longest
+// service name and either label.
+func TestAdminSetSummaryFitsContext(t *testing.T) {
+	f := newFixture(t, 1, "c1")
+	id := strings.Repeat("c", 40)
+	f.p.active[id] = true
+	f.p.names = map[string]string{id: strings.Repeat("n", MaxAdminName)}
+	f.m.ServiceName = strings.Repeat("S", MaxServiceName)
+	for _, a := range []string{ActionAdminSetAdd, ActionAdminSetRemove} {
+		sum, err := f.m.adminSetSummary(a, []byte(`{"connection_id":"`+id+`"}`))
+		if err != nil || len(sum) > MaxAdminSummary {
+			t.Fatalf("%s: %d %v", a, len(sum), err)
+		}
+		if _, err := ChallengeContext(f.m.ServiceName, a, sum, strings.Repeat("a", 64)); err != nil {
+			t.Fatalf("%s: %v", a, err)
+		}
 	}
 }

@@ -457,11 +457,13 @@ const MaxAdminName = 32
 // The name is what the member's vault sent when it connected: the admins
 // are told it is self-declared (anyone the API key can invite can choose
 // any name), and the date, the fingerprint and the id are what the
-// service holds. The fingerprint is the first 8 hex digits, in the two
-// groups of 4 the app shows, of SHA-256("vettid/vms/2/ik-fp" || ik) of the
-// connection's pinned identity key (VAULT-MESSAGING §10.8), which the
-// member's app shows on the connection's details (as the first two of its
-// 8 groups of 4). Nothing is cut or replaced: an added connection whose name is
+// service holds. The fingerprint is the first 16 hex digits, in the first
+// 4 of the 8 groups of 4 that apps show, of
+// SHA-256("vettid/vms/2/ik-fp" || ik) of the connection's pinned identity
+// key (VAULT-MESSAGING §10.8). The member's own app does not show its
+// vault's fingerprint; an admin connected to that member can compare it
+// with the vault key fingerprint on their own connection with them, since
+// the vault presents one ik everywhere. Nothing is cut or replaced: an added connection whose name is
 // over MaxAdminName characters or has characters outside printable ASCII
 // and Latin-1 letters, that is unknown or not active, or has no pinned
 // credential key (it has never signed in) or no identity key, is refused.
@@ -503,8 +505,8 @@ func (m *Manager) adminSetSummary(action string, payload []byte) (string, error)
 	}
 	if len(info.IK) == ed25519.PublicKeySize {
 		fp := sha256.Sum256(append([]byte("vettid/vms/2/ik-fp"), info.IK...))
-		h := hex.EncodeToString(fp[:4])
-		s += ", key " + h[:4] + " " + h[4:]
+		h := hex.EncodeToString(fp[:8])
+		s += ", key " + h[:4] + " " + h[4:8] + " " + h[8:12] + " " + h[12:]
 	}
 	s += ", connection " + target
 	if len(s) > MaxAdminSummary {

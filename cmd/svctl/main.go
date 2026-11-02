@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -477,7 +478,7 @@ func (c *cli) approveAndFollow(ctx context.Context, req servicevault.ApprovalReq
 			return ap.ID, err
 		}
 		if json.Unmarshal(req.Payload, &p) != nil || p.ConnectionID == "" || !strings.HasSuffix(st.Summary, ", connection "+p.ConnectionID) ||
-			(req.Action == servicevault.ActionAdminSetAdd && (!strings.Contains(st.Summary, ", connected ") || !strings.Contains(st.Summary, ", key "))) {
+			(req.Action == servicevault.ActionAdminSetAdd && (!strings.Contains(st.Summary, ", connected ") || !addedKey.MatchString(st.Summary))) {
 			return ap.ID, errors.New("the summary the admins read does not name the connection asked for")
 		}
 		summary = st.Summary
@@ -523,6 +524,10 @@ func (c *cli) approveAndFollow(ctx context.Context, req servicevault.ApprovalReq
 	})
 	return ap.ID, err
 }
+
+// addedKey is the key fingerprint of an admin_set.add summary: 16 hex
+// digits in 4 groups.
+var addedKey = regexp.MustCompile(`, key [0-9a-f]{4}( [0-9a-f]{4}){3}, connection `)
 
 // proposalTitle reads the title of the proposal a vote.extend payload is
 // for, as the service has it, to build the summary the admins read.

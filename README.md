@@ -689,16 +689,17 @@ admin's connection.
   (`admin_set.remove`), `Contract template:` (`contract_template.change`),
   `Push assignment:` (`assignment.push`). For `admin_set.add` and
   `admin_set.remove` the application gives no `summary` (`invalid_summary`):
-  the service writes `name given "<name>", connected <date>, key <8 hex
-  digits>, connection <id>` for the connection. The name is the one the
+  the service writes `name given "<name>", connected <date>, key <16 hex
+  digits in 4 groups>, connection <id>` for the connection. The name is the one the
   member's vault sent when it connected, so the wording says it is
   self-declared; it is shown whole, at most 32 characters of printable
   ASCII and Latin-1 letters, or the approval is refused (`field_not_shown`).
-  The date is when the connection was activated. The key is the first two
-  groups of 4 of the fingerprint of the connection's identity key,
-  `SHA-256("vettid/vms/2/ik-fp" || ik)` (VAULT-MESSAGING §10.8), which the
-  member's app shows on the connection's details, so the member can read
-  it out. An added connection that is unknown, not active, or has no
+  The date is when the connection was activated. The key is the first 4 of the 8 groups of 4 of the
+  fingerprint of the connection's identity key,
+  `SHA-256("vettid/vms/2/ik-fp" || ik)` (VAULT-MESSAGING §10.8). The
+  member's own app does not show it; an admin connected to that member can
+  compare it with the vault key fingerprint on their own connection with
+  them, as the vault presents one `ik` everywhere. An added connection that is unknown, not active, or has no
   pinned credential key (it has never signed in) is refused
   (`invalid_connection`); removing a connection the service no longer
   knows names only its id. An application's summary can't

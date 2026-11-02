@@ -138,7 +138,7 @@ func (f *fakeApprovals) Create(_ context.Context, r approval.Request) (*approval
 			ConnectionID string `json:"connection_id"`
 		}
 		_ = json.Unmarshal(r.Payload, &p)
-		r.Summary = `name given "Ann", connected 2026-11-02, key 9a1f bb7d, connection ` + p.ConnectionID
+		r.Summary = `name given "Ann", connected 2026-11-02, key 9a1f bb7d 0123 4567, connection ` + p.ConnectionID
 		if f.wrongTarget {
 			r.Summary = `"Ann", connection c9`
 		}
@@ -368,7 +368,7 @@ func TestApprove(t *testing.T) {
 	if code, _, errOut := newFixture(t).run(t, "approve", "-action", "admin_set.add", "-summary", "x", "-payload", `{"connection_id":"c2"}`); code != exitUsage || !strings.Contains(errOut, "takes no -summary") {
 		t.Fatalf("exit %d %s", code, errOut)
 	}
-	if code, out, errOut := newFixture(t).run(t, "approve", "-action", "admin_set.add", "-payload", `{"connection_id":"c2"}`); code != exitOK || !strings.Contains(out, `summary: name given "Ann", connected 2026-11-02, key 9a1f bb7d, connection c2`) || !strings.Contains(out, "action_hash_check: ok") {
+	if code, out, errOut := newFixture(t).run(t, "approve", "-action", "admin_set.add", "-payload", `{"connection_id":"c2"}`); code != exitOK || !strings.Contains(out, `summary: name given "Ann", connected 2026-11-02, key 9a1f bb7d 0123 4567, connection c2`) || !strings.Contains(out, "action_hash_check: ok") {
 		t.Fatalf("exit %d %s %s", code, out, errOut)
 	}
 	wt := newFixture(t)
