@@ -711,6 +711,119 @@ export class ServiceVaultStack extends cdk.Stack {
     ecsAlarm('deploy_failed', 'A service vault deployment failed and the circuit breaker rolled it back',
       logs.FilterPattern.stringValue('$.detail.eventName', '=', 'SERVICE_DEPLOYMENT_FAILED'));
 
+    // ---- Control-plane watch (ballot review P1) -------------------------------
+    // Someone with AWS access to this account (not the enclave) can run a
+    // task under the task role and read the keystore, or move the TLS pin.
+    // CloudTrail management events (the account's or the organization's
+    // trail; this stack creates none) reach EventBridge; each rule below
+    // logs its matches, labelled, to one log group and one alarm per label
+    // notifies the same topic. "notice" ones are expected during a deploy.
+    // iam:PassRole is not a CloudTrail event, so the task role's use is
+    // watched where it is passed: RegisterTaskDefinition, RunTask,
+    // StartTask and CreateService naming it or the family.
+    const secEvents = new logs.LogGroup(this, 'SecurityEvents', {
+      retention: logs.RetentionDays.ONE_YEAR,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+    const secEventsArn = this.formatArn({ service: 'logs', resource: 'log-group', resourceName: secEvents.logGroupName, arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME });
+    new logs.ResourcePolicy(this, 'SecurityEventsPolicy', {
+      resourcePolicyName: `${prefix}-security-events`,
+      policyStatements: [new iam.PolicyStatement({
+        principals: [new iam.ServicePrincipal('events.amazonaws.com')],
+        actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
+        resources: [secEvents.logGroupArn],
+        conditions: { StringEquals: { 'aws:SourceAccount': this.account } },
+      })],
+    });
+    const taskRoleArn = taskDef.taskRole.roleArn;
+    const family = taskDef.family;
+    const familyArn = this.formatArn({ service: 'ecs', resource: 'task-definition', resourceName: family });
+    // A task definition as RunTask/CreateService name it: family, family:revision or its ARN.
+    const ourTaskDef = events.Match.anyOf(
+      events.Match.exactString(family), events.Match.prefix(`${family}:`), events.Match.prefix(`${familyArn}:`),
+    );
+    const notTaskRole = { 'anything-but': [taskRoleArn] };
+    // Anything but the task role's own sessions. anything-but needs the
+    // field present, and only role sessions carry a session issuer, so the
+    // other callers (IAM users, root, services) are a second branch.
+    const notTaskRoleSession = [
+      { userIdentity: { type: [{ 'anything-but': ['AssumedRole'] }] } },
+      { userIdentity: { type: ['AssumedRole'], sessionContext: { sessionIssuer: { arn: [notTaskRole] } } } },
+    ];
+    const secRule = (name: string, severity: 'notice' | 'alarm', description: string, alarmDescription: string, source: string, detail: object) => {
+      // The targets are written out (not CloudWatchLogGroup targets) so that
+      // one resource policy (account-wide, 10 per region) serves all six rules.
+      const rule = new events.Rule(this, `Sec-${name}-rule`, {
+        description: `${description} (${name} ${severity})`,
+        eventPattern: { source: [source], detailType: ['AWS API Call via CloudTrail'], detail },
+      });
+      (rule.node.defaultChild as events.CfnRule).targets = [{
+        id: 'Target0',
+        arn: secEventsArn,
+        inputTransformer: {
+          inputPathsMap: {
+            time: '$.time',
+            name: '$.detail.eventName',
+            who: '$.detail.userIdentity.arn',
+            ip: '$.detail.sourceIPAddress',
+            id: '$.detail.eventID',
+          },
+          inputTemplate: `{"timestamp":<time>,"message":"sec:${name} <name> by <who> from <ip> id <id>"}`,
+        },
+      }];
+      const metric = new logs.MetricFilter(this, `Sec-${name}`, {
+        logGroup: secEvents,
+        filterPattern: logs.FilterPattern.literal(`"sec:${name}"`),
+        metricNamespace: `VettID/ServiceVault/${envName}`,
+        metricName: name,
+        metricValue: '1',
+      }).metric({ statistic: 'Sum', period: cdk.Duration.minutes(5) });
+      notify(new cloudwatch.Alarm(this, `Sec-${name}-alarm`, {
+        alarmName: `${prefix}-${severity === 'notice' ? 'notice-' : ''}${name}`,
+        alarmDescription: `${severity === 'notice' ? 'NOTICE (a deploy triggers it): ' : ''}${alarmDescription}`,
+        metric,
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }));
+    };
+    secRule('taskdef_registered', 'notice', 'A task definition revision of the service vault family was registered',
+      'A new task definition revision of the service vault family was registered (every deploy does this; otherwise someone is changing what runs under the task role)',
+      'aws.ecs', { eventName: ['RegisterTaskDefinition'], requestParameters: { family: [family] } });
+    secRule('service_updated', 'notice', 'The service vault ECS service was updated',
+      'The service vault ECS service was updated (every deploy does this; otherwise someone is changing what runs)',
+      'aws.ecs', { eventName: ['UpdateService'], requestParameters: { service: [prefix, this.service.serviceArn] } });
+    secRule('run_task', 'alarm', 'A task was run or started in the service vault cluster',
+      'A task was run or started by hand in the service vault cluster: the service never does (it starts tasks itself, not as RunTask); someone may be running code under the task role',
+      'aws.ecs', { eventName: ['RunTask', 'StartTask'], requestParameters: { cluster: [prefix, cluster.clusterArn] } });
+    secRule('taskrole_use', 'alarm', 'The task role or task definition family was used outside the service',
+      'The service vault task role or task definition was named in a run, start, create-service or a task definition of another family: someone is running code under the task role',
+      'aws.ecs', {
+        $or: [
+          { eventName: ['RegisterTaskDefinition'], requestParameters: { taskRoleArn: [taskRoleArn], family: [{ 'anything-but': [family] }] } },
+          { eventName: ['RunTask', 'StartTask', 'CreateService'], requestParameters: { taskDefinition: ourTaskDef } },
+          { eventName: ['RunTask', 'StartTask'], requestParameters: { overrides: { taskRoleArn: [taskRoleArn] } } },
+        ],
+      });
+    secRule('keystore_decrypt', 'alarm', 'The keystore key was used to decrypt or re-encrypt by a principal other than the task role',
+      'The keystore KMS key was used (Decrypt, ReEncrypt) by something other than the service vault task role',
+      'aws.kms', {
+        eventName: ['Decrypt', 'ReEncryptFrom', 'ReEncryptTo'],
+        resources: { ARN: [this.key.keyArn] },
+        $or: notTaskRoleSession,
+      });
+    secRule('tls_pin_change', 'alarm', 'The TLS pin parameter was written or deleted by a principal other than the task role',
+      'The service vault TLS pin parameter was written or deleted by something other than the task role (a deploy that creates the parameter fires it once)',
+      'aws.ssm', {
+        $or: [
+          { eventName: ['PutParameter', 'DeleteParameter'], requestParameters: { name: [tlsPin.parameterName] }, userIdentity: notTaskRoleSession[0].userIdentity },
+          { eventName: ['PutParameter', 'DeleteParameter'], requestParameters: { name: [tlsPin.parameterName] }, userIdentity: notTaskRoleSession[1].userIdentity },
+          { eventName: ['DeleteParameters'], requestParameters: { names: [tlsPin.parameterName] }, userIdentity: notTaskRoleSession[0].userIdentity },
+          { eventName: ['DeleteParameters'], requestParameters: { names: [tlsPin.parameterName] }, userIdentity: notTaskRoleSession[1].userIdentity },
+        ],
+      });
+
     // Down: ECS reports the service's CPU every minute while a task runs
     // (without Container Insights too); no data for 10 minutes means no
     // task (a Spot reclamation is replaced in a minute or two).
