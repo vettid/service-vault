@@ -131,6 +131,7 @@ type Config struct {
 	ApprovalTTL         time.Duration // SV_APPROVAL_TTL, default 24h (1h on staging)
 	Channel             string        // SV_CHANNEL: staging | production (default)
 	AllowNoPurpose      bool          // SV_APPROVAL_ALLOW_NO_PURPOSE, default false
+	LongChallenges      bool          // SV_LONG_APPROVAL_CHALLENGES, default false
 	// TestSignIns serves POST /v1/signins/unsigned (SV_TEST_SIGNINS, default
 	// false): for test deployments only.
 	TestSignIns bool
@@ -236,6 +237,15 @@ func configFromEnv(getenv func(string) string) (*Config, error) {
 		c.AllowNoPurpose = true
 	default:
 		return nil, errors.New("SV_APPROVAL_ALLOW_NO_PURPOSE: true or false")
+	}
+	// Off until the channel's member vaults carry VAULT-MESSAGING 0.82.0
+	// (§10.4, "Older vaults"); chosen; not in the spec.
+	switch v := strings.TrimSpace(getenv("SV_LONG_APPROVAL_CHALLENGES")); v {
+	case "", "false":
+	case "true":
+		c.LongChallenges = true
+	default:
+		return nil, errors.New("SV_LONG_APPROVAL_CHALLENGES: true or false")
 	}
 	switch v := strings.TrimSpace(getenv("SV_TEST_SIGNINS")); v {
 	case "", "false":
@@ -386,7 +396,7 @@ func serve(args []string) error {
 		}
 	}
 	approvals := &approval.Manager{Store: records, Pager: records, ServiceName: cfg.ServiceName,
-		Threshold: cfg.AdminThreshold, TTL: cfg.ApprovalTTL, AllowNoPurpose: cfg.AllowNoPurpose, BootstrapKey: bootKey, BoundConnection: svc.BoundConnection, Log: log,
+		Threshold: cfg.AdminThreshold, TTL: cfg.ApprovalTTL, LongChallenges: cfg.LongChallenges, AllowNoPurpose: cfg.AllowNoPurpose, BootstrapKey: bootKey, BoundConnection: svc.BoundConnection, Log: log,
 		Hooks: &webhook.Outbox{Store: records, Kind: approval.HookKind, Sender: sender, Log: log}}
 	if err := approvals.Start(ctx); err != nil {
 		return fmt.Errorf("approvals: %w", err)

@@ -188,12 +188,16 @@ MEMBER-SERVICE-PLAN §4.5 and §5.2; the operator's view is in the README,
   signature never counts. m approvals settle it `approved`; when the
   approvals plus the admins who can still answer fall below m, `denied`.
   Settling cancels the other admins' challenges on the service's side.
-  A challenge's `exp` is the approval's own expiry, at least 10 minutes
-  and at most 24 hours after it is sent (VAULT-MESSAGING 0.82.0 §10.4);
-  a reminder goes only to admins holding no live challenge. When a
-  challenge expires unanswered before the approval's own expiry (an older
-  member vault cuts it to 10 minutes) and the approval is
-  still pending, the service logs INFO `approval challenge expired`
+  With `SV_LONG_APPROVAL_CHALLENGES` a challenge's `exp` is the approval's
+  own expiry, at least 10 minutes and at most 24 hours after it is sent
+  (VAULT-MESSAGING 0.82.0 §10.4), and a reminder goes only to admins
+  holding no live challenge. The service cannot see a member vault clamp a
+  challenge (the vault drops it silently), which is why the flag is off by
+  default and why `internal/peer` sends at most 2 long challenges per
+  connection at a time, as a member vault keeps (a third goes with 10
+  minutes). Otherwise a challenge lasts 10 minutes, and a reminder challenges every admin who has not answered. When a
+  challenge expires unanswered before the approval's own expiry and the
+  approval is still pending, the service logs INFO `approval challenge expired`
   (ids only), queues the `approval.challenge_expired` webhook with the
   save, and the approval's status lists the admin in `remind_needed`
   (admins asked, not answered, holding no live challenge) until a

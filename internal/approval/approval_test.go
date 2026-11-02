@@ -57,7 +57,24 @@ func (p *fakePeer) Authenticate(_ context.Context, conn, ctxt, purpose string, t
 	}
 	p.n++
 	req := fmt.Sprintf("req%02d", p.n)
-	p.sent = append(p.sent, sent{conn, req, ctxt, p.now(), ttl})
+	// As the peer sends it: 10 minutes unless longer is asked, and only two
+	// long ones per connection at a time.
+	now := p.now()
+	if ttl <= 0 {
+		ttl = peerwire.ConnAuthChallengeTTL
+	}
+	if ttl > peerwire.ConnAuthChallengeTTL {
+		long := 0
+		for _, o := range p.sent {
+			if o.conn == conn && o.ttl > peerwire.ConnAuthChallengeTTL && now.Before(o.at.Add(o.ttl)) {
+				long++
+			}
+		}
+		if long >= peer.MaxLongLivedChallenges {
+			ttl = peerwire.ConnAuthChallengeTTL
+		}
+	}
+	p.sent = append(p.sent, sent{conn, req, ctxt, now, ttl})
 	return req, nil
 }
 
@@ -238,10 +255,7 @@ func (f *fixture) answerTo(s sent, how string) *peer.Event {
 	case "bad":
 		e.Type, e.Reason = peer.EventSignInDenied, "bad_signature"
 		sig()
-	case "expire": // a member vault that clamped the challenge to 10 minutes
-		e.Type = peer.EventSignInExpired
-		e.Exp = s.at.Add(min(s.ttl, RemindInterval))
-	case "expire-long": // the challenge ran its full life
+	case "expire": // the challenge ran out: at the exp it was sent with
 		e.Type = peer.EventSignInExpired
 		e.Exp = s.at.Add(s.ttl)
 	}
@@ -484,13 +498,13 @@ func TestRemindRateLimit(t *testing.T) {
 	f.answer("c1", "approve")
 	f.p.fail = nil
 	f.clk.Advance(time.Second)
-	// c2 still holds a live challenge: only c3 is challenged.
+	old := f.p.last("c2").req
 	r, err := f.m.Remind(context.Background(), c.ID)
-	if err != nil || strings.Join(r.Reminded, ",") != "c3" {
+	if err != nil || strings.Join(r.Reminded, ",") != "c2,c3" {
 		t.Fatalf("%+v %v", r, err)
 	}
-	if len(f.p.cancelled) != 0 {
-		t.Fatal("a live challenge was cancelled")
+	if !slices.Contains(f.p.cancelled, old) {
+		t.Fatal("previous challenge not cancelled")
 	}
 	if _, err := f.m.Remind(context.Background(), c.ID); codeOf(err) != CodeTooSoon {
 		t.Fatalf("%v", err)
@@ -945,9 +959,8 @@ func TestChallengeExpired(t *testing.T) {
 	if len(f.hk.of(EventChallengeExpired)) != 1 {
 		t.Fatal("webhook twice")
 	}
-	// c2 still holds its live challenge, so only c1 is challenged again.
 	r, err := f.m.Remind(context.Background(), c.ID)
-	if err != nil || strings.Join(r.Reminded, ",") != "c1" {
+	if err != nil || strings.Join(r.Reminded, ",") != "c1,c2" {
 		t.Fatalf("%+v %v", r, err)
 	}
 	if s := f.status(c.ID); len(s.RemindNeeded) != 0 {
@@ -960,6 +973,7 @@ func TestChallengeExpired(t *testing.T) {
 // sends the approval's remaining life.
 func TestChallengeLife(t *testing.T) {
 	f := newFixture(t, 1, "c1")
+	f.m.LongChallenges = true
 	f.m.TTL = 6 * time.Hour
 	f.create(ActionVoteOpen, "Open", `{}`)
 	if got := f.p.last("c1").ttl; got != 6*time.Hour {
@@ -975,6 +989,7 @@ func TestChallengeLife(t *testing.T) {
 	if got := f.p.last("c1").ttl; got != 4*time.Hour {
 		t.Fatalf("reminder ttl %v", got)
 	}
+	f.clk.Advance(24 * time.Hour) // the first challenges are over
 	f.m.TTL = 7 * 24 * time.Hour
 	f.create(ActionVoteOpen, "Third", `{}`)
 	if got := f.p.last("c1").ttl; got != peer.MaxApprovalChallengeTTL {
@@ -999,11 +1014,12 @@ func TestChallengeLife(t *testing.T) {
 // approval.challenge_expired: the approval's own expiry is reported.
 func TestChallengeEndsWithApproval(t *testing.T) {
 	f := newFixture(t, 1, "c1")
+	f.m.LongChallenges = true
 	f.m.TTL = time.Hour
 	c := f.create(ActionVoteOpen, "Open", `{}`)
 	ch := f.p.last("c1")
 	f.clk.Advance(time.Hour)
-	f.answerTo(ch, "expire-long")
+	f.answerTo(ch, "expire")
 	f.tick()
 	if n := len(f.hk.of(EventChallengeExpired)); n != 0 {
 		t.Fatalf("%d challenge_expired webhooks", n)
@@ -1023,11 +1039,12 @@ func TestChallengeEndsWithApproval(t *testing.T) {
 // shorter life than the approval's) is still reported.
 func TestChallengeExpiresBeforeApproval(t *testing.T) {
 	f := newFixture(t, 1, "c1")
+	f.m.LongChallenges = true
 	c := f.create(ActionVoteOpen, "Open", `{}`)
 	ch := f.p.last("c1")
-	ch.ttl = 2 * time.Hour // as if the member's vault ended it early
+	ch.ttl = 2 * time.Hour // as if it had been sent with less than the approval's life
 	f.clk.Advance(2 * time.Hour)
-	f.answerTo(ch, "expire-long")
+	f.answerTo(ch, "expire")
 	f.tick()
 	if n := len(f.hk.of(EventChallengeExpired)); n != 1 {
 		t.Fatalf("%d webhooks", n)
@@ -1041,7 +1058,12 @@ func TestChallengeExpiresBeforeApproval(t *testing.T) {
 // to remind, and no challenge is sent.
 func TestRemindNothingToRemind(t *testing.T) {
 	f := newFixture(t, 2, "c1", "c2")
+	f.m.LongChallenges = true
 	c := f.create(ActionVoteOpen, "Open", `{}`)
+	// Nothing to remind is answered before too_soon.
+	if _, err := f.m.Remind(context.Background(), c.ID); codeOf(err) != CodeNothingToRemind {
+		t.Fatalf("%v", err)
+	}
 	f.clk.Advance(RemindInterval)
 	n := len(f.p.sent)
 	if _, err := f.m.Remind(context.Background(), c.ID); codeOf(err) != CodeNothingToRemind {
@@ -1107,9 +1129,8 @@ func TestRemindNeededLeavesWithAdmin(t *testing.T) {
 		t.Fatalf("%+v", s)
 	}
 	f.clk.Advance(RemindInterval)
-	// c1 holds a live challenge and c2 has left: nothing to remind.
-	if _, err := f.m.Remind(context.Background(), c.ID); codeOf(err) != CodeNothingToRemind {
-		t.Fatalf("%v", err)
+	if _, err := f.m.Remind(context.Background(), c.ID); err != nil {
+		t.Fatal(err)
 	}
 	if s := f.status(c.ID); len(s.RemindNeeded) != 0 {
 		t.Fatalf("after remind %v", s.RemindNeeded)
@@ -1134,5 +1155,61 @@ func TestRemindNeededNotSent(t *testing.T) {
 	}
 	if s := f.status(c.ID); len(s.RemindNeeded) != 0 || s.RemindAfter != nil {
 		t.Fatalf("%+v", s)
+	}
+}
+
+// With the gate off (member vaults before 0.82.0) a challenge lasts 10
+// minutes, and what #105 reported still holds: the webhook, remind_needed,
+// and a reminder that challenges every admin who has not answered.
+func TestChallengeShortWithoutGate(t *testing.T) {
+	f := newFixture(t, 2, "c1", "c2")
+	c := f.create(ActionVoteOpen, "Open", `{}`)
+	ch := f.p.last("c1")
+	if ch.ttl != RemindInterval {
+		t.Fatalf("ttl %v", ch.ttl)
+	}
+	f.clk.Advance(RemindInterval)
+	f.answerTo(ch, "expire")
+	f.tick()
+	if n := len(f.hk.of(EventChallengeExpired)); n != 1 {
+		t.Fatalf("%d webhooks", n)
+	}
+	if s := f.status(c.ID); strings.Join(s.RemindNeeded, ",") != "c1" {
+		t.Fatalf("%+v", s)
+	}
+	r, err := f.m.Remind(context.Background(), c.ID)
+	if err != nil || strings.Join(r.Reminded, ",") != "c1,c2" {
+		t.Fatalf("%+v %v", r, err)
+	}
+	if got := f.p.last("c1").ttl; got != RemindInterval {
+		t.Fatalf("reminder ttl %v", got)
+	}
+}
+
+// With the gate on, a third concurrent approval challenge to a connection
+// is sent with 10 minutes (the member vault keeps two long ones); when it
+// runs out the approval is still open, so it is reported and the admin
+// can be reminded, while the long ones end quietly with their approvals.
+func TestThirdConcurrentLongChallenge(t *testing.T) {
+	f := newFixture(t, 1, "c1")
+	f.m.LongChallenges = true
+	f.create(ActionVoteOpen, "One", `{}`)
+	f.create(ActionVoteOpen, "Two", `{}`)
+	third := f.create(ActionVoteOpen, "Three", `{}`)
+	ch := f.p.last("c1")
+	if ch.ttl != RemindInterval {
+		t.Fatalf("third ttl %v", ch.ttl)
+	}
+	f.clk.Advance(RemindInterval)
+	f.answerTo(ch, "expire")
+	f.tick()
+	if n := len(f.hk.of(EventChallengeExpired)); n != 1 {
+		t.Fatalf("%d webhooks", n)
+	}
+	if s := f.status(third.ID); strings.Join(s.RemindNeeded, ",") != "c1" {
+		t.Fatalf("%+v", s)
+	}
+	if r, err := f.m.Remind(context.Background(), third.ID); err != nil || strings.Join(r.Reminded, ",") != "c1" {
+		t.Fatalf("%+v %v", r, err)
 	}
 }

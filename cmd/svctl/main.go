@@ -66,7 +66,10 @@ commands:
   approve -action A -summary S -payload JSON
                                    submit an action for admin approval, then follow it
   approval ID                      print an approval's status; "remind needed" lists admins with no live challenge
-  remind ID                        challenge again the admins who have not answered and hold no live challenge
+  remind ID                        challenge again the admins who have not answered (with long
+                                   approval challenges, only those holding no live challenge;
+                                   exit 0 and "nothing to remind" if there are none; exit 1 on
+                                   too_soon)
   admins                           print the admin set and the threshold
   audit [-since ID] [-limit N]     print a page of the audit log, one JSON entry per line
   anchor-key                       print GET /v1/anchor-key (for the votes site's service list)

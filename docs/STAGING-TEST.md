@@ -108,17 +108,21 @@ a real service's members sign in themselves.
    signed answer.
 
 On staging an approval lasts at most 1 hour (`SV_CHANNEL=staging`; the
-stack refuses a longer `approvalTtl`). With member vault release 26 and
-later an approval challenge lives as long as the approval (VAULT-MESSAGING
-0.82.0 §10.4, at most 24 hours; at most 1 hour here), so a vault held for
-its daily owner check (§3.6.3) shows it after the owner check, if that
-comes within the hour. With an older member vault the challenge is cut to
-10 minutes and runs out unseen: `sv approval <approval_id>` then prints
-`remind needed: <connection_id> (svctl remind <approval_id>)` and the
-service vault sends the `approval.challenge_expired` webhook. Release the
-vault, then `sv remind <approval_id>` sends a new challenge (at most once
-per 10 minutes, and only to an admin holding no live challenge: otherwise
-`sv remind` says there is nothing to remind).
+stack refuses a longer `approvalTtl`). Deploy with `-c
+longApprovalChallenges=true` only once the staging member vault is on
+release 26 or later (VAULT-MESSAGING 0.82.0 §10.4). Then an approval
+challenge lives as long as the approval (at most 1 hour here), so a vault
+held for its daily owner check (§3.6.3) shows it after the owner check, if
+that comes within the hour; `sv remind <approval_id>` sends only to an
+admin holding no live challenge, and otherwise says there is nothing to
+remind. The service vault cannot see a member vault shorten a challenge,
+so it sends at most 2 long ones per connection at a time. Without the flag
+(older member vaults) the challenge lives 10 minutes and a held vault
+misses it: `sv approval <approval_id>` prints `remind needed:
+<connection_id> (svctl remind <approval_id>)` and the service vault sends
+the `approval.challenge_expired` webhook. Release the vault, then `sv
+remind <approval_id>` sends a new challenge (at most once per 10
+minutes).
 
 ## 5. Optional
 

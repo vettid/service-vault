@@ -114,6 +114,24 @@ func TestConfigFromEnv(t *testing.T) {
 		}
 	}
 	e = goodEnv()
+	if c, err := configFromEnv(env(e)); err != nil || c.LongChallenges {
+		t.Fatalf("long challenges default %+v %v", c, err)
+	}
+	e["SV_LONG_APPROVAL_CHALLENGES"] = "true"
+	if c, err := configFromEnv(env(e)); err != nil || !c.LongChallenges {
+		t.Fatalf("long challenges on %+v %v", c, err)
+	}
+	e["SV_LONG_APPROVAL_CHALLENGES"] = "false"
+	if c, err := configFromEnv(env(e)); err != nil || c.LongChallenges {
+		t.Fatalf("long challenges off %+v %v", c, err)
+	}
+	for _, v := range []string{"yes", "1", "True"} {
+		e["SV_LONG_APPROVAL_CHALLENGES"] = v
+		if _, err := configFromEnv(env(e)); err == nil {
+			t.Errorf("SV_LONG_APPROVAL_CHALLENGES=%q accepted", v)
+		}
+	}
+	e = goodEnv()
 	if c, err := configFromEnv(env(e)); err != nil || c.TestSignIns {
 		t.Fatalf("test sign-ins default %+v %v", c, err)
 	}

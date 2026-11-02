@@ -163,7 +163,7 @@ describe('compute', () => {
 
   test('admin approval settings: unset by default, passed through when given, checked', () => {
     const td = Object.values<any>(
-      synth({ adminBootstrapEmail: 'admin@example.org', adminThreshold: 2, approvalTtl: '48h', approvalAllowNoPurpose: true }).findResources('AWS::ECS::TaskDefinition'),
+      synth({ envName: 'prod', adminBootstrapEmail: 'admin@example.org', adminThreshold: 2, approvalTtl: '48h', approvalAllowNoPurpose: true }).findResources('AWS::ECS::TaskDefinition'),
     )[0].Properties;
     const env = Object.fromEntries(td.ContainerDefinitions[0].Environment.map((e: any) => [e.Name, e.Value]));
     expect(env.SV_ADMIN_BOOTSTRAP_EMAIL).toBe('admin@example.org');
@@ -186,11 +186,24 @@ describe('compute', () => {
     expect(() => synth({ envName: 'staging', approvalTtl: '2h' })).toThrow(/approvalTtl/);
     expect(() => synth({ envName: 'staging', approvalTtl: '1h1m' })).toThrow(/approvalTtl/);
     expect(() => synth({ envName: 'staging', approvalTtl: '90m' })).toThrow(/approvalTtl/);
-    expect(envOf({}).SV_CHANNEL).toBe('production');
+    // Production only for envName "prod" (as SV_SIGSTORE); dev and test envs follow staging.
     expect(envOf({ envName: 'prod' }).SV_CHANNEL).toBe('production');
-    expect(envOf({ envName: 'test' }).SV_CHANNEL).toBe('production');
+    expect(envOf({ envName: 'test' }).SV_CHANNEL).toBe('staging');
+    expect(envOf({}).SV_CHANNEL).toBe('staging'); // the test stack's envName is "test"
+    expect(() => synth({ envName: 'test', approvalTtl: '2h' })).toThrow(/approvalTtl/);
     expect(envOf({ envName: 'prod' }).SV_APPROVAL_TTL).toBeUndefined(); // the service's 24h default
     expect(envOf({ envName: 'prod', approvalTtl: '48h' }).SV_APPROVAL_TTL).toBe('48h');
+  });
+
+  test('longApprovalChallenges: SV_LONG_APPROVAL_CHALLENGES only when set', () => {
+    const envOf = (props: Partial<ServiceVaultStackProps>) => {
+      const td = Object.values<any>(synth(props).findResources('AWS::ECS::TaskDefinition'))[0].Properties;
+      return Object.fromEntries(td.ContainerDefinitions[0].Environment.map((e: any) => [e.Name, e.Value]));
+    };
+    expect(envOf({}).SV_LONG_APPROVAL_CHALLENGES).toBeUndefined();
+    expect(envOf({ longApprovalChallenges: false }).SV_LONG_APPROVAL_CHALLENGES).toBeUndefined();
+    expect(envOf({ longApprovalChallenges: true }).SV_LONG_APPROVAL_CHALLENGES).toBe('true');
+    expect(envOf({ envName: 'prod', longApprovalChallenges: true }).SV_LONG_APPROVAL_CHALLENGES).toBe('true');
   });
 
   test('testSignIns: SV_TEST_SIGNINS only on staging with the flag', () => {

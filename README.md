@@ -76,7 +76,8 @@ npx cdk deploy \
 | `vpcCidr` | no (`10.60.0.0/24`) | The VPC (two /26 public subnets). |
 | `adminBootstrapEmail` | no | `SV_ADMIN_BOOTSTRAP_EMAIL` (see "Admin approvals"). It is plain text in the task definition and stays in that definition's revisions after a redeploy without it: use an address you don't mind being kept there (a staging test member), or arm the bootstrap with `service-vault admin bootstrap` instead |
 | `adminThreshold` | no (1) | `SV_ADMIN_THRESHOLD` |
-| `approvalTtl` | no (`24h`; on staging `1h`) | `SV_APPROVAL_TTL`. The stack also sets `SV_CHANNEL` (`staging` when `envName` is `staging`, else `production`), and refuses an `approvalTtl` above `1h` for `staging` |
+| `approvalTtl` | no (`24h`; `1h` unless `envName` is `prod`) | `SV_APPROVAL_TTL`. The stack also sets `SV_CHANNEL`: `production` only when `envName` is `prod` (as for `SV_SIGSTORE`), `staging` for every other `envName`; and it refuses an `approvalTtl` above `1h` for `staging` |
+| `longApprovalChallenges` | no (off) | `true` sets `SV_LONG_APPROVAL_CHALLENGES` (see "Admin approvals", Timing). Set it for a channel only once that channel's member-vault release carries VAULT-MESSAGING 0.82.0 (staging: release 26). `-c longApprovalChallenges=true` or absent |
 | `approvalAllowNoPurpose` | no | `true` sets `SV_APPROVAL_ALLOW_NO_PURPOSE` (see "Admin approvals"): only while an admin's vault predates purposes |
 | `testSignIns` | no | `true` sets `SV_TEST_SIGNINS` (see `POST /v1/signins/unsigned`): testing only, so the stack refuses it unless `envName` is `staging`. Context is not remembered: a staging deploy without `-c testSignIns=true` turns the route off again |
 | `recordSealMigrate` | no | `true` only for the deploy that upgrades a deployment from before sealing (see "Records at rest") |
@@ -401,6 +402,7 @@ which is retained and never deleted with the stack.
 | `SV_ADMIN_BOOTSTRAP_EMAIL` | env, optional | The connection bound to this email (from an invitation with a verified email) becomes the first admin, once: the bootstrap is one-shot, and the setting is ignored after it (see "Admin approvals") |
 | `SV_ADMIN_THRESHOLD` | env, optional | m: how many distinct admins must approve a governance action (default 1; 1–64) |
 | `SV_APPROVAL_TTL` | env, optional | How long an approval stays open (default `24h`; `10m` to `168h`; with `SV_CHANNEL=staging`, default `1h` and at most `1h`) |
+| `SV_LONG_APPROVAL_CHALLENGES` | env, optional | `true` sends an approval challenge with the approval's own expiry, at most 24 hours, and reminds only admins holding no live challenge (VAULT-MESSAGING 0.82.0 §10.4); default `false`: 10 minutes, and a reminder challenges every admin who has not answered. Turn it on for a channel only once that channel's member vaults carry 0.82.0 (staging: release 26): an older member vault cuts the challenge to 10 minutes without telling the service. Only `true` turns it on; any other value but `false` stops the start (chosen; not in the spec) |
 | `SV_CHANNEL` | env, optional | `staging` or `production` (default `production`); anything else stops the start. On `staging` an approval lasts at most 1 hour (STAGING-TIME-SCALE N16; VAULT-MESSAGING 0.82.0 §10.4), and so does its challenge |
 | `SV_APPROVAL_ALLOW_NO_PURPOSE` | env, optional | `true` counts approvals signed without a purpose (vaults before VAULT-MESSAGING 0.65.0), marked `no_purpose`; default `false`, which audits them and doesn't count them (§10.4). For a transition only |
 | `SV_TEST_SIGNINS` | env, optional | `true` serves `POST /v1/signins/unsigned` (`svctl signin -unsigned`); default `false`, when it answers `403 test_only`. For testing only: it sends members a sign-in they did not start. A malformed value stops the start |
@@ -458,8 +460,9 @@ the member's account name as their vault presents it. Admin approvals add
 `approval.expired` `{approval_id, action, action_hash}`,
 `approval.challenge_expired` `{approval_id, action, connection_id,
 request_id, expires_at}` (an admin's challenge ran out unanswered while
-the approval is still open, as with a member vault before release 26 that
-cuts it to 10 minutes; remind them; not sent when the challenge ended
+the approval is still open: every challenge without
+`SV_LONG_APPROVAL_CHALLENGES`, which lasts 10 minutes, and a third
+concurrent long one with it; remind them; not sent when the challenge ended
 with the approval, which is reported as `approval.expired`) and
 `admin_set.changed` `{admins, added?, removed?, reason, approval_id?}`
 (its `connection_id` is the connection added or removed).
@@ -643,23 +646,36 @@ admin's connection.
   hash it is given; fixed vectors are in
   `sdk/go/servicevault/testdata/action_hash.json`.
 - *Timing.* An approval stays open for `SV_APPROVAL_TTL` (24 h; 1 h on
-  staging, `SV_CHANNEL`). Each challenge lives as long as the approval,
-  at least 10 minutes and at most 24 hours (VAULT-MESSAGING 0.82.0
-  §10.4, "Long-lived approval challenges"; member vault release 26 and
-  later). Sign-in challenges stay at 10 minutes. An admin whose vault is
-  held (its daily owner check, §3.6.3) therefore sees the challenge after
-  passing the check. `POST /v1/approvals/{id}/remind` sends it again, at
-  most once per 10 minutes per approval, only to the admins who have not
-  answered and hold no live challenge (each re-send uses the member
-  vault's approval bucket, below); with none it answers `nothing_to_remind`
-  (409) and `svctl remind` says so. A member vault before release 26 cuts
-  the challenge to 10 minutes: then the service vault sends
-  `approval.challenge_expired` when it runs out while the approval is
-  open, and the approval's status lists the admin in `remind_needed`
-  (`svctl approval ID` prints "remind needed") until a reminder sends a
-  new challenge. A challenge that ends with the approval raises no
-  `approval.challenge_expired`; the approval's `approval.expired` is
-  reported.
+  staging, `SV_CHANNEL`).
+  - With `SV_LONG_APPROVAL_CHALLENGES=true` each challenge lives as long
+    as the approval, at least 10 minutes and at most 24 hours
+    (VAULT-MESSAGING 0.82.0 §10.4, "Long-lived approval challenges";
+    member vault release 26 and later), so an admin whose vault is held
+    (its daily owner check, §3.6.3) sees it after passing the check.
+    Sign-in challenges stay at 10 minutes. A member vault keeps at most 2
+    long-lived challenges per connection and cuts a third to 10 minutes
+    without telling the sender, and one before release 26 cuts every one:
+    the service vault cannot see that. So it sends at most 2 long
+    challenges per connection at a time (a third goes with 10 minutes; a
+    place frees when its challenge ends or is withdrawn, and one whose
+    withdraw could not be queued counts until its expiry) (chosen; not in
+    the spec), and the flag is for channels whose member vaults are all on
+    release 26 or later. A challenge that ends with the approval raises no
+    `approval.challenge_expired`; the approval's `approval.expired` is
+    reported. `POST /v1/approvals/{id}/remind` then sends only to the
+    admins who have not answered and hold no live challenge (each re-send
+    uses the member vault's approval bucket, below), at most once per 10
+    minutes per approval; with none it answers `nothing_to_remind` (409)
+    before `too_soon`, and `svctl remind` says so and exits 0 (`too_soon`
+    exits non-zero) (chosen; not in the spec).
+  - Without it (the default, for member vaults before release 26) each
+    challenge lives 10 minutes and the service vault reports a run-out challenge as below. When a
+    challenge runs out while the approval is open the service vault sends
+    `approval.challenge_expired`, the approval's status lists the admin in
+    `remind_needed` (`svctl approval ID` prints "remind needed"), and a
+    reminder challenges every admin who has not answered, replacing their
+    challenge. An admin whose vault is held sees no challenge once the 10
+    minutes pass.
 - *The member vault's ask gate* (VAULT-MESSAGING 0.65.0 §10.4.1, member
   vault release 24 and later) applies to admins as to anyone. Approval
   challenges (`purpose: "approval"`) have their own bucket: at most 5 per
@@ -671,7 +687,9 @@ admin's connection.
   and the 8 pending asks, cover every kind together. A suppressed challenge is answered as a denial after a
   random delay of 1 to 20 minutes, but at the latest 1 minute before the
   challenge expires (so within about 9 minutes of a 10-minute challenge),
-  and it counts as that admin's denial. Remind sparingly.
+  and it counts as that admin's denial. A sixth approval challenge to a
+  connection within 24 hours is suppressed this way (it never reaches the
+  admin and comes back as a delayed denial): remind sparingly.
 - *Outcomes.* `approval.approved` when m admins approved; the application
   applies the action (except `admin_set.*`, applied by the service
   vault). A signature that does not verify is audited and not counted;

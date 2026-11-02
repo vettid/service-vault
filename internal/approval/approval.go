@@ -69,6 +69,15 @@ type Manager struct {
 	// TTL is how long an approval stays open (SV_APPROVAL_TTL, default
 	// DefaultTTL).
 	TTL time.Duration
+	// LongChallenges sends an approval challenge with the approval's own
+	// expiry, at most 24 hours (SV_LONG_APPROVAL_CHALLENGES; VAULT-MESSAGING
+	// 0.82.0 §10.4), and reminds only admins holding no live challenge.
+	// Off, a challenge lasts 10 minutes and a reminder challenges every
+	// admin who has not answered. Turn it on for a channel only once its
+	// member vaults carry 0.82.0: an older one clamps the challenge to 10
+	// minutes without telling the service, which could not then see that
+	// the admin holds none.
+	LongChallenges bool
 	// AllowNoPurpose counts an approval signed without a purpose, from a
 	// vault older than VAULT-MESSAGING 0.65.0 (SV_APPROVAL_ALLOW_NO_PURPOSE,
 	// for a transition only). Without it such an answer is audited and not
@@ -425,7 +434,10 @@ func challengeTTL(r *record, now time.Time) time.Duration {
 // An admin who cannot be reached now is skipped (and can be reminded).
 func (m *Manager) challenge(ctx context.Context, b *batch, r *record, conns []string, ctxt string) []Challenge {
 	var sent []Challenge
-	ttl := challengeTTL(r, m.now())
+	var ttl time.Duration // 0: the connauth default, 10 minutes
+	if m.LongChallenges {
+		ttl = challengeTTL(r, m.now())
+	}
 	for _, c := range conns {
 		reqID, err := m.Peer.Authenticate(ctx, c, ctxt, peerwire.PurposeApproval, ttl)
 		if err != nil {
@@ -502,10 +514,12 @@ func (m *Manager) Status(ctx context.Context, id string) (*Status, error) {
 // ErrNotFound is an unknown approval.
 var ErrNotFound = errors.New("approval: not found")
 
-// Remind sends the challenge again to the admins who have not answered
-// and hold no live challenge (the remind_needed ones), at most once per
-// RemindInterval per approval (the creation counts), each lasting as long
-// as the approval. CodeNothingToRemind when there are none.
+// Remind sends the challenge again to the admins who have not answered,
+// at most once per RemindInterval per approval (the creation counts). With
+// LongChallenges only to those holding no live challenge (the
+// remind_needed ones), each lasting as long as the approval, and
+// CodeNothingToRemind when there are none (checked before the interval).
+// Otherwise to every admin who has not answered, replacing their challenge.
 func (m *Manager) Remind(ctx context.Context, id string) (*Reminder, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -520,26 +534,37 @@ func (m *Manager) Remind(ctx context.Context, id string) (*Reminder, error) {
 	if r.Status != StatusPending || !now.Before(r.Exp) {
 		return nil, errCode(CodeNotPending)
 	}
-	if now.Before(r.LastSent.Add(RemindInterval)) {
-		return nil, errCode(CodeTooSoon)
-	}
 	set, err := m.admins(ctx)
 	if err != nil {
 		return nil, err
 	}
+	var to []Challenge
 	var conns []string
 	for _, a := range r.Admins {
-		// An admin who still holds a live challenge is not challenged
-		// again: a long challenge outlives RemindInterval, and each
-		// challenge that reaches a member's vault uses its approval rate
-		// bucket (VAULT-MESSAGING §10.4.1).
-		if slices.Contains(set, a) && r.Pending[a] == "" && !r.answered(a) {
-			conns = append(conns, a)
+		if !slices.Contains(set, a) || r.answered(a) {
+			continue
 		}
+		if m.LongChallenges {
+			// An admin who still holds a live challenge is not challenged
+			// again: it outlives RemindInterval, and each challenge that
+			// reaches a member's vault uses its approval bucket
+			// (VAULT-MESSAGING §10.4.1).
+			if r.Pending[a] != "" {
+				continue
+			}
+		} else if old := r.Pending[a]; old != "" {
+			to = append(to, Challenge{ConnectionID: a, RequestID: old})
+			delete(r.Pending, a)
+		}
+		conns = append(conns, a)
 	}
-	if len(conns) == 0 {
+	if m.LongChallenges && len(conns) == 0 {
 		return nil, errCode(CodeNothingToRemind)
 	}
+	if now.Before(r.LastSent.Add(RemindInterval)) {
+		return nil, errCode(CodeTooSoon)
+	}
+	m.cancel(ctx, to)
 	ctxt, err := ChallengeContext(m.ServiceName, r.Summary, r.Hash)
 	if err != nil {
 		return nil, err
