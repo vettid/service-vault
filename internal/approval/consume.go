@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"slices"
 	"time"
 
 	"github.com/vettid/service-vault/internal/ballot"
@@ -66,18 +65,13 @@ func (m *Manager) Consume(ctx context.Context, id, action string, payload []byte
 		return errCode(CodeApprovalExpired)
 	}
 	// Recount: an admin removed since approving no longer stands behind
-	// the action, so the signatures of the current admin set must still
+	// the action, so the signatures of the current admin set (not those of a changed key) must still
 	// meet the threshold, the approval's own or the current one if higher.
 	set, err := m.admins(ctx)
 	if err != nil {
 		return err
 	}
-	n := 0
-	for _, a := range r.Approvals {
-		if slices.Contains(set, a.ConnectionID) {
-			n++
-		}
-	}
+	n := r.standing(set)
 	if n < max(r.Threshold, m.threshold()) {
 		return errCode(CodeApprovalNotApproved)
 	}

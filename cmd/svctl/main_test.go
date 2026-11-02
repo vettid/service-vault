@@ -168,7 +168,7 @@ func (f *fakeApprovals) Status(_ context.Context, id string) (*approval.Status, 
 	if f.n > 1 {
 		st.RemindNeeded = []string{}
 		st.Status = approval.StatusApproved
-		st.Approvals = []approval.Approver{{ConnectionID: "c1", At: exp}}
+		st.Approvals = []approval.Approver{{ConnectionID: "c1", At: exp, Counted: true}}
 	}
 	return st, nil
 }

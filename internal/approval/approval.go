@@ -219,7 +219,9 @@ type record struct {
 }
 
 func (r *record) answered(connID string) bool {
-	return slices.ContainsFunc(r.Approvals, func(a Approver) bool { return a.ConnectionID == connID }) ||
+	// An approval that does not count (a changed key) is not an answer: the
+	// admin may be asked again.
+	return slices.ContainsFunc(r.Approvals, func(a Approver) bool { return a.ConnectionID == connID && a.stands(r.Action) }) ||
 		slices.ContainsFunc(r.Denials, func(d Denier) bool { return d.ConnectionID == connID })
 }
 
@@ -1114,8 +1116,12 @@ func (m *Manager) Answer(ctx context.Context, e *peer.Event) (bool, error) {
 		answer = AnswerDenied
 	}
 	noPurpose := answer == AnswerApproved && e.Purpose == ""
-	counted := r.Status == StatusPending && now.Before(r.Exp) && outstanding && slices.Contains(set, e.ConnectionID) &&
+	valid := r.Status == StatusPending && now.Before(r.Exp) && outstanding && slices.Contains(set, e.ConnectionID) &&
 		!r.answered(e.ConnectionID) && answer != AnswerBadSignature && (!noPurpose || m.AllowNoPurpose)
+	// A governance approval signed with a changed key does not count: it
+	// is recorded and audited, and the admin may approve again.
+	keyChanged := answer == AnswerApproved && e.KeyChanged && Governance(r.Action)
+	counted := valid && !keyChanged
 	if outstanding {
 		delete(r.Pending, e.ConnectionID)
 	}
@@ -1127,6 +1133,9 @@ func (m *Manager) Answer(ctx context.Context, e *peer.Event) (bool, error) {
 	if noPurpose {
 		ent.Reason = ReasonNoPurpose
 	}
+	if valid && keyChanged {
+		ent.Reason = ReasonKeyChanged
+	}
 	if !e.SignedAt.IsZero() {
 		sa := e.SignedAt.UTC()
 		ent.SignedAt = &sa
@@ -1135,14 +1144,20 @@ func (m *Manager) Answer(ctx context.Context, e *peer.Event) (bool, error) {
 		return true, err
 	}
 	var settled []Challenge
+	if valid && keyChanged {
+		r.Approvals = slices.DeleteFunc(r.Approvals, func(a Approver) bool { return a.ConnectionID == e.ConnectionID })
+		r.Approvals = append(r.Approvals, Approver{ConnectionID: e.ConnectionID, At: at, KeyChanged: true})
+	}
 	if counted {
 		switch answer {
 		case AnswerApproved:
-			r.Approvals = append(r.Approvals, Approver{ConnectionID: e.ConnectionID, At: at, KeyChanged: e.KeyChanged})
+			// Replaces an earlier approval of theirs that did not count.
+			r.Approvals = slices.DeleteFunc(r.Approvals, func(a Approver) bool { return a.ConnectionID == e.ConnectionID })
+			r.Approvals = append(r.Approvals, Approver{ConnectionID: e.ConnectionID, At: at, KeyChanged: e.KeyChanged, Counted: true})
 		case AnswerDenied:
 			r.Denials = append(r.Denials, Denier{ConnectionID: e.ConnectionID, At: at})
 		}
-		if settled, err = m.evaluate(ctx, b, r, set, ReasonDenied); err != nil {
+		if settled, err = m.evaluate(ctx, b, r, set, r.Threshold, ReasonDenied); err != nil {
 			return true, err
 		}
 	}
@@ -1164,19 +1179,14 @@ func (m *Manager) Answer(ctx context.Context, e *peer.Event) (bool, error) {
 // evaluate settles a pending approval if m approvals of current admins
 // are in (approved) or can no longer be (denied, with reason). It returns the challenges
 // still outstanding at a settlement, to be cancelled once it is written.
-func (m *Manager) evaluate(ctx context.Context, b *batch, r *record, set []string, reason string) ([]Challenge, error) {
+func (m *Manager) evaluate(ctx context.Context, b *batch, r *record, set []string, threshold int, reason string) ([]Challenge, error) {
 	if r.Status != StatusPending {
 		return nil, nil
 	}
 	// Only approvals of admins still in the set count: an admin removed
 	// (or severed) since approving no longer stands behind the action.
-	counted := 0
-	for _, a := range r.Approvals {
-		if slices.Contains(set, a.ConnectionID) {
-			counted++
-		}
-	}
-	if counted >= r.Threshold {
+	counted := r.standing(set)
+	if counted >= threshold {
 		return m.settle(ctx, b, r, StatusApproved, "", set)
 	}
 	open := 0
@@ -1185,10 +1195,22 @@ func (m *Manager) evaluate(ctx context.Context, b *batch, r *record, set []strin
 			open++
 		}
 	}
-	if counted+open < r.Threshold {
+	if counted+open < threshold {
 		return m.settle(ctx, b, r, StatusDenied, reason, set)
 	}
 	return nil, nil
+}
+
+// standing counts the approvals that count toward the threshold: those of
+// admins in set, not set aside for a changed key.
+func (r *record) standing(set []string) int {
+	n := 0
+	for _, a := range r.Approvals {
+		if a.stands(r.Action) && slices.Contains(set, a.ConnectionID) {
+			n++
+		}
+	}
+	return n
 }
 
 // settle ends an approval: its status, the audit entry, its webhook and,
@@ -1229,6 +1251,17 @@ func (m *Manager) settle(ctx context.Context, b *batch, r *record, status, reaso
 // and not an admin; a removed one must still be an admin, and the set
 // never becomes empty this way.
 func (m *Manager) applyAdminSet(b *batch, r *record, set []string) (bool, error) {
+	// Defence in depth: whatever settled the approval, the set is never
+	// changed on an approval signed with a changed key, or one that does
+	// not meet its threshold with the approvals that count.
+	for _, a := range r.Approvals {
+		if a.Counted && a.KeyChanged && slices.Contains(set, a.ConnectionID) {
+			return false, nil
+		}
+	}
+	if r.standing(set) < r.Threshold {
+		return false, nil
+	}
 	target, err := adminSetTarget(r.Payload)
 	if err != nil {
 		return false, nil
@@ -1302,7 +1335,7 @@ func (m *Manager) reevaluate(ctx context.Context) error {
 				}
 			}
 			m.cancel(ctx, gone)
-			if settled, err = m.evaluate(ctx, b, r, set, ReasonAdminsRemoved); err != nil {
+			if settled, err = m.evaluate(ctx, b, r, set, max(r.Threshold, m.threshold()), ReasonAdminsRemoved); err != nil {
 				return err
 			}
 		}

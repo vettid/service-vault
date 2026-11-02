@@ -300,13 +300,19 @@ type AskBudget struct {
 	NextAskAt time.Time `json:"next_ask_at"`
 }
 
-// Approver is an admin's counted approval.
+// Approver is an admin's approval.
 type Approver struct {
 	ConnectionID string    `json:"connection_id"`
 	At           time.Time `json:"at"`
 	// KeyChanged: the admin signed with a key other than the one pinned
-	// for the connection. The approval counts; the application decides.
+	// for the connection.
 	KeyChanged bool `json:"key_changed"`
+	// Counted: the approval counts toward the threshold. It does not when
+	// KeyChanged is set on a governance action (admin_set.add,
+	// admin_set.remove, proposal.create, vote.extend,
+	// contract_template.change): the admin approves again once the key
+	// they sign with is the pinned one.
+	Counted bool `json:"counted"`
 }
 
 // Denier is an admin's counted denial.

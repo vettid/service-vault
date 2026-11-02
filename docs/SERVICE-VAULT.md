@@ -244,6 +244,12 @@ MEMBER-SERVICE-PLAN §4.5 and §5.2; the operator's view is in the README,
 - **Trust.** An approval is as strong as the admins' credential keys and
   the member vault's own checks: the service vault verifies each
   signature over the challenge it sent and pins the key per connection
-  (a different key is reported as `key_changed` and still counts). The
+  (a different key is reported as `key_changed`; for the governance actions
+  `admin_set.add`, `admin_set.remove`, `proposal.create`, `vote.extend` and
+  `contract_template.change` that approval is recorded with `counted: false`
+  and audited with reason `key_changed`: it does not count toward the
+  threshold, `Consume` does not count it and no admin-set change is applied
+  on it; the admin is asked again and counts once they sign with the pinned
+  key. `assignment.push` counts it). The
   ask gate of VAULT-MESSAGING §10.4.1 applies: a suppressed challenge
   reads as a denial.

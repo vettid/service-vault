@@ -50,6 +50,25 @@ const (
 	ReasonAdminsRemoved = "admins_removed" // admins left the set and too few remain to reach it
 )
 
+// ReasonKeyChanged is the reason an approval response was audited as not
+// counted: the admin signed with a credential key other than the one
+// pinned for the connection, for a governance action (Governance).
+const ReasonKeyChanged = "key_changed"
+
+// Governance reports whether an action decides who governs or what binds
+// the members: the admin set, new votes, extended votes and the contract
+// template. An approval of one signed with a changed credential key does
+// not count, since someone else may now hold the member's credential.
+// assignment.push is not governance: it hands work to named members, and
+// changes neither who decides nor what binds them (chosen).
+func Governance(action string) bool {
+	switch action {
+	case ActionAdminSetAdd, ActionAdminSetRemove, ActionProposalCreate, ActionVoteExtend, ActionContractTemplateChange:
+		return true
+	}
+	return false
+}
+
 // Webhook event types.
 const (
 	EventApproved = "approval.approved"
@@ -216,14 +235,37 @@ type AskBudget struct {
 	NextAskAt    time.Time `json:"next_ask_at"` // oldest counting challenge's exp + 24 h + clock skew
 }
 
-// Approver is an admin's counted approval.
+// Approver is an admin's approval.
 type Approver struct {
 	ConnectionID string    `json:"connection_id"`
 	At           time.Time `json:"at"`
 	// KeyChanged: the admin signed with a credential key other than the
 	// one pinned for the connection that no rotation chain reaches
-	// (§10.4). The approval still counts; the application decides.
+	// (§10.4).
 	KeyChanged bool `json:"key_changed"`
+	// Counted: the approval counts toward the threshold. It does not when
+	// KeyChanged is set on a governance action (Governance): the admin
+	// can approve again, and it counts once the pinned key is the one
+	// they sign with.
+	Counted bool `json:"counted"`
+}
+
+// UnmarshalJSON reads an approval stored before Counted existed as counted.
+func (a *Approver) UnmarshalJSON(b []byte) error {
+	type plain Approver
+	p := plain{Counted: true}
+	if err := json.Unmarshal(b, &p); err != nil {
+		return err
+	}
+	*a = Approver(p)
+	return nil
+}
+
+// stands reports whether the approval counts for an action. It fails
+// closed: a governance approval signed with a changed key never stands,
+// whatever Counted says.
+func (a Approver) stands(action string) bool {
+	return a.Counted && !(a.KeyChanged && Governance(action))
 }
 
 // Denier is an admin's counted denial.

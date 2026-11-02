@@ -42,7 +42,7 @@ func (f *fakeApprovals) Status(_ context.Context, id string) (*approval.Status, 
 		return nil, approval.ErrNotFound
 	}
 	return &approval.Status{ID: id, Status: approval.StatusApproved, ActionHash: strings.Repeat("ab", 32), Threshold: 1,
-		Admins: []string{"c1"}, Approvals: []approval.Approver{{ConnectionID: "c1", KeyChanged: true}}, Denials: []approval.Denier{}, RemindNeeded: []string{"c2"}}, nil
+		Admins: []string{"c1"}, Approvals: []approval.Approver{{ConnectionID: "c1", KeyChanged: true, Counted: true}}, Denials: []approval.Denier{}, RemindNeeded: []string{"c2"}}, nil
 }
 
 func (f *fakeApprovals) Remind(_ context.Context, id string, force ...string) (*approval.Reminder, error) {

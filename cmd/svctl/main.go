@@ -598,6 +598,10 @@ func (c *cli) printApproval(st *servicevault.Approval) {
 	}
 	c.printf("threshold: %d\n", st.Threshold)
 	for _, a := range st.Approvals {
+		if !a.Counted {
+			c.printf("not_counted: %s key_changed=%t (signed with a changed key; it does not count)\n", a.ConnectionID, a.KeyChanged)
+			continue
+		}
 		c.printf("approved_by: %s key_changed=%t\n", a.ConnectionID, a.KeyChanged)
 	}
 	for _, d := range st.Denials {

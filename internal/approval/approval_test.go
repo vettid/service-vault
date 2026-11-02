@@ -382,7 +382,7 @@ func TestOneOfN(t *testing.T) {
 // a redelivered answer changes nothing; a bad signature does not count.
 func TestTwoOfN(t *testing.T) {
 	f := newFixture(t, 2, "c1", "c2", "c3")
-	c := f.create(ActionContractTemplateChange, "Create proposal: bylaws v2", `{"title":"Bylaws v2"}`)
+	c := f.create(ActionAssignmentPush, "Create proposal: bylaws v2", `{"title":"Bylaws v2"}`)
 	e := f.answer("c1", "approve-changed")
 	f.deliver(e) // redelivered
 	if s := f.status(c.ID); s.Status != StatusPending || len(s.Approvals) != 1 || !s.Approvals[0].KeyChanged {
