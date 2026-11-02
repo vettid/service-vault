@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ type fakeApprovals struct {
 	since      string
 	limit      int
 	statusFail bool
+	force      []string
 }
 
 func (f *fakeApprovals) Create(_ context.Context, req approval.Request) (*approval.Created, error) {
@@ -43,10 +45,22 @@ func (f *fakeApprovals) Status(_ context.Context, id string) (*approval.Status, 
 		Admins: []string{"c1"}, Approvals: []approval.Approver{{ConnectionID: "c1", KeyChanged: true}}, Denials: []approval.Denier{}, RemindNeeded: []string{"c2"}}, nil
 }
 
-func (f *fakeApprovals) Remind(_ context.Context, id string) (*approval.Reminder, error) {
+func (f *fakeApprovals) Remind(_ context.Context, id string, force ...string) (*approval.Reminder, error) {
+	f.force = force
+	if len(force) > 0 && id == "a1" {
+		switch force[0] {
+		case "notadmin":
+			return nil, &approval.Error{Code: approval.CodeNotAdmin}
+		case "answered":
+			return nil, &approval.Error{Code: approval.CodeAnswered}
+		}
+		return &approval.Reminder{ID: id, Reminded: force}, nil
+	}
 	switch id {
 	case "soon":
 		return nil, &approval.Error{Code: approval.CodeTooSoon}
+	case "idle":
+		return nil, &approval.Error{Code: approval.CodeNothingToRemind}
 	case "done":
 		return nil, &approval.Error{Code: approval.CodeNotPending}
 	case "a1":
@@ -104,10 +118,32 @@ func TestApprovalRoutes(t *testing.T) {
 	if rec, _ := do(t, h, "GET", "/v1/approvals/nope", apiKey, ""); rec.Code != 404 {
 		t.Fatalf("%d", rec.Code)
 	}
-	for id, want := range map[string]int{"a1": 200, "soon": 429, "done": 409, "nope": 404} {
+	for id, want := range map[string]int{"a1": 200, "soon": 429, "idle": 409, "done": 409, "nope": 404} {
 		if rec, m := do(t, h, "POST", "/v1/approvals/"+id+"/remind", apiKey, ""); rec.Code != want {
 			t.Errorf("remind %s: %d %v", id, rec.Code, m)
 		}
+	}
+	// A forced re-send names admins in the body; the body is optional.
+	for body, want := range map[string]int{`{"force":["c2"]}`: 200, `{"force":["notadmin"]}`: 422, `{"force":["answered"]}`: 409,
+		`{"force":"c2"}`: 400, `{"other":1}`: 400, `{`: 400} {
+		if rec, m := do(t, h, "POST", "/v1/approvals/a1/remind", apiKey, body); rec.Code != want {
+			t.Errorf("remind %s: %d %v", body, rec.Code, m)
+		}
+	}
+	if rec, m := do(t, h, "POST", "/v1/approvals/a1/remind", apiKey, `{"force":["c2"]}`); rec.Code != 200 || fmt.Sprint(m["reminded"]) != "[c2]" || fmt.Sprint(fa.force) != "[c2]" {
+		t.Errorf("forced remind: %d %v %v", rec.Code, m, fa.force)
+	}
+	if rec, _ := do(t, h, "POST", "/v1/approvals/a1/remind", apiKey, ""); rec.Code != 200 || len(fa.force) != 0 {
+		t.Errorf("plain remind: %d %v", rec.Code, fa.force)
+	}
+	// An empty body sent chunked (length unknown) is no body either.
+	chunked := httptest.NewRequest("POST", "/v1/approvals/a1/remind", strings.NewReader(""))
+	chunked.ContentLength = -1
+	chunked.Header.Set("Authorization", "Bearer "+apiKey)
+	crec := httptest.NewRecorder()
+	h.ServeHTTP(crec, chunked)
+	if crec.Code != 200 || len(fa.force) != 0 {
+		t.Errorf("chunked empty remind: %d %s", crec.Code, crec.Body.String())
 	}
 	if rec, m := do(t, h, "GET", "/v1/admins", apiKey, ""); rec.Code != 200 || m["threshold"] != float64(1) {
 		t.Fatalf("%d %v", rec.Code, m)

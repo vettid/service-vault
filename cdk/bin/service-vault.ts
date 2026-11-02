@@ -7,7 +7,7 @@ import { ServiceVaultStack } from '../lib/service-vault-stack';
 //   (votes.vettid.org, for publishing votes; optional), webhookUrl
 //   (required), relayUrl, serviceName, apiClientSecurityGroupId,
 //   apiClientCidr, vpcCidr, adminBootstrapEmail, adminThreshold,
-//   approvalTtl, approvalAllowNoPurpose, testSignIns (staging only), recordSealMigrate, recordKeyVersion, and one of alarmTopicArn and
+//   approvalTtl, approvalAllowNoPurpose, testSignIns (staging only), longApprovalChallenges (true or absent), recordSealMigrate, recordKeyVersion, and one of alarmTopicArn and
 //   alarmEmail (required). See
 //   README "Deployment".
 const app = new cdk.App();
@@ -24,6 +24,8 @@ const required = (key: string): string => {
 const envName = ctx('envName') ?? 'prod';
 const testSignIns = ctx('testSignIns');
 if (testSignIns !== undefined && testSignIns !== 'true') throw new Error('context "testSignIns" must be true or absent');
+const longApprovalChallenges = ctx('longApprovalChallenges');
+if (longApprovalChallenges !== undefined && longApprovalChallenges !== 'true') throw new Error('context "longApprovalChallenges" must be true or absent');
 const stack = new ServiceVaultStack(app, `ServiceVault-${envName}`, {
   envName,
   image: required('image'),
@@ -40,6 +42,7 @@ const stack = new ServiceVaultStack(app, `ServiceVault-${envName}`, {
   approvalTtl: ctx('approvalTtl'),
   approvalAllowNoPurpose: ctx('approvalAllowNoPurpose') === 'true',
   testSignIns: testSignIns === 'true',
+  longApprovalChallenges: longApprovalChallenges === 'true',
   alarmTopicArn: ctx('alarmTopicArn'),
   alarmEmail: ctx('alarmEmail'),
   recordSealMigrate: ctx('recordSealMigrate') === 'true',

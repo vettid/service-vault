@@ -166,6 +166,15 @@ export interface ServiceVaultStackProps extends cdk.StackProps {
    */
   readonly testSignIns?: boolean;
   /**
+   * Send an approval challenge with the approval's own expiry, at most 24
+   * hours, and remind only admins holding no live challenge
+   * (SV_LONG_APPROVAL_CHALLENGES; VAULT-MESSAGING 0.82.0 §10.4). Set it for a
+   * channel only once that channel's member-vault release carries 0.82.0
+   * (staging: release 26): an older member vault cuts the challenge to 10
+   * minutes without telling the service. Default off.
+   */
+  readonly longApprovalChallenges?: boolean;
+  /**
    * Where the alarms go; exactly one is required, so that an alarm always
    * reaches a person: an existing SNS topic (staging: vettid.org's vault
    * alerts topic, /vettid-org/staging/vault/alerts-topic-arn), or an
@@ -257,6 +266,19 @@ export class ServiceVaultStack extends cdk.Stack {
     if (props.approvalTtl !== undefined && !/^([0-9]+(h|m|s))+$/.test(props.approvalTtl)) {
       throw new Error(`approvalTtl must be a duration such as 24h (got "${props.approvalTtl}")`);
     }
+    // Production only for envName "prod", as for SV_SIGSTORE: every other
+    // environment follows the staging rules.
+    const channel = envName === 'prod' ? 'production' : 'staging';
+    if (channel === 'staging' && props.approvalTtl !== undefined) {
+      // The staging channel keeps an approval to 1 hour (VAULT-MESSAGING
+      // 0.82.0 §10.4; STAGING-TIME-SCALE N16): the challenge lives as long.
+      const unit: Record<string, number> = { h: 3600, m: 60, s: 1 };
+      let seconds = 0;
+      for (const m of props.approvalTtl.matchAll(/([0-9]+)([hms])/g)) seconds += Number(m[1]) * unit[m[2]];
+      if (seconds > 3600) {
+        throw new Error(`approvalTtl must be at most 1h unless envName is "prod" (got "${props.approvalTtl}", envName "${envName}")`);
+      }
+    }
     if (!props.alarmTopicArn === !props.alarmEmail) {
       throw new Error('set exactly one of alarmTopicArn and alarmEmail: the alarms must reach a person');
     }
@@ -266,7 +288,11 @@ export class ServiceVaultStack extends cdk.Stack {
     if (props.alarmEmail && !/^[^@\s]+@[a-z0-9.-]+\.[a-z]+$/.test(props.alarmEmail)) {
       throw new Error(`alarmEmail must be an address (got "${props.alarmEmail}")`);
     }
-    const approvalEnv: Record<string, string> = {};
+    const approvalEnv: Record<string, string> = { SV_CHANNEL: channel };
+    if (props.longApprovalChallenges && channel === 'production') {
+      throw new Error('longApprovalChallenges is refused for envName "prod": production waits for a production member-vault release with VAULT-MESSAGING 0.82.0');
+    }
+    if (props.longApprovalChallenges) approvalEnv.SV_LONG_APPROVAL_CHALLENGES = 'true';
     if (props.adminBootstrapEmail) approvalEnv.SV_ADMIN_BOOTSTRAP_EMAIL = props.adminBootstrapEmail;
     if (props.adminThreshold !== undefined) approvalEnv.SV_ADMIN_THRESHOLD = String(props.adminThreshold);
     if (props.approvalTtl) approvalEnv.SV_APPROVAL_TTL = props.approvalTtl;

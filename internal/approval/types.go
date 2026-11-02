@@ -100,9 +100,8 @@ const (
 	MaxPayload = 16 << 10 // bytes, canonical
 	// MaxContext is the challenge context's bound (VAULT-MESSAGING §10.4).
 	MaxContext = 256
-	// RemindInterval: challenges go out at most this often per approval
-	// (the connauth challenge's own life, so a reminder never overlaps
-	// an outstanding challenge).
+	// RemindInterval: challenges go out at most this often per approval.
+	// A challenge lasts at least this long (the connauth challenge life).
 	RemindInterval = 10 * time.Minute
 	// DefaultTTL is how long an approval stays open (SV_APPROVAL_TTL).
 	DefaultTTL = 24 * time.Hour
@@ -118,6 +117,9 @@ const (
 	CodeLastAdmin         = "last_admin"         // admin_set.remove of the only admin
 	CodeNotPending        = "not_pending"
 	CodeTooSoon           = "too_soon"
+	CodeNotAdmin          = "not_admin"         // remind force: not an admin of the approval, or no longer in the set
+	CodeAnswered          = "answered"          // remind force: the admin has answered
+	CodeNothingToRemind   = "nothing_to_remind" // every admin who has not answered holds a live challenge
 )
 
 // Error is a request the service refuses, with its API error code.

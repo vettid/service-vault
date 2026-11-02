@@ -116,6 +116,7 @@ type fakeApprovals struct {
 	n       int
 	req     approval.Request
 	badHash bool
+	forced  []string
 }
 
 func (f *fakeApprovals) Create(_ context.Context, r approval.Request) (*approval.Created, error) {
@@ -151,7 +152,20 @@ func (f *fakeApprovals) Status(_ context.Context, id string) (*approval.Status, 
 	return st, nil
 }
 
-func (f *fakeApprovals) Remind(_ context.Context, id string) (*approval.Reminder, error) {
+func (f *fakeApprovals) Remind(_ context.Context, id string, force ...string) (*approval.Reminder, error) {
+	f.forced = force // read by the test below
+	if len(force) > 0 && id == "a1" {
+		switch force[0] {
+		case "gone":
+			return nil, &approval.Error{Code: approval.CodeNotAdmin}
+		case "done":
+			return nil, &approval.Error{Code: approval.CodeAnswered}
+		}
+		return &approval.Reminder{ID: id, Reminded: force}, nil
+	}
+	if id == "idle" {
+		return nil, &approval.Error{Code: approval.CodeNothingToRemind}
+	}
 	if id != "a1" {
 		return nil, approval.ErrNotFound
 	}
@@ -365,6 +379,7 @@ func TestRemindAdminsAuditHealth(t *testing.T) {
 		want string
 	}{
 		{[]string{"remind", "a1"}, "approval_id: a1\nreminded: c2\n"},
+		{[]string{"remind", "idle"}, "nothing to remind: every admin who has not answered still holds a live challenge\n"},
 		{[]string{"admins"}, "threshold: 1\nadmin: c1\nadmin: c2\n"},
 		{[]string{"health"}, "ok\n"},
 		{[]string{"audit", "-since", "e1"}, `{"id":"e2","at":"2026-10-27T12:10:00Z","type":"approval.requested","approval_id":"a1"}` + "\n"},
@@ -380,6 +395,20 @@ func TestRemindAdminsAuditHealth(t *testing.T) {
 	}
 	if code, _, errOut := f.run(t, "remind", "nope"); code != exitError || !strings.Contains(errOut, "not_found") {
 		t.Fatalf("exit %d %s", code, errOut)
+	}
+	// A forced re-send names the admins; the refusals exit 1, a bad flag 2.
+	if code, out, errOut := f.run(t, "remind", "-force", "c2, c3", "a1"); code != exitOK || out != "approval_id: a1\nreminded: c2\nreminded: c3\n" ||
+		strings.Join(f.apv.forced, ",") != "c2,c3" {
+		t.Fatalf("forced: exit %d\n%s\nstderr %s %v", code, out, errOut, f.apv.forced)
+	}
+	if code, _, errOut := f.run(t, "remind", "-force", "gone", "a1"); code != exitError || !strings.Contains(errOut, "not_admin") {
+		t.Fatalf("not an admin: exit %d %s", code, errOut)
+	}
+	if code, _, errOut := f.run(t, "remind", "-force", "done", "a1"); code != exitError || !strings.Contains(errOut, "answered") {
+		t.Fatalf("answered: exit %d %s", code, errOut)
+	}
+	if code, _, _ := f.run(t, "remind", "-force", ",", "a1"); code != exitUsage {
+		t.Fatalf("empty -force: exit %d", code)
 	}
 }
 

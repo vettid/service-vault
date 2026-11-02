@@ -76,7 +76,8 @@ npx cdk deploy \
 | `vpcCidr` | no (`10.60.0.0/24`) | The VPC (two /26 public subnets). |
 | `adminBootstrapEmail` | no | `SV_ADMIN_BOOTSTRAP_EMAIL` (see "Admin approvals"). It is plain text in the task definition and stays in that definition's revisions after a redeploy without it: use an address you don't mind being kept there (a staging test member), or arm the bootstrap with `service-vault admin bootstrap` instead |
 | `adminThreshold` | no (1) | `SV_ADMIN_THRESHOLD` |
-| `approvalTtl` | no (`24h`) | `SV_APPROVAL_TTL` |
+| `approvalTtl` | no (`24h`; `1h` unless `envName` is `prod`) | `SV_APPROVAL_TTL`. The stack also sets `SV_CHANNEL`: `production` only when `envName` is `prod` (as for `SV_SIGSTORE`), `staging` for every other `envName`; and it refuses an `approvalTtl` above `1h` for `staging` |
+| `longApprovalChallenges` | no (off) | `true` sets `SV_LONG_APPROVAL_CHALLENGES` (see "Admin approvals", Timing). Set it for a channel only once that channel's member-vault release carries VAULT-MESSAGING 0.82.0 (staging: release 26). `-c longApprovalChallenges=true` or absent; the stack refuses it for `envName` `prod` (production waits for a production member-vault release with 0.82.0) |
 | `approvalAllowNoPurpose` | no | `true` sets `SV_APPROVAL_ALLOW_NO_PURPOSE` (see "Admin approvals"): only while an admin's vault predates purposes |
 | `testSignIns` | no | `true` sets `SV_TEST_SIGNINS` (see `POST /v1/signins/unsigned`): testing only, so the stack refuses it unless `envName` is `staging`. Context is not remembered: a staging deploy without `-c testSignIns=true` turns the route off again |
 | `recordSealMigrate` | no | `true` only for the deploy that upgrades a deployment from before sealing (see "Records at rest") |
@@ -400,7 +401,9 @@ which is retained and never deleted with the stack.
 | `SV_SIGNIN_LIMITS_SOURCE` | env, optional | Sign-in limits per source (default `20/15m`; `none` for none) |
 | `SV_ADMIN_BOOTSTRAP_EMAIL` | env, optional | The connection bound to this email (from an invitation with a verified email) becomes the first admin, once: the bootstrap is one-shot, and the setting is ignored after it (see "Admin approvals") |
 | `SV_ADMIN_THRESHOLD` | env, optional | m: how many distinct admins must approve a governance action (default 1; 1–64) |
-| `SV_APPROVAL_TTL` | env, optional | How long an approval stays open (default `24h`; `10m` to `168h`) |
+| `SV_APPROVAL_TTL` | env, optional | How long an approval stays open (default `24h`; `10m` to `168h`; with `SV_CHANNEL=staging`, default `1h` and at most `1h`) |
+| `SV_LONG_APPROVAL_CHALLENGES` | env, optional | `true` sends an approval challenge with the approval's own expiry, at most 24 hours, and reminds only admins holding no live challenge (VAULT-MESSAGING 0.82.0 §10.4); default `false`: 10 minutes, and a reminder challenges every admin who has not answered. Turn it on for a channel only once that channel's member vaults carry 0.82.0 (staging: release 26): an older member vault cuts the challenge to 10 minutes without telling the service. Only `true` turns it on; any other value but `false` stops the start (chosen; not in the spec) |
+| `SV_CHANNEL` | env, optional | `staging` or `production` (default `production`); anything else stops the start. The default is production, so a staging run outside the CDK stack must set `SV_CHANNEL=staging` itself. On `staging` an approval lasts at most 1 hour (STAGING-TIME-SCALE N16; VAULT-MESSAGING 0.82.0 §10.4), and so does its challenge |
 | `SV_APPROVAL_ALLOW_NO_PURPOSE` | env, optional | `true` counts approvals signed without a purpose (vaults before VAULT-MESSAGING 0.65.0), marked `no_purpose`; default `false`, which audits them and doesn't count them (§10.4). For a transition only |
 | `SV_TEST_SIGNINS` | env, optional | `true` serves `POST /v1/signins/unsigned` (`svctl signin -unsigned`); default `false`, when it answers `403 test_only`. For testing only: it sends members a sign-in they did not start. A malformed value stops the start |
 | `SV_RECORD_KEY_VERSION` | env, optional | The lowest record key version to use (default 1; see "Rotating the record key") |
@@ -432,7 +435,7 @@ billed.
 | `POST /v1/signins/unsigned` | For testing only: `403 {error: test_only}` and nothing sent unless `SV_TEST_SIGNINS=true`. Otherwise `200 {signins: [{connection_id, signin_id?, match_code?, skipped?}], more, stopped?}`: one sign-in challenge to each eligible connection (active, vault advertises the vote feature) that has no pinned credential key, i.e. whose member has never signed in on it, so that its vault does not refuse their vote with `not_signed_in` (VAULT-MESSAGING §10.19.5). A call goes through the connections in id order until it has sent 10 challenges or looked at 100 connections; a skipped connection counts only toward the 100, so connections skipped for long do not keep the call from the ones after them. `more` is the number not yet looked at (call again). Within the member vault's limits (§10.4.1): never a second challenge to a connection with a sign-in pending, none within an hour of a decline, at most 10 in 24 h (a challenge that expires unanswered counts; they live 5 minutes); a connection left out says `skipped`: `pending`, `declined`, `daily_limit`, `not_sent`, or `not_recorded` (sent, with its `match_code`, but no `signin_id` to read). An error or the call's 8-second deadline ends it early with `stopped` (`error` or `timeout`) and the entries done so far, still status 200; the call goes on server-side if the client gives up. Each `signin_id` is read at `GET /v1/signins/{id}`, and its outcome is a `signin.*` webhook: the application did not start these sign-ins, so it will see webhooks for ids it does not know. A member's app tells them to approve a sign-in only if they are signing in right now, and one they did not start teaches the opposite, so a real service must not use this: its members sign in themselves. For test connections (`svctl signin -unsigned`) |
 | `POST /v1/approvals` `{action, summary, payload}` | `201 {approval_id, action_hash, status: "pending", expires_at}`; refused with `invalid_action`, `invalid_summary`, `invalid_payload` (400), `invalid_connection`, `unreachable`, `last_admin` (422) |
 | `GET /v1/approvals/{id}` | `{approval_id, action, summary, action_hash, status, reason?, threshold, admins, approvals: [{connection_id, at, key_changed}], denials: [{connection_id, at}], created_at, expires_at, remind_needed: [connection_id], remind_after?, applied?}`; `status` is `pending`, `approved`, `denied` or `expired`; `remind_needed`, while pending, lists the admins who have not answered and hold no live challenge (it ran out, or could not be sent); `remind_after` comes with it: the earliest a reminder is accepted |
-| `POST /v1/approvals/{id}/remind` | `{approval_id, reminded: [connection_id]}`: the challenge again to the admins who have not answered; `too_soon` (429) within 10 minutes of the last, `not_pending` (409) once settled |
+| `POST /v1/approvals/{id}/remind` | `{approval_id, reminded: [connection_id]}`: the challenge again to the admins who have not answered and hold no live challenge (the `remind_needed` ones); `too_soon` (429) within 10 minutes of the last, `not_pending` (409) once settled, `nothing_to_remind` (409) when every admin who has not answered still holds a live challenge. An optional body `{"force": [connection_id, ...]}` (chosen; not in the spec) challenges only the named admins again, each even with a live challenge (the old one is withdrawn first): `not_admin` (422) for one outside the approval's admins or the current set, `answered` (409) for one who has answered; still `too_soon` within 10 minutes of the last. Each forced re-send spends one of that admin's 5 approval asks per 24 h (§10.4.1) and a sixth comes back as a delayed denial: use it only when the admin reports not seeing the request |
 | `GET /v1/admins` | `{admins: [connection_id], threshold}` |
 | `GET /v1/audit?since=&limit=` | `{entries: [...], next?}`: the audit log after entry `since`, oldest first, `limit` 1–100 (default 100); pass `next` as `since` for the next page |
 | `POST /v1/proposals` `{title, text, choices, quorum, binding, removed_may_vote, opens_at, closes_at, outage_rule}` | `201 {proposal_id, proposal_hash, eligible, unsigned, sent}`: the proposal is made from the active connections at this moment whose vault advertised the vote feature (BALLOT-PROTOCOL §3.2), published and sent to each (BALLOT-PROTOCOL §3); `abstain` is added to the choices if they lack it. `unsigned` is how many of the `eligible` connections have no pinned credential key: their member has never signed in on the connection, and their vault refuses `vote.cast` with `not_signed_in` until they do (VAULT-MESSAGING §10.19.5); members sign in to the service themselves (on a test deployment only, `POST /v1/signins/unsigned`, `svctl signin -unsigned`). `invalid_proposal` (400) for one outside the bounds of BALLOT-PROTOCOL §3.1 (member vaults refuse those) or with no such connection; `publication_not_configured` (503) until publication is configured; `503 {error: not_published, proposal_id}` when it was kept but its publication failed (retry with `/publish`). Served with `SV_BALLOTS_TABLE` |
@@ -456,8 +459,11 @@ the member's account name as their vault presents it. Admin approvals add
 `approval.denied` `{approval_id, action, action_hash, reason}`,
 `approval.expired` `{approval_id, action, action_hash}`,
 `approval.challenge_expired` `{approval_id, action, connection_id,
-request_id, expires_at}` (an admin's 10-minute challenge ran out
-unanswered while the approval is still open; remind them) and
+request_id, expires_at}` (an admin's challenge ran out unanswered while
+the approval is still open: every challenge without
+`SV_LONG_APPROVAL_CHALLENGES`, which lasts 10 minutes, and a third
+concurrent long one with it; remind them; not sent when the challenge ended
+with the approval, which is reported as `approval.expired`) and
 `admin_set.changed` `{admins, added?, removed?, reason, approval_id?}`
 (its `connection_id` is the connection added or removed).
 
@@ -639,15 +645,55 @@ admin's connection.
   `servicevault.ActionHash` computes it, so the application can check the
   hash it is given; fixed vectors are in
   `sdk/go/servicevault/testdata/action_hash.json`.
-- *Timing.* An approval stays open for `SV_APPROVAL_TTL` (24 h); each
-  challenge lives 10 minutes, the connauth maximum. `POST
-  /v1/approvals/{id}/remind` sends it again to the admins who have not
-  answered, at most once per 10 minutes per approval. An admin whose
-  vault is held (its daily owner check, VAULT-MESSAGING §3.6.3) sees no
-  challenge once the 10 minutes pass: the service vault sends
-  `approval.challenge_expired`, and the approval's status lists the admin
-  in `remind_needed` (`svctl approval ID` prints "remind needed") until a
-  reminder sends a new challenge.
+- *Timing.* An approval stays open for `SV_APPROVAL_TTL` (24 h; 1 h on
+  staging, `SV_CHANNEL`).
+  - With `SV_LONG_APPROVAL_CHALLENGES=true` each challenge lives as long
+    as the approval, at least 10 minutes and at most 24 hours
+    (VAULT-MESSAGING 0.82.0 §10.4, "Long-lived approval challenges";
+    member vault release 26 and later), so an admin whose vault is held
+    (its daily owner check, §3.6.3) sees it after passing the check.
+    Sign-in challenges stay at 10 minutes. A member vault keeps at most 2
+    long-lived challenges per connection and cuts a third to 10 minutes
+    without telling the sender, and one before release 26 cuts every one:
+    the service vault cannot see that. So it sends at most 2 long
+    challenges per connection at a time (a third goes with 10 minutes; a
+    place frees when its challenge ends or is withdrawn, and one whose
+    withdraw could not be queued counts until its expiry) (chosen; not in
+    the spec), and the flag is for channels whose member vaults are all on
+    release 26 or later. A challenge that ends with the approval raises no
+    `approval.challenge_expired`; the approval's `approval.expired` is
+    reported. `POST /v1/approvals/{id}/remind` then sends only to the
+    admins who have not answered and hold no live challenge (each re-send
+    uses the member vault's approval bucket, below), at most once per 10
+    minutes per approval; with none it answers `nothing_to_remind` (409)
+    before `too_soon`, and `svctl remind` says so and exits 0 (`too_soon`
+    exits non-zero) (chosen; not in the spec). The same holds for the
+    member vault's limit of 4 challenges held per connection: a long
+    challenge sent while 4 are held (live ones and withdraws not queued,
+    counted until their expiry plus a minute for clock skew) goes with 10
+    minutes. Known limits: a withdraw that reaches a held member vault
+    before its challenge is ignored there, so the member keeps the
+    challenge and its place until its expiry while the service has freed
+    them; and a challenge the member vault loses for another reason (a
+    vault restore, a deposit refused for good) leaves that admin
+    unremindable until the challenge's expiry, at most 24 h (1 h on
+    staging). For these, `svctl remind -force <connection_id>` (`POST
+    /v1/approvals/{id}/remind` with `{"force": [...]}`) withdraws that
+    admin's live challenge and sends a new one, once per 10 minutes per
+    approval. Each forced re-send spends one of the admin's 5 approval asks
+    per 24 hours (§10.4.1) and a sixth comes back as a delayed denial,
+    which counts as a denial: use it only when the admin reports not
+    seeing the request. If the withdraw was lost, the member may then see
+    two requests for the same approval: they should approve the newest (an
+    answer to the older one is ignored by the service).
+  - Without it (the default, for member vaults before release 26) each
+    challenge lives 10 minutes and the service vault reports a run-out challenge as below. When a
+    challenge runs out while the approval is open the service vault sends
+    `approval.challenge_expired`, the approval's status lists the admin in
+    `remind_needed` (`svctl approval ID` prints "remind needed"), and a
+    reminder challenges every admin who has not answered, replacing their
+    challenge. An admin whose vault is held sees no challenge once the 10
+    minutes pass.
 - *The member vault's ask gate* (VAULT-MESSAGING 0.65.0 §10.4.1, member
   vault release 24 and later) applies to admins as to anyone. Approval
   challenges (`purpose: "approval"`) have their own bucket: at most 5 per
@@ -659,7 +705,9 @@ admin's connection.
   and the 8 pending asks, cover every kind together. A suppressed challenge is answered as a denial after a
   random delay of 1 to 20 minutes, but at the latest 1 minute before the
   challenge expires (so within about 9 minutes of a 10-minute challenge),
-  and it counts as that admin's denial. Remind sparingly.
+  and it counts as that admin's denial. A sixth approval challenge to a
+  connection within 24 hours is suppressed this way (it never reaches the
+  admin and comes back as a delayed denial): remind sparingly.
 - *Outcomes.* `approval.approved` when m admins approved; the application
   applies the action (except `admin_set.*`, applied by the service
   vault). A signature that does not verify is audited and not counted;
@@ -732,7 +780,7 @@ ap, err := c.CreateApproval(ctx, servicevault.ApprovalRequest{
 	Action: servicevault.ActionVoteOpen, Summary: "Open the vote on proposal 7",
 	Payload: json.RawMessage(`{"proposal":7}`)})   // POST /v1/approvals
 st2, err := c.Approval(ctx, ap.ID)                  // GET /v1/approvals/{id}
-rm, err := c.RemindApproval(ctx, ap.ID)             // POST /v1/approvals/{id}/remind
+rm, err := c.RemindApproval(ctx, ap.ID)             // POST /v1/approvals/{id}/remind (extra args: force these admins)
 ad, err := c.Admins(ctx)                            // GET /v1/admins
 pg, err := c.Audit(ctx, since, 100)                 // GET /v1/audit
 h, err := servicevault.ActionHash(action, summary, payload) // compare with ap.ActionHash
@@ -824,7 +872,7 @@ svctl signin -email E [-source S] [-wait 3m]
 svctl signin -unsigned
 svctl approve -action vote.open -summary "Open the vote" -payload '{"proposal":7}' [-wait 30m]
 svctl approval <approval id>
-svctl remind <approval id>
+svctl remind [-force <connection id>,...] <approval id>
 svctl admins
 svctl audit [-since <entry id>] [-limit 100]
 svctl anchor-key

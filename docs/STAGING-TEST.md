@@ -107,9 +107,29 @@ a real service's members sign in themselves.
 3. Operator: `status: approved`; `sv audit` shows the request and the
    signed answer.
 
-A challenge lives 10 minutes (VAULT-MESSAGING §10.4). If the member's
-vault is held for its daily owner check (§3.6.3) the challenge runs out
-unseen: `sv approval <approval_id>` then prints `remind needed:
+On staging an approval lasts at most 1 hour (`SV_CHANNEL=staging`, which the stack sets; a staging run outside it must set it itself, the default being production; the
+stack refuses a longer `approvalTtl`). Deploy with `-c
+longApprovalChallenges=true` only once the staging member vault is on
+release 26 or later (VAULT-MESSAGING 0.82.0 §10.4). Then an approval
+challenge lives as long as the approval (at most 1 hour here), so a vault
+held for its daily owner check (§3.6.3) shows it after the owner check, if
+that comes within the hour; `sv remind <approval_id>` sends only to an
+admin holding no live challenge, and otherwise says there is nothing to
+remind. The service vault cannot see a member vault shorten a challenge,
+so it sends at most 2 long ones per connection at a time (and none while
+4 are held). A withdraw that reaches a held vault before its challenge is
+ignored there, and a challenge the member vault loses for another reason
+(a vault restore, a deposit refused for good) is not seen by the service:
+the admin stays unremindable until the challenge's expiry, at most 1 hour
+here. If the admin reports not seeing the request, `sv remind -force
+<connection_id> <approval_id>` withdraws their live challenge and sends a
+new one (once per 10 minutes); each forced re-send spends one of that
+admin's 5 approval asks per 24 hours, and a sixth comes back as a delayed
+denial. If the withdraw was lost the member may see two requests for the
+same approval: approve the newest (the older one's answer is ignored).
+Without the flag
+(older member vaults) the challenge lives 10 minutes and a held vault
+misses it: `sv approval <approval_id>` prints `remind needed:
 <connection_id> (svctl remind <approval_id>)` and the service vault sends
 the `approval.challenge_expired` webhook. Release the vault, then `sv
 remind <approval_id>` sends a new challenge (at most once per 10

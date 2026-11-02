@@ -66,7 +66,14 @@ commands:
   approve -action A -summary S -payload JSON
                                    submit an action for admin approval, then follow it
   approval ID                      print an approval's status; "remind needed" lists admins with no live challenge
-  remind ID                        challenge again the admins who have not answered
+  remind [-force CONN,...] ID      challenge again the admins who have not answered (with long
+                                   approval challenges, only those holding no live challenge;
+                                   exit 0 and "nothing to remind" if there are none; exit 1 on
+                                   too_soon). -force names admins to challenge again even with a
+                                   live challenge (the old one is withdrawn); each forced re-send
+                                   spends one of that admin's 5 approval asks per 24 h and a
+                                   sixth comes back as a delayed denial: use it only when the
+                                   admin reports not seeing the request
   admins                           print the admin set and the threshold
   audit [-since ID] [-limit N]     print a page of the audit log, one JSON entry per line
   anchor-key                       print GET /v1/anchor-key (for the votes site's service list)
@@ -488,10 +495,25 @@ func (c *cli) approval(ctx context.Context, args []string) error {
 
 func (c *cli) remind(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("remind", flag.ContinueOnError)
+	force := fs.String("force", "", "challenge again these admins (connection ids, comma-separated) even if they hold a live challenge")
 	if err := c.flags(fs, args, 1); err != nil {
 		return err
 	}
-	r, err := c.c.RemindApproval(ctx, fs.Arg(0))
+	var named []string
+	for _, id := range strings.Split(*force, ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			named = append(named, id)
+		}
+	}
+	if *force != "" && len(named) == 0 {
+		return usageError{errors.New("remind: -force needs connection ids")}
+	}
+	r, err := c.c.RemindApproval(ctx, fs.Arg(0), named...)
+	var ae *servicevault.APIError
+	if errors.As(err, &ae) && ae.Code == servicevault.CodeNothingToRemind {
+		c.printf("nothing to remind: every admin who has not answered still holds a live challenge\n")
+		return nil
+	}
 	if err != nil {
 		return err
 	}
