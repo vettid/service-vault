@@ -201,11 +201,12 @@ type Manager struct {
 	Now             func() time.Time
 	Log             *slog.Logger
 
-	mu      sync.Mutex
-	govDone bool // migrateGov has seen every admin
-	lastID  string
-	kick    chan struct{}
-	once    sync.Once
+	mu        sync.Mutex
+	govWarned map[string]time.Time // admin -> when the migration last warned it waits for them
+	govDone   bool                 // migrateGov has seen every admin
+	lastID    string
+	kick      chan struct{}
+	once      sync.Once
 }
 
 // record is a stored approval.
@@ -580,6 +581,11 @@ func fingerprint(label string, key []byte) string {
 	h := hex.EncodeToString(fp[:8])
 	return h[:4] + " " + h[4:8] + " " + h[8:12] + " " + h[12:]
 }
+
+// CredentialKeyFingerprint is the fingerprint of a credential key as the
+// admin.repin and admin_set.add summaries show it: 16 hex digits in 4
+// groups of SHA-256("vettid/vms/2/ck-fp" || key).
+func CredentialKeyFingerprint(key []byte) string { return fingerprint(ckFPLabel, key) }
 
 // repinPayload is the payload of admin.repin: the admin and the
 // credential key their governance key is to become.
@@ -1969,6 +1975,7 @@ func (m *Manager) migrateGov(ctx context.Context) error {
 		switch {
 		case !ok:
 			notReady = true
+			m.warnGovWaiting(a)
 		case len(info.GovKey) == 0 && len(info.AuthKey) > 0:
 			todo = append(todo, a)
 			keys[a] = info.AuthKey
@@ -1988,6 +1995,7 @@ func (m *Manager) migrateGov(ctx context.Context) error {
 		ok, err := m.Peer.PinGov(ctx, a, key, true)
 		if errors.Is(err, peer.ErrNotFound) {
 			notReady = true
+			m.warnGovWaiting(a)
 			continue
 		} else if err != nil {
 			return err
@@ -2026,6 +2034,25 @@ func (m *Manager) migrateGov(ctx context.Context) error {
 	}
 	m.govDone = true
 	return nil
+}
+
+// govWarnEvery is how often the migration says it is waiting for an admin.
+const govWarnEvery = time.Hour
+
+// warnGovWaiting logs, at most once an hour per admin, that the migration
+// of governance keys waits for the peer to know the admin's connection
+// (until then their governance approvals do not count).
+func (m *Manager) warnGovWaiting(connID string) {
+	now := m.now()
+	if last, ok := m.govWarned[connID]; ok && now.Sub(last) < govWarnEvery {
+		return
+	}
+	if m.govWarned == nil {
+		m.govWarned = map[string]time.Time{}
+	}
+	m.govWarned[connID] = now
+	m.log().Warn("governance key migration waiting: the peer does not know this admin's connection",
+		"connection_id", connID, "alarm", "gov_migration_waiting")
 }
 
 // govMigID is the id of the stored marker that migrateGov has finished.

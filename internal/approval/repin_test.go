@@ -235,6 +235,19 @@ func TestGovKeyMigrationNoEvidence(t *testing.T) {
 	if len(f.govKey("c1")) != 0 || len(f.auditOf(AuditGovKeyMigrated)) != 0 {
 		t.Fatal("pinned before the peer knew the connection")
 	}
+	// It says so, once an hour per admin, naming the connection.
+	if n := strings.Count(f.logs.String(), "governance key migration waiting"); n != 1 || !strings.Contains(f.logs.String(), "connection_id=c1") {
+		t.Fatalf("warnings: %d\n%s", n, f.logs)
+	}
+	f.tick()
+	if n := strings.Count(f.logs.String(), "governance key migration waiting"); n != 1 {
+		t.Fatalf("warned again at once: %d", n)
+	}
+	f.clk.t = f.clk.t.Add(govWarnEvery)
+	f.tick()
+	if n := strings.Count(f.logs.String(), "governance key migration waiting"); n != 2 {
+		t.Fatalf("no warning after an hour: %d", n)
+	}
 	f.p.active["c1"] = true
 	f.tick()
 	if !bytes.Equal(f.govKey("c1"), keyA) {

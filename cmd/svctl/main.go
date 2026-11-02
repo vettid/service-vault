@@ -22,6 +22,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -485,6 +486,20 @@ func (c *cli) approveAndFollow(ctx context.Context, req servicevault.ApprovalReq
 		}
 		summary = st.Summary
 		c.printf("summary: %s\n", summary)
+		if req.Action == servicevault.ActionAdminRepin {
+			// The key the admins read in the summary is the key in the
+			// payload the hash covers.
+			var got struct {
+				NewKey string `json:"new_key"`
+			}
+			key, kerr := []byte(nil), error(nil)
+			if json.Unmarshal(st.Payload, &got) == nil {
+				key, kerr = base64.StdEncoding.DecodeString(got.NewKey)
+			}
+			if kerr != nil || len(key) != 32 || !strings.Contains(st.Summary, ", new key "+approval.CredentialKeyFingerprint(key)+", ") {
+				return ap.ID, errors.New("the new key in the payload does not match the fingerprint the admins read")
+			}
+		}
 		if req.Action == servicevault.ActionAdminRepin && !strings.Contains(string(req.Payload), "new_key") {
 			// The service filled in new_key (the connection's credential
 			// key now): the hash covers the payload it returns, which must

@@ -120,6 +120,7 @@ type fakeApprovals struct {
 	badHash     bool
 	wrongTarget bool
 	noChangeAt  bool // admin.repin: the key change time is not recorded
+	wrongKeyFP  bool // admin.repin: the summary shows another key's fingerprint
 	forced      []string
 }
 
@@ -150,7 +151,12 @@ func (f *fakeApprovals) Create(_ context.Context, r approval.Request) (*approval
 		if f.noChangeAt {
 			at = "key changed time not recorded"
 		}
-		r.Summary = `name given "Ann", new key 9a1f bb7d 0123 4567, ` + at + `, connection ` + p.ConnectionID
+		nk, _ := base64.StdEncoding.DecodeString(p.NewKey)
+		fp := approval.CredentialKeyFingerprint(nk)
+		if f.wrongKeyFP {
+			fp = "9a1f bb7d 0123 4567"
+		}
+		r.Summary = `name given "Ann", new key ` + fp + `, ` + at + `, connection ` + p.ConnectionID
 		if f.wrongTarget {
 			r.Summary = `"Ann", connection c9`
 		}
@@ -406,7 +412,7 @@ func TestApprove(t *testing.T) {
 		if noAt {
 			want = "key changed time not recorded, connection c2"
 		}
-		if code != exitOK || !strings.Contains(out, "summary: name given \"Ann\", new key 9a1f bb7d 0123 4567, "+want) || !strings.Contains(out, "action_hash_check: ok") {
+		if code != exitOK || !strings.Contains(out, "summary: name given \"Ann\", new key "+approval.CredentialKeyFingerprint(bytes.Repeat([]byte{9}, 32))+", "+want) || !strings.Contains(out, "action_hash_check: ok") {
 			t.Fatalf("repin (no change time: %v): exit %d %s %s", noAt, code, out, errOut)
 		}
 	}
@@ -415,6 +421,14 @@ func TestApprove(t *testing.T) {
 	}
 	if code, _, errOut := newFixture(t).run(t, "approve", "-action", "admin.repin", "-summary", "x", "-payload", `{"connection_id":"c2"}`); code != exitUsage || !strings.Contains(errOut, "takes no -summary") {
 		t.Fatalf("exit %d %s", code, errOut)
+	}
+	// A summary whose fingerprint is not the payload key's is refused.
+	for _, payload := range []string{`{"connection_id":"c2"}`, `{"connection_id":"c2","new_key":"` + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32)) + `"}`} {
+		wf := newFixture(t)
+		wf.apv.wrongKeyFP = true
+		if code, _, errOut := wf.run(t, "approve", "-action", "admin.repin", "-payload", payload); code != exitError || !strings.Contains(errOut, "does not match the fingerprint") {
+			t.Fatalf("repin wrong fingerprint: exit %d %s", code, errOut)
+		}
 	}
 	wt := newFixture(t)
 	wt.apv.wrongTarget = true
