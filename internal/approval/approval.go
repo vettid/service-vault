@@ -613,7 +613,7 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 	for _, c := range sent {
 		out.Reminded = append(out.Reminded, c.ConnectionID)
 	}
-	m.log().Info("approval reminded", "approval_id", r.ID, "challenged", len(sent), "forced", len(conns) > 0 && len(force) > 0)
+	m.log().Info("approval reminded", "approval_id", r.ID, "challenged", len(sent), "forced", len(force) > 0)
 	return out, nil
 }
 

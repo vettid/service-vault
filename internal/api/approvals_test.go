@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -134,6 +135,15 @@ func TestApprovalRoutes(t *testing.T) {
 	}
 	if rec, _ := do(t, h, "POST", "/v1/approvals/a1/remind", apiKey, ""); rec.Code != 200 || len(fa.force) != 0 {
 		t.Errorf("plain remind: %d %v", rec.Code, fa.force)
+	}
+	// An empty body sent chunked (length unknown) is no body either.
+	chunked := httptest.NewRequest("POST", "/v1/approvals/a1/remind", strings.NewReader(""))
+	chunked.ContentLength = -1
+	chunked.Header.Set("Authorization", "Bearer "+apiKey)
+	crec := httptest.NewRecorder()
+	h.ServeHTTP(crec, chunked)
+	if crec.Code != 200 || len(fa.force) != 0 {
+		t.Errorf("chunked empty remind: %d %s", crec.Code, crec.Body.String())
 	}
 	if rec, m := do(t, h, "GET", "/v1/admins", apiKey, ""); rec.Code != 200 || m["threshold"] != float64(1) {
 		t.Fatalf("%d %v", rec.Code, m)

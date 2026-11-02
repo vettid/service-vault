@@ -10,6 +10,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -467,8 +468,14 @@ func (s *Server) remindApproval(w http.ResponseWriter, r *http.Request) {
 	var b struct {
 		Force []string `json:"force"`
 	}
-	if r.ContentLength != 0 && !readJSONMax(w, r, &b, maxRemindBody) {
-		return
+	if r.ContentLength != 0 {
+		// An empty body (also when sent chunked) is no body.
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRemindBody))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&b); err != nil && !errors.Is(err, io.EOF) || err == nil && dec.More() {
+			writeError(w, http.StatusBadRequest, "bad_request")
+			return
+		}
 	}
 	if len(b.Force) > maxRemindForce {
 		writeError(w, http.StatusBadRequest, "bad_request")

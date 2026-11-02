@@ -64,9 +64,12 @@ func (p *fakePeer) Authenticate(_ context.Context, conn, ctxt, purpose string, t
 		ttl = peerwire.ConnAuthChallengeTTL
 	}
 	if ttl > peerwire.ConnAuthChallengeTTL {
+		// Every approval challenge holds a place, whatever its life (a
+		// member clock that lags sees even a 10-minute one as long); a
+		// cancelled one has been withdrawn.
 		long := 0
 		for _, o := range p.sent {
-			if o.conn == conn && o.ttl > peerwire.ConnAuthChallengeTTL && now.Before(o.at.Add(o.ttl)) {
+			if o.conn == conn && now.Before(o.at.Add(o.ttl)) && !slices.Contains(p.cancelled, o.req) {
 				long++
 			}
 		}
@@ -1250,8 +1253,34 @@ func TestRemindForce(t *testing.T) {
 		if _, err := f.m.Remind(ctx, c.ID, "c1"); codeOf(err) != CodeAnswered {
 			t.Fatalf("gate %v: answered: %v", gate, err)
 		}
+		before := len(f.p.sent)
 		if _, err := f.m.Remind(ctx, c.ID, "c2", "c2"); err != nil {
 			t.Fatalf("gate %v: %v", gate, err)
 		}
+		if n := len(f.p.sent) - before; n != 1 {
+			t.Fatalf("gate %v: %d challenges for a duplicate id", gate, n)
+		}
+	}
+}
+
+// A forced re-send follows the place limit like any challenge: with two
+// other approval challenges holding the places, the new one goes out with
+// 10 minutes.
+func TestRemindForcePlaceLimit(t *testing.T) {
+	f := newFixture(t, 1, "c1")
+	f.m.LongChallenges = true
+	a := f.create(ActionVoteOpen, "One", `{}`)
+	f.create(ActionVoteOpen, "Two", `{}`)
+	f.clk.Advance(RemindInterval)
+	f.create(ActionVoteOpen, "Three", `{}`) // the places are taken: 10 minutes
+	if got := f.p.last("c1").ttl; got != RemindInterval {
+		t.Fatalf("third %v", got)
+	}
+	if _, err := f.m.Remind(context.Background(), a.ID, "c1"); err != nil {
+		t.Fatal(err)
+	}
+	// One's old challenge is withdrawn, but Two and Three hold the places.
+	if got := f.p.last("c1").ttl; got != RemindInterval {
+		t.Fatalf("forced re-send %v", got)
 	}
 }

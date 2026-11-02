@@ -125,7 +125,9 @@ here. If the admin reports not seeing the request, `sv remind -force
 <connection_id> <approval_id>` withdraws their live challenge and sends a
 new one (once per 10 minutes); each forced re-send spends one of that
 admin's 5 approval asks per 24 hours, and a sixth comes back as a delayed
-denial. Without the flag
+denial. If the withdraw was lost the member may see two requests for the
+same approval: approve the newest (the older one's answer is ignored).
+Without the flag
 (older member vaults) the challenge lives 10 minutes and a held vault
 misses it: `sv approval <approval_id>` prints `remind needed:
 <connection_id> (svctl remind <approval_id>)` and the service vault sends

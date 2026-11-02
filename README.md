@@ -683,7 +683,9 @@ admin's connection.
     approval. Each forced re-send spends one of the admin's 5 approval asks
     per 24 hours (§10.4.1) and a sixth comes back as a delayed denial,
     which counts as a denial: use it only when the admin reports not
-    seeing the request.
+    seeing the request. If the withdraw was lost, the member may then see
+    two requests for the same approval: they should approve the newest (an
+    answer to the older one is ignored by the service).
   - Without it (the default, for member vaults before release 26) each
     challenge lives 10 minutes and the service vault reports a run-out challenge as below. When a
     challenge runs out while the approval is open the service vault sends
