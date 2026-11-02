@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.13.0 (2026-11-02)
+**Status:** 0.13.1 (2026-11-02)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -185,6 +185,18 @@ design: vettid/votes, docs/VOTES-SITE.md).
 - **Write-once:** each document has one path; the site accepts the same
   bytes again, refuses different bytes, and never changes or removes a
   document.
+- **The upload's answer (the publisher contract):** `201` or `200` counts
+  as published. The answer may carry `index_updated`: if it is `false`,
+  the document is written but the index update failed, and the service
+  uploads the identical bytes again until it is `true` (the only repair:
+  nothing rebuilds the index from the documents): an extension at each
+  reconcile and close, the results at each close once it is recorded as
+  not updated; a proposal's entry is added by the next upload of its
+  extensions or results. A missing field means updated, as older sites
+  send none. `409` is a different document at
+  that path. The service never depends on the index to find a document:
+  it reads `extension-<n+1>` until a 404, when it reconciles and at the
+  close (§10.2).
 - **Discovery:** the site keeps an index of proposals open or closed in
   the last 30 days, with their extensions. The app fetches it, with no
   session, on a fixed hourly schedule, and hands the vault the entries
@@ -627,8 +639,65 @@ internationalised look-alike domain), shown to the admins whole. An
 extension asked for less than 1 minute before the close it extends (the
 `CollectMargin` that the count already allows after the close) is refused
 as too late (`too_late`) before the approval is looked at, so that the
-approval stays usable: one published later may not reach the close in time. **(chosen; not in the
-spec.)** Counting the votes after the close (§7) needs no approval: it
+approval stays usable: one published later may not reach the close in time.
+
+The extension is **stored before it is published**, because the site's
+copy is write-once. The service signs the extension and stores it as *pending* on the
+proposal record (a write conditional on the record's version) **before the
+approval is used**; if that store fails (a conflict), nothing is used and
+the request can be retried; if the approval is then refused, the pending
+extension is cleared and the approval is as it was. It then uses the
+approval, publishes the extension, and marks it in effect (appended to the
+extensions, `closes_at` moved, pending cleared). A retry repeats the use
+of the same approval for the same extension, which the approvals accept
+once (never a second use). A
+retry, or a restart, publishes the same bytes, never a new signature,
+and uses no second approval; while one is pending a different extension
+is refused (`extension_pending`, 409). **Whether an extension is in
+effect is decided by the RFC 3161 time (`genTime`) in the Sigstore bundle
+the service anchored for it**, as the site decides (VOTES-SITE §4) and a
+vault does (VAULT-MESSAGING §10.19.6): before the `closes_at` it extends,
+or it does not apply (`too_late`). The service reads that time only from
+the bundle it kept itself, never from the one the site serves, and only
+after verifying the token: its message imprint is SHA-256 of the bundle's
+message signature (the ECDSA signature the anchor timestamps), the bundle's
+message digest is SHA-256 of the document, and the CMS signature chains
+from the TSA's certificate to a root pinned in the release (per Sigstore
+instance's Sigstore trusted root; judged at the token's own time, which must fall in that authority's `validFor`), as an end-entity certificate
+with the single, critical time-stamping usage. Anything that doesn't
+verify applies nothing. The site also refuses a first upload by its own
+clock, once the close it extends has passed there, whatever the bundle
+says (`too_late`, which the service treats as `too_late`, not as an
+outage). A retry
+that was never anchored must leave the 1-minute margin; one with a kept
+bundle is judged by its time. Before counting, the close **reconciles**
+the store with the site: it reads `extension-1`, `extension-2`, … to the
+first 404 to find them. A pending extension the site has is put in
+effect; one the site has and the store lacks is adopted only if it
+carries the service's signature, this proposal, the next number, the 24 h
+limit and a kept bundle of the service's own with a time before the close
+it extends (none kept, as after a restore of the table: refused). A 404
+is not proof of absence (it may be cached): before a pending extension is
+dropped, once the close and the margin have passed, its stored bytes are
+uploaded again; `200` or `201` says the site has it (it is adopted), `422
+too_late` says it does not (it is dropped), anything else is an error and
+nothing is dropped. Any other difference (the store holds an extension
+the site lacks or has other bytes; the site's extension doesn't verify)
+is refused: nothing is counted and the error is logged (`site_mismatch`,
+409). The last extension is uploaded again at each reconcile, which also
+finishes the index (§3.3).
+
+**Known limits.** (1) A 404 on an extension's signature or bundle file
+(cached) can delay a close by the CDN's error time to live: liveness
+only. (2) An extension with no bundle of the service's own is never
+adopted. (3) A probe answered `422` with a code other than `too_late`
+(`bad_anchor`, `unknown_service`) is an error: every close fails, and
+nothing is dropped or counted, until the site accepts the document. The
+operator corrects the cause at the site (for instance the service list
+entry naming the anchor key) and closes again; if the site can never
+accept it, the pending extension has to be removed from the proposal's
+record by hand (there is no API for it), after which the close counts
+without it. **(chosen; not in the spec.)** Counting the votes after the close (§7) needs no approval: it
 decides nothing that the window and the ballots have not.
 
 ## 11. Test vectors
@@ -681,6 +750,12 @@ item.
 
 ## Changes
 
+- **0.13.1 (2026-11-02):** §10.2: an extension is stored (pending) before
+  it is published (and before its approval is used), a retry publishes the
+  same bytes, the verified bundle's RFC 3161 time (read from the service's own kept bundle)
+  decides whether it applies, and the close reconciles with the site
+  before counting, probing before it drops a pending extension. §3.3: the publisher contract for the upload's
+  answer (`index_updated`). No change to the messages or documents.
 - **0.13.0 (2026-11-02):** creating a proposal (§3.4) and extending one
   (§10.2) need the admins' m-of-n approval of the exact input, used
   once; the API key alone no longer starts or extends a vote. §2 says

@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"github.com/vettid/service-vault/internal/ballot/ballottest"
 	"github.com/vettid/service-vault/vote"
 	"sync"
 	"testing"
@@ -57,6 +58,42 @@ type fakePublisher struct {
 	// started and release, when set, hold an extension's publication
 	// until release is closed, after telling started.
 	started, release chan struct{}
+	// integrated and tsa are the times of a bundle made; failAfter writes
+	// to the site and then reports an error (a lost answer); site is what
+	// the site holds; own is the bundles kept, by document; refuse is what
+	// the site answers an upload with.
+	integrated, tsa func() int64
+	failAfter       bool
+	site            map[int64]*SiteExtension
+	own             map[string]json.RawMessage
+	refuse          *ErrPublishRefused
+	published       [][]byte // the extension documents sent, in order
+	indexStale      bool     // the extension answers say the index isn't updated
+	resultsStale    bool
+	resultsUploads  int
+}
+
+func (p *fakePublisher) bundle(doc []byte) json.RawMessage {
+	if b := p.own[string(doc)]; b != nil {
+		return b
+	}
+	tsa := p.integrated()
+	if p.tsa != nil {
+		tsa = p.tsa()
+	}
+	if p.own == nil {
+		p.own = map[string]json.RawMessage{}
+	}
+	p.own[string(doc)] = ballottest.Bundle(tsa, p.integrated())
+	return p.own[string(doc)]
+}
+
+func (p *fakePublisher) StoredBundle(_ context.Context, doc []byte) (json.RawMessage, error) {
+	return p.own[string(doc)], nil
+}
+
+func (p *fakePublisher) Extension(_ context.Context, _ string, n int64) (*SiteExtension, error) {
+	return p.site[n], nil
 }
 
 func (p *fakePublisher) PublishProposal(_ context.Context, id string, doc, sig []byte) (json.RawMessage, error) {
@@ -77,6 +114,8 @@ type fakeApprovals struct {
 	used     map[string]bool
 	consumed int
 	uses     []Use
+	seen     map[Use]bool
+	fail     error // Consume fails with it
 }
 
 type fakeApproval struct {
@@ -86,12 +125,24 @@ type fakeApproval struct {
 }
 
 func (f *fakeApprovals) Consume(_ context.Context, id, action string, payload []byte, use Use) error {
+	retry := use.Retry
 	if use.ProposalID == "" {
 		return errors.New("no use")
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.fail != nil {
+		return f.fail
+	}
+	if f.seen == nil {
+		f.seen = map[Use]bool{}
+	}
+	use.Retry = false
+	if f.seen[use] && retry { // a repeat of the same use
+		return nil
+	}
 	if f.auto {
+		f.seen[use] = true
 		f.consumed++
 		return nil
 	}
@@ -105,6 +156,7 @@ func (f *fakeApprovals) Consume(_ context.Context, id, action string, payload []
 		return errors.New("used")
 	}
 	f.used[id] = true
+	f.seen[use] = true
 	f.consumed++
 	f.uses = append(f.uses, use)
 	return nil
@@ -121,12 +173,14 @@ func newManager(t *testing.T) (*Manager, *fakeSender, *fakePublisher) {
 	ik := ed25519.NewKeyFromSeed(digest("service ik"))
 	clock := time.Unix(1793500000, 0)
 	s, p := &fakeSender{down: map[string]bool{}}, &fakePublisher{}
-	return &Manager{
+	m := &Manager{
 		Store: &RecordStore{Records: peer.NewMemStore(), Copy: &MemCopy{}},
 		Sign:  func(label string, msg []byte) ([]byte, error) { return suite.Sign(ik, label, msg) },
 		IK:    ik.Public().(ed25519.PublicKey), Roster: fakeRoster{"c2", "c0", "c1"}, Sender: s, Publisher: p,
-		NewID: envelope.NewULID, Now: func() time.Time { return clock }, Approvals: &fakeApprovals{auto: true},
-	}, s, p
+		NewID: envelope.NewULID, Now: func() time.Time { return clock }, Approvals: &fakeApprovals{auto: true}, Timestamp: ballottest.Time,
+	}
+	p.integrated = func() int64 { return m.Now().Unix() }
+	return m, s, p
 }
 
 func input() ProposalInput {
@@ -256,12 +310,13 @@ func TestCreateRefusals(t *testing.T) {
 	}
 }
 
-func (p *fakePublisher) PublishResults(_ context.Context, id string, results, sig, rows []byte) (json.RawMessage, error) {
+func (p *fakePublisher) PublishResults(_ context.Context, id string, results, sig, rows []byte) (Receipt, error) {
 	p.calls++
+	p.resultsUploads++
 	if p.fail {
-		return nil, errors.New("rekor down")
+		return Receipt{}, errors.New("rekor down")
 	}
-	return json.RawMessage(`{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}`), nil
+	return Receipt{Bundle: json.RawMessage(`{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}`), IndexStale: p.resultsStale}, nil
 }
 
 type fakeCatcher struct {
@@ -361,16 +416,33 @@ func TestClose(t *testing.T) {
 	}
 }
 
-func (p *fakePublisher) PublishExtension(_ context.Context, id string, n int64, doc, sig []byte) (json.RawMessage, error) {
+func (p *fakePublisher) PublishExtension(_ context.Context, id string, n int64, doc, sig []byte) (Receipt, error) {
 	if p.release != nil {
 		p.started <- struct{}{}
 		<-p.release
 	}
 	p.calls++
 	if p.fail {
-		return nil, errors.New("rekor down")
+		return Receipt{}, errors.New("rekor down")
 	}
-	return json.RawMessage(`{}`), nil
+	b := p.bundle(doc)
+	p.published = append(p.published, doc)
+	if p.refuse != nil {
+		return Receipt{}, p.refuse
+	}
+	if old := p.site[n]; old != nil && !bytes.Equal(old.Doc, doc) {
+		return Receipt{}, errors.New("409")
+	}
+	if p.site == nil {
+		p.site = map[int64]*SiteExtension{}
+	}
+	if p.site[n] == nil {
+		p.site[n] = &SiteExtension{Doc: doc, Sig: sig, Bundle: b}
+	}
+	if p.failAfter {
+		return Receipt{}, errors.New("answer lost")
+	}
+	return Receipt{Bundle: b, IndexStale: p.indexStale}, nil
 }
 
 func TestExtend(t *testing.T) {
@@ -500,7 +572,7 @@ func TestTwoTasksSaveByVersion(t *testing.T) {
 	}
 	in := input()
 	m1.Now = func() time.Time { return time.Unix(in.ClosesAt-600, 0) }
-	m2 := &Manager{Store: m1.Store, Sign: m1.Sign, IK: m1.IK, Roster: m1.Roster, Sender: m1.Sender, Publisher: &fakePublisher{},
+	m2 := &Manager{Store: m1.Store, Sign: m1.Sign, IK: m1.IK, Roster: m1.Roster, Sender: m1.Sender, Publisher: pub,
 		Catcher: &fakeCatcher{caught: true}, NewID: m1.NewID, Now: func() time.Time { return time.Unix(in.ClosesAt, 0).Add(2 * CollectMargin) }}
 	pub.started, pub.release = make(chan struct{}), make(chan struct{})
 	done := make(chan error, 1)
