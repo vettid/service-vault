@@ -476,7 +476,7 @@ func serve(args []string) error {
 			if err != nil {
 				return err
 			}
-			mgr.Publisher = &publish.Publisher{URL: cfg.VotesURL, Anchor: anc, Client: anchor.Client(time.Minute), Records: records}
+			mgr.Publisher = &publish.Publisher{URL: cfg.VotesURL, Anchor: anc, Client: anchor.Client(time.Minute), Records: records, Log: log}
 		}
 		if rebuild {
 			// The table was restored: ballots it lost are in the copy (§6).

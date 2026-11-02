@@ -3,8 +3,9 @@ package ballot
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
-	"strconv"
+	"github.com/vettid/service-vault/internal/ballot/ballottest"
 	"testing"
 	"time"
 
@@ -153,14 +154,15 @@ func TestExtendRefusedWhilePending(t *testing.T) {
 	}
 }
 
-// The log's time decides: an extension integrated at or after the close
-// it extends doesn't apply, however early this clock says it is.
-func TestExtendByLogTime(t *testing.T) {
+// The RFC 3161 time in our own bundle decides: one timestamped at or after
+// the close it extends doesn't apply, however early this clock says it is;
+// one timestamped before it does, whatever the Rekor entry's time.
+func TestExtendByTimestamp(t *testing.T) {
 	ctx := context.Background()
 	e := newExtEnv(t)
-	e.pub.integrated = func() int64 { return e.in.ClosesAt + 1 }
+	e.pub.tsa = func() int64 { return e.in.ClosesAt + 1 }
 	if _, err := e.m.Extend(ctx, e.id, "apv", e.req(7200)); !errors.Is(err, ErrTooLate) {
-		t.Fatalf("logged after the close: %v", err)
+		t.Fatalf("timestamped after the close: %v", err)
 	}
 	if o := e.open(t); len(o.Extensions) != 0 || o.ClosesAt != e.in.ClosesAt {
 		t.Fatal("applied")
@@ -172,6 +174,19 @@ func TestExtendByLogTime(t *testing.T) {
 	}
 	if pr, _ := e.m.Results(ctx, e.id); pr != nil {
 		t.Fatal("counted")
+	}
+}
+
+// The timestamp before the close with the Rekor entry after it is accepted.
+func TestExtendTimestampBeforeRekorAfter(t *testing.T) {
+	e := newExtEnv(t)
+	e.pub.tsa = func() int64 { return e.in.ClosesAt - 5 }
+	e.pub.integrated = func() int64 { return e.in.ClosesAt + 300 }
+	if _, err := e.m.Extend(context.Background(), e.id, "apv", e.req(7200)); err != nil {
+		t.Fatalf("TSA before the close, Rekor after: %v", err)
+	}
+	if o := e.open(t); len(o.Extensions) != 1 {
+		t.Fatal("not applied")
 	}
 }
 
@@ -196,8 +211,6 @@ func TestCloseReconcilesPending(t *testing.T) {
 	if _, err := m.Extend(ctx, c.ProposalID, "apv", ExtensionInput{ClosesAt: in.ClosesAt + 7200, Outage: outage}); err == nil {
 		t.Fatal("expected the failed save")
 	}
-	zero := 0
-	pub.indexed = &zero
 	clock = time.Unix(in.ClosesAt, 0).Add(2 * CollectMargin)
 	if _, err := m.Close(ctx, c.ProposalID); !errors.Is(err, ErrNotClosed) {
 		t.Fatalf("before the extended close: %v", err)
@@ -241,13 +254,13 @@ func TestClosePendingNotOnSite(t *testing.T) {
 	}
 }
 
-// An extension on the site that the store lacks is adopted if it
-// verifies, and refused (nothing counted) if it doesn't.
+// An extension on the site that the store lacks is adopted if it verifies
+// and we kept our own bundle for it, and refused (nothing counted)
+// otherwise. The bundle the site serves is never believed.
 func TestCloseAdoptsOnlyVerifiedSiteExtension(t *testing.T) {
 	ctx := context.Background()
-	other := func(e *extEnv) func(string, []byte) ([]byte, error) { return nil }
-	_ = other
-	build := func(e *extEnv, id string, n int64, sign func(string, []byte) ([]byte, error), at int64) *SiteExtension {
+	forged := func(at int64) []byte { return ballottest.Bundle(at, at) }
+	build := func(e *extEnv, id string, n int64, sign func(string, []byte) ([]byte, error), ownAt int64) *SiteExtension {
 		o := e.open(t)
 		x := &vote.Extension{V: 1, ProposalID: id, N: n, ClosesAt: e.in.ClosesAt + 7200, Outage: e.outage}
 		doc, err := vote.EncodeExtension(x)
@@ -259,29 +272,31 @@ func TestCloseAdoptsOnlyVerifiedSiteExtension(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return &SiteExtension{Doc: doc, Sig: sig, Bundle: []byte(`{"verificationMaterial":{"tlogEntries":[{"integratedTime":"` + strconv.FormatInt(at, 10) + `"}]}}`)}
+		if ownAt != 0 {
+			e.pub.own = map[string]json.RawMessage{string(doc): ballottest.Bundle(ownAt, ownAt)}
+		}
+		// The bundle on the site always claims an early time.
+		return &SiteExtension{Doc: doc, Sig: sig, Bundle: forged(e.in.ClosesAt - 100)}
 	}
+	early, late := int64(0), int64(0)
 	cases := map[string]struct {
 		mutate func(e *extEnv) *SiteExtension
 		ok     bool
 	}{
-		"valid": {func(e *extEnv) *SiteExtension { return build(e, e.id, 1, e.m.Sign, e.in.ClosesAt-10) }, true},
+		"valid": {func(e *extEnv) *SiteExtension { return build(e, e.id, 1, e.m.Sign, early) }, true},
 		"wrong signer": {func(e *extEnv) *SiteExtension {
 			e2 := newExtEnv(t)
-			return build(e, e.id, 1, func(l string, m []byte) ([]byte, error) {
-				s, err := e2.m.Sign(l, append([]byte{1}, m...))
-				return s, err
-			}, e.in.ClosesAt-10)
+			return build(e, e.id, 1, func(l string, m []byte) ([]byte, error) { return e2.m.Sign(l, append([]byte{1}, m...)) }, early)
 		}, false},
-		"wrong number": {func(e *extEnv) *SiteExtension { return build(e, e.id, 2, e.m.Sign, e.in.ClosesAt-10) }, false},
-		"wrong proposal": {func(e *extEnv) *SiteExtension {
-			return build(e, "01ARZ3NDEKTSV4RRFFQ69G5FAV", 1, e.m.Sign, e.in.ClosesAt-10)
-		}, false},
-		"logged late": {func(e *extEnv) *SiteExtension { return build(e, e.id, 1, e.m.Sign, e.in.ClosesAt) }, false},
+		"wrong number":   {func(e *extEnv) *SiteExtension { return build(e, e.id, 2, e.m.Sign, early) }, false},
+		"wrong proposal": {func(e *extEnv) *SiteExtension { return build(e, "01ARZ3NDEKTSV4RRFFQ69G5FAV", 1, e.m.Sign, early) }, false},
+		"our bundle is late (the site's early bundle is forged)": {func(e *extEnv) *SiteExtension { return build(e, e.id, 1, e.m.Sign, late) }, false},
+		"no bundle of our own": {func(e *extEnv) *SiteExtension { return build(e, e.id, 1, e.m.Sign, 0) }, false},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
 			e := newExtEnv(t)
+			early, late = e.in.ClosesAt-10, e.in.ClosesAt+10
 			x := c.mutate(e)
 			e.pub.site = map[int64]*SiteExtension{1: x}
 			*e.clock = time.Unix(e.in.ClosesAt+7200, 0).Add(2 * CollectMargin)
@@ -302,6 +317,71 @@ func TestCloseAdoptsOnlyVerifiedSiteExtension(t *testing.T) {
 				t.Fatal("counted or adopted")
 			}
 		})
+	}
+}
+
+// A pending extension the site doesn't show (its 404 may be cached) is
+// probed by uploading its stored bytes: accepted means it is there and is
+// adopted, 422 too_late means it isn't and it is dropped, anything else is
+// an error and it is kept.
+func TestClosePendingProbe(t *testing.T) {
+	ctx := context.Background()
+	for name, c := range map[string]struct {
+		refuse  *ErrPublishRefused
+		pending bool
+		ext     int
+		wantErr bool
+	}{
+		"site has it":     {nil, false, 1, false},
+		"too late":        {&ErrPublishRefused{Status: 422, Code: "too_late"}, false, 0, false},
+		"another refusal": {&ErrPublishRefused{Status: 409, Code: "differs"}, true, 0, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newExtEnv(t)
+			e.pub.failAfter = true
+			if _, err := e.m.Extend(ctx, e.id, "apv", e.req(7200)); err == nil {
+				t.Fatal("expected the lost answer")
+			}
+			e.pub.failAfter = false
+			e.pub.site = nil // a cached 404: the files aren't seen
+			e.pub.refuse = c.refuse
+			*e.clock = time.Unix(e.in.ClosesAt+7200, 0).Add(2 * CollectMargin)
+			_, err := e.m.Close(ctx, e.id)
+			if (err != nil) != c.wantErr || errors.Is(err, ErrSiteMismatch) {
+				t.Fatalf("close: %v", err)
+			}
+			if o := e.open(t); (o.Pending != nil) != c.pending || len(o.Extensions) != c.ext {
+				t.Fatalf("pending %v, %d extensions", o.Pending != nil, len(o.Extensions))
+			}
+		})
+	}
+}
+
+// While the site says its index isn't updated, the identical results are
+// uploaded again at each close until it is.
+func TestCloseRetriesResultsIndex(t *testing.T) {
+	ctx := context.Background()
+	e := newExtEnv(t)
+	e.pub.resultsStale = true
+	*e.clock = time.Unix(e.in.ClosesAt, 0).Add(2 * CollectMargin)
+	if _, err := e.m.Close(ctx, e.id); err != nil {
+		t.Fatal(err)
+	}
+	if pr, _ := e.m.Results(ctx, e.id); !pr.IndexStale || e.pub.resultsUploads != 1 {
+		t.Fatalf("stale %v, uploads %d", pr.IndexStale, e.pub.resultsUploads)
+	}
+	if _, err := e.m.Close(ctx, e.id); err != nil || e.pub.resultsUploads != 2 {
+		t.Fatalf("still stale: %v, uploads %d", err, e.pub.resultsUploads)
+	}
+	e.pub.resultsStale = false
+	if _, err := e.m.Close(ctx, e.id); err != nil || e.pub.resultsUploads != 3 {
+		t.Fatalf("index done: %v, uploads %d", err, e.pub.resultsUploads)
+	}
+	if pr, _ := e.m.Results(ctx, e.id); pr.IndexStale {
+		t.Fatal("still marked")
+	}
+	if _, err := e.m.Close(ctx, e.id); err != nil || e.pub.resultsUploads != 3 {
+		t.Fatalf("after: %v, uploads %d", err, e.pub.resultsUploads)
 	}
 }
 

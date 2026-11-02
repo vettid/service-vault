@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/vettid/service-vault/vote"
-	"strconv"
 	"time"
 )
 
@@ -19,7 +18,34 @@ import (
 // ExtensionPublisher anchors and publishes an extension (§3.3), and
 // returns its Sigstore bundle.
 type ExtensionPublisher interface {
-	PublishExtension(ctx context.Context, proposalID string, n int64, doc, sig []byte) (json.RawMessage, error)
+	PublishExtension(ctx context.Context, proposalID string, n int64, doc, sig []byte) (Receipt, error)
+}
+
+// Receipt is what a publication returns: the document's bundle, and
+// whether the site wrote the document but not its index entry
+// (index_updated false in its answer; a missing field is not stale). The
+// identical upload again finishes the index (BALLOT-PROTOCOL §3.3).
+type Receipt struct {
+	Bundle     json.RawMessage
+	IndexStale bool
+}
+
+// BundleSource returns the bundle this service anchored for a document
+// and kept (nil if there is none), without anchoring anything. Times are
+// read only from such a bundle, never from one the site served.
+type BundleSource interface {
+	StoredBundle(ctx context.Context, doc []byte) (json.RawMessage, error)
+}
+
+// ErrPublishRefused is the site refusing a document with a code it gave:
+// no retry changes it.
+type ErrPublishRefused struct {
+	Status int
+	Code   string
+}
+
+func (e *ErrPublishRefused) Error() string {
+	return fmt.Sprintf("publish: votes.vettid.org refused it: %d %s", e.Status, e.Code)
 }
 
 // MinOutage is the shortest outage that extends a vote (§10.2).
@@ -39,35 +65,13 @@ type ExtensionInput struct {
 const ExtendMargin = CollectMargin
 
 // ErrTooLate is an extension asked for once the close it would extend has
-// passed, or one whose Rekor time is not before that close.
+// passed, or one whose RFC 3161 time is not before that close.
 var ErrTooLate = errors.New("ballot: the close to extend has passed")
 
 // ErrExtensionPending is a new extension asked for while another is signed
 // and stored but not yet in effect: it is finished (the same request
 // again) or settled by Close first.
 var ErrExtensionPending = errors.New("ballot: another extension is pending")
-
-// IntegratedTime returns the time (Unix seconds) at which the transparency
-// log integrated the bundle's single entry: the time that decides whether
-// an extension came before the close it extends. It fails closed on a
-// bundle without exactly one entry carrying a time.
-func IntegratedTime(bundle json.RawMessage) (int64, error) {
-	var b struct {
-		VerificationMaterial struct {
-			TlogEntries []struct {
-				IntegratedTime string `json:"integratedTime"`
-			} `json:"tlogEntries"`
-		} `json:"verificationMaterial"`
-	}
-	if err := json.Unmarshal(bundle, &b); err != nil || len(b.VerificationMaterial.TlogEntries) != 1 {
-		return 0, errors.New("ballot: the bundle has no single log entry")
-	}
-	t, err := strconv.ParseInt(b.VerificationMaterial.TlogEntries[0].IntegratedTime, 10, 64)
-	if err != nil || t <= 0 {
-		return 0, errors.New("ballot: the bundle's log time is unreadable")
-	}
-	return t, nil
-}
 
 // Extend publishes an extension and sends vote.extended to every eligible
 // member.
@@ -82,8 +86,9 @@ func IntegratedTime(bundle json.RawMessage) (int64, error) {
 // again) publishes the same bytes and finishes. A failure between the use
 // and the store leaves the approval used (the admins approve again).
 //
-// Whether the extension is in effect is decided by the log time in its
-// bundle: before the close it extends, or it does not apply (ErrTooLate).
+// Whether the extension is in effect is decided by the RFC 3161 time in
+// the bundle this service anchored for it (TSATime), as the site decides:
+// before the close it extends, or it does not apply (ErrTooLate).
 func (m *Manager) Extend(ctx context.Context, id, approvalID string, in ExtensionInput) (*vote.Extension, error) {
 	unlock, err := m.lock(ctx, id)
 	if err != nil {
@@ -91,7 +96,8 @@ func (m *Manager) Extend(ctx context.Context, id, approvalID string, in Extensio
 	}
 	defer unlock()
 	ep, ok := m.Publisher.(ExtensionPublisher)
-	if m.Publisher == nil || !ok {
+	bs, ok2 := m.Publisher.(BundleSource)
+	if m.Publisher == nil || !ok || !ok2 {
 		return nil, ErrNoPublisher
 	}
 	o, err := m.Store.OpenProposal(ctx, id)
@@ -106,9 +112,20 @@ func (m *Manager) Extend(ctx context.Context, id, approvalID string, in Extensio
 		return nil, err
 	}
 	now := m.Now().Unix()
-	// A retry of a pending extension may run up to the close; a new one
-	// must leave the margin.
-	if o.Published || now >= o.ClosesAt || o.Pending == nil && now >= o.ClosesAt-int64(ExtendMargin/time.Second) {
+	// A new extension, or a retry that was never anchored (no bundle
+	// kept), must leave the margin; a retry with a bundle is judged by
+	// its time below.
+	margin := now >= o.ClosesAt-int64(ExtendMargin/time.Second)
+	var kept json.RawMessage
+	if o.Pending != nil {
+		if kept, err = bs.StoredBundle(ctx, o.Pending.Doc); err != nil {
+			return nil, err
+		}
+		if kept != nil {
+			margin = false
+		}
+	}
+	if o.Published || margin {
 		return nil, ErrTooLate
 	}
 	out := in.Outage
@@ -145,6 +162,13 @@ func (m *Manager) Extend(ctx context.Context, id, approvalID string, in Extensio
 			return nil, ErrExtensionPending
 		}
 		doc, sig = pe.Doc, pe.Sig
+		if kept != nil {
+			if at, err := TSATime(kept); err != nil {
+				return nil, err
+			} else if at >= o.ClosesAt {
+				return nil, ErrTooLate
+			}
+		}
 	} else {
 		msg, _ := vote.DocSigMsg(sum(o.Doc), doc)
 		if sig, err = m.Sign(vote.LabelExtended, msg); err != nil {
@@ -159,13 +183,17 @@ func (m *Manager) Extend(ctx context.Context, id, approvalID string, in Extensio
 			return nil, err
 		}
 	}
-	bundle, err := ep.PublishExtension(ctx, id, e.N, doc, sig)
+	rc, err := ep.PublishExtension(ctx, id, e.N, doc, sig)
 	if err != nil {
 		return nil, fmt.Errorf("ballot: publish extension %d of %s: %w", e.N, id, err)
 	}
+	bundle := rc.Bundle
+	if rc.IndexStale {
+		m.log().Warn("site index not updated for the extension; the next close uploads it again", "proposal_id", id, "n", e.N)
+	}
 	// Each extension is published before the close it extends (§10.2):
-	// the log's time for it decides, not this clock.
-	at, err := IntegratedTime(bundle)
+	// the bundle's RFC 3161 time decides, not this clock.
+	at, err := TSATime(bundle)
 	if err != nil {
 		return nil, err
 	}

@@ -71,7 +71,7 @@ type OpenProposal struct {
 	Extensions []vote.Signed `json:"extensions,omitempty"`
 	// Pending is an extension signed and stored, and published or about to
 	// be (§10.2): it takes effect, as Extensions' next, once the site holds
-	// it and its Rekor time is before the close it extends.
+	// it and its RFC 3161 time is before the close it extends.
 	Pending *PendingExtension `json:"pending_extension,omitempty"`
 	// Published is set once collection ended and the results are being
 	// published (§7): a cast handled after it is late.

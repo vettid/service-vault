@@ -189,8 +189,11 @@ design: vettid/votes, docs/VOTES-SITE.md).
   as published. The answer may carry `index_updated`: if it is `false`,
   the document is written but the index update failed, and the service
   uploads the identical bytes again until it is `true` (the only repair:
-  nothing rebuilds the index from the documents); a missing field means
-  updated, as older sites send none. `409` is a different document at
+  nothing rebuilds the index from the documents): an extension at each
+  reconcile and close, the results at each close once it is recorded as
+  not updated; a proposal's entry is added by the next upload of its
+  extensions or results. A missing field means updated, as older sites
+  send none. `409` is a different document at
   that path. The service never depends on the index to find a document:
   it reads `extension-<n+1>` until a 404, when it reconciles and at the
   close (§10.2).
@@ -646,20 +649,28 @@ on the record's version), then publishes it, then marks it in effect
 retry, or a restart, publishes the same bytes, never a new signature,
 and uses no second approval; while one is pending a different extension
 is refused (`extension_pending`, 409). **Whether an extension is in
-effect is decided by the integrated time of the log entry in its Sigstore
-bundle**, not by the service's clock: it must be before the `closes_at`
-it extends, or it does not apply (`too_late`). Before counting, the close
-**reconciles** the store with the site: it reads `extension-1`,
-`extension-2`, … to the first 404, and a pending extension the site has
-is put in effect; one the site has and the store lacks is adopted only if
-it carries the service's signature, this proposal, the next number, the
-24 h limit and a log time before the close it extends; a pending one the
-site lacks is dropped once the close and the margin have passed. Any
-other difference (the store holds an extension the site lacks or has
-other bytes; the site's extension doesn't verify) is refused: nothing is
-counted and the error is logged (`site_mismatch`, 409). If the index
-lists fewer extensions than the files, the last is uploaded again
-(§3.3) to finish it. **(chosen; not in the
+effect is decided by the RFC 3161 time (`genTime`) in the Sigstore bundle
+the service anchored for it**, as the site decides (VOTES-SITE §4) and a
+vault does (VAULT-MESSAGING §10.19.6): before the `closes_at` it extends,
+or it does not apply (`too_late`). The service reads that time only from
+the bundle it kept itself, never from the one the site serves. A retry
+that was never anchored must leave the 1-minute margin; one with a kept
+bundle is judged by its time. Before counting, the close **reconciles**
+the store with the site: it reads `extension-1`, `extension-2`, … to the
+first 404 to find them. A pending extension the site has is put in
+effect; one the site has and the store lacks is adopted only if it
+carries the service's signature, this proposal, the next number, the 24 h
+limit and a kept bundle of the service's own with a time before the close
+it extends (none kept, as after a restore of the table: refused). A 404
+is not proof of absence (it may be cached): before a pending extension is
+dropped, once the close and the margin have passed, its stored bytes are
+uploaded again; `200` or `201` says the site has it (it is adopted), `422
+too_late` says it does not (it is dropped), anything else is an error and
+nothing is dropped. Any other difference (the store holds an extension
+the site lacks or has other bytes; the site's extension doesn't verify)
+is refused: nothing is counted and the error is logged (`site_mismatch`,
+409). The last extension is uploaded again at each reconcile, which also
+finishes the index (§3.3). **(chosen; not in the
 spec.)** Counting the votes after the close (§7) needs no approval: it
 decides nothing that the window and the ballots have not.
 
@@ -714,9 +725,10 @@ item.
 ## Changes
 
 - **0.13.1 (2026-11-02):** §10.2: an extension is stored (pending) before
-  it is published, a retry publishes the same bytes, the log time of its
-  bundle decides whether it applies, and the close reconciles with the
-  site before counting. §3.3: the publisher contract for the upload's
+  it is published, a retry publishes the same bytes, the
+  bundle's RFC 3161 time (read from the service's own kept bundle)
+  decides whether it applies, and the close reconciles with the site
+  before counting, probing before it drops a pending extension. §3.3: the publisher contract for the upload's
   answer (`index_updated`). No change to the messages or documents.
 - **0.13.0 (2026-11-02):** creating a proposal (§3.4) and extending one
   (§10.2) need the admins' m-of-n approval of the exact input, used

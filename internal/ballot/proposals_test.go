@@ -6,7 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"github.com/vettid/service-vault/internal/ballot/ballottest"
 	"github.com/vettid/service-vault/vote"
 	"sync"
 	"testing"
@@ -58,29 +58,42 @@ type fakePublisher struct {
 	// started and release, when set, hold an extension's publication
 	// until release is closed, after telling started.
 	started, release chan struct{}
-	// integrated is the log time of a bundle made; failAfter writes to the
-	// site and then reports an error (a lost answer); site is what the
-	// site holds; indexed is the index's count (-1: no entry).
-	integrated func() int64
-	failAfter  bool
-	site       map[int64]*SiteExtension
-	indexed    *int
-	published  [][]byte // the extension documents sent, in order
+	// integrated and tsa are the times of a bundle made; failAfter writes
+	// to the site and then reports an error (a lost answer); site is what
+	// the site holds; own is the bundles kept, by document; refuse is what
+	// the site answers an upload with.
+	integrated, tsa func() int64
+	failAfter       bool
+	site            map[int64]*SiteExtension
+	own             map[string]json.RawMessage
+	refuse          *ErrPublishRefused
+	published       [][]byte // the extension documents sent, in order
+	indexStale      bool     // the extension answers say the index isn't updated
+	resultsStale    bool
+	resultsUploads  int
 }
 
-func (p *fakePublisher) bundle() json.RawMessage {
-	return json.RawMessage(fmt.Sprintf(`{"verificationMaterial":{"tlogEntries":[{"integratedTime":"%d"}]}}`, p.integrated()))
+func (p *fakePublisher) bundle(doc []byte) json.RawMessage {
+	if b := p.own[string(doc)]; b != nil {
+		return b
+	}
+	tsa := p.integrated()
+	if p.tsa != nil {
+		tsa = p.tsa()
+	}
+	if p.own == nil {
+		p.own = map[string]json.RawMessage{}
+	}
+	p.own[string(doc)] = ballottest.Bundle(tsa, p.integrated())
+	return p.own[string(doc)]
+}
+
+func (p *fakePublisher) StoredBundle(_ context.Context, doc []byte) (json.RawMessage, error) {
+	return p.own[string(doc)], nil
 }
 
 func (p *fakePublisher) Extension(_ context.Context, _ string, n int64) (*SiteExtension, error) {
 	return p.site[n], nil
-}
-
-func (p *fakePublisher) ExtensionCount(_ context.Context, _ string) (int, bool, error) {
-	if p.indexed != nil {
-		return *p.indexed, true, nil
-	}
-	return len(p.site), len(p.site) > 0, nil
 }
 
 func (p *fakePublisher) PublishProposal(_ context.Context, id string, doc, sig []byte) (json.RawMessage, error) {
@@ -282,12 +295,13 @@ func TestCreateRefusals(t *testing.T) {
 	}
 }
 
-func (p *fakePublisher) PublishResults(_ context.Context, id string, results, sig, rows []byte) (json.RawMessage, error) {
+func (p *fakePublisher) PublishResults(_ context.Context, id string, results, sig, rows []byte) (Receipt, error) {
 	p.calls++
+	p.resultsUploads++
 	if p.fail {
-		return nil, errors.New("rekor down")
+		return Receipt{}, errors.New("rekor down")
 	}
-	return json.RawMessage(`{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}`), nil
+	return Receipt{Bundle: json.RawMessage(`{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}`), IndexStale: p.resultsStale}, nil
 }
 
 type fakeCatcher struct {
@@ -387,29 +401,33 @@ func TestClose(t *testing.T) {
 	}
 }
 
-func (p *fakePublisher) PublishExtension(_ context.Context, id string, n int64, doc, sig []byte) (json.RawMessage, error) {
+func (p *fakePublisher) PublishExtension(_ context.Context, id string, n int64, doc, sig []byte) (Receipt, error) {
 	if p.release != nil {
 		p.started <- struct{}{}
 		<-p.release
 	}
 	p.calls++
 	if p.fail {
-		return nil, errors.New("rekor down")
+		return Receipt{}, errors.New("rekor down")
 	}
+	b := p.bundle(doc)
 	p.published = append(p.published, doc)
+	if p.refuse != nil {
+		return Receipt{}, p.refuse
+	}
 	if old := p.site[n]; old != nil && !bytes.Equal(old.Doc, doc) {
-		return nil, errors.New("409")
+		return Receipt{}, errors.New("409")
 	}
 	if p.site == nil {
 		p.site = map[int64]*SiteExtension{}
 	}
 	if p.site[n] == nil {
-		p.site[n] = &SiteExtension{Doc: doc, Sig: sig, Bundle: p.bundle()}
+		p.site[n] = &SiteExtension{Doc: doc, Sig: sig, Bundle: b}
 	}
 	if p.failAfter {
-		return nil, errors.New("answer lost")
+		return Receipt{}, errors.New("answer lost")
 	}
-	return p.site[n].Bundle, nil
+	return Receipt{Bundle: b, IndexStale: p.indexStale}, nil
 }
 
 func TestExtend(t *testing.T) {

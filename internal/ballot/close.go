@@ -33,7 +33,7 @@ type Catcher interface {
 // ResultsPublisher anchors and publishes the results (§3.3), and returns
 // their Sigstore bundle.
 type ResultsPublisher interface {
-	PublishResults(ctx context.Context, proposalID string, results, sig, rows []byte) (json.RawMessage, error)
+	PublishResults(ctx context.Context, proposalID string, results, sig, rows []byte) (Receipt, error)
 }
 
 // Errors from Close.
@@ -48,6 +48,10 @@ type PublishedResults struct {
 	Sig     []byte          `json:"results_sig"`
 	Rows    []byte          `json:"rows"`
 	Bundle  json.RawMessage `json:"bundle,omitempty"`
+	// IndexStale is set while the site has the results but answered that
+	// its index isn't updated: the identical upload is repeated at each
+	// Close until it is (BALLOT-PROTOCOL §3.3).
+	IndexStale bool `json:"index_stale,omitempty"`
 }
 
 // ResultsSummary is what Close reports.
@@ -69,7 +73,8 @@ func (m *Manager) Close(ctx context.Context, id string) (*ResultsSummary, error)
 	rp, ok := m.Publisher.(ResultsPublisher)
 	sr, ok2 := m.Publisher.(SiteReader)
 	ep, ok3 := m.Publisher.(ExtensionPublisher)
-	if m.Publisher == nil || !ok || !ok2 || !ok3 {
+	bs, ok4 := m.Publisher.(BundleSource)
+	if m.Publisher == nil || !ok || !ok2 || !ok3 || !ok4 {
 		return nil, ErrNoPublisher
 	}
 	o, err := m.Store.OpenProposal(ctx, id)
@@ -91,7 +96,7 @@ func (m *Manager) Close(ctx context.Context, id string) (*ResultsSummary, error)
 		// Before counting: the extensions are the site's (an extension
 		// published but not stored moves the close). Nothing is counted
 		// while they can't be reconciled.
-		if err := m.reconcile(ctx, sr, ep, o); err != nil {
+		if err := m.reconcile(ctx, sr, ep, bs, o); err != nil {
 			return nil, err
 		}
 		end = time.Unix(o.ClosesAt, 0).Add(CollectMargin)
@@ -123,13 +128,27 @@ func (m *Manager) Close(ctx context.Context, id string) (*ResultsSummary, error)
 		}
 	}
 	if pr.Bundle == nil {
-		if pr.Bundle, err = rp.PublishResults(ctx, id, pr.Results, pr.Sig, pr.Rows); err != nil {
+		rc, err := rp.PublishResults(ctx, id, pr.Results, pr.Sig, pr.Rows)
+		if err != nil {
 			return nil, fmt.Errorf("ballot: publish results of %s: %w", id, err)
 		}
+		pr.Bundle, pr.IndexStale = rc.Bundle, rc.IndexStale
 		if err := m.saveResults(ctx, id, pr, false); err != nil {
 			return nil, err
 		}
 		m.announce(ctx, o, pr)
+	} else if pr.IndexStale {
+		// The site has the results; its index missed them. The identical
+		// upload again reruns the index update.
+		switch rc, err := rp.PublishResults(ctx, id, pr.Results, pr.Sig, pr.Rows); {
+		case err != nil:
+			m.log().Warn("site index still not updated for the results", "proposal_id", id, "err", err.Error())
+		case !rc.IndexStale:
+			pr.IndexStale = false
+			if err := m.saveResults(ctx, id, pr, false); err != nil {
+				m.log().Warn("results not saved", "proposal_id", id, "err", err.Error())
+			}
+		}
 	}
 	res, err := vote.ParseResults(pr.Results)
 	if err != nil {

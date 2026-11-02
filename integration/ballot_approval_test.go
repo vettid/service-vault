@@ -8,6 +8,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/json"
+	"github.com/vettid/service-vault/internal/ballot/ballottest"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -40,9 +41,12 @@ func (site) PublishProposal(context.Context, string, []byte, []byte) (json.RawMe
 	return json.RawMessage(`{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}`), nil
 }
 
-func (site) PublishExtension(context.Context, string, int64, []byte, []byte) (json.RawMessage, error) {
-	return json.RawMessage(`{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}`), nil
+func (site) PublishExtension(context.Context, string, int64, []byte, []byte) (ballot.Receipt, error) {
+	now := time.Now().Unix()
+	return ballot.Receipt{Bundle: ballottest.Bundle(now, now)}, nil
 }
+
+func (site) StoredBundle(context.Context, []byte) (json.RawMessage, error) { return nil, nil }
 
 // A vote is made, and extended, only through the admins' approval of
 // its exact input, used once, on DynamoDB: the request, the admins'
