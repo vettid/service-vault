@@ -239,7 +239,9 @@ func (p *Peer) EligibleUnsigned() []string {
 }
 
 // HasPendingSignIn reports whether a sign-in challenge sent to the
-// connection awaits its answer. It reads the challenges alone: the
+// connection awaits its answer or may still be held at the member vault
+// (until its exp plus ClockSkew, also after a cancel whose withdraw was
+// not sent). It reads the challenges alone: the
 // member vault bounds the pending challenges it holds per connection
 // (VAULT-MESSAGING §10.4.1), so a caller that sends at most one while
 // none is pending stays within the bound.
