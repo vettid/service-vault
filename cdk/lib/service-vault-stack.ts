@@ -801,6 +801,9 @@ export class ServiceVaultStack extends cdk.Stack {
           { eventName: ['RegisterTaskDefinition'], requestParameters: { taskRoleArn: taskRoleNames, family: [{ 'anything-but': [family] }] } },
           { eventName: ['RunTask', 'StartTask', 'CreateService', 'CreateTaskSet'], requestParameters: { taskDefinition: ourTaskDef } },
           { eventName: ['UpdateService'], requestParameters: { taskDefinition: ourTaskDef, service: [{ 'anything-but': [prefix, this.service.serviceArn] }] } },
+          // The same service name in another cluster is another service; an absent cluster is the default one.
+          { eventName: ['UpdateService'], requestParameters: { taskDefinition: ourTaskDef, cluster: [{ 'anything-but': [prefix, cluster.clusterArn] }] } },
+          { eventName: ['UpdateService'], requestParameters: { taskDefinition: ourTaskDef, cluster: [{ exists: false }] } },
           { eventName: ['RunTask', 'StartTask'], requestParameters: { overrides: { taskRoleArn: taskRoleNames } } },
         ],
       });
@@ -824,6 +827,9 @@ export class ServiceVaultStack extends cdk.Stack {
     // The task role's trust policy and permissions: a way to the role that
     // needs no task at all. IAM events reach EventBridge in us-east-1 only,
     // so elsewhere this rule is not created (README "Limits").
+    if (cdk.Token.isUnresolved(this.region)) {
+      cdk.Annotations.of(this).addWarning('The region is not known at synth: the taskrole_policy_change rule (IAM events, us-east-1 only) is omitted. Set env.region to us-east-1 to get it.');
+    }
     if (this.region === 'us-east-1') {
       secRule('taskrole_policy_change', 'alarm', 'The task role\'s trust policy or permissions were changed',
         'The service vault task role\'s trust policy or permissions were changed (UpdateAssumeRolePolicy, AttachRolePolicy, PutRolePolicy): CloudFormation does this only in a deploy that changes the role',

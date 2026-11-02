@@ -478,7 +478,7 @@ describe('alarms', () => {
     });
 
     test('taskrole_use (PassRole is not a CloudTrail event): task role in another family, our task definition run or created, task role override', () => {
-      const [reg, run, upd, override] = anyOf('taskrole_use');
+      const [reg, run, upd, updCluster, updDefault, override] = anyOf('taskrole_use');
       expect(reg.eventName).toEqual(['RegisterTaskDefinition']);
       expect(reg.requestParameters.taskRoleArn).toHaveLength(2); // ARN and short name
       expect(s(reg.requestParameters.taskRoleArn)).toContain('TaskTaskRole');
@@ -492,6 +492,14 @@ describe('alarms', () => {
       expect(upd.requestParameters.taskDefinition).toEqual(run.requestParameters.taskDefinition);
       expect(upd.requestParameters.service[0]['anything-but']).toHaveLength(2);
       expect(s(upd.requestParameters.service)).toContain('vettid-service-vault-test');
+      for (const u of [updCluster, updDefault]) {
+        expect(u.eventName).toEqual(['UpdateService']);
+        expect(u.requestParameters.taskDefinition).toEqual(run.requestParameters.taskDefinition);
+      }
+      expect(updCluster.requestParameters.cluster[0]['anything-but']).toHaveLength(2);
+      expect(s(updCluster.requestParameters.cluster)).toContain('vettid-service-vault-test');
+      expect(s(updCluster.requestParameters.cluster)).toContain('ClusterEB0386A7');
+      expect(updDefault.requestParameters.cluster).toEqual([{ exists: false }]);
       expect(override.eventName).toEqual(['RunTask', 'StartTask']);
       expect(override.requestParameters.overrides.taskRoleArn).toHaveLength(2);
       expect(s(override.requestParameters.overrides.taskRoleArn)).toContain('TaskTaskRole');

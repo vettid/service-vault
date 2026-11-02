@@ -132,7 +132,8 @@ deployments) go to a log group of their own, kept a month, for
 `task_stopped` and `deploy_failed`. Each EventBridge rule that writes to
 a log group adds an account-wide CloudWatch Logs resource policy
 (10 per region): this stack has three, the key changes', the ECS
-events' and the control-plane rules' below (one policy for all seven).
+events' and the control-plane rules' below (one policy for all seven),
+so staging and prod in one account and region use 6 of the 10.
 
 **Control-plane alarms.** Someone with AWS access to the account (not the
 enclave) could run a task under the task role and read the keystore, or
@@ -154,7 +155,7 @@ once on staging by making each call.
 | `notice-taskdef_registered` | `ecs:RegisterTaskDefinition` for this service's family | **Yes**, every deploy that changes the task definition (new image, setting) |
 | `notice-service_updated` | `ecs:UpdateService` on this service | **Yes**, every deploy that changes the service, and a manual scale or force-new-deployment |
 | `run_task` | `ecs:RunTask` or `ecs:StartTask` in this cluster | No: never normal (the service scheduler starts its tasks without a RunTask call by the operator) |
-| `taskrole_use` | the task role used outside the service: `RegisterTaskDefinition` naming the task role (ARN or short name) in another family; `RunTask`, `StartTask`, `CreateService` or `CreateTaskSet` naming this family (any cluster); `UpdateService` on another service naming this family; a `RunTask` or `StartTask` override of the task role | Once, on the first create or when CloudFormation replaces the service (its own `CreateService` names the family); not on ordinary deploys |
+| `taskrole_use` | the task role used outside the service: `RegisterTaskDefinition` naming the task role (ARN or short name) in another family; `RunTask`, `StartTask`, `CreateService` or `CreateTaskSet` naming this family (any cluster); `UpdateService` naming this family on another service, in another cluster or in the default cluster; a `RunTask` or `StartTask` override of the task role | Once, on the first create or when CloudFormation replaces the service (its own `CreateService` names the family); not on ordinary deploys |
 | `keystore_decrypt` | `kms:Decrypt`, `ReEncrypt` on the keystore key by any caller but a session of the task role | No (the operator's `table restore` does not use the key) |
 | `tls_pin_change` | `ssm:PutParameter`, `DeleteParameter`, `DeleteParameters` on the TLS pin parameter by any caller but a session of the task role | Once, on the first deploy, when CloudFormation creates the parameter; and whenever a CloudFormation update touches the `TlsPin` resource, which rewrites its value |
 | `taskrole_policy_change` | `iam:UpdateAssumeRolePolicy`, `AttachRolePolicy`, `PutRolePolicy` on the task role (us-east-1 only, see Limits) | Yes, a deploy that changes the task role's permissions (CloudFormation puts its policy); otherwise never |
