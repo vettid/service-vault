@@ -689,7 +689,8 @@ admin's connection.
     its expiry, so it never counts fewer than the member's vault does.
     The log starts empty when this version is first deployed, so for
     up to a challenge's expiry plus 24 hours after that, challenges sent
-    before it are not counted. Only forced reminders are checked: creating an approval, and a plain
+    before it are not counted. Only forced reminders are checked:
+    creating an approval, and a plain
     reminder without long challenges, still challenge every admin who has
     not answered. Use it only when the admin reports not seeing the
     request. If the withdraw was lost, the member may then see
