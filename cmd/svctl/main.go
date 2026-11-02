@@ -72,9 +72,10 @@ commands:
                                    too_soon). -force names admins to challenge again even with a
                                    live challenge (the old one is withdrawn); each forced re-send
                                    spends one of that admin's 5 approval asks per 24 h, and a
-                                   force naming an admin sent 5 approval challenges in the last
-                                   24 h is refused (ask_budget, exit 1): use it only when the
-                                   admin reports not seeing the request
+                                   force naming an admin with 5 approval challenges still
+                                   counting (each until its expiry + 24 h) is refused
+                                   (ask_budget, exit 1): use it only when the admin reports not
+                                   seeing the request
   admins                           print the admin set and the threshold
   audit [-since ID] [-limit N]     print a page of the audit log, one JSON entry per line
   anchor-key                       print GET /v1/anchor-key (for the votes site's service list)
@@ -516,7 +517,7 @@ func (c *cli) remind(ctx context.Context, args []string) error {
 		return nil
 	}
 	if errors.As(err, &ae) && ae.Code == servicevault.CodeAskBudget {
-		return fmt.Errorf("remind: a named admin was sent 5 approval challenges in the last 24 hours; "+
+		return fmt.Errorf("remind: a named admin has 5 approval challenges still counting (each until its expiry plus 24 hours); "+
 			"a sixth would come back as a denial (%w)", err)
 	}
 	if err != nil {

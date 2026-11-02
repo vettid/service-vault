@@ -1285,48 +1285,50 @@ func TestRemindForcePlaceLimit(t *testing.T) {
 	}
 }
 
-// A forced re-send is refused (ask_budget) once the service has sent an
-// admin 5 approval challenges in the last 24 hours, counting every
-// approval's challenges to that admin; the 6th would come back from the
-// member's vault as a delayed denial (VAULT-MESSAGING §10.4.1). The
-// window slides: a send older than 24 hours frees its part.
+// A forced re-send is refused (ask_budget) while 5 approval challenges the
+// service sent an admin, from any approval, still count: until each one's
+// exp plus 24 hours plus the clock skew, since the member's vault may
+// receive a challenge as late as its exp (VAULT-MESSAGING §10.4.1). A
+// refused force withdraws and sends nothing.
 func TestRemindForceAskBudget(t *testing.T) {
 	for _, gate := range []bool{true, false} {
-		f := newFixture(t, 1, "c1", "c2")
+		f := newFixture(t, 1, "c1")
 		f.m.LongChallenges = gate
+		f.m.TTL = 72 * time.Hour
 		ctx := context.Background()
-		// Five approvals, a challenge each to c1 and c2.
 		var ids []string
 		for i := range askBudget {
 			ids = append(ids, f.create(ActionVoteOpen, fmt.Sprint("Open ", i), `{}`).ID)
 			f.clk.Advance(time.Hour)
 		}
+		l, err := f.m.asks(ctx, "c1")
+		if err != nil || len(l.Exp) != askBudget {
+			t.Fatalf("gate %v: %+v %v", gate, l, err)
+		}
+		// Each counts at least until its challenge's exp plus a day.
+		want := f.p.first("c1").at.Add(f.p.first("c1").ttl)
+		if l.Exp[0].Before(want) {
+			t.Fatalf("gate %v: logged exp %v before the challenge's %v", gate, l.Exp[0], want)
+		}
 		f.clk.Advance(RemindInterval)
-		before := len(f.p.sent)
-		cancelled := len(f.p.cancelled)
+		before, cancelled := len(f.p.sent), len(f.p.cancelled)
 		if _, err := f.m.Remind(ctx, ids[4], "c1"); codeOf(err) != CodeAskBudget {
 			t.Fatalf("gate %v: sixth: %v", gate, err)
 		}
-		if _, err := f.m.Remind(ctx, ids[4], "c2", "c1"); codeOf(err) != CodeAskBudget {
-			t.Fatalf("gate %v: any named admin over budget refuses the call: %v", gate, err)
-		}
-		if len(f.p.sent) != before || len(f.p.cancelled) != cancelled {
+		if len(f.p.sent) != before || len(f.p.cancelled) != cancelled || f.status(ids[4]).Status != StatusPending {
 			t.Fatalf("gate %v: a refused force sent or withdrew something", gate)
 		}
-		if f.status(ids[4]).Status != StatusPending {
-			t.Fatalf("gate %v: status", gate)
-		}
-		// 24 hours after the first send, its part is free again.
-		f.clk.Advance(24*time.Hour - 5*time.Hour - RemindInterval - time.Second)
+		// Up to the first one's exp + 24 h + skew it still counts.
+		end := l.Exp[0].Add(askWindow + peer.ClockSkew)
+		f.clk.Advance(end.Sub(f.clk.Now()) - time.Millisecond)
 		if _, err := f.m.Remind(ctx, ids[4], "c1"); codeOf(err) != CodeAskBudget {
-			t.Fatalf("gate %v: a second early: %v", gate, err)
+			t.Fatalf("gate %v: just before the end: %v", gate, err)
 		}
-		f.clk.Advance(time.Second)
+		f.clk.Advance(time.Millisecond)
 		if r, err := f.m.Remind(ctx, ids[4], "c1"); err != nil || fmt.Sprint(r.Reminded) != "[c1]" {
-			t.Fatalf("gate %v: after the window: %+v %v", gate, r, err)
+			t.Fatalf("gate %v: after: %+v %v", gate, r, err)
 		}
-		// That send counts: the second approval's first send is within the
-		// window, so a further force on another approval is refused.
+		// That send counts too: the next force is refused again.
 		f.clk.Advance(RemindInterval)
 		if _, err := f.m.Remind(ctx, ids[3], "c1"); codeOf(err) != CodeAskBudget {
 			t.Fatalf("gate %v: after the re-send: %v", gate, err)
@@ -1334,8 +1336,102 @@ func TestRemindForceAskBudget(t *testing.T) {
 	}
 }
 
-// Plain reminders count in the log as well; the log keeps only the newest
-// askBudget sends.
+// A long challenge delivered late (held in the outbox while the member's
+// vault is away) can reach the member up to 24 hours after it was sent and
+// open the member's window then: 25 hours after five long challenges a
+// force is still refused.
+func TestRemindForceAskBudgetLateDelivery(t *testing.T) {
+	f := newFixture(t, 1, "c1")
+	f.m.LongChallenges = true
+	f.m.TTL = 72 * time.Hour
+	ctx := context.Background()
+	var ids []string
+	for i := range askBudget {
+		ids = append(ids, f.create(ActionVoteOpen, fmt.Sprint("Open ", i), `{}`).ID)
+	}
+	// Each is logged with the life asked for (24 h), even one the peer
+	// sends shorter for want of a long place: counting longer only refuses
+	// more.
+	if l, err := f.m.asks(ctx, "c1"); err != nil || l.Exp[0].Before(f.clk.Now().Add(peer.MaxApprovalChallengeTTL)) {
+		t.Fatalf("%+v %v", l, err)
+	}
+	f.clk.Advance(25 * time.Hour)
+	if _, err := f.m.Remind(ctx, ids[0], "c1"); codeOf(err) != CodeAskBudget {
+		t.Fatalf("25 h later: %v", err)
+	}
+	f.clk.Advance(23*time.Hour + peer.ClockSkew + time.Millisecond)
+	if _, err := f.m.Remind(ctx, ids[0], "c1"); err != nil {
+		t.Fatalf("after exp + 24 h + skew: %v", err)
+	}
+}
+
+// A force naming several admins is refused when any one is at the budget,
+// even if the others are not; nothing is withdrawn from them.
+func TestRemindForceAskBudgetAnyNamed(t *testing.T) {
+	f := newFixture(t, 1, "c1", "c2")
+	ctx := context.Background()
+	for range askBudget {
+		if err := f.m.logAsk(ctx, "c1", f.clk.Now().Add(RemindInterval)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := f.create(ActionVoteOpen, "Open", `{}`)
+	f.clk.Advance(RemindInterval)
+	old2 := f.p.last("c2")
+	before := len(f.p.sent)
+	if _, err := f.m.Remind(ctx, c.ID, "c2", "c1"); codeOf(err) != CodeAskBudget {
+		t.Fatalf("%v", err)
+	}
+	if len(f.p.sent) != before || slices.Contains(f.p.cancelled, old2.req) {
+		t.Fatal("a refused force sent or withdrew something")
+	}
+	if r, err := f.m.Remind(ctx, c.ID, "c2"); err != nil || fmt.Sprint(r.Reminded) != "[c2]" {
+		t.Fatalf("c2 alone: %+v %v", r, err)
+	}
+}
+
+// failStore fails Apply for any batch that writes kind.
+type failStore struct {
+	peer.Store
+	kind string
+}
+
+func (s *failStore) Apply(ctx context.Context, changes []peer.Change) error {
+	for _, c := range changes {
+		if c.Kind == s.kind {
+			return errors.New("store down")
+		}
+	}
+	return s.Store.Apply(ctx, changes)
+}
+
+// A challenge is logged before it is sent: one whose approval cannot be
+// saved still counts, and an admin whose log cannot be written is not
+// challenged.
+func TestAskLogBeforeSend(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, 1, "c1")
+	f.m.Store = &failStore{Store: f.st, kind: kindApproval}
+	if _, err := f.m.Create(ctx, Request{Action: ActionVoteOpen, Summary: "Open", Payload: json.RawMessage(`{}`)}); err == nil {
+		t.Fatal("created with the store down")
+	}
+	if len(f.p.sent) != 1 {
+		t.Fatalf("%d sent", len(f.p.sent))
+	}
+	if l, err := f.m.asks(ctx, "c1"); err != nil || len(l.Exp) != 1 {
+		t.Fatalf("the unsaved approval's challenge is not counted: %+v %v", l, err)
+	}
+	f = newFixture(t, 1, "c1")
+	f.m.Store = &failStore{Store: f.st, kind: kindAsks}
+	f.create(ActionVoteOpen, "Open", `{}`)
+	if len(f.p.sent) != 0 {
+		t.Fatalf("sent %d without logging", len(f.p.sent))
+	}
+}
+
+// Plain reminders count in the log as well; the log keeps only the
+// askBudget entries that count longest, and the record lasts as long as
+// the newest counts.
 func TestAskLogBounded(t *testing.T) {
 	f := newFixture(t, 1, "c1")
 	ctx := context.Background()
@@ -1347,19 +1443,32 @@ func TestAskLogBounded(t *testing.T) {
 		}
 	}
 	l, err := f.m.asks(ctx, "c1")
-	if err != nil || len(l.Sent) != askBudget || !l.full(f.clk.Now()) {
+	if err != nil || len(l.Exp) != askBudget || !l.full(f.clk.Now()) {
 		t.Fatalf("%+v %v", l, err)
 	}
-	if !l.Sent[askBudget-1].Equal(f.clk.Now()) {
-		t.Fatalf("newest %v", l.Sent[askBudget-1])
+	newest := l.Exp[askBudget-1]
+	if want := f.clk.Now().Add(RemindInterval); newest.Before(want) {
+		t.Fatalf("newest %v, want at least %v", newest, want)
+	}
+	// An entry that counts less long does not push out one that counts longer.
+	if err := f.m.logAsk(ctx, "c1", l.Exp[0].Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if l2, _ := f.m.asks(ctx, "c1"); !slices.Equal(l2.Exp, l.Exp) {
+		t.Fatalf("%v != %v", l2.Exp, l.Exp)
 	}
 	f.clk.Advance(RemindInterval)
 	if _, err := f.m.Remind(ctx, c.ID, "c1"); codeOf(err) != CodeAskBudget {
 		t.Fatalf("force after plain reminders: %v", err)
 	}
-	// The record expires 24 hours after the newest send.
-	f.clk.Advance(askWindow)
+	l, _ = f.m.asks(ctx, "c1")
+	end := l.Exp[askBudget-1].Add(askWindow + peer.ClockSkew)
+	f.clk.Advance(end.Sub(f.clk.Now()) - time.Millisecond)
+	if _, ok, _ := f.st.Get(ctx, kindAsks, "c1"); !ok {
+		t.Fatal("ask log gone while its newest entry counts")
+	}
+	f.clk.Advance(time.Millisecond)
 	if _, ok, _ := f.st.Get(ctx, kindAsks, "c1"); ok {
-		t.Fatal("ask log kept past its window")
+		t.Fatal("ask log kept after its newest entry stopped counting")
 	}
 }

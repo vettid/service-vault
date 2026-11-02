@@ -41,26 +41,33 @@ const (
 )
 
 // The member vault's approval rate bucket (VAULT-MESSAGING §10.4.1): 5
-// approval challenges per connection in a fixed 24-hour window. The
-// service counts its own sends in a sliding 24 hours, which is never less
-// than the member's count (a suppressed or lost challenge counts here and
-// not there), so a forced reminder is refused before it could come back
-// as a delayed denial.
+// approval challenges per connection in a fixed 24-hour window that starts
+// when the first reaches the member. A challenge can reach the member at
+// any time until its exp (the outbox holds it while the relay or the
+// member's vault is away; an expired one is dropped there), so the service
+// counts each challenge it sends until its exp plus askWindow plus
+// peer.ClockSkew. Any 5 in one member window reached it within 24 hours
+// before the next one, so all 5 still count here when that one would be
+// sent: a forced reminder is refused before it could come back as a
+// delayed denial. A suppressed, lost or unsent challenge counts here and
+// not there, which only refuses more.
 const (
 	askBudget = 5
 	askWindow = 24 * time.Hour
 )
 
-// askLog is the send times of the newest approval challenges to one
-// connection, at most askBudget, oldest first.
+// askLog is the exps of the approval challenges sent to one connection
+// that count longest, at most askBudget, in increasing order.
 type askLog struct {
-	Sent []time.Time `json:"sent"`
+	Exp []time.Time `json:"exp"`
 }
 
-// full reports whether askBudget challenges were sent within askWindow
-// before now.
+// counts reports whether a challenge with this exp still counts at now.
+func counts(exp, now time.Time) bool { return now.Before(exp.Add(askWindow + peer.ClockSkew)) }
+
+// full reports whether askBudget logged challenges still count at now.
 func (l *askLog) full(now time.Time) bool {
-	return len(l.Sent) >= askBudget && now.Sub(l.Sent[len(l.Sent)-askBudget]) < askWindow
+	return len(l.Exp) >= askBudget && counts(l.Exp[len(l.Exp)-askBudget], now)
 }
 
 func (m *Manager) asks(ctx context.Context, connID string) (*askLog, error) {
@@ -465,6 +472,8 @@ func challengeTTL(r *record, now time.Time) time.Duration {
 // challenge sends the approval's challenge to each of conns, each lasting
 // as long as the approval (challengeTTL), and records the request ids.
 // An admin who cannot be reached now is skipped (and can be reminded).
+// Each challenge is logged (logAsk) before it is sent; an admin whose log
+// cannot be written is skipped too.
 func (m *Manager) challenge(ctx context.Context, b *batch, r *record, conns []string, ctxt string) []Challenge {
 	var sent []Challenge
 	var ttl time.Duration // 0: the connauth default, 10 minutes
@@ -472,6 +481,10 @@ func (m *Manager) challenge(ctx context.Context, b *batch, r *record, conns []st
 		ttl = challengeTTL(r, m.now())
 	}
 	for _, c := range conns {
+		if err := m.logAsk(ctx, c, m.now().Add(max(ttl, peerwire.ConnAuthChallengeTTL))); err != nil {
+			m.log().Warn("approval ask log", "approval_id", r.ID, "connection_id", c, "err", errName(err))
+			continue
+		}
 		reqID, err := m.Peer.Authenticate(ctx, c, ctxt, peerwire.PurposeApproval, ttl)
 		if err != nil {
 			m.log().Warn("approval challenge", "approval_id", r.ID, "connection_id", c, "err", errName(err))
@@ -481,28 +494,32 @@ func (m *Manager) challenge(ctx context.Context, b *batch, r *record, conns []st
 		b.changes = append(b.changes, peer.Change{Kind: kindReq, ID: reqID, Data: []byte(r.ID),
 			Expires: r.Exp.Add(reqRetention)})
 		sent = append(sent, Challenge{ConnectionID: c, RequestID: reqID})
-		m.logAsk(ctx, b, c)
 	}
 	return sent
 }
 
-// logAsk adds a challenge sent now to connID's askLog. A log that cannot
-// be read is left as it is (and the send not counted) rather than
-// replaced by a shorter one.
-func (m *Manager) logAsk(ctx context.Context, b *batch, connID string) {
+// logAsk adds a challenge to connID's askLog, with exp (at least the
+// challenge's own, so it counts at least as long), and writes the log at
+// once, on its own: a challenge is counted before it is sent, even if the
+// send or the approval's batch then fails (counting one never sent only
+// refuses more).
+func (m *Manager) logAsk(ctx context.Context, connID string, exp time.Time) error {
 	l, err := m.asks(ctx, connID)
 	if err != nil {
-		m.log().Warn("approval ask log", "connection_id", connID, "err", errName(err))
-		return
+		return err
 	}
-	now := b.now.UTC().Truncate(time.Millisecond)
-	l.Sent = append(l.Sent, now)
-	if n := len(l.Sent); n > askBudget {
-		l.Sent = l.Sent[n-askBudget:]
+	l.Exp = append(l.Exp, exp.UTC().Truncate(time.Millisecond).Add(time.Millisecond))
+	slices.SortFunc(l.Exp, time.Time.Compare)
+	if n := len(l.Exp); n > askBudget {
+		l.Exp = l.Exp[n-askBudget:]
 	}
-	if err := b.put(kindAsks, connID, l, now.Add(askWindow)); err != nil {
-		m.log().Warn("approval ask log", "connection_id", connID, "err", errName(err))
+	data, err := marshal(l)
+	if err != nil {
+		return err
 	}
+	last := l.Exp[len(l.Exp)-1]
+	return m.Store.Apply(ctx, []peer.Change{{Kind: kindAsks, ID: connID, Data: data,
+		Expires: last.Add(askWindow + peer.ClockSkew)}})
 }
 
 func (m *Manager) cancel(ctx context.Context, chs []Challenge) {
@@ -575,8 +592,8 @@ var ErrNotFound = errors.New("approval: not found")
 // Otherwise to every admin who has not answered, replacing their challenge.
 // With force, only to the named admins (CodeNotAdmin for one outside the
 // approval's admins or the current set, CodeAnswered for one who has
-// answered, CodeAskBudget for one sent 5 approval challenges in the last
-// 24 hours): each one's live challenge is withdrawn and a new one sent,
+// answered, CodeAskBudget for one sent 5 approval challenges that still
+// count, see askBudget): each one's live challenge is withdrawn and a new one sent,
 // whatever the gate says, still at most once per RemindInterval. Each
 // forced re-send uses one of the member's approval asks (VAULT-MESSAGING
 // §10.4.1). (chosen; not in the spec)

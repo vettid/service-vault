@@ -410,7 +410,7 @@ func TestRemindAdminsAuditHealth(t *testing.T) {
 		t.Fatalf("answered: exit %d %s", code, errOut)
 	}
 	if code, _, errOut := f.run(t, "remind", "-force", "spent", "a1"); code != exitError || !strings.Contains(errOut, "ask_budget") ||
-		!strings.Contains(errOut, "5 approval challenges in the last 24 hours") {
+		!strings.Contains(errOut, "5 approval challenges still counting") {
 		t.Fatalf("ask budget: exit %d %s", code, errOut)
 	}
 	if code, _, _ := f.run(t, "remind", "-force", ",", "a1"); code != exitUsage {
