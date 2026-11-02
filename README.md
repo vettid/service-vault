@@ -132,7 +132,7 @@ deployments) go to a log group of their own, kept a month, for
 `task_stopped` and `deploy_failed`. Each EventBridge rule that writes to
 a log group adds an account-wide CloudWatch Logs resource policy
 (10 per region): this stack has three, the key changes', the ECS
-events' and the control-plane rules' below (one policy for all seven),
+events' and the control-plane rules' below (one policy for all ten),
 so staging and prod in one account and region use 6 of the 10.
 
 **Control-plane alarms.** Someone with AWS access to the account (not the
