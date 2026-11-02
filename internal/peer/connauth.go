@@ -132,32 +132,13 @@ func (p *Peer) authenticate(ctx context.Context, connID, ctxt, purpose, matchCod
 		return "", ErrNotFound
 	}
 	p.challenges[wc.RequestID] = &challenge{ID: wc.RequestID, ConnID: connID, Nonce: wc.Nonce, Context: ctxt, Purpose: purpose,
-		MatchCode: matchCode, Exp: exp, Sent: now.UTC().Truncate(time.Millisecond)}
+		MatchCode: matchCode, Exp: exp}
 	p.markDirty(kindAuth, wc.RequestID)
 	if err := p.flushAndDrain(ctx); err != nil {
 		return "", err
 	}
 	p.log().Info("challenge sent", "connection_id", connID, "request_id", wc.RequestID)
 	return wc.RequestID, nil
-}
-
-// sentAt is when the challenge was sent: Sent, or for a record that has
-// none, the time in its request id (a ULID).
-func (ch *challenge) sentAt() time.Time {
-	if !ch.Sent.IsZero() {
-		return ch.Sent
-	}
-	if ms, err := ulidMS(ch.ID); err == nil {
-		return time.UnixMilli(int64(ms)).UTC()
-	}
-	return time.Time{}
-}
-
-// long reports whether the challenge was sent with more than the usual
-// 10 minutes (one of the member vault's long-lived places).
-func (ch *challenge) long() bool {
-	sent := ch.sentAt()
-	return !sent.IsZero() && ch.Exp.Sub(sent) > peerwire.ConnAuthChallengeTTL
 }
 
 // holds reports whether the challenge may still hold a place at the member
@@ -167,12 +148,15 @@ func (ch *challenge) holds(now time.Time) bool {
 	return now.Before(ch.Exp.Add(ClockSkew))
 }
 
-// longLived counts the long challenges to connID that may still hold a
-// long-lived place at the member vault.
+// longLived counts the challenges to connID that may still hold a
+// long-lived place at the member vault. Every approval challenge counts,
+// whatever its life: a member vault whose clock lags sees even a 10-minute
+// challenge as expiring more than 10 minutes after it arrived, and counts
+// it long; overcounting only sends more challenges with 10 minutes.
 func (p *Peer) longLived(connID string, now time.Time) int {
 	n := 0
 	for _, ch := range p.challenges {
-		if ch.ConnID == connID && ch.long() && ch.holds(now) {
+		if ch.ConnID == connID && ch.Purpose == peerwire.PurposeApproval && ch.holds(now) {
 			n++
 		}
 	}

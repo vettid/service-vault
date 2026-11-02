@@ -72,12 +72,16 @@ func TestLongLivedChallengeLimit(t *testing.T) {
 	if d != long || d2 != long {
 		t.Fatalf("first two %v %v", d, d2)
 	}
-	if _, d := send(long); d != short {
-		t.Fatalf("third %v", d)
+	third, d3 := send(long)
+	if d3 != short {
+		t.Fatalf("third %v", d3)
 	}
-	// Withdrawn (queued): the place is free.
-	if ok, err := f.p.CancelChallenge(ctx, a); !ok || err != nil {
-		t.Fatal(ok, err)
+	// Withdrawn (queued): the places are free. The 10-minute third counted
+	// as one too (a lagging member clock would see it as long).
+	for _, id := range []string{a, third} {
+		if ok, err := f.p.CancelChallenge(ctx, id); !ok || err != nil {
+			t.Fatal(ok, err)
+		}
 	}
 	f.pump()
 	if _, d := send(long); d != long {
@@ -97,7 +101,8 @@ func TestLongLivedChallengeLimit(t *testing.T) {
 	p.outbox = slices.DeleteFunc(p.outbox, func(e *outboxEntry) bool { return string(e.Payload) == "x" })
 	p.mu.Unlock()
 	f.pump()
-	if n := len(m.Received(peerwire.TypeConnAuthWithdraw)); n != 1 {
+	if n := len(m.Received(peerwire.TypeConnAuthWithdraw)); n != 2 {
+		t.Fatalf("%d withdraws", n)
 		t.Fatalf("%d withdraws", n)
 	}
 	if _, d := send(long); d != short {
@@ -260,17 +265,26 @@ func TestExpiredChallengeKeptUntilSkew(t *testing.T) {
 	}
 }
 
-// A record without Sent takes the send time from its ULID.
-func TestLongWithoutSent(t *testing.T) {
+// A member vault whose clock lags counts even a 10-minute approval challenge
+// as long-lived, so two of them held leave no long place: a third long
+// request is sent with 10 minutes.
+func TestShortApprovalChallengesCountAsLong(t *testing.T) {
 	f := newFixture(t)
-	now := f.clk.Now()
-	id := f.p.newID(now)
-	ch := &challenge{ID: id, Exp: now.Add(time.Hour)}
-	if !ch.long() {
-		t.Fatal("a one-hour challenge without Sent is not long")
+	m := f.member(10)
+	cid := f.connect(m, "tag")
+	ctx := context.Background()
+	for i := 0; i < MaxLongLivedChallenges; i++ {
+		if _, err := f.p.Authenticate(ctx, cid, "x", peerwire.PurposeApproval, 0); err != nil {
+			t.Fatal(err)
+		}
 	}
-	ch.Exp = now.Add(5 * time.Minute)
-	if ch.long() {
-		t.Fatal("a 5-minute challenge is long")
+	f.pump()
+	n := len(m.Received(peerwire.TypeConnAuthChallenge))
+	if _, err := f.p.Authenticate(ctx, cid, "x", peerwire.PurposeApproval, 6*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	f.pump()
+	if d := m.Received(peerwire.TypeConnAuthChallenge)[n].Exp.Sub(f.clk.Now()); d != peerwire.ConnAuthChallengeTTL {
+		t.Fatalf("third %v", d)
 	}
 }

@@ -298,8 +298,6 @@ type challenge struct {
 	// 0.79.0 §10.4), or "".
 	MatchCode string    `json:"match_code,omitempty"`
 	Exp       time.Time `json:"exp"`
-	// Sent is when it was sent: with Exp it tells a long-lived challenge.
-	Sent time.Time `json:"sent,omitzero"`
 	// Gone marks a challenge that is over for us (cancelled with its withdraw
 	// not queued, or expired) but may still hold a place at the member
 	// vault: forgotten for every purpose but that count, until Exp plus
