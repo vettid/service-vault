@@ -22,6 +22,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -478,7 +479,10 @@ func serve(args []string) error {
 			if err != nil {
 				return err
 			}
-			mgr.Publisher = &publish.Publisher{URL: cfg.VotesURL, Anchor: anc, Client: anchor.Client(time.Minute), Records: records}
+			mgr.Timestamp = func(bundle json.RawMessage, doc []byte) (int64, error) {
+				return anchor.TimestampTime(cfg.Sigstore, bundle, doc)
+			}
+			mgr.Publisher = &publish.Publisher{URL: cfg.VotesURL, Anchor: anc, Client: anchor.Client(time.Minute), Records: records, Log: log}
 		}
 		if rebuild {
 			// The table was restored: ballots it lost are in the copy (§6).

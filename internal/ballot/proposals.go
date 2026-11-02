@@ -62,6 +62,11 @@ type Manager struct {
 	// Approvals checks and uses the admins' approvals; nil creates and
 	// extends nothing.
 	Approvals Approvals
+	// Timestamp returns the verified RFC 3161 time (Unix seconds) of the
+	// bundle this service anchored for doc, or an error
+	// (anchor.TimestampTime). It decides whether an extension came before
+	// the close it extends; nil decides nothing in effect (fail closed).
+	Timestamp func(bundle json.RawMessage, doc []byte) (int64, error)
 	NewID     func(time.Time) (string, error)
 	Now       func() time.Time
 	Log       *slog.Logger
@@ -71,6 +76,17 @@ type Manager struct {
 	// the whole record, so one mustn't save a copy read before another's
 	// save. One task runs the service vault, so a process lock suffices.
 	locks sync.Map
+}
+
+// ErrNoTimestamps is a service vault with no way to verify the time of an
+// anchor bundle: it applies no extension.
+var ErrNoTimestamps = errors.New("ballot: anchor timestamps can't be verified here")
+
+func (m *Manager) tsaTime(bundle json.RawMessage, doc []byte) (int64, error) {
+	if m.Timestamp == nil {
+		return 0, ErrNoTimestamps
+	}
+	return m.Timestamp(bundle, doc)
 }
 
 // lock takes a proposal's lock, waiting at most as long as ctx allows,

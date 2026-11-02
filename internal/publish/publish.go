@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -44,6 +45,9 @@ type Publisher struct {
 	// memory only (tests).
 	Records peer.Store
 
+	// Log is where the publisher logs; nil is slog's default.
+	Log *slog.Logger
+
 	mu      sync.Mutex
 	bundles map[[32]byte]json.RawMessage // anchored this run, by document
 }
@@ -52,33 +56,52 @@ var (
 	_ ballot.Publisher          = (*Publisher)(nil)
 	_ ballot.ExtensionPublisher = (*Publisher)(nil)
 	_ ballot.ResultsPublisher   = (*Publisher)(nil)
+	_ ballot.BundleSource       = (*Publisher)(nil)
 	_ Anchorer                  = (*anchor.Anchorer)(nil)
 )
 
 // ErrRefused is the site refusing a document: a code it gave, which no
 // retry changes.
-type ErrRefused struct {
-	Status int
-	Code   string
-}
-
-func (e *ErrRefused) Error() string {
-	return fmt.Sprintf("publish: votes.vettid.org refused it: %d %s", e.Status, e.Code)
-}
+type ErrRefused = ballot.ErrPublishRefused
 
 // PublishProposal implements ballot.Publisher.
 func (p *Publisher) PublishProposal(ctx context.Context, id string, doc, sig []byte) (json.RawMessage, error) {
-	return p.publish(ctx, id, "proposal", doc, sig, nil)
+	rc, err := p.publish(ctx, id, "proposal", doc, sig, nil)
+	return rc.Bundle, err
 }
 
 // PublishExtension implements ballot.ExtensionPublisher.
-func (p *Publisher) PublishExtension(ctx context.Context, id string, n int64, doc, sig []byte) (json.RawMessage, error) {
+func (p *Publisher) PublishExtension(ctx context.Context, id string, n int64, doc, sig []byte) (ballot.Receipt, error) {
 	return p.publish(ctx, id, "extension-"+strconv.FormatInt(n, 10), doc, sig, nil)
 }
 
 // PublishResults implements ballot.ResultsPublisher.
-func (p *Publisher) PublishResults(ctx context.Context, id string, results, sig, rows []byte) (json.RawMessage, error) {
+func (p *Publisher) PublishResults(ctx context.Context, id string, results, sig, rows []byte) (ballot.Receipt, error) {
 	return p.publish(ctx, id, "results", results, sig, rows)
+}
+
+func (p *Publisher) log() *slog.Logger {
+	if p.Log != nil {
+		return p.Log
+	}
+	return slog.Default()
+}
+
+// StoredBundle implements ballot.BundleSource: the bundle kept for doc,
+// in memory or in Records, or nil. It never anchors.
+func (p *Publisher) StoredBundle(ctx context.Context, doc []byte) (json.RawMessage, error) {
+	key := sha256.Sum256(doc)
+	p.mu.Lock()
+	b := p.bundles[key]
+	p.mu.Unlock()
+	if b != nil || p.Records == nil {
+		return b, nil
+	}
+	data, ok, err := p.Records.Get(ctx, KindBundle, hex.EncodeToString(key[:]))
+	if err != nil || !ok {
+		return nil, err
+	}
+	return data, nil
 }
 
 // bundle returns doc's bundle: the one kept, or a new anchor, kept
@@ -127,10 +150,10 @@ func (p *Publisher) bundle(ctx context.Context, doc []byte) (json.RawMessage, er
 
 // publish anchors doc (once: a retry, even after a restart, sends the
 // same bundle, which the site wants, §4 "Write-once") and uploads it.
-func (p *Publisher) publish(ctx context.Context, id, name string, doc, sig, rows []byte) (json.RawMessage, error) {
+func (p *Publisher) publish(ctx context.Context, id, name string, doc, sig, rows []byte) (ballot.Receipt, error) {
 	bundle, err := p.bundle(ctx, doc)
 	if err != nil {
-		return nil, err
+		return ballot.Receipt{}, err
 	}
 	body, err := json.Marshal(struct {
 		Doc    []byte          `json:"doc"`
@@ -139,32 +162,43 @@ func (p *Publisher) publish(ctx context.Context, id, name string, doc, sig, rows
 		Rows   []byte          `json:"rows,omitempty"`
 	}{doc, sig, bundle, rows})
 	if err != nil {
-		return nil, err
+		return ballot.Receipt{}, err
 	}
 	url := strings.TrimRight(p.URL, "/") + "/api/v1/p/" + id + "/" + name
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return ballot.Receipt{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := p.Client.Do(req)
 	if err != nil {
-		return nil, err
+		return ballot.Receipt{}, err
 	}
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	switch resp.StatusCode {
 	case http.StatusCreated, http.StatusOK:
-		return bundle, nil
+		// The document is written. "index_updated": false says the index
+		// update failed: published all the same, and the identical upload
+		// again (reconcile does it for an extension) finishes the index.
+		// A site that sends no such field is not saying it failed.
+		var a struct {
+			IndexUpdated *bool `json:"index_updated"`
+		}
+		stale := json.Unmarshal(out, &a) == nil && a.IndexUpdated != nil && !*a.IndexUpdated
+		if stale {
+			p.log().Warn("publish: the site's index is not updated", "proposal_id", id, "name", name)
+		}
+		return ballot.Receipt{Bundle: bundle, IndexStale: stale}, nil
 	}
 	var e struct {
 		Error string `json:"error"`
 	}
 	_ = json.Unmarshal(out, &e)
 	if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
-		return nil, fmt.Errorf("publish: votes.vettid.org answered %d %s", resp.StatusCode, e.Error)
+		return ballot.Receipt{}, fmt.Errorf("publish: votes.vettid.org answered %d %s", resp.StatusCode, e.Error)
 	}
-	return nil, &ErrRefused{Status: resp.StatusCode, Code: e.Error}
+	return ballot.Receipt{}, &ErrRefused{Status: resp.StatusCode, Code: e.Error}
 }
 
 // errNoURL is a publisher with no site.
@@ -176,4 +210,56 @@ func (p *Publisher) Check() error {
 		return errNoURL
 	}
 	return nil
+}
+
+var _ ballot.SiteReader = (*Publisher)(nil)
+
+// get fetches a path of the site's read side (/v1/...), or nil on 404.
+func (p *Publisher) get(ctx context.Context, path string, max int64) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(p.URL, "/")+"/v1/"+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := p.Client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		b, err := io.ReadAll(io.LimitReader(resp.Body, max+1))
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(b)) > max {
+			return nil, fmt.Errorf("publish: %s is over %d bytes", path, max)
+		}
+		return b, nil
+	case http.StatusNotFound:
+		return nil, nil
+	}
+	return nil, fmt.Errorf("publish: votes.vettid.org answered %d for %s", resp.StatusCode, path)
+}
+
+// Extension implements ballot.SiteReader. The site writes the document
+// last, so a document without its signature or bundle is an error, not
+// a missing extension.
+func (p *Publisher) Extension(ctx context.Context, id string, n int64) (*ballot.SiteExtension, error) {
+	base := "p/" + id + "/extension-" + strconv.FormatInt(n, 10)
+	doc, err := p.get(ctx, base+".json", 4096)
+	if err != nil || doc == nil {
+		return nil, err
+	}
+	sig, err := p.get(ctx, base+".json.sig", 256)
+	if err != nil {
+		return nil, err
+	}
+	bundle, err := p.get(ctx, base+".json.sigstore.json", 64<<10)
+	if err != nil {
+		return nil, err
+	}
+	if sig == nil || bundle == nil {
+		return nil, fmt.Errorf("publish: extension %d of %s has no signature or bundle on the site", n, id)
+	}
+	return &ballot.SiteExtension{Doc: doc, Sig: sig, Bundle: bundle}, nil
 }

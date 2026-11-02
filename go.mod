@@ -12,6 +12,8 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.72.2
 	github.com/aws/aws-sdk-go-v2/service/kms v1.62.1
 	github.com/aws/aws-sdk-go-v2/service/ssm v1.81.1
+	github.com/digitorus/timestamp v0.0.0-20231217203849-220c5c2851b7
+	github.com/sigstore/timestamp-authority/v2 v2.1.3
 	github.com/vettid/vettid-relay v0.0.0-20261027144202-528df9b0bf76
 	github.com/vettid/vettid-vault v0.0.0-20261030185125-eda711ff0a13
 	rsc.io/qr v0.2.0
@@ -31,6 +33,8 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.51.6 // indirect
 	github.com/aws/smithy-go v1.28.7 // indirect
 	github.com/coder/websocket v1.8.15 // indirect
+	github.com/digitorus/pkcs7 v0.0.0-20230818184609-3a137a874352 // indirect
+	github.com/pkg/errors v0.9.1 // indirect
 	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.43.0 // indirect

@@ -47,6 +47,16 @@ type Member struct {
 	Secret []byte `json:"secret"`
 }
 
+// PendingExtension is the signed extension stored before it is published:
+// a retry or a restart publishes these same bytes, never a new one.
+type PendingExtension struct {
+	Doc []byte `json:"doc"`
+	Sig []byte `json:"sig"`
+	// ApprovalID and Use are the approval used for it (consumed once).
+	ApprovalID string `json:"approval_id"`
+	Use        Use    `json:"use"`
+}
+
 // OpenProposal is what the box holds of a proposal while it runs.
 type OpenProposal struct {
 	Doc []byte `json:"doc"`
@@ -59,6 +69,10 @@ type OpenProposal struct {
 	Members map[string]Member `json:"members"`
 	// Extensions are the published extensions, in order (§10.2).
 	Extensions []vote.Signed `json:"extensions,omitempty"`
+	// Pending is an extension signed and stored, and published or about to
+	// be (§10.2): it takes effect, as Extensions' next, once the site holds
+	// it and its RFC 3161 time is before the close it extends.
+	Pending *PendingExtension `json:"pending_extension,omitempty"`
 	// Published is set once collection ended and the results are being
 	// published (§7): a cast handled after it is late.
 	Published bool `json:"published"`

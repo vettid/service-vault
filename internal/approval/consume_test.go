@@ -218,6 +218,15 @@ func TestConsume(t *testing.T) {
 			if code := codeOf(f.consume(a.ID, tc.action, pl)); code != CodeApprovalUsed {
 				t.Fatalf("second use: %q", code)
 			}
+			// A repeat of the same use is a retry; of another, a second use.
+			same := ballot.Use{ProposalID: extProposal, N: 1, Retry: true}
+			if err := f.m.Consume(context.Background(), a.ID, tc.action, pl, same); err != nil {
+				t.Fatalf("retry of the same use: %v", err)
+			}
+			other := ballot.Use{ProposalID: extProposal, N: 2, Retry: true}
+			if code := codeOf(f.m.Consume(context.Background(), a.ID, tc.action, pl, other)); code != CodeApprovalUsed {
+				t.Fatalf("retry of another use: %q", code)
+			}
 		})
 	}
 }

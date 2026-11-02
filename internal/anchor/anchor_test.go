@@ -2,15 +2,20 @@ package anchor
 
 import (
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/asn1"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/digitorus/timestamp"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,6 +31,11 @@ type fakeSigstore struct {
 	entered  []byte // the canonical body it last entered
 	tamper   bool   // enter another digest than the one sent
 	conflict bool   // answer 409, as for an entry already there
+	// The throwaway TSA: its certificate (a test CA's, with the critical
+	// time-stamping usage) and key, and how it answers ("" grants).
+	tsaCert  *x509.Certificate
+	tsaKey   *ecdsa.PrivateKey
+	tsaMode  string
 	location string // the 409's Location, when set
 }
 
@@ -70,13 +80,28 @@ func (f *fakeSigstore) handler(t *testing.T) http.Handler {
 			return
 		}
 		b, _ := io.ReadAll(r.Body)
-		var req tsReq
-		if _, err := asn1.Unmarshal(b, &req); err != nil || !req.MessageImprint.HashAlgorithm.Algorithm.Equal(oidSHA256) {
+		if req, err := timestamp.ParseRequest(b); err != nil || req.HashAlgorithm != crypto.SHA256 || req.Certificates {
 			t.Errorf("timestamp request: %v", err)
 		}
-		token, _ := asn1.Marshal(asn1.RawValue{Tag: asn1.TagSequence, IsCompound: true, Bytes: []byte{0x05, 0x00}})
-		resp, _ := asn1.Marshal(tsResp{Status: pkiStatusInfo{Status: 0}, TimeStampToken: asn1.RawValue{FullBytes: token}})
-		_, _ = w.Write(resp)
+		req, _ := timestamp.ParseRequest(b)
+		switch f.tsaMode {
+		case "refused":
+			resp, _ := timestamp.CreateErrorResponse(timestamp.Rejection, timestamp.BadAlgorithm)
+			_, _ = w.Write(resp)
+		case "notoken":
+			// A granted status with no token: SEQUENCE { SEQUENCE { INTEGER 0 } }
+			_, _ = w.Write([]byte{0x30, 0x05, 0x30, 0x03, 0x02, 0x01, 0x00})
+		case "otherimprint":
+			req.HashedMessage = make([]byte, 32)
+			fallthrough
+		default:
+			resp, err := (&timestamp.Timestamp{HashAlgorithm: req.HashAlgorithm, HashedMessage: req.HashedMessage, Time: time.Now(),
+				Policy: asn1.ObjectIdentifier{1, 2, 3, 4}, AddTSACertificate: true}).CreateResponseWithOpts(f.tsaCert, f.tsaKey, crypto.SHA256)
+			if err != nil {
+				t.Errorf("signing the response: %v", err)
+			}
+			_, _ = w.Write(resp)
+		}
 	})
 	return mux
 }
@@ -84,6 +109,7 @@ func (f *fakeSigstore) handler(t *testing.T) http.Handler {
 func newFake(t *testing.T) (*Anchorer, *fakeSigstore, *ecdsa.PrivateKey) {
 	t.Helper()
 	f := &fakeSigstore{}
+	f.tsaCert, f.tsaKey = testTSA(t)
 	srv := httptest.NewServer(f.handler(t))
 	t.Cleanup(srv.Close)
 	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -150,6 +176,21 @@ func TestAnchorRetryAndTamper(t *testing.T) {
 	}
 }
 
+// A TSA that refuses, grants with no token, or stamps another imprint is
+// an error; the signed response of the default fake is accepted.
+func TestAnchorTSAResponses(t *testing.T) {
+	a, f, _ := newFake(t)
+	if _, err := a.Anchor(context.Background(), []byte("doc")); err != nil {
+		t.Fatalf("a signed response: %v", err)
+	}
+	for _, mode := range []string{"refused", "notoken", "otherimprint"} {
+		f.tsaMode = mode
+		if _, err := a.Anchor(context.Background(), []byte("doc")); err == nil {
+			t.Errorf("%s: accepted", mode)
+		}
+	}
+}
+
 // Against Sigstore's staging instance (a public log meant for tests),
 // only with SV_LIVE_SIGSTORE=staging. SV_LIVE_BUNDLE_OUT, if set, is
 // where the bundle and document are written, to check with Sigstore's
@@ -177,4 +218,30 @@ func TestAnchorStagingLive(t *testing.T) {
 			}
 		}
 	}
+}
+
+// testTSA makes a throwaway CA and a TSA certificate under it, with the
+// time-stamping extended key usage marked critical, as RFC 3161 wants.
+func testTSA(t *testing.T) (*x509.Certificate, *ecdsa.PrivateKey) {
+	t.Helper()
+	caKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	caTmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "test ca"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), IsCA: true, BasicConstraintsValid: true,
+		KeyUsage: x509.KeyUsageCertSign}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, _ := x509.ParseCertificate(caDER)
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	eku, _ := asn1.Marshal([]asn1.ObjectIdentifier{{1, 3, 6, 1, 5, 5, 7, 3, 8}})
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "test tsa"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature,
+		ExtraExtensions: []pkix.Extension{{Id: asn1.ObjectIdentifier{2, 5, 29, 37}, Critical: true, Value: eku}}}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca, &key.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, _ := x509.ParseCertificate(der)
+	return cert, key
 }
