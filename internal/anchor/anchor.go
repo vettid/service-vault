@@ -12,12 +12,12 @@ package anchor
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
-	"encoding/asn1"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -343,16 +343,6 @@ func (a *Anchorer) check(e *logEntry, digest, sig []byte) (*tlogEntry, error) {
 // TimeStampReq for the signature with no certificate asked for, as
 // sigstore-go asks.
 
-type tsResp struct {
-	Status         pkiStatusInfo
-	TimeStampToken asn1.RawValue `asn1:"optional"`
-}
-
-type pkiStatusInfo struct {
-	Status int
-	Rest   asn1.RawValue `asn1:"optional"`
-}
-
 // timestamp asks the timestamp authority to stamp the signature and
 // returns its TimeStampResp, which the bundle carries as it came.
 func (a *Anchorer) timestamp(ctx context.Context, sig []byte) ([]byte, error) {
@@ -367,10 +357,12 @@ func (a *Anchorer) timestamp(ctx context.Context, sig []byte) ([]byte, error) {
 	if status != http.StatusOK && status != http.StatusCreated {
 		return nil, fmt.Errorf("anchor: the timestamp authority answered %d", status)
 	}
-	var r tsResp
-	rest, err := asn1.Unmarshal(body, &r)
-	// Granted (0) or granted with modifications (1), with a token.
-	if err != nil || len(rest) != 0 || r.Status.Status > 1 || len(r.TimeStampToken.FullBytes) == 0 {
+	// Granted, with a token that parses (and, if it carries the TSA's
+	// certificate, whose signature checks); a refusal or a missing token is
+	// an error. The imprint must be the signature's.
+	ts, err := timestamp.ParseResponse(body)
+	h := sha256.Sum256(sig)
+	if err != nil || ts.HashAlgorithm != crypto.SHA256 || !bytes.Equal(ts.HashedMessage, h[:]) {
 		return nil, errors.New("anchor: the timestamp authority didn't grant a timestamp")
 	}
 	return body, nil
