@@ -77,7 +77,13 @@ func (m *Manager) asks(ctx context.Context, connID string) (*askLog, error) {
 	if err != nil || !ok {
 		return l, err
 	}
-	return l, json.Unmarshal(data, l)
+	if err := json.Unmarshal(data, l); err != nil {
+		// Fails closed: that admin is neither challenged nor forced until
+		// the record expires.
+		m.log().Error("approval ask log unreadable", "connection_id", connID)
+		return nil, err
+	}
+	return l, nil
 }
 
 // Peer is the part of peer.Peer the manager uses.

@@ -1390,10 +1390,19 @@ func TestRemindForceAskBudgetAnyNamed(t *testing.T) {
 	}
 }
 
-// failStore fails Apply for any batch that writes kind.
+// failStore fails Apply for any batch that writes kind, and Get of
+// getKind.
 type failStore struct {
 	peer.Store
-	kind string
+	kind    string
+	getKind string
+}
+
+func (s *failStore) Get(ctx context.Context, kind, id string) ([]byte, bool, error) {
+	if kind == s.getKind {
+		return nil, false, errors.New("store down")
+	}
+	return s.Store.Get(ctx, kind, id)
 }
 
 func (s *failStore) Apply(ctx context.Context, changes []peer.Change) error {
@@ -1470,5 +1479,37 @@ func TestAskLogBounded(t *testing.T) {
 	f.clk.Advance(time.Millisecond)
 	if _, ok, _ := f.st.Get(ctx, kindAsks, "c1"); ok {
 		t.Fatal("ask log kept after its newest entry stopped counting")
+	}
+}
+
+// An ask log that cannot be read, or does not decode, fails closed: a
+// forced reminder is refused with an error before anything is withdrawn
+// or sent, and a plain one skips that admin.
+func TestAskLogUnreadable(t *testing.T) {
+	ctx := context.Background()
+	for _, how := range []string{"get", "decode"} {
+		f := newFixture(t, 1, "c1")
+		c := f.create(ActionVoteOpen, "Open", `{}`)
+		f.clk.Advance(RemindInterval)
+		old := f.p.last("c1")
+		before := len(f.p.sent)
+		if how == "get" {
+			f.m.Store = &failStore{Store: f.st, getKind: kindAsks}
+		} else if err := f.st.Apply(ctx, []peer.Change{{Kind: kindAsks, ID: "c1", Data: []byte("{"),
+			Expires: f.clk.Now().Add(time.Hour)}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.m.Remind(ctx, c.ID, "c1"); err == nil || codeOf(err) != "" {
+			t.Fatalf("%s: force: %v", how, err)
+		}
+		if len(f.p.sent) != before || slices.Contains(f.p.cancelled, old.req) {
+			t.Fatalf("%s: a failed force sent or withdrew something", how)
+		}
+		if r, err := f.m.Remind(ctx, c.ID); err != nil || len(r.Reminded) != 0 || len(f.p.sent) != before {
+			t.Fatalf("%s: plain: %+v %v", how, r, err)
+		}
+		if how == "decode" && !strings.Contains(f.logs.String(), "approval ask log unreadable") {
+			t.Fatalf("no log line: %s", f.logs.String())
+		}
 	}
 }

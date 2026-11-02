@@ -687,7 +687,9 @@ admin's connection.
     still count. It counts each one until its expiry plus 24 hours, since
     a challenge held in the outbox can reach the member's vault as late as
     its expiry, so it never counts fewer than the member's vault does.
-    Only forced reminders are checked: creating an approval, and a plain
+    The log starts empty when this version is first deployed, so for
+    up to a challenge's expiry plus 24 hours after that, challenges sent
+    before it are not counted. Only forced reminders are checked: creating an approval, and a plain
     reminder without long challenges, still challenge every admin who has
     not answered. Use it only when the admin reports not seeing the
     request. If the withdraw was lost, the member may then see
