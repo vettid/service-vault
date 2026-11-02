@@ -19,6 +19,13 @@ import (
 // (the member vault's MaxPendingOut).
 const MaxPendingChallenges = 8
 
+// MaxApprovalChallengeTTL is the longest life of a challenge with purpose
+// approval: the approval it asks about may last that long (VAULT-MESSAGING
+// 0.82.0 §10.4, "Long-lived approval challenges"; the receiver's cap on a
+// service connection). Every other challenge lives at most
+// peerwire.ConnAuthChallengeTTL.
+const MaxApprovalChallengeTTL = 24 * time.Hour
+
 // Errors of Authenticate.
 var (
 	ErrNotStarted = errors.New("peer: not started")
@@ -31,8 +38,10 @@ var (
 // Authenticate sends a connection.authenticate.challenge with context
 // ctxt and purpose (peerwire.PurposeSignIn, PurposeApproval or "" for
 // none; VAULT-MESSAGING 0.65.0 §10.4, §10.4.1) to an active connection,
-// answerable for ttl (at most
-// peerwire.ConnAuthChallengeTTL; the inner exp, §10.4). The outcome
+// answerable for ttl (the inner exp, §10.4): at most
+// peerwire.ConnAuthChallengeTTL, or MaxApprovalChallengeTTL for purpose
+// approval; zero gives ConnAuthChallengeTTL and more than the maximum is
+// capped to it. The outcome
 // arrives as an event with the returned request id: signin.approved,
 // signin.denied or signin.expired.
 func (p *Peer) Authenticate(ctx context.Context, connID, ctxt, purpose string, ttl time.Duration) (string, error) {
@@ -56,8 +65,15 @@ func (p *Peer) authenticate(ctx context.Context, connID, ctxt, purpose, matchCod
 	if purpose != "" && !peerwire.KnownPurpose(purpose) {
 		return "", ErrPurpose
 	}
-	if ttl <= 0 || ttl > peerwire.ConnAuthChallengeTTL {
+	limit := peerwire.ConnAuthChallengeTTL
+	if purpose == peerwire.PurposeApproval {
+		limit = MaxApprovalChallengeTTL
+	}
+	if ttl <= 0 {
 		ttl = peerwire.ConnAuthChallengeTTL
+	}
+	if ttl > limit {
+		ttl = limit
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -220,6 +236,6 @@ func (p *Peer) expireChallenges(now time.Time) {
 		if c := p.conns[ch.ConnID]; c != nil {
 			tag = c.Tag
 		}
-		p.emit(&Event{Type: EventSignInExpired, ConnectionID: ch.ConnID, RequestID: id, Tag: tag, Context: ch.Context}, now)
+		p.emit(&Event{Type: EventSignInExpired, ConnectionID: ch.ConnID, RequestID: id, Tag: tag, Context: ch.Context, Exp: ch.Exp}, now)
 	}
 }

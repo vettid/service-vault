@@ -152,6 +152,9 @@ func (f *fakeApprovals) Status(_ context.Context, id string) (*approval.Status, 
 }
 
 func (f *fakeApprovals) Remind(_ context.Context, id string) (*approval.Reminder, error) {
+	if id == "idle" {
+		return nil, &approval.Error{Code: approval.CodeNothingToRemind}
+	}
 	if id != "a1" {
 		return nil, approval.ErrNotFound
 	}
@@ -365,6 +368,7 @@ func TestRemindAdminsAuditHealth(t *testing.T) {
 		want string
 	}{
 		{[]string{"remind", "a1"}, "approval_id: a1\nreminded: c2\n"},
+		{[]string{"remind", "idle"}, "nothing to remind: every admin who has not answered still holds a live challenge\n"},
 		{[]string{"admins"}, "threshold: 1\nadmin: c1\nadmin: c2\n"},
 		{[]string{"health"}, "ok\n"},
 		{[]string{"audit", "-since", "e1"}, `{"id":"e2","at":"2026-10-27T12:10:00Z","type":"approval.requested","approval_id":"a1"}` + "\n"},

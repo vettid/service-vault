@@ -135,6 +135,7 @@ const (
 	CodeLastAdmin         = "last_admin"         // admin_set.remove of the only admin (422)
 	CodeNotPending        = "not_pending"        // the approval is settled or expired (409)
 	CodeTooSoon           = "too_soon"           // a reminder within 10 minutes of the last challenges (429)
+	CodeNothingToRemind   = "nothing_to_remind"  // every admin who has not answered holds a live challenge (409)
 )
 
 // APIError is a non-2xx answer from the API.
@@ -400,7 +401,8 @@ func (c *Client) Approval(ctx context.Context, id string) (*Approval, error) {
 }
 
 // RemindApproval challenges again the admins who have not answered, at
-// most once per 10 minutes per approval (CodeTooSoon otherwise).
+// most once per 10 minutes per approval (CodeTooSoon otherwise). Admins
+// who hold a live challenge are skipped; CodeNothingToRemind if none is left.
 func (c *Client) RemindApproval(ctx context.Context, id string) (*Reminder, error) {
 	if id == "" {
 		return nil, errors.New("servicevault: empty approval id")

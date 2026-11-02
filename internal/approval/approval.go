@@ -412,13 +412,22 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 	return &Created{ID: id, ActionHash: hash, Status: StatusPending, ExpiresAt: r.Exp}, nil
 }
 
-// challenge sends the approval's challenge to each of conns (each with
-// the connauth maximum life, 10 minutes) and records the request ids.
+// challengeTTL is the life of a challenge sent at now for r: the
+// approval's own remaining life, at least peerwire.ConnAuthChallengeTTL
+// and at most peer.MaxApprovalChallengeTTL (VAULT-MESSAGING 0.82.0 §10.4,
+// "Long-lived approval challenges").
+func challengeTTL(r *record, now time.Time) time.Duration {
+	return min(max(r.Exp.Sub(now), peerwire.ConnAuthChallengeTTL), peer.MaxApprovalChallengeTTL)
+}
+
+// challenge sends the approval's challenge to each of conns, each lasting
+// as long as the approval (challengeTTL), and records the request ids.
 // An admin who cannot be reached now is skipped (and can be reminded).
 func (m *Manager) challenge(ctx context.Context, b *batch, r *record, conns []string, ctxt string) []Challenge {
 	var sent []Challenge
+	ttl := challengeTTL(r, m.now())
 	for _, c := range conns {
-		reqID, err := m.Peer.Authenticate(ctx, c, ctxt, peerwire.PurposeApproval, 0)
+		reqID, err := m.Peer.Authenticate(ctx, c, ctxt, peerwire.PurposeApproval, ttl)
 		if err != nil {
 			m.log().Warn("approval challenge", "approval_id", r.ID, "connection_id", c, "err", errName(err))
 			continue
@@ -493,8 +502,10 @@ func (m *Manager) Status(ctx context.Context, id string) (*Status, error) {
 // ErrNotFound is an unknown approval.
 var ErrNotFound = errors.New("approval: not found")
 
-// Remind sends the challenge again to the admins who have not answered,
-// at most once per RemindInterval per approval (the creation counts).
+// Remind sends the challenge again to the admins who have not answered
+// and hold no live challenge (the remind_needed ones), at most once per
+// RemindInterval per approval (the creation counts), each lasting as long
+// as the approval. CodeNothingToRemind when there are none.
 func (m *Manager) Remind(ctx context.Context, id string) (*Reminder, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -516,18 +527,19 @@ func (m *Manager) Remind(ctx context.Context, id string) (*Reminder, error) {
 	if err != nil {
 		return nil, err
 	}
-	var to []Challenge
 	var conns []string
 	for _, a := range r.Admins {
-		if slices.Contains(set, a) && !r.answered(a) {
+		// An admin who still holds a live challenge is not challenged
+		// again: a long challenge outlives RemindInterval, and each
+		// challenge that reaches a member's vault uses its approval rate
+		// bucket (VAULT-MESSAGING §10.4.1).
+		if slices.Contains(set, a) && r.Pending[a] == "" && !r.answered(a) {
 			conns = append(conns, a)
-			if old := r.Pending[a]; old != "" {
-				to = append(to, Challenge{ConnectionID: a, RequestID: old})
-				delete(r.Pending, a)
-			}
 		}
 	}
-	m.cancel(ctx, to)
+	if len(conns) == 0 {
+		return nil, errCode(CodeNothingToRemind)
+	}
 	ctxt, err := ChallengeContext(m.ServiceName, r.Summary, r.Hash)
 	if err != nil {
 		return nil, err
@@ -617,7 +629,10 @@ func (m *Manager) Answer(ctx context.Context, e *peer.Event) (bool, error) {
 			return true, b.apply(ctx)
 		}
 		delete(r.Pending, e.ConnectionID)
-		live := r.Status == StatusPending && now.Before(r.Exp)
+		// A challenge that ended with the approval (its exp at or after the
+		// approval's own expiry, the normal case for a long challenge) is
+		// not reported: the approval's own expiry is (approval.expired).
+		live := r.Status == StatusPending && now.Before(r.Exp) && e.Exp.Before(r.Exp)
 		if live {
 			set, err := m.admins(ctx)
 			if err != nil {

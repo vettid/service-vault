@@ -66,7 +66,7 @@ commands:
   approve -action A -summary S -payload JSON
                                    submit an action for admin approval, then follow it
   approval ID                      print an approval's status; "remind needed" lists admins with no live challenge
-  remind ID                        challenge again the admins who have not answered
+  remind ID                        challenge again the admins who have not answered and hold no live challenge
   admins                           print the admin set and the threshold
   audit [-since ID] [-limit N]     print a page of the audit log, one JSON entry per line
   anchor-key                       print GET /v1/anchor-key (for the votes site's service list)
@@ -492,6 +492,11 @@ func (c *cli) remind(ctx context.Context, args []string) error {
 		return err
 	}
 	r, err := c.c.RemindApproval(ctx, fs.Arg(0))
+	var ae *servicevault.APIError
+	if errors.As(err, &ae) && ae.Code == servicevault.CodeNothingToRemind {
+		c.printf("nothing to remind: every admin who has not answered still holds a live challenge\n")
+		return nil
+	}
 	if err != nil {
 		return err
 	}

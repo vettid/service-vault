@@ -64,7 +64,9 @@ type Event struct {
 	// signed without one, VAULT-MESSAGING 0.65.0 §10.4).
 	Purpose  string    `json:"purpose,omitempty"`
 	SignedAt time.Time `json:"signed_at,omitzero"`
-	At       time.Time `json:"at"`
+	// Exp is when an expired challenge ended (signin.expired only).
+	Exp time.Time `json:"exp,omitzero"`
+	At  time.Time `json:"at"`
 }
 
 // Events receives the peer's events after they are persisted. Deliver is

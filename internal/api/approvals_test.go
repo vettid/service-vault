@@ -47,6 +47,8 @@ func (f *fakeApprovals) Remind(_ context.Context, id string) (*approval.Reminder
 	switch id {
 	case "soon":
 		return nil, &approval.Error{Code: approval.CodeTooSoon}
+	case "idle":
+		return nil, &approval.Error{Code: approval.CodeNothingToRemind}
 	case "done":
 		return nil, &approval.Error{Code: approval.CodeNotPending}
 	case "a1":
@@ -104,7 +106,7 @@ func TestApprovalRoutes(t *testing.T) {
 	if rec, _ := do(t, h, "GET", "/v1/approvals/nope", apiKey, ""); rec.Code != 404 {
 		t.Fatalf("%d", rec.Code)
 	}
-	for id, want := range map[string]int{"a1": 200, "soon": 429, "done": 409, "nope": 404} {
+	for id, want := range map[string]int{"a1": 200, "soon": 429, "idle": 409, "done": 409, "nope": 404} {
 		if rec, m := do(t, h, "POST", "/v1/approvals/"+id+"/remind", apiKey, ""); rec.Code != want {
 			t.Errorf("remind %s: %d %v", id, rec.Code, m)
 		}
