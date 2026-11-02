@@ -478,7 +478,13 @@ describe('alarms', () => {
     });
 
     test('taskrole_use (PassRole is not a CloudTrail event): task role in another family, our task definition run or created, task role override', () => {
-      const [reg, run, upd, updCluster, updDefault, override] = anyOf('taskrole_use');
+      const [reg, override] = anyOf('taskrole_use');
+      const partB = rules.find((r: any) => r.Description.includes('(taskrole_use alarm, part b)'));
+      expect(partB.Targets[0].InputTemplate ?? partB.Targets[0].InputTransformer.InputTemplate).toContain('sec:taskrole_use ');
+      const partC = rules.find((r: any) => r.Description.includes('(taskrole_use alarm, part c)'));
+      expect(partC.Targets[0].InputTransformer.InputTemplate).toContain('sec:taskrole_use ');
+      const [run, upd] = partB.EventPattern.detail.$or;
+      const [updCluster, updDefault] = partC.EventPattern.detail.$or;
       expect(reg.eventName).toEqual(['RegisterTaskDefinition']);
       expect(reg.requestParameters.taskRoleArn).toHaveLength(2); // ARN and short name
       expect(s(reg.requestParameters.taskRoleArn)).toContain('TaskTaskRole');
@@ -545,7 +551,18 @@ describe('alarms', () => {
       notTaskRole([branches[2], branches[3]]);
     });
 
-    test('one resource policy serves the seven rules, limited to their ARNs, and the task role gains nothing', () => {
+    test('every rule pattern is under EventBridge\'s 2048 characters with each ARN at 200 characters', () => {
+      const resolve = (x: any): any => Array.isArray(x) ? x.map(resolve)
+        : x && typeof x === 'object'
+          ? (['Ref', 'Fn::GetAtt', 'Fn::Join', 'Fn::Sub'].some((k) => k in x) ? 'a'.repeat(200) : Object.fromEntries(Object.entries(x).map(([k, v]) => [k, resolve(v)])))
+          : x;
+      const sizes: Record<string, number> = {};
+      for (const r of rules) sizes[r.Description] = JSON.stringify(resolve(r.EventPattern)).length;
+      expect(Object.keys(sizes).length).toBeGreaterThanOrEqual(11);
+      for (const [d, n] of Object.entries(sizes)) expect([d, n < 2048]).toEqual([d, true]);
+    });
+
+    test('one resource policy serves the nine rules, limited to their ARNs, and the task role gains nothing', () => {
       t.resourceCountIs('AWS::Logs::ResourcePolicy', 1);
       t.hasResourceProperties('AWS::Logs::ResourcePolicy', { PolicyName: 'vettid-service-vault-test-security-events' });
       expect(s(Object.values<any>(t.findResources('AWS::Logs::ResourcePolicy'))[0].Properties.PolicyDocument)).toContain('ArnEquals');

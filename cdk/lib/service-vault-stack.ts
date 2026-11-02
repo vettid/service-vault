@@ -732,9 +732,10 @@ export class ServiceVaultStack extends cdk.Stack {
     const secRules: events.Rule[] = [];
     const family = taskDef.family;
     const familyArn = this.formatArn({ service: 'ecs', resource: 'task-definition', resourceName: family });
-    // A task definition as RunTask/CreateService name it: family, family:revision or its ARN.
+    // A task definition as RunTask/CreateService name it: family, family:revision, or its ARN with or without the revision
+    // (one prefix on the ARN: a pattern is at most 2048 characters).
     const ourTaskDef = events.Match.anyOf(
-      events.Match.exactString(family), events.Match.exactString(familyArn), events.Match.prefix(`${family}:`), events.Match.prefix(`${familyArn}:`),
+      events.Match.exactString(family), events.Match.prefix(`${family}:`), events.Match.prefix(familyArn),
     );
     const notTaskRole = { 'anything-but': [taskRoleArn] };
     // Anything but the task role's own sessions. anything-but needs the
@@ -744,11 +745,12 @@ export class ServiceVaultStack extends cdk.Stack {
       { userIdentity: { type: [{ 'anything-but': ['AssumedRole'] }] } },
       { userIdentity: { type: ['AssumedRole'], sessionContext: { sessionIssuer: { arn: [notTaskRole] } } } },
     ];
-    const secRule = (name: string, severity: 'notice' | 'alarm', description: string, alarmDescription: string, source: string, detail: object, readOnly = false) => {
+    const secRule = (name: string, severity: 'notice' | 'alarm', description: string, alarmDescription: string, source: string, detail: object, readOnly = false, part = '') => {
+      // part: a further rule for the same label, metric filter and alarm (a pattern is at most 2048 characters).
       // The targets are written out (not CloudWatchLogGroup targets) so that
-      // one resource policy (account-wide, 10 per region) serves all seven rules.
-      const rule = new events.Rule(this, `Sec-${name}-rule`, {
-        description: `${description} (${name} ${severity})`,
+      // one resource policy (account-wide, 10 per region) serves all nine rules.
+      const rule = new events.Rule(this, `Sec-${name}${part}-rule`, {
+        description: `${description} (${name} ${severity}${part ? `, part ${part.slice(1)}` : ''})`,
         eventPattern: { source: [source], detailType: ['AWS API Call via CloudTrail'], detail },
       });
       secRules.push(rule);
@@ -768,6 +770,7 @@ export class ServiceVaultStack extends cdk.Stack {
           inputTemplate: `{"timestamp":<time>,"message":"sec:${name} <name> by <who> from <ip> id <id>"}`,
         },
       }];
+      if (part) return;
       const metric = new logs.MetricFilter(this, `Sec-${name}`, {
         logGroup: secEvents,
         filterPattern: logs.FilterPattern.literal(`"sec:${name}"`),
@@ -794,19 +797,31 @@ export class ServiceVaultStack extends cdk.Stack {
     secRule('run_task', 'alarm', 'A task was run or started in the service vault cluster',
       'A task was run or started by hand in the service vault cluster: the service never does (it starts tasks itself, not as RunTask); someone may be running code under the task role',
       'aws.ecs', { eventName: ['RunTask', 'StartTask'], requestParameters: { cluster: [prefix, cluster.clusterArn] } });
-    secRule('taskrole_use', 'alarm', 'The task role or task definition family was used outside the service',
-      'The service vault task role or task definition was named in a run, start, create-service or a task definition of another family: someone is running code under the task role',
+    // Three rules (pattern limit of 2048 characters, ARNs included), one label:
+    // A, the task role used outside the family; B and C, the family used elsewhere.
+    const taskRoleUseDescription = 'The service vault task role or task definition was named in a run, start, create-service or a task definition of another family: someone is running code under the task role';
+    secRule('taskrole_use', 'alarm', 'The task role used outside the service\'s task definition family', taskRoleUseDescription,
       'aws.ecs', {
         $or: [
           { eventName: ['RegisterTaskDefinition'], requestParameters: { taskRoleArn: taskRoleNames, family: [{ 'anything-but': [family] }] } },
-          { eventName: ['RunTask', 'StartTask', 'CreateService', 'CreateTaskSet'], requestParameters: { taskDefinition: ourTaskDef } },
-          { eventName: ['UpdateService'], requestParameters: { taskDefinition: ourTaskDef, service: [{ 'anything-but': [prefix, this.service.serviceArn] }] } },
-          // The same service name in another cluster is another service; an absent cluster is the default one.
-          { eventName: ['UpdateService'], requestParameters: { taskDefinition: ourTaskDef, cluster: [{ 'anything-but': [prefix, cluster.clusterArn] }] } },
-          { eventName: ['UpdateService'], requestParameters: { taskDefinition: ourTaskDef, cluster: [{ exists: false }] } },
           { eventName: ['RunTask', 'StartTask'], requestParameters: { overrides: { taskRoleArn: taskRoleNames } } },
         ],
       });
+    secRule('taskrole_use', 'alarm', 'The service\'s task definition family used elsewhere', taskRoleUseDescription,
+      'aws.ecs', {
+        $or: [
+          { eventName: ['RunTask', 'StartTask', 'CreateService', 'CreateTaskSet'], requestParameters: { taskDefinition: ourTaskDef } },
+          { eventName: ['UpdateService'], requestParameters: { taskDefinition: ourTaskDef, service: [{ 'anything-but': [prefix, this.service.serviceArn] }] } },
+        ],
+      }, false, '-b');
+    secRule('taskrole_use', 'alarm', 'The service\'s task definition family used by a service of another cluster', taskRoleUseDescription,
+      'aws.ecs', {
+        $or: [
+          // The same service name in another cluster is another service; an absent cluster is the default one.
+          { eventName: ['UpdateService'], requestParameters: { taskDefinition: ourTaskDef, cluster: [{ 'anything-but': [prefix, cluster.clusterArn] }] } },
+          { eventName: ['UpdateService'], requestParameters: { taskDefinition: ourTaskDef, cluster: [{ exists: false }] } },
+        ],
+      }, false, '-c');
     secRule('keystore_decrypt', 'alarm', 'The keystore key was used to decrypt or re-encrypt by a principal other than the task role',
       'The keystore KMS key was used (Decrypt, ReEncrypt) by something other than the service vault task role',
       'aws.kms', {
