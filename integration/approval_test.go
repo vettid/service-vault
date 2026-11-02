@@ -77,7 +77,7 @@ func TestApprovalsOnDynamoDB(t *testing.T) {
 	}
 	m.Threshold = 1
 	for i, c := range []string{"c2", "c3"} {
-		cr, err := m.Create(ctx, approval.Request{Action: approval.ActionAdminSetAdd, Summary: "Add " + c,
+		cr, err := m.Create(ctx, approval.Request{Action: approval.ActionAdminSetAdd, Summary: "",
 			Payload: json.RawMessage(`{"connection_id":"` + c + `"}`)})
 		if err != nil {
 			t.Fatal(err)

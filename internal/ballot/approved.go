@@ -119,7 +119,26 @@ const (
 	maxSummary      = 165 // the whole; the title is cut to fit
 )
 
-var errTooLong = errors.New("ballot: too long to show the admins")
+// errTooLong: what the admins would read does not fit the challenge's
+// context whole.
+var errTooLong error = &ErrNotShown{"summary"}
+
+// ErrCharset is text outside the characters the summary can show without
+// look-alikes: printable ASCII and the Latin-1 letters.
+var ErrCharset = errors.New("ballot: text uses characters outside printable ASCII and Latin-1 letters")
+
+// latin accepts printable ASCII and the Latin-1 letters (U+00C0 to
+// U+00FF but × and ÷): no other script, so that two labels or a title
+// can't differ only by a look-alike letter (a Cyrillic "е" for "e"). A
+// wider set waits for a check for confusables.
+func latin(s string) bool {
+	for _, r := range s {
+		if !(r >= 0x20 && r <= 0x7e || r >= 0xc0 && r <= 0xff && r != 0xd7 && r != 0xf7) {
+			return false
+		}
+	}
+	return true
+}
 
 // ErrNotShown is a field the admins' phones would not show, and that is
 // not what the service sets: it can't be part of an approved action.
@@ -158,6 +177,9 @@ func checkInput(in *ProposalInput) error {
 	if !plain(in.Title) || strings.TrimSpace(in.Title) == "" || len(in.Title) > 200 {
 		return errors.New("ballot: the title can't be shown")
 	}
+	if !latin(in.Title) {
+		return ErrCharset
+	}
 	if in.Text != "" && in.Text != in.Title {
 		return &ErrNotShown{"text"}
 	}
@@ -177,6 +199,8 @@ func checkInput(in *ProposalInput) error {
 		switch {
 		case !plain(l) || l == "" || l != strings.TrimSpace(l):
 			return errors.New("ballot: a choice label can't be shown")
+		case !latin(l):
+			return ErrCharset
 		case utf8.RuneCountInString(l) > MaxLabelRunes:
 			return errors.New("ballot: a choice label is over 24 characters")
 		case key == "abstain" || seen[key]:
@@ -226,13 +250,17 @@ func ProposalSummary(payload []byte) (string, error) {
 		head += ", removed may vote"
 	}
 	head += ", title "
-	if len(head) > maxSummaryFixed {
-		return "", errTooLong
+	// The title is shown whole or the approval is refused: the motion may
+	// be the title, and a cut title would hide the rest of it.
+	if s := head + strconv.Quote(in.Title); len(s) <= maxSummary {
+		return s, nil
 	}
-	return head + quoteFit(in.Title, maxSummary-len(head)), nil
+	return "", errTooLong
 }
 
-// quoteFit is s quoted, its end cut (and marked with …) so that the
+// quoteFit is s quoted (only an extension's summary uses it: the stored
+// title it shows was approved in full when the proposal was made, so
+// cutting it here hides nothing that was not already approved), its end cut (and marked with …) so that the
 // whole is at most n bytes.
 func quoteFit(s string, n int) string {
 	if q := strconv.Quote(s); len(q) <= n {

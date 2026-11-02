@@ -290,11 +290,15 @@ func TestReservedSummaryStarts(t *testing.T) {
 		if strings.HasPrefix(action, "admin_set") {
 			payload = `{"connection_id":"c9"}`
 		}
-		_, err := g.m.Create(context.Background(), Request{Action: action, Summary: "Routine", Payload: json.RawMessage(payload)})
+		routine := "Routine"
+		if BuiltSummary(action) {
+			routine = ""
+		}
+		_, err := g.m.Create(context.Background(), Request{Action: action, Summary: routine, Payload: json.RawMessage(payload)})
 		if err != nil && action != ActionAdminSetAdd {
 			t.Fatalf("%s: %v", action, err)
 		}
-		if err == nil && !strings.Contains(g.p.sent[0].ctxt, ": "+label+" Routine — ref ") {
+		if err == nil && !strings.Contains(g.p.sent[0].ctxt, ": "+label+" ") {
 			t.Errorf("%s: %q", action, g.p.sent[0].ctxt)
 		}
 	}
@@ -379,5 +383,45 @@ func TestConsumeRecounts(t *testing.T) {
 	g.m.Threshold = 1
 	if err := g.consume(b.ID, ActionProposalCreate, pl); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// admin_set.* summaries are built from the payload: who is added or
+// removed, as the service holds it. The application writes none.
+func TestAdminSetSummaryBuilt(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, 1, "c1", "c2")
+	f.p.names = map[string]string{"c2": "Ann \u0410nn \"Q\"", "c1": "Bob"}
+	f.p.active["c3"] = true
+	f.p.states = map[string]string{"c4": "suspended"}
+	for _, a := range []string{ActionAdminSetAdd, ActionAdminSetRemove} {
+		_, err := f.m.Create(ctx, Request{Action: a, Summary: "Open the vote", Payload: json.RawMessage(`{"connection_id":"c3"}`)})
+		if codeOf(err) != CodeInvalidSummary {
+			t.Errorf("%s with a summary: %v", a, err)
+		}
+	}
+	n := len(f.p.sent)
+	for name, p := range map[string]string{"unknown": `{"connection_id":"c9"}`, "inactive": `{"connection_id":"c4"}`,
+		"already admin": `{"connection_id":"c2"}`, "quote": `{"connection_id":"c\"3"}`, "long": `{"connection_id":"` + strings.Repeat("c", 41) + `"}`} {
+		if _, err := f.m.Create(ctx, Request{Action: ActionAdminSetAdd, Payload: json.RawMessage(p)}); err == nil {
+			t.Errorf("add %s accepted", name)
+		}
+	}
+	if len(f.p.sent) != n {
+		t.Fatal("a refused approval was sent")
+	}
+	c := f.create(ActionAdminSetAdd, "", `{"connection_id":"c3"}`)
+	if s := f.status(c.ID).Summary; s != `"no name", connection c3` {
+		t.Fatalf("%q", s)
+	}
+	if ctxt := f.p.last("c1").ctxt; !strings.Contains(ctxt, "Add admin: \"no name\", connection c3 — ref ") {
+		t.Fatalf("%q", ctxt)
+	}
+	r := f.create(ActionAdminSetRemove, "", `{"connection_id":"c2"}`)
+	if s := f.status(r.ID).Summary; s != `"Ann ?nn \"Q\"", connection c2` {
+		t.Fatalf("%q", s)
+	}
+	if ctxt := f.p.last("c1").ctxt; !strings.Contains(ctxt, "Remove admin: ") {
+		t.Fatalf("%q", ctxt)
 	}
 }

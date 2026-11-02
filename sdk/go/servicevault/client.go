@@ -268,7 +268,11 @@ const (
 type ApprovalRequest struct {
 	Action string `json:"action"` // one of the Action constants
 	// Summary is what the admins read on the phone: plain text, 1 to 120
-	// bytes, no control or bidirectional characters.
+	// bytes, no control or bidirectional characters, not starting with the
+	// words of an action label or BINDING, ADVISORY or EXTEND. It must be
+	// empty for ActionProposalCreate, ActionVoteExtend, ActionAdminSetAdd
+	// and ActionAdminSetRemove: the service writes what the admins read
+	// from the payload (who is added or removed, as it holds it).
 	Summary string `json:"summary"`
 	// Payload is the action itself, a JSON object of at most 16 KiB in
 	// canonical form. ActionHash(Action, Summary, Payload) is the hash

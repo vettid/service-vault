@@ -687,7 +687,12 @@ admin's connection.
   the service's, by action: `New vote:` (`proposal.create`), `Extend vote:`
   (`vote.extend`), `Add admin:` (`admin_set.add`), `Remove admin:`
   (`admin_set.remove`), `Contract template:` (`contract_template.change`),
-  `Push assignment:` (`assignment.push`). An application's summary can't
+  `Push assignment:` (`assignment.push`). For `admin_set.add` and
+  `admin_set.remove` the application gives no `summary` (`invalid_summary`):
+  the service writes `"<the connection's name>", connection <id>`, the name
+  as it holds it (cut to 24 characters, anything outside printable ASCII
+  and Latin-1 letters shown as `?`), and refuses an added connection that
+  is unknown or not active (`invalid_connection`). An application's summary can't
   start with a label's words or with `BINDING`, `ADVISORY` or `EXTEND`
   (`invalid_summary`). `SV_SERVICE_NAME` is at most 32 bytes (the service
   vault refuses to start with a longer one), so that a summary built from
@@ -703,7 +708,9 @@ admin's connection.
     in order and adds `abstain` (the ids a vote's ballots name). `text`
     must be empty or the title, `quorum.text` empty, `outage_rule` empty
     or the default (`field_not_shown`); a label is at most 24 characters,
-    distinct and not `Abstain`; an extension's `outage.source` is an
+    distinct and not `Abstain`; titles and labels use printable ASCII and
+    Latin-1 letters only (`unsupported_characters`), and a title is shown
+    whole or the approval is refused (`field_not_shown`); an extension's `outage.source` is an
     `https://` URL of at most 32 bytes, and its proposal must exist (the
     admins read its title: `unknown_proposal`). These
     two approvals take no `summary` (`invalid_summary` if one is given):

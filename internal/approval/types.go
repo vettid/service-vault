@@ -132,8 +132,16 @@ var ActionLabels = map[string]string{
 
 // builtSummary reports whether the service builds the action's summary
 // from its payload, and so shows it whole (never cut).
-func builtSummary(action string) bool {
-	return action == ActionProposalCreate || action == ActionVoteExtend
+func builtSummary(action string) bool { return BuiltSummary(action) }
+
+// BuiltSummary reports whether the service writes the action's summary
+// from its payload (the application gives none).
+func BuiltSummary(action string) bool {
+	switch action {
+	case ActionProposalCreate, ActionVoteExtend, ActionAdminSetAdd, ActionAdminSetRemove:
+		return true
+	}
+	return false
 }
 
 // Limits.
@@ -154,11 +162,12 @@ const (
 	CodeInvalidAction     = "invalid_action"
 	CodeInvalidSummary    = "invalid_summary"
 	CodeInvalidPayload    = "invalid_payload"
-	CodeFieldNotShown     = "field_not_shown"    // proposal.create, vote.extend: a field the admins' phones would not show
-	CodeUnknownProposal   = "unknown_proposal"   // vote.extend: no such proposal
-	CodeInvalidConnection = "invalid_connection" // admin_set.*: not an active connection, not an admin, or already one
-	CodeUnreachable       = "unreachable"        // the threshold is more than the admins there are (or would be)
-	CodeLastAdmin         = "last_admin"         // admin_set.remove of the only admin
+	CodeUnsupportedText   = "unsupported_characters" // a title or label outside printable ASCII and Latin-1 letters
+	CodeFieldNotShown     = "field_not_shown"        // proposal.create, vote.extend: a field the admins' phones would not show
+	CodeUnknownProposal   = "unknown_proposal"       // vote.extend: no such proposal
+	CodeInvalidConnection = "invalid_connection"     // admin_set.*: not an active connection, not an admin, or already one
+	CodeUnreachable       = "unreachable"            // the threshold is more than the admins there are (or would be)
+	CodeLastAdmin         = "last_admin"             // admin_set.remove of the only admin
 	CodeNotPending        = "not_pending"
 	CodeTooSoon           = "too_soon"
 	CodeNotAdmin          = "not_admin"         // remind force: not an admin of the approval, or no longer in the set

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -112,11 +113,12 @@ func (f *fakeSignIns) StartUnsigned(context.Context, int, int) *api.UnsignedSign
 
 // fakeApprovals: a1 is pending once, then approved by c1.
 type fakeApprovals struct {
-	mu      sync.Mutex
-	n       int
-	req     approval.Request
-	badHash bool
-	forced  []string
+	mu          sync.Mutex
+	n           int
+	req         approval.Request
+	badHash     bool
+	wrongTarget bool
+	forced      []string
 }
 
 func (f *fakeApprovals) Create(_ context.Context, r approval.Request) (*approval.Created, error) {
@@ -127,6 +129,19 @@ func (f *fakeApprovals) Create(_ context.Context, r approval.Request) (*approval
 			return nil, &approval.Error{Code: approval.CodeInvalidPayload}
 		}
 		r.Summary = sum
+	}
+	if strings.HasPrefix(r.Action, "admin_set.") {
+		if r.Summary != "" {
+			return nil, &approval.Error{Code: approval.CodeInvalidSummary}
+		}
+		var p struct {
+			ConnectionID string `json:"connection_id"`
+		}
+		_ = json.Unmarshal(r.Payload, &p)
+		r.Summary = `"Ann", connection ` + p.ConnectionID
+		if f.wrongTarget {
+			r.Summary = `"Ann", connection c9`
+		}
 	}
 	f.req = r
 	if r.Action == "nope" {
@@ -347,6 +362,18 @@ func TestApprove(t *testing.T) {
 	// The summary of proposal.create and vote.extend is the service's:
 	// none is given.
 	if code, _, errOut := newFixture(t).run(t, "approve", "-action", "proposal.create", "-summary", "x", "-payload", "{}"); code != exitUsage || !strings.Contains(errOut, "takes no -summary") {
+		t.Fatalf("exit %d %s", code, errOut)
+	}
+	// admin_set.* takes no summary either: the service names the target.
+	if code, _, errOut := newFixture(t).run(t, "approve", "-action", "admin_set.add", "-summary", "x", "-payload", `{"connection_id":"c2"}`); code != exitUsage || !strings.Contains(errOut, "takes no -summary") {
+		t.Fatalf("exit %d %s", code, errOut)
+	}
+	if code, out, errOut := newFixture(t).run(t, "approve", "-action", "admin_set.add", "-payload", `{"connection_id":"c2"}`); code != exitOK || !strings.Contains(out, `summary: "Ann", connection c2`) || !strings.Contains(out, "action_hash_check: ok") {
+		t.Fatalf("exit %d %s %s", code, out, errOut)
+	}
+	wt := newFixture(t)
+	wt.apv.wrongTarget = true
+	if code, _, errOut := wt.run(t, "approve", "-action", "admin_set.remove", "-payload", `{"connection_id":"c2"}`); code != exitError || !strings.Contains(errOut, "does not name the connection") {
 		t.Fatalf("exit %d %s", code, errOut)
 	}
 	// A hash that does not match the request is an error.

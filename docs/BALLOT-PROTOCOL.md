@@ -216,8 +216,9 @@ The label `New vote:` is the service's, put before every summary of this
 action (and `Extend vote:` before an extension's); the application
 writes no text of either. The summary is built from the payload: binding
 or advisory, the window, the quorum's minimum, the choices' labels and
-the title (cut to fit, marked with `…`); the rest is shown whole or the
-approval is refused. For an extension it is the proposal (its title, from
+the title, all shown whole: an input whose summary does not fit the
+context (about 65 bytes of title with two short labels) is refused, never
+cut, so a title that equals the motion can't hide the rest of it. For an extension it is the proposal (its title, from
 the service's copy, and its id), the new close, the outage and its source.
 
 **Every field of the executed proposal is shown, set by the service, or
@@ -225,8 +226,8 @@ refused:**
 
 | Field | In the approval | Executed |
 |---|---|---|
-| `title` | shown | as approved |
-| `choices` | shown: the labels, in order, each at most 24 characters, distinct (also ignoring case) and none `Abstain`; an `id` is refused | the service assigns `c1`, `c2`, … in that order (matching §3.1's id grammar) and adds `abstain` (label `Abstain`) last, always |
+| `title` | shown whole; printable ASCII and Latin-1 letters only | as approved |
+| `choices` | shown: the labels, in order, each at most 24 characters, printable ASCII and Latin-1 letters only, distinct (also ignoring case) and none `Abstain`; an `id` is refused | the service assigns `c1`, `c2`, … in that order (matching §3.1's id grammar) and adds `abstain` (label `Abstain`) last, always |
 | `binding`, `removed_may_vote` | shown | as approved |
 | `opens_at`, `closes_at` | shown | as approved |
 | `quorum.min_ballots` | shown | as approved |
@@ -235,6 +236,13 @@ refused:**
 | `outage_rule` | refused unless empty or the rule of §10.2 ("Extended by a relay outage over 1 hour, 24 h at most.") | always that rule |
 | `proposal_id`, `service`, `record_at`, `eligible`, `record_root` | not in it: the service's, at the moment of use | the roster at the moment of use (§3.2), the time of use |
 | the tags and secrets | not in it | drawn at the moment of use |
+
+Titles and labels use printable ASCII and Latin-1 letters only
+(`unsupported_characters`), so that two labels can't differ only by a
+look-alike letter from another script (a Cyrillic `е` for `e`); a wider
+character set waits for a check for confusables. An extension's summary
+shows the stored title, which was approved in full when the proposal was
+made, and may cut it with `…` to fit.
 
 A refused field makes the approval request fail (`field_not_shown`, or
 `invalid_payload`), and the proposal request fail with nothing made and

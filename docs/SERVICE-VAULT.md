@@ -179,7 +179,9 @@ MEMBER-SERVICE-PLAN §4.5 and §5.2; the operator's view is in the README,
   `connection.authenticate.challenge` whose context names the action and
   the first 16 hex digits of the hash, after a label the service sets by
   action (`New vote:`, `Extend vote:`, `Add admin:`, `Remove admin:`,
-  `Contract template:`, `Push assignment:`), goes to each of them
+  `Contract template:`, `Push assignment:`; for a vote and for `admin_set.*`
+  the summary is the service's, built from the payload and the connection's
+  name it holds), goes to each of them
   (10-minute inner `exp`); the service name is at most 32 bytes, and a
   summary built from a payload is shown whole or refused, never cut. Request, record and audit entry are written together.
   For `proposal.create` and `vote.extend` the application gives no

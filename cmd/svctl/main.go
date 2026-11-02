@@ -38,6 +38,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 
+	"github.com/vettid/service-vault/internal/approval"
 	"github.com/vettid/service-vault/internal/ballot"
 	"github.com/vettid/service-vault/sdk/go/servicevault"
 )
@@ -65,6 +66,8 @@ commands:
                                    skipped; does not wait for the answers; exit 1 if the
                                    run stopped early
   approve -action A -summary S -payload JSON
+                                   (no -summary for proposal.create, vote.extend, admin_set.add
+                                   and admin_set.remove: the service writes it from the payload)
                                    submit an action for admin approval, then follow it
                                    (ask_budget, exit 1, if fewer admins than the threshold
                                    can be asked: the others have 5 approval challenges
@@ -421,7 +424,7 @@ func (c *cli) approve(ctx context.Context, args []string) error {
 	if err := c.flags(fs, args, 0); err != nil {
 		return err
 	}
-	_, built, _ := ballot.SummaryFor(*action, nil, "")
+	built := approval.BuiltSummary(*action)
 	switch {
 	case *action == "" || *summary == "" && !built:
 		return usageError{errors.New("-action and -summary are required")}
@@ -463,7 +466,22 @@ func (c *cli) approveAndFollow(ctx context.Context, req servicevault.ApprovalReq
 			return "", err
 		}
 	}
-	if want, built, err := ballot.SummaryFor(req.Action, req.Payload, title); err != nil {
+	if req.Action == servicevault.ActionAdminSetAdd || req.Action == servicevault.ActionAdminSetRemove {
+		// The summary is the service's: who is added or removed, from its
+		// own record of the connection. It must name the connection asked.
+		var p struct {
+			ConnectionID string `json:"connection_id"`
+		}
+		st, err := c.c.Approval(ctx, ap.ID)
+		if err != nil {
+			return ap.ID, err
+		}
+		if json.Unmarshal(req.Payload, &p) != nil || p.ConnectionID == "" || !strings.HasSuffix(st.Summary, ", connection "+p.ConnectionID) {
+			return ap.ID, errors.New("the summary the admins read does not name the connection asked for")
+		}
+		summary = st.Summary
+		c.printf("summary: %s\n", summary)
+	} else if want, built, err := ballot.SummaryFor(req.Action, req.Payload, title); err != nil {
 		return ap.ID, fmt.Errorf("the payload can't be summarized: %w", err)
 	} else if built {
 		st, err := c.c.Approval(ctx, ap.ID)

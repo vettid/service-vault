@@ -77,7 +77,7 @@ func runProposalApproval(t *testing.T, ctx context.Context, st peer.Store, pager
 		}
 	}
 	// c2 joins the admins by approval; then two of two are needed.
-	add, err := m.Create(ctx, approval.Request{Action: approval.ActionAdminSetAdd, Summary: "Add c2", Payload: json.RawMessage(`{"connection_id":"c2"}`)})
+	add, err := m.Create(ctx, approval.Request{Action: approval.ActionAdminSetAdd, Summary: "", Payload: json.RawMessage(`{"connection_id":"c2"}`)})
 	if err != nil {
 		t.Fatal(err)
 	}

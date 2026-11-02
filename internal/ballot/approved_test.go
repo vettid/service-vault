@@ -302,10 +302,13 @@ func TestProposalSummaryFromPayload(t *testing.T) {
 	if s, _ = ProposalSummary(mustCanon(t, in)); !strings.HasPrefix(s, "ADVISORY") {
 		t.Errorf("%q", s)
 	}
-	// A long title is cut, never the rest.
+	// A title is shown whole or refused: never cut.
 	in.Title = strings.Repeat("Budget ", 25)
-	s, err = ProposalSummary(mustCanon(t, in))
-	if err != nil || len(s) > maxSummary || !strings.Contains(s, "…") || !strings.Contains(s, "closes "+closes) {
+	if _, err = ProposalSummary(mustCanon(t, in)); !errors.As(err, new(*ErrNotShown)) {
+		t.Errorf("a title that does not fit: %v", err)
+	}
+	in.Title = strings.Repeat("B", 40)
+	if s, err = ProposalSummary(mustCanon(t, in)); err != nil || !strings.HasSuffix(s, `"`+in.Title+`"`) || len(s) > maxSummary {
 		t.Errorf("%d %q %v", len(s), s, err)
 	}
 	// What can't be shown honestly is refused.
@@ -435,5 +438,23 @@ func TestCreateAssignsChoiceIDs(t *testing.T) {
 	var x ProposalInput
 	if err := parseCanonical([]byte(`{"binding":false,"choices":[{"id":"abstain","label":"Yes"}]}`), &x); err == nil {
 		t.Fatal("accepted an id")
+	}
+}
+
+// Look-alike letters from other scripts are refused (until a check for
+// confusables exists); printable ASCII and Latin-1 letters are shown.
+func TestLabelCharacters(t *testing.T) {
+	in := input()
+	in.Title = "Budget d\u00e9cision \u00c7a"
+	in.Choices[0].Label = "Oui, \u00e7a"
+	if _, err := ProposalSummary(mustCanon(t, in)); err != nil {
+		t.Fatalf("Latin-1: %v", err)
+	}
+	in.Choices[0].Label = "Y\u0435s" // Cyrillic е
+	if _, err := ProposalSummary(mustCanon(t, in)); !errors.Is(err, ErrCharset) {
+		t.Fatalf("Cyrillic: %v", err)
+	}
+	if latin("\u00d7") || latin("\u00f7") || latin("\u0100") || latin("a\u200bb") || !latin("Yes") {
+		t.Fatal("latin")
 	}
 }

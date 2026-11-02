@@ -5,9 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/vettid/vettid-vault/vms/peerwire"
 	"log/slog"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -440,9 +443,59 @@ func adminSetTarget(payload json.RawMessage) (string, error) {
 	return p.ConnectionID, nil
 }
 
+// adminSetSummary is what the admins read for an admin_set.* action:
+// the target connection's name as the service holds it (cleaned to
+// printable ASCII and Latin-1 letters, at most 24 characters, quoted) and
+// its connection id. An added connection must be known and active.
+func (m *Manager) adminSetSummary(action string, payload []byte) (string, error) {
+	target, err := adminSetTarget(payload)
+	if err != nil {
+		return "", err
+	}
+	if len(target) > 40 || checkSummary(target) != nil || strings.ContainsAny(target, "\"") {
+		return "", errCode(CodeInvalidPayload)
+	}
+	if m.Peer == nil {
+		return "", errCode(CodeInvalidConnection)
+	}
+	info, ok := m.Peer.Connection(target)
+	if action == ActionAdminSetAdd && (!ok || info.State != peer.StateActive) {
+		return "", errCode(CodeInvalidConnection)
+	}
+	name := cleanName(info.Name)
+	if name == "" {
+		name = "no name"
+	}
+	return fmt.Sprintf("%s, connection %s", strconv.Quote(name), target), nil
+}
+
+// cleanName reduces a member's profile name, which the member chose, to
+// printable ASCII and Latin-1 letters (anything else becomes "?"), at most
+// 24 characters (cut marked with "…").
+func cleanName(n string) string {
+	var b strings.Builder
+	cnt := 0
+	for _, r := range strings.TrimSpace(n) {
+		if cnt == 24 {
+			b.WriteString("…")
+			break
+		}
+		if r >= 0x20 && r <= 0x7e || r >= 0xc0 && r <= 0xff && r != 0xd7 && r != 0xf7 {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('?')
+		}
+		cnt++
+	}
+	return b.String()
+}
+
 // summaryError is the refusal of a payload whose summary can't be built.
 func summaryError(err error) error {
 	var ns *ballot.ErrNotShown
+	if errors.Is(err, ballot.ErrCharset) {
+		return errCode(CodeUnsupportedText)
+	}
 	if errors.As(err, &ns) {
 		return errCode(CodeFieldNotShown)
 	}
@@ -482,6 +535,17 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 		title = t
 	}
 	summary, built, err := ballot.SummaryFor(req.Action, payload, title)
+	if req.Action == ActionAdminSetAdd || req.Action == ActionAdminSetRemove {
+		// The admins are shown who is added or removed, as the service
+		// holds it, not text the application wrote.
+		if req.Summary != "" {
+			return nil, errCode(CodeInvalidSummary)
+		}
+		if summary, err = m.adminSetSummary(req.Action, payload); err != nil {
+			return nil, err
+		}
+		built, err = true, nil
+	}
 	switch {
 	case !built:
 		summary = req.Summary

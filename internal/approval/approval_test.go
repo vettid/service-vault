@@ -31,6 +31,8 @@ type fakePeer struct {
 	fail      map[string]error // Authenticate fails for these connections
 	purposes  []string         // each Authenticate's purpose
 	now       func() time.Time
+	names     map[string]string // connection id -> the member's name
+	states    map[string]string // connection id -> a state other than active (known, not active)
 }
 
 type sent struct {
@@ -42,10 +44,13 @@ type sent struct {
 func (p *fakePeer) Connection(id string) (peer.ConnectionInfo, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if st := p.states[id]; st != "" {
+		return peer.ConnectionInfo{ID: id, State: st, Name: p.names[id]}, true
+	}
 	if !p.active[id] {
 		return peer.ConnectionInfo{}, false
 	}
-	return peer.ConnectionInfo{ID: id, State: peer.StateActive}, true
+	return peer.ConnectionInfo{ID: id, State: peer.StateActive, Name: p.names[id]}, true
 }
 
 func (p *fakePeer) Authenticate(_ context.Context, conn, ctxt, purpose string, ttl time.Duration) (string, error) {
@@ -689,25 +694,25 @@ func TestAdminSetChanges(t *testing.T) {
 	f := newFixture(t, 1, "c1")
 	f.p.active["c2"] = true
 	ctx := context.Background()
-	_, err := f.m.Create(ctx, Request{Action: ActionAdminSetAdd, Summary: "Add", Payload: json.RawMessage(`{"connection_id":"c9"}`)})
+	_, err := f.m.Create(ctx, Request{Action: ActionAdminSetAdd, Summary: "", Payload: json.RawMessage(`{"connection_id":"c9"}`)})
 	if codeOf(err) != CodeInvalidConnection {
 		t.Fatalf("inactive: %v", err)
 	}
-	_, err = f.m.Create(ctx, Request{Action: ActionAdminSetAdd, Summary: "Add", Payload: json.RawMessage(`{"connection_id":"c1"}`)})
+	_, err = f.m.Create(ctx, Request{Action: ActionAdminSetAdd, Summary: "", Payload: json.RawMessage(`{"connection_id":"c1"}`)})
 	if codeOf(err) != CodeInvalidConnection {
 		t.Fatalf("already: %v", err)
 	}
-	_, err = f.m.Create(ctx, Request{Action: ActionAdminSetAdd, Summary: "Add", Payload: json.RawMessage(`{"connection_id":"c2","x":1}`)})
+	_, err = f.m.Create(ctx, Request{Action: ActionAdminSetAdd, Summary: "", Payload: json.RawMessage(`{"connection_id":"c2","x":1}`)})
 	if codeOf(err) != CodeInvalidPayload {
 		t.Fatalf("extra field: %v", err)
 	}
-	add := f.create(ActionAdminSetAdd, "Add an admin", `{"connection_id":"c2"}`)
+	add := f.create(ActionAdminSetAdd, "", `{"connection_id":"c2"}`)
 	f.answer("c1", "approve")
 	s := f.status(add.ID)
 	if s.Status != StatusApproved || s.Applied == nil || !*s.Applied || strings.Join(f.admins(), ",") != "c1,c2" {
 		t.Fatalf("%+v %v", s, f.admins())
 	}
-	rm := f.create(ActionAdminSetRemove, "Remove an admin", `{"connection_id":"c1"}`)
+	rm := f.create(ActionAdminSetRemove, "", `{"connection_id":"c1"}`)
 	if len(f.status(rm.ID).Admins) != 2 {
 		t.Fatal("not asked of both")
 	}
@@ -730,14 +735,14 @@ func TestAdminSetChanges(t *testing.T) {
 // and not applied when two removals race.
 func TestLastAdminProtected(t *testing.T) {
 	f := newFixture(t, 1, "c1")
-	_, err := f.m.Create(context.Background(), Request{Action: ActionAdminSetRemove, Summary: "Remove",
+	_, err := f.m.Create(context.Background(), Request{Action: ActionAdminSetRemove, Summary: "",
 		Payload: json.RawMessage(`{"connection_id":"c1"}`)})
 	if codeOf(err) != CodeLastAdmin {
 		t.Fatalf("%v", err)
 	}
 	g := newFixture(t, 1, "c1", "c2")
-	r1 := g.create(ActionAdminSetRemove, "Remove c1", `{"connection_id":"c1"}`)
-	r2 := g.create(ActionAdminSetRemove, "Remove c2", `{"connection_id":"c2"}`)
+	r1 := g.create(ActionAdminSetRemove, "", `{"connection_id":"c1"}`)
+	r2 := g.create(ActionAdminSetRemove, "", `{"connection_id":"c2"}`)
 	g.answer("c2", "approve") // c2's last challenge is r2's
 	if s := g.status(r2.ID); s.Status != StatusApproved || !*s.Applied {
 		t.Fatalf("r2 %+v", s)
@@ -756,7 +761,7 @@ func TestLastAdminProtected(t *testing.T) {
 	}
 	// With m = 2 and n = 2 a removal would leave the threshold unreachable.
 	h := newFixture(t, 2, "c1", "c2")
-	_, err = h.m.Create(context.Background(), Request{Action: ActionAdminSetRemove, Summary: "Remove",
+	_, err = h.m.Create(context.Background(), Request{Action: ActionAdminSetRemove, Summary: "",
 		Payload: json.RawMessage(`{"connection_id":"c1"}`)})
 	if codeOf(err) != CodeUnreachable {
 		t.Fatalf("%v", err)
