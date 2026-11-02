@@ -248,7 +248,9 @@ func (p *Peer) HasPendingSignIn(connID string) bool {
 	defer p.mu.Unlock()
 	now := p.now()
 	for _, ch := range p.challenges {
-		if ch.ConnID == connID && ch.Purpose == peerwire.PurposeSignIn && now.Before(ch.Exp) {
+		// A Gone sign-in (cancelled without a withdraw, or just expired) still
+		// counts until exp plus the skew: the member vault may still hold it.
+		if ch.ConnID == connID && ch.Purpose == peerwire.PurposeSignIn && ch.holds(now) {
 			return true
 		}
 	}

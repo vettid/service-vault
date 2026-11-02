@@ -2,6 +2,7 @@ package peer
 
 import (
 	"context"
+	"crypto/ed25519"
 	"slices"
 	"testing"
 	"time"
@@ -200,6 +201,62 @@ func TestLongPlaceSkewBoundary(t *testing.T) {
 	f.tick()
 	if d := next(); d != long {
 		t.Fatalf("at exp plus the skew %v", d)
+	}
+}
+
+// An expired challenge stays as a Gone record until exp plus the clock
+// skew: reported once, a late signed answer is not accepted, and it is
+// deleted after the skew. A Gone sign-in still counts as pending.
+func TestExpiredChallengeKeptUntilSkew(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "tag")
+	ctx := context.Background()
+	id, err := f.p.AuthenticateSignIn(ctx, cid, "Sign in", "42", 2*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.pump()
+	f.clk.Advance(2 * time.Minute)
+	f.tick()
+	if ex := f.ev.of(EventSignInExpired); len(ex) != 1 || ex[0].RequestID != id {
+		t.Fatalf("expired %+v", ex)
+	}
+	if f.p.challenges[id] == nil || !f.p.challenges[id].Gone {
+		t.Fatal("the expired challenge is not kept")
+	}
+	if !f.p.HasPendingSignIn(cid) {
+		t.Fatal("a Gone sign-in does not count as pending")
+	}
+	// A late signed answer inside the skew.
+	r, err := peerwire.SignConnAuth(m.Cred, f.keys.IKPublic(), m.IK.Public().(ed25519.PublicKey), m.Challenges[0], f.clk.Now(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.clk.Advance(30 * time.Second)
+	m.Send(peerwire.TypeConnAuthResponse, r.Marshal())
+	f.pump()
+	if n := len(f.ev.of(EventSignInApproved)); n != 0 {
+		t.Fatalf("%d approvals for a late answer", n)
+	}
+	f.tick()
+	f.tick()
+	if n := len(f.ev.of(EventSignInExpired)); n != 1 {
+		t.Fatalf("%d expired events", n)
+	}
+	if f.p.challenges[id] == nil {
+		t.Fatal("deleted inside the skew")
+	}
+	f.clk.Advance(ClockSkew)
+	f.tick()
+	if f.p.challenges[id] != nil {
+		t.Fatal("kept past exp plus the skew")
+	}
+	if f.p.HasPendingSignIn(cid) {
+		t.Fatal("still pending after the skew")
+	}
+	if n := len(f.ev.of(EventSignInExpired)); n != 1 {
+		t.Fatalf("%d expired events at the end", n)
 	}
 }
 
