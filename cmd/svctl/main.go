@@ -67,7 +67,7 @@ commands:
                                    skipped; does not wait for the answers; exit 1 if the
                                    run stopped early
   approve -action A -summary S -payload JSON
-                                   (no -summary for proposal.create, vote.extend, admin_set.add
+                                   (no -summary for proposal.create, vote.extend, admin.repin, admin_set.add
                                    and admin_set.remove: the service writes it from the payload)
                                    submit an action for admin approval, then follow it
                                    (ask_budget, exit 1, if fewer admins than the threshold
@@ -467,7 +467,7 @@ func (c *cli) approveAndFollow(ctx context.Context, req servicevault.ApprovalReq
 			return "", err
 		}
 	}
-	if req.Action == servicevault.ActionAdminSetAdd || req.Action == servicevault.ActionAdminSetRemove {
+	if req.Action == servicevault.ActionAdminSetAdd || req.Action == servicevault.ActionAdminSetRemove || req.Action == servicevault.ActionAdminRepin {
 		// The summary is the service's: who is added or removed, from its
 		// own record of the connection. It must name the connection asked.
 		var p struct {
@@ -478,7 +478,8 @@ func (c *cli) approveAndFollow(ctx context.Context, req servicevault.ApprovalReq
 			return ap.ID, err
 		}
 		if json.Unmarshal(req.Payload, &p) != nil || p.ConnectionID == "" || !strings.HasSuffix(st.Summary, ", connection "+p.ConnectionID) ||
-			(req.Action == servicevault.ActionAdminSetAdd && (!strings.Contains(st.Summary, ", connected ") || !addedKey.MatchString(st.Summary))) {
+			(req.Action == servicevault.ActionAdminSetAdd && (!strings.Contains(st.Summary, ", connected ") || !addedKey.MatchString(st.Summary))) ||
+			(req.Action == servicevault.ActionAdminRepin && !repinKeys.MatchString(st.Summary)) {
 			return ap.ID, errors.New("the summary the admins read does not name the connection asked for")
 		}
 		summary = st.Summary
@@ -496,10 +497,15 @@ func (c *cli) approveAndFollow(ctx context.Context, req servicevault.ApprovalReq
 		summary = want
 		c.printf("summary: %s\n", want)
 	}
-	if h, err := servicevault.ActionHash(req.Action, summary, req.Payload); err != nil || h != ap.ActionHash {
+	if req.Action == servicevault.ActionAdminRepin && !strings.Contains(string(req.Payload), "new_key") {
+		// The service filled in new_key (the connection's credential key
+		// now), so the payload it hashed is not the one given here.
+		c.printf("action_hash_check: skipped (the service filled in new_key; compare the key fingerprints with the admin)\n")
+	} else if h, err := servicevault.ActionHash(req.Action, summary, req.Payload); err != nil || h != ap.ActionHash {
 		return ap.ID, errors.New("the action hash does not match the one computed here")
+	} else {
+		c.printf("action_hash_check: ok\n")
 	}
-	c.printf("action_hash_check: ok\n")
 	c.printf("%s", askBudgetLines(ap.AskBudget))
 	var told string // the remind-needed line last printed
 	err = c.follow(ctx, wait, func(ctx context.Context) (bool, error) {
@@ -524,6 +530,10 @@ func (c *cli) approveAndFollow(ctx context.Context, req servicevault.ApprovalReq
 	})
 	return ap.ID, err
 }
+
+// repinKeys is the two key fingerprints of an admin.repin summary: 16 hex
+// digits in 4 groups each.
+var repinKeys = regexp.MustCompile(`, old key [0-9a-f]{4}( [0-9a-f]{4}){3}, new key [0-9a-f]{4}( [0-9a-f]{4}){3}, connection `)
 
 // addedKey is the key fingerprint of an admin_set.add summary: 16 hex
 // digits in 4 groups.
@@ -599,7 +609,8 @@ func (c *cli) printApproval(st *servicevault.Approval) {
 	c.printf("threshold: %d\n", st.Threshold)
 	for _, a := range st.Approvals {
 		if !a.Counted {
-			c.printf("not_counted: %s key_changed=%t (signed with a changed key; it does not count)\n", a.ConnectionID, a.KeyChanged)
+			c.printf("not_counted: %s reason=%s key_changed=%t (it does not count; the other admins re-pin with: svctl approve -action admin.repin -payload '{\"connection_id\":\"%s\"}')\n",
+				a.ConnectionID, a.Reason, a.KeyChanged, a.ConnectionID)
 			continue
 		}
 		c.printf("approved_by: %s key_changed=%t\n", a.ConnectionID, a.KeyChanged)

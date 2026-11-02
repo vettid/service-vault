@@ -120,6 +120,12 @@ type Connection struct {
 	// connection.authenticate.response (§10.4).
 	AuthKey []byte    `json:"auth_key,omitempty"`
 	AuthAt  time.Time `json:"auth_at,omitzero"`
+	// GovKey is the credential key an admin's governance approvals must be
+	// signed with. AuthKey moves with every signed sign-in; GovKey follows
+	// only a verified rotation chain, and otherwise moves only by PinGov (the
+	// connection becomes an admin) and RepinGov (the other admins approved
+	// admin.repin). Empty: not pinned, no governance approval counts.
+	GovKey []byte `json:"gov_key,omitempty"`
 
 	// relay.token.refresh bounds (§7.2): when this peer last got a fresh
 	// token near its token's end, and after quota_exceeded.

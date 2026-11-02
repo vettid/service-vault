@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -135,6 +136,12 @@ type Peer interface {
 	Connection(id string) (peer.ConnectionInfo, bool)
 	Authenticate(ctx context.Context, connID, ctxt, purpose string, ttl time.Duration) (string, error)
 	CancelChallenge(ctx context.Context, requestID string) (bool, error)
+	// PinGov pins a connection's governance key to its credential key as
+	// it is now (when it becomes an admin; with onlyIfEmpty only if none
+	// is pinned). RepinGov moves it to key if that is still the
+	// connection's credential key. Both report whether they did.
+	PinGov(ctx context.Context, connID string, onlyIfEmpty bool) (bool, error)
+	RepinGov(ctx context.Context, connID string, key []byte) (bool, error)
 }
 
 // Pager reads an append-only kind in id order (store.Table, peer.MemStore).
@@ -490,31 +497,126 @@ func (m *Manager) adminSetSummary(action string, payload []byte) (string, error)
 	if !ok {
 		return "connection " + target, nil
 	}
-	name := "name not given"
-	if info.Name != "" {
-		if utf8.RuneCountInString(info.Name) > MaxAdminName || !adminNameOK(info.Name) {
-			if add {
-				return "", errCode(CodeFieldNotShown)
-			}
-			name = "name not shown"
-		} else {
-			name = "name given " + strconv.Quote(info.Name)
-		}
+	name, err := shownName(info.Name, add)
+	if err != nil {
+		return "", err
 	}
 	s := name
 	if !info.Activated.IsZero() {
 		s += ", connected " + info.Activated.UTC().Format("2006-01-02")
 	}
 	if len(info.IK) == ed25519.PublicKeySize {
-		fp := sha256.Sum256(append([]byte("vettid/vms/2/ik-fp"), info.IK...))
-		h := hex.EncodeToString(fp[:8])
-		s += ", key " + h[:4] + " " + h[4:8] + " " + h[8:12] + " " + h[12:]
+		s += ", key " + fingerprint("vettid/vms/2/ik-fp", info.IK)
 	}
 	s += ", connection " + target
 	if len(s) > MaxAdminSummary {
 		return "", errCode(CodeFieldNotShown)
 	}
 	return s, nil
+}
+
+// shownName is how a connection's self-declared name is shown to the
+// admins. A name that can't be shown whole is refused with strict, and
+// otherwise reads "name not shown".
+func shownName(n string, strict bool) (string, error) {
+	switch {
+	case n == "":
+		return "name not given", nil
+	case utf8.RuneCountInString(n) > MaxAdminName || !adminNameOK(n):
+		if strict {
+			return "", errCode(CodeFieldNotShown)
+		}
+		return "name not shown", nil
+	}
+	return "name given " + strconv.Quote(n), nil
+}
+
+// ckFPLabel domain-separates the fingerprint of a credential key, as
+// VAULT-MESSAGING §10.8's label does the identity key's.
+const ckFPLabel = "vettid/vms/2/ck-fp"
+
+// fingerprint is the first 16 hex digits, in 4 groups of 4, of
+// SHA-256(label || key).
+func fingerprint(label string, key []byte) string {
+	fp := sha256.Sum256(append([]byte(label), key...))
+	h := hex.EncodeToString(fp[:8])
+	return h[:4] + " " + h[4:8] + " " + h[8:12] + " " + h[12:]
+}
+
+// repinPayload is the payload of admin.repin: the admin and the
+// credential key their governance key is to become.
+type repinPayload struct {
+	ConnectionID string `json:"connection_id"`
+	NewKey       string `json:"new_key,omitempty"` // base64 (standard), 32 bytes
+}
+
+// parseRepin reads an admin.repin payload strictly. key is nil when the
+// payload gives none.
+func parseRepin(payload []byte) (target string, key []byte, err error) {
+	var p repinPayload
+	dec := json.NewDecoder(bytes.NewReader(payload))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil || p.ConnectionID == "" || len(p.ConnectionID) > 40 ||
+		checkSummary(p.ConnectionID) != nil || strings.ContainsAny(p.ConnectionID, "\"") {
+		return "", nil, errCode(CodeInvalidPayload)
+	}
+	if p.NewKey == "" {
+		return p.ConnectionID, nil, nil
+	}
+	key, err = base64.StdEncoding.DecodeString(p.NewKey)
+	if err != nil || len(key) != ed25519.PublicKeySize {
+		return "", nil, errCode(CodeInvalidPayload)
+	}
+	return p.ConnectionID, key, nil
+}
+
+// repinSummary checks an admin.repin payload against the connection the
+// service holds, fills in new_key when the payload gives none (the
+// connection's credential key now), and builds what the other admins read:
+//
+//	name given "<name>", old key xxxx xxxx xxxx xxxx, new key xxxx xxxx xxxx xxxx, connection <id>
+//
+// The fingerprints are of the credential keys (ckFPLabel). Nothing is cut:
+// a name that can't be shown whole is refused. It returns the payload to
+// approve, with new_key.
+func (m *Manager) repinSummary(payload []byte) (out []byte, summary string, err error) {
+	target, key, err := parseRepin(payload)
+	if err != nil {
+		return nil, "", err
+	}
+	if m.Peer == nil {
+		return nil, "", errCode(CodeInvalidConnection)
+	}
+	info, ok := m.Peer.Connection(target)
+	if !ok || info.State != peer.StateActive || len(info.AuthKey) != ed25519.PublicKeySize || len(info.GovKey) != ed25519.PublicKeySize {
+		return nil, "", errCode(CodeInvalidConnection)
+	}
+	if key == nil {
+		key = info.AuthKey
+	}
+	// Only the key the connection signs in with now; and only if that is
+	// not the governance key already.
+	if !bytes.Equal(key, info.AuthKey) || bytes.Equal(key, info.GovKey) {
+		return nil, "", errCode(CodeInvalidPayload)
+	}
+	name, err := shownName(info.Name, true)
+	if err != nil {
+		return nil, "", err
+	}
+	summary = name + ", old key " + fingerprint(ckFPLabel, info.GovKey) + ", new key " + fingerprint(ckFPLabel, key) +
+		", connection " + target
+	if len(summary) > MaxAdminSummary {
+		return nil, "", errCode(CodeFieldNotShown)
+	}
+	raw, err := json.Marshal(repinPayload{ConnectionID: target, NewKey: base64.StdEncoding.EncodeToString(key)})
+	if err != nil {
+		return nil, "", err
+	}
+	out, err = servicevault.CanonicalJSON(raw)
+	if err != nil {
+		return nil, "", errCode(CodeInvalidPayload)
+	}
+	return out, summary, nil
 }
 
 // MaxAdminSummary bounds an admin_set.* summary, so that it is shown
@@ -591,6 +693,17 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 		}
 		built, err = true, nil
 	}
+	if req.Action == ActionAdminRepin {
+		// The other admins read who is re-pinned, from what the service
+		// holds, not text the application wrote.
+		if req.Summary != "" {
+			return nil, errCode(CodeInvalidSummary)
+		}
+		if payload, summary, err = m.repinSummary(payload); err != nil {
+			return nil, err
+		}
+		built, err = true, nil
+	}
 	switch {
 	case !built:
 		summary = req.Summary
@@ -619,7 +732,20 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 		return nil, err
 	}
 	th := m.threshold()
+	asked := set // the admins asked; admin.repin leaves out the admin re-pinned
 	switch req.Action {
+	case ActionAdminRepin:
+		target, _, err := parseRepin(payload)
+		if err != nil {
+			return nil, err
+		}
+		switch {
+		case !slices.Contains(set, target) || !m.active(target):
+			return nil, errCode(CodeInvalidConnection)
+		case len(set) == 1:
+			return nil, errCode(CodeSoleAdmin)
+		}
+		asked = slices.DeleteFunc(slices.Clone(set), func(c string) bool { return c == target })
 	case ActionAdminSetAdd:
 		target, err := adminSetTarget(payload)
 		if err != nil {
@@ -642,14 +768,14 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 			return nil, errCode(CodeUnreachable)
 		}
 	}
-	if th > len(set) {
+	if th > len(asked) {
 		return nil, errCode(CodeUnreachable)
 	}
 	now := m.now()
 	// Before anything is sent or stored: too few admins can be asked now
 	// (canAsk) for the threshold to be met.
 	askable := 0
-	for _, a := range set {
+	for _, a := range asked {
 		ok, err := m.canAsk(ctx, a, now)
 		if err != nil {
 			return nil, err
@@ -666,10 +792,10 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 		return nil, err
 	}
 	r := &record{ID: id, Action: req.Action, Summary: req.Summary, Payload: payload, Hash: hash, Status: StatusPending,
-		Threshold: th, Admins: slices.Clone(set), Created: now.UTC().Truncate(time.Millisecond),
+		Threshold: th, Admins: slices.Clone(asked), Created: now.UTC().Truncate(time.Millisecond),
 		Exp: now.Add(m.ttl()).UTC().Truncate(time.Second), LastSent: now, Pending: map[string]string{}}
 	b := m.batch(now)
-	sent, skipped, _ := m.challenge(ctx, b, r, set, ctxt)
+	sent, skipped, _ := m.challenge(ctx, b, r, asked, ctxt)
 	exp := r.Exp
 	if err := errors.Join(b.save(r), b.put(kindOpen, id, "", time.Time{}), b.audit(&AuditEntry{Type: AuditRequested,
 		ApprovalID: id, Action: r.Action, Summary: r.Summary, ActionHash: hash, Payload: payload, Threshold: th,
@@ -1120,7 +1246,7 @@ func (m *Manager) Answer(ctx context.Context, e *peer.Event) (bool, error) {
 		!r.answered(e.ConnectionID) && answer != AnswerBadSignature && (!noPurpose || m.AllowNoPurpose)
 	// A governance approval signed with a changed key does not count: it
 	// is recorded and audited, and the admin may approve again.
-	keyChanged := answer == AnswerApproved && e.KeyChanged && Governance(r.Action)
+	keyChanged := answer == AnswerApproved && e.GovKeyChanged && Governance(r.Action)
 	counted := valid && !keyChanged
 	if outstanding {
 		delete(r.Pending, e.ConnectionID)
@@ -1133,8 +1259,12 @@ func (m *Manager) Answer(ctx context.Context, e *peer.Event) (bool, error) {
 	if noPurpose {
 		ent.Reason = ReasonNoPurpose
 	}
+	why := ReasonNotRepinned
+	if e.KeyChanged {
+		why = ReasonKeyChanged
+	}
 	if valid && keyChanged {
-		ent.Reason = ReasonKeyChanged
+		ent.Reason = why
 	}
 	if !e.SignedAt.IsZero() {
 		sa := e.SignedAt.UTC()
@@ -1146,7 +1276,7 @@ func (m *Manager) Answer(ctx context.Context, e *peer.Event) (bool, error) {
 	var settled []Challenge
 	if valid && keyChanged {
 		r.Approvals = slices.DeleteFunc(r.Approvals, func(a Approver) bool { return a.ConnectionID == e.ConnectionID })
-		r.Approvals = append(r.Approvals, Approver{ConnectionID: e.ConnectionID, At: at, KeyChanged: true})
+		r.Approvals = append(r.Approvals, Approver{ConnectionID: e.ConnectionID, At: at, KeyChanged: e.KeyChanged, GovKeyChanged: true, Reason: why})
 	}
 	if counted {
 		switch answer {
@@ -1205,8 +1335,16 @@ func (m *Manager) evaluate(ctx context.Context, b *batch, r *record, set []strin
 // admins in set, not set aside for a changed key.
 func (r *record) standing(set []string) int {
 	n := 0
+	self := "" // admin.repin: the admin re-pinned never approves their own
+	if r.Action == ActionAdminRepin {
+		t, _, err := parseRepin(r.Payload)
+		if err != nil {
+			return 0
+		}
+		self = t
+	}
 	for _, a := range r.Approvals {
-		if a.stands(r.Action) && slices.Contains(set, a.ConnectionID) {
+		if a.stands(r.Action) && slices.Contains(set, a.ConnectionID) && a.ConnectionID != self {
 			n++
 		}
 	}
@@ -1223,8 +1361,8 @@ func (m *Manager) settle(ctx context.Context, b *batch, r *record, status, reaso
 	}
 	r.Pending = nil
 	b.del(kindOpen, r.ID)
-	if status == StatusApproved && (r.Action == ActionAdminSetAdd || r.Action == ActionAdminSetRemove) {
-		applied, err := m.applyAdminSet(b, r, set)
+	if status == StatusApproved && (r.Action == ActionAdminSetAdd || r.Action == ActionAdminSetRemove || r.Action == ActionAdminRepin) {
+		applied, err := m.applyAdminSet(ctx, b, r, set)
 		if err != nil {
 			return nil, err
 		}
@@ -1250,17 +1388,29 @@ func (m *Manager) settle(ctx context.Context, b *batch, r *record, status, reaso
 // action, if it still applies: an added connection must still be active
 // and not an admin; a removed one must still be an admin, and the set
 // never becomes empty this way.
-func (m *Manager) applyAdminSet(b *batch, r *record, set []string) (bool, error) {
+func (m *Manager) applyAdminSet(ctx context.Context, b *batch, r *record, set []string) (bool, error) {
 	// Defence in depth: whatever settled the approval, the set is never
 	// changed on an approval signed with a changed key, or one that does
 	// not meet its threshold with the approvals that count.
 	for _, a := range r.Approvals {
-		if a.Counted && a.KeyChanged && slices.Contains(set, a.ConnectionID) {
+		if a.Counted && a.GovKeyChanged && slices.Contains(set, a.ConnectionID) {
 			return false, nil
 		}
 	}
 	if r.standing(set) < r.Threshold {
 		return false, nil
+	}
+	if r.Action == ActionAdminRepin {
+		// The governance key becomes the connection's credential key,
+		// if that is still the key the admins were shown.
+		target, key, err := parseRepin(r.Payload)
+		if err != nil || key == nil || !slices.Contains(set, target) || !m.active(target) {
+			return false, nil
+		}
+		if ok, err := m.Peer.RepinGov(ctx, target, key); err != nil || !ok {
+			return false, err
+		}
+		return true, b.audit(&AuditEntry{Type: AuditAdminRepinned, ApprovalID: r.ID, ConnectionID: target})
 	}
 	target, err := adminSetTarget(r.Payload)
 	if err != nil {
@@ -1270,6 +1420,10 @@ func (m *Manager) applyAdminSet(b *batch, r *record, set []string) (bool, error)
 	case ActionAdminSetAdd:
 		if slices.Contains(set, target) || !m.active(target) {
 			return false, nil
+		}
+		// The new admin's governance key is their credential key now.
+		if ok, err := m.Peer.PinGov(ctx, target, false); err != nil || !ok {
+			return false, err
 		}
 		return true, b.adminSetChanged(append(slices.Clone(set), target), target, "", ChangeApproval, r.ID)
 	default:
@@ -1427,6 +1581,12 @@ func (m *Manager) bootstrap(ctx context.Context, connID string) error {
 		return err
 	}
 	now := m.now()
+	// Pinned now if it has a credential key; otherwise by its first sign-in.
+	if m.Peer != nil {
+		if _, err := m.Peer.PinGov(ctx, connID, false); err != nil {
+			return err
+		}
+	}
 	b := m.batch(now)
 	if err := b.adminSetChanged([]string{connID}, connID, "", ChangeBootstrap, ""); err != nil {
 		return err
@@ -1550,6 +1710,15 @@ func (m *Manager) Start(ctx context.Context) error {
 			return err
 		}
 		st = &bootState{State: bootDone}
+	}
+	// Admins from before the governance key existed: pinned to the
+	// credential key they have now.
+	if m.Peer != nil {
+		for _, a := range set {
+			if _, err := m.Peer.PinGov(ctx, a, true); err != nil {
+				return err
+			}
+		}
 	}
 	switch {
 	case st != nil && st.State == bootArmed:

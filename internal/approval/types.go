@@ -29,11 +29,12 @@ const (
 	ActionAdminSetAdd            = "admin_set.add"
 	ActionAdminSetRemove         = "admin_set.remove"
 	ActionAssignmentPush         = "assignment.push"
+	ActionAdminRepin             = "admin.repin"
 )
 
 var actions = map[string]bool{
 	ActionProposalCreate: true, ActionVoteExtend: true, ActionContractTemplateChange: true,
-	ActionAdminSetAdd: true, ActionAdminSetRemove: true, ActionAssignmentPush: true,
+	ActionAdminSetAdd: true, ActionAdminSetRemove: true, ActionAssignmentPush: true, ActionAdminRepin: true,
 }
 
 // Approval statuses.
@@ -50,10 +51,16 @@ const (
 	ReasonAdminsRemoved = "admins_removed" // admins left the set and too few remain to reach it
 )
 
-// ReasonKeyChanged is the reason an approval response was audited as not
-// counted: the admin signed with a credential key other than the one
-// pinned for the connection, for a governance action (Governance).
-const ReasonKeyChanged = "key_changed"
+// Reasons an approval response was audited as not counted, for a
+// governance action (Governance): the admin signed with a credential key
+// other than their governance key (types.go, Approver), either one that is
+// new (key_changed: the key is not the one pinned at the last sign-in
+// either) or one the service has seen sign in since but that the other
+// admins have not re-pinned (not_repinned).
+const (
+	ReasonKeyChanged  = "key_changed"
+	ReasonNotRepinned = "not_repinned"
+)
 
 // Governance reports whether an action decides who governs or what binds
 // the members: the admin set, new votes, extended votes and the contract
@@ -63,7 +70,7 @@ const ReasonKeyChanged = "key_changed"
 // changes neither who decides nor what binds them (chosen).
 func Governance(action string) bool {
 	switch action {
-	case ActionAdminSetAdd, ActionAdminSetRemove, ActionProposalCreate, ActionVoteExtend, ActionContractTemplateChange:
+	case ActionAdminSetAdd, ActionAdminSetRemove, ActionAdminRepin, ActionProposalCreate, ActionVoteExtend, ActionContractTemplateChange:
 		return true
 	}
 	return false
@@ -93,6 +100,7 @@ const (
 	// once, for the proposal or extension it approved.
 	AuditConsumed        = "approval.consumed"
 	AuditAdminSetChanged = "admin_set.changed"
+	AuditAdminRepinned   = "admin.repinned" // an admin's governance key was re-pinned (admin.repin applied)
 	// AuditBootstrapArmed: the operator armed a new one-shot bootstrap
 	// (`service-vault admin bootstrap`); the email is not recorded.
 	AuditBootstrapArmed = "admin_set.bootstrap_armed"
@@ -147,6 +155,7 @@ var ActionLabels = map[string]string{
 	ActionAdminSetRemove:         "Remove admin:",
 	ActionContractTemplateChange: "Contract template:",
 	ActionAssignmentPush:         "Push assignment:",
+	ActionAdminRepin:             "Re-pin admin:",
 }
 
 // builtSummary reports whether the service builds the action's summary
@@ -157,7 +166,7 @@ func builtSummary(action string) bool { return BuiltSummary(action) }
 // from its payload (the application gives none).
 func BuiltSummary(action string) bool {
 	switch action {
-	case ActionProposalCreate, ActionVoteExtend, ActionAdminSetAdd, ActionAdminSetRemove:
+	case ActionProposalCreate, ActionVoteExtend, ActionAdminSetAdd, ActionAdminSetRemove, ActionAdminRepin:
 		return true
 	}
 	return false
@@ -186,6 +195,7 @@ const (
 	CodeUnknownProposal   = "unknown_proposal"       // vote.extend: no such proposal
 	CodeInvalidConnection = "invalid_connection"     // admin_set.*: not an active connection, not an admin, or already one
 	CodeUnreachable       = "unreachable"            // the threshold is more than the admins there are (or would be)
+	CodeSoleAdmin         = "sole_admin"             // admin.repin with one admin: the others can't confirm it (bootstrap instead)
 	CodeLastAdmin         = "last_admin"             // admin_set.remove of the only admin
 	CodeNotPending        = "not_pending"
 	CodeTooSoon           = "too_soon"
@@ -240,14 +250,23 @@ type Approver struct {
 	ConnectionID string    `json:"connection_id"`
 	At           time.Time `json:"at"`
 	// KeyChanged: the admin signed with a credential key other than the
-	// one pinned for the connection that no rotation chain reaches
+	// one pinned at their last sign-in that no rotation chain reaches
 	// (§10.4).
 	KeyChanged bool `json:"key_changed"`
+	// GovKeyChanged: the key is not the admin's governance key, nor
+	// reached from it by a rotation chain, or none is pinned. The
+	// governance key moves only when the connection becomes an admin and
+	// when the other admins approve admin.repin, so unlike KeyChanged it
+	// stays set for every approval until then. It alone decides whether a
+	// governance approval counts: KeyChanged compares with a key any
+	// sign-in moves, so it can't.
+	GovKeyChanged bool `json:"gov_key_changed"`
 	// Counted: the approval counts toward the threshold. It does not when
-	// KeyChanged is set on a governance action (Governance): the admin
-	// can approve again, and it counts once the pinned key is the one
-	// they sign with.
+	// GovKeyChanged is set on a governance action (Governance): the admin
+	// can approve again once re-pinned.
 	Counted bool `json:"counted"`
+	// Reason, with Counted false: key_changed, key_changed or not_repinned.
+	Reason string `json:"reason,omitempty"`
 }
 
 // UnmarshalJSON reads an approval stored before Counted existed as counted.
@@ -262,10 +281,10 @@ func (a *Approver) UnmarshalJSON(b []byte) error {
 }
 
 // stands reports whether the approval counts for an action. It fails
-// closed: a governance approval signed with a changed key never stands,
+// closed: a governance approval signed with a key other than the governance key never stands,
 // whatever Counted says.
 func (a Approver) stands(action string) bool {
-	return a.Counted && !(a.KeyChanged && Governance(action))
+	return a.Counted && !(a.GovKeyChanged && Governance(action))
 }
 
 // Denier is an admin's counted denial.

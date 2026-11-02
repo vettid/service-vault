@@ -298,7 +298,7 @@ func TestReservedSummaryStarts(t *testing.T) {
 			routine = ""
 		}
 		_, err := g.m.Create(context.Background(), Request{Action: action, Summary: routine, Payload: json.RawMessage(payload)})
-		if err != nil && action != ActionAdminSetAdd {
+		if err != nil && action != ActionAdminSetAdd && action != ActionAdminRepin {
 			t.Fatalf("%s: %v", action, err)
 		}
 		if err == nil && !strings.Contains(g.p.sent[0].ctxt, ": "+label+" ") {

@@ -197,10 +197,11 @@ its input (MEMBER-SERVICE-PLAN §4.5, §5.2), and uses that approval once;
 holding the application's API key is not enough. The approval is for the
 action `proposal.create`, and it is approved when m distinct admins have
 signed the challenge (VAULT-MESSAGING §10.4). A signature made with a
-credential key other than the one the service pinned for the admin's
-connection (reported as `key_changed`) does not count, here or when the
-service counts again before using the approval: someone else may now
-hold that credential. Its payload is the input
+credential key other than the admin's governance key (the key pinned
+when the connection became an admin, which moves only by a rotation chain
+from it or by the other admins' `admin.repin`) does not count, here or
+when the service counts again before using the approval: someone else
+may now hold that credential. Its payload is the input
 in JCS form with every field present, parsed strictly (§2).
 
 Before creating, the service checks, in one step that no other request

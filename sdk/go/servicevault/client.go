@@ -133,6 +133,7 @@ const (
 	CodeInvalidConnection = "invalid_connection" // admin_set.*: not an active connection, not an admin, or already one (422)
 	CodeUnreachable       = "unreachable"        // the threshold is more than the admins there are, or would be (422)
 	CodeLastAdmin         = "last_admin"         // admin_set.remove of the only admin (422)
+	CodeSoleAdmin         = "sole_admin"         // admin.repin with one admin: the others can't confirm it (422)
 	CodeNotPending        = "not_pending"        // the approval is settled or expired (409)
 	CodeTooSoon           = "too_soon"           // a reminder within 10 minutes of the last challenges (429)
 	CodeNotAdmin          = "not_admin"          // remind force: not an admin of the approval, or no longer in the set (422)
@@ -254,6 +255,7 @@ const (
 	ActionAdminSetAdd            = "admin_set.add"    // payload {"connection_id": "..."}; applied by the service vault
 	ActionAdminSetRemove         = "admin_set.remove" // payload {"connection_id": "..."}; applied by the service vault
 	ActionAssignmentPush         = "assignment.push"
+	ActionAdminRepin             = "admin.repin" // payload {"connection_id": "...", "new_key": "<base64>"} (new_key optional: the connection's credential key); applied by the service vault
 )
 
 // Approval statuses (Approval.Status).
@@ -308,11 +310,17 @@ type Approver struct {
 	// for the connection.
 	KeyChanged bool `json:"key_changed"`
 	// Counted: the approval counts toward the threshold. It does not when
-	// KeyChanged is set on a governance action (admin_set.add,
-	// admin_set.remove, proposal.create, vote.extend,
-	// contract_template.change): the admin approves again once the key
-	// they sign with is the pinned one.
+	// the key is not the admin's governance key on a governance action
+	// (admin_set.add, admin_set.remove, admin.repin, proposal.create,
+	// vote.extend, contract_template.change): their approvals count again
+	// once the other admins approve admin.repin for the key they sign with.
 	Counted bool `json:"counted"`
+	// GovKeyChanged: the key is not the admin's governance key.
+	GovKeyChanged bool `json:"gov_key_changed"`
+	// Reason, with Counted false: key_changed (a new key) or not_repinned
+	// (a key the service has seen since, that the other admins have not
+	// confirmed with admin.repin).
+	Reason string `json:"reason,omitempty"`
 }
 
 // Denier is an admin's counted denial.

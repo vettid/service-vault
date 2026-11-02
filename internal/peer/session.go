@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
@@ -355,6 +356,9 @@ type ConnectionInfo struct {
 	// connection.authenticate.response (empty before one).
 	IK      []byte
 	AuthKey []byte
+	// GovKey is the credential key the connection's governance approvals
+	// must be signed with (empty: none pinned). See Connection.GovKey.
+	GovKey []byte
 }
 
 // Connection returns a connection by id.
@@ -366,7 +370,38 @@ func (p *Peer) Connection(id string) (ConnectionInfo, bool) {
 		return ConnectionInfo{}, false
 	}
 	return ConnectionInfo{ID: c.ID, State: c.State, Name: c.Name(), InviteID: c.InviteID, Tag: c.Tag, Activated: c.Activated,
-		IK: append([]byte(nil), c.Peer.IK...), AuthKey: append([]byte(nil), c.AuthKey...)}, true
+		IK: append([]byte(nil), c.Peer.IK...), AuthKey: append([]byte(nil), c.AuthKey...),
+		GovKey: append([]byte(nil), c.GovKey...)}, true
+}
+
+// PinGov pins the connection's governance key to its credential key as it
+// is now, when it becomes an admin (or, with onlyIfEmpty, when none is
+// pinned yet: the migration of an existing admin). It reports whether it
+// pinned.
+func (p *Peer) PinGov(ctx context.Context, connID string, onlyIfEmpty bool) (bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	c := p.conns[connID]
+	if c == nil || len(c.AuthKey) == 0 || onlyIfEmpty && len(c.GovKey) > 0 {
+		return false, nil
+	}
+	c.GovKey = append([]byte(nil), c.AuthKey...)
+	p.markDirty(kindConn, c.ID)
+	return true, p.flushAndDrain(ctx)
+}
+
+// RepinGov moves the connection's governance key to key, but only while
+// key is still its credential key; it reports whether it did.
+func (p *Peer) RepinGov(ctx context.Context, connID string, key []byte) (bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	c := p.conns[connID]
+	if c == nil || len(key) == 0 || !bytes.Equal(c.AuthKey, key) {
+		return false, nil
+	}
+	c.GovKey = append([]byte(nil), key...)
+	p.markDirty(kindConn, c.ID)
+	return true, p.flushAndDrain(ctx)
 }
 
 // housekeeping runs before each batch and every minute: invitations,

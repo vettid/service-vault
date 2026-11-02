@@ -86,7 +86,9 @@ func (p *fakePeer) HasPendingSignIn(conn string) bool {
 	return p.pending[conn]
 }
 
-func (*fakePeer) CancelChallenge(context.Context, string) (bool, error) { return true, nil }
+func (*fakePeer) CancelChallenge(context.Context, string) (bool, error)  { return true, nil }
+func (*fakePeer) PinGov(context.Context, string, bool) (bool, error)     { return true, nil }
+func (*fakePeer) RepinGov(context.Context, string, []byte) (bool, error) { return true, nil }
 
 // fixture is the service (internal/service on a fake peer) behind the
 // private API (internal/api) over TLS 1.3 with a tlsid key.

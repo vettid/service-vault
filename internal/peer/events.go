@@ -48,7 +48,10 @@ type Event struct {
 	Tag          string `json:"tag,omitempty"`
 	Reason       string `json:"reason,omitempty"`      // signin.denied: denied | bad_signature; connection.suspended: rotation_conflict
 	KeyChanged   bool   `json:"key_changed,omitempty"` // signin.approved: the pinned key changed (§10.4)
-	Direction    string `json:"direction,omitempty"`   // connection.removed: in (the member) | out (the service)
+	// GovKeyChanged: the key is not the governance key (Connection.GovKey),
+	// nor reached from it by a rotation chain, or none is pinned.
+	GovKeyChanged bool   `json:"gov_key_changed,omitempty"`
+	Direction     string `json:"direction,omitempty"` // connection.removed: in (the member) | out (the service)
 	// The evidence of a challenge's answer (signin.*): the challenge's
 	// context, and for a signed answer the credential key, the signature
 	// and its signed_at, with what else the signature covers: the

@@ -34,6 +34,43 @@ type fakePeer struct {
 	names     map[string]string // connection id -> the member's name
 	states    map[string]string // connection id -> a state other than active (known, not active)
 	noAuth    map[string]bool   // connection id -> no pinned credential key
+	auth      map[string][]byte // connection id -> its credential key (default: 7 x 32)
+	// gov: connection id -> its governance key. Absent: the default
+	// credential key (pinned); present and empty: none pinned.
+	gov map[string][]byte
+}
+
+func (p *fakePeer) authKey(id string) []byte {
+	if k := p.auth[id]; k != nil {
+		return k
+	}
+	return bytes.Repeat([]byte{7}, 32)
+}
+
+func (p *fakePeer) PinGov(_ context.Context, id string, onlyIfEmpty bool) (bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if k, set := p.gov[id]; p.noAuth[id] || onlyIfEmpty && (!set || len(k) > 0) {
+		return false, nil
+	}
+	if p.gov == nil {
+		p.gov = map[string][]byte{}
+	}
+	p.gov[id] = p.authKey(id)
+	return true, nil
+}
+
+func (p *fakePeer) RepinGov(_ context.Context, id string, key []byte) (bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.noAuth[id] || !bytes.Equal(key, p.authKey(id)) {
+		return false, nil
+	}
+	if p.gov == nil {
+		p.gov = map[string][]byte{}
+	}
+	p.gov[id] = key
+	return true, nil
 }
 
 // fakeIK is a connection's identity key in the tests: its id's last
@@ -44,7 +81,11 @@ func (p *fakePeer) info(id, state string) peer.ConnectionInfo {
 	ci := peer.ConnectionInfo{ID: id, State: state, Name: p.names[id], IK: fakeIK(id),
 		Activated: time.Date(2026, 11, 2, 9, 30, 0, 0, time.UTC)}
 	if !p.noAuth[id] {
-		ci.AuthKey = bytes.Repeat([]byte{7}, 32)
+		ci.AuthKey = p.authKey(id)
+		ci.GovKey = bytes.Repeat([]byte{7}, 32) // pinned before any test moves auth
+		if g, set := p.gov[id]; set {
+			ci.GovKey = g
+		}
 	}
 	return ci
 }
@@ -265,8 +306,12 @@ func (f *fixture) answerTo(s sent, how string) *peer.Event {
 		e.Purpose = peerwire.PurposeApproval
 	}
 	switch how {
-	case "approve", "approve-changed":
+	case "approve", "approve-changed", "approve-unpinned":
+		// approve-changed: a new key (not the governance key, not the last
+		// sign-in's); approve-unpinned: the key of a later sign-in, still
+		// not the governance key.
 		e.Type, e.KeyChanged = peer.EventSignInApproved, how == "approve-changed"
+		e.GovKeyChanged = how != "approve"
 		sig()
 	case "approve-no-purpose": // a vault before VAULT-MESSAGING 0.65.0
 		e.Type = peer.EventSignInApproved

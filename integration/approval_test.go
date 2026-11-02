@@ -41,6 +41,9 @@ func (p *approvalPeer) Authenticate(_ context.Context, conn, _, _ string, _ time
 
 func (p *approvalPeer) CancelChallenge(context.Context, string) (bool, error) { return true, nil }
 
+func (p *approvalPeer) PinGov(context.Context, string, bool) (bool, error)     { return true, nil }
+func (p *approvalPeer) RepinGov(context.Context, string, []byte) (bool, error) { return true, nil }
+
 // Approvals on DynamoDB: the admin set, approvals and the webhook outbox
 // survive a restart (a new Manager on the same table); answers are
 // handled once; the audit log is append-only and reads back in order,
