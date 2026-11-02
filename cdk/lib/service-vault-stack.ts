@@ -748,7 +748,7 @@ export class ServiceVaultStack extends cdk.Stack {
     const secRule = (name: string, severity: 'notice' | 'alarm', description: string, alarmDescription: string, source: string, detail: object, readOnly = false, part = '') => {
       // part: a further rule for the same label, metric filter and alarm (a pattern is at most 2048 characters).
       // The targets are written out (not CloudWatchLogGroup targets) so that
-      // one resource policy (account-wide, 10 per region) serves all nine rules.
+      // one resource policy (account-wide, 10 per region) serves all ten rules.
       const rule = new events.Rule(this, `Sec-${name}${part}-rule`, {
         description: `${description} (${name} ${severity}${part ? `, part ${part.slice(1)}` : ''})`,
         eventPattern: { source: [source], detailType: ['AWS API Call via CloudTrail'], detail },
@@ -829,16 +829,18 @@ export class ServiceVaultStack extends cdk.Stack {
         resources: { ARN: [this.key.keyArn] },
         $or: notTaskRoleSession,
       }, true);
-    secRule('tls_pin_change', 'alarm', 'The TLS pin parameter was written or deleted by a principal other than the task role',
-      'The service vault TLS pin parameter was written or deleted by something other than the task role (a deploy that creates the parameter fires it once)',
-      'aws.ssm', {
-        $or: [
-          { eventName: ['PutParameter', 'DeleteParameter'], requestParameters: { name: [tlsPin.parameterName] }, userIdentity: notTaskRoleSession[0].userIdentity },
-          { eventName: ['PutParameter', 'DeleteParameter'], requestParameters: { name: [tlsPin.parameterName] }, userIdentity: notTaskRoleSession[1].userIdentity },
-          { eventName: ['DeleteParameters'], requestParameters: { names: [tlsPin.parameterName] }, userIdentity: notTaskRoleSession[0].userIdentity },
-          { eventName: ['DeleteParameters'], requestParameters: { names: [tlsPin.parameterName] }, userIdentity: notTaskRoleSession[1].userIdentity },
-        ],
-      });
+    // Two rules, one label (pattern limit of 2048 characters): callers that are
+    // not role sessions, and role sessions of another issuer.
+    const tlsPinDescription = 'The service vault TLS pin parameter was written or deleted by something other than the task role (a deploy that creates the parameter fires it once)';
+    const tlsPinBranches = (caller: object) => [
+      { eventName: ['PutParameter', 'DeleteParameter'], requestParameters: { name: [tlsPin.parameterName] }, userIdentity: caller },
+      { eventName: ['DeleteParameters'], requestParameters: { names: [tlsPin.parameterName] }, userIdentity: caller },
+    ];
+    secRule('tls_pin_change', 'alarm', 'The TLS pin parameter was written or deleted by a caller that is not a role session', tlsPinDescription,
+      'aws.ssm', { $or: tlsPinBranches(notTaskRoleSession[0].userIdentity) });
+    secRule('tls_pin_change', 'alarm', 'The TLS pin parameter was written or deleted by a role session other than the task role', tlsPinDescription,
+      'aws.ssm', { $or: tlsPinBranches(notTaskRoleSession[1].userIdentity) }, false, '-b');
+
     // The task role's trust policy and permissions: a way to the role that
     // needs no task at all. IAM events reach EventBridge in us-east-1 only,
     // so elsewhere this rule is not created (README "Limits").
