@@ -349,11 +349,11 @@ relay sees the padded size of every message, and `pad` keeps it the same
 for every choice. No signature's message covers `pad` (they cover binary
 messages, not the JSON), with one exception: a refusal to a body too
 malformed to form them signs `H(the request body)`, pad included. `pad`
-is in no published document. A receiver checks neither its value nor
-its length, and does not require it, so a sender without it still
-works; VAULT-MESSAGING §5.3's strict-JSON rules (no duplicate names,
-depth, UTF-8) still apply to it. The service keeps
-nothing of it. The vault's `vote.evidence` export (VAULT-MESSAGING)
+is in no published document. A receiver checks neither its type, its
+value nor its length, and does not require it, so a sender without it
+still works; VAULT-MESSAGING §5.3's strict-JSON rules (no duplicate
+names, depth, UTF-8) still apply to it (the service does not yet refuse
+a duplicate name in `vote.cast`). The service keeps nothing of it. The vault's `vote.evidence` export (VAULT-MESSAGING)
 holds the service's answers as the service sent them, byte for byte, so
 the service's padding is what keeps those exports one size for every
 choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
