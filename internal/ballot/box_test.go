@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"github.com/vettid/service-vault/vote"
+	"strings"
 	"sync"
 	"testing"
 
@@ -343,5 +344,101 @@ func TestUnpublishedProposal(t *testing.T) {
 	f.open.Bundle = json.RawMessage(`{}`)
 	if a := f.send("c0", TypeStatus, q, f.during(), true); a.Code != "" {
 		t.Fatalf("status once published: %q", a.Code)
+	}
+}
+
+// A vote.cast body may carry the vault's "pad" (VAULT-MESSAGING
+// §10.19.5): it is ignored, not required, and of any length.
+func TestCastPadIgnored(t *testing.T) {
+	for name, pad := range map[string]any{
+		"right length": strings.Repeat("0", 29),
+		"absent":       nil,
+		"empty":        "",
+		"too long":     strings.Repeat("0", 500),
+		"not zeros":    "xyz",
+		"other type":   7,
+	} {
+		f := newBoxFixture(t)
+		body, leaf := f.castBody("c0", "yes")
+		in := map[string]any{}
+		for k, v := range body {
+			in[k] = v
+		}
+		if pad != nil {
+			in["pad"] = pad
+		}
+		a := f.send("c0", TypeCast, in, f.during(), true)
+		if a.Code != "" {
+			t.Errorf("%s: refused %q", name, a.Code)
+			continue
+		}
+		x := parseAnswer(t, a)
+		rmsg, _ := vote.ReceiptMsg(f.v.ph, leaf, f.during())
+		if vote.Verify(f.ik(), vote.LabelReceipt, rmsg, x.ReceiptSig) != nil {
+			t.Errorf("%s: receipt", name)
+		}
+	}
+	// A duplicate "pad" key is read like any other duplicate: last wins.
+	f := newBoxFixture(t)
+	body, _ := f.castBody("c0", "yes")
+	j, _ := json.Marshal(body)
+	j = append(j[:len(j)-1], []byte(`,"pad":"0","pad":"00"}`)...)
+	a, err := f.box.Vote(context.Background(), &peer.VoteRequest{ConnectionID: "c0",
+		CredentialKey: f.creds["c0"].Public().(ed25519.PublicKey), Active: true, Type: TypeCast, Body: j, MsgMS: f.during()})
+	if err != nil || a.Code != "" {
+		t.Fatalf("duplicate pad: %v %q", err, a.Code)
+	}
+}
+
+// The answers that carry a ballot have one encoded length for every
+// choice id length, and the pad changes no signature.
+func TestBallotAnswersHaveOneSize(t *testing.T) {
+	var statusLen, refusalLen int
+	for n := 1; n <= 32; n++ {
+		f := newBoxFixture(t)
+		m := f.open.Members["c0"]
+		choice := strings.Repeat("a", n)
+		bal := vote.Ballot{RecordTag: m.Tag, VK: bytes.Repeat([]byte{1}, vote.VKLen), ChoiceID: choice, BallotSig: bytes.Repeat([]byte{2}, vote.SigLen)}
+		f.store.ballots[f.p.ProposalID+"|"+string(m.Tag)] = &BallotRecord{Ballot: bal, ConnectionID: "c0", MsgMS: f.during(), ReceiptSig: bytes.Repeat([]byte{3}, vote.SigLen)}
+		leaf, _ := bal.Leaf()
+
+		st := f.send("c0", TypeStatus, map[string]string{"proposal_id": f.p.ProposalID}, f.during(), true)
+		if st.Code != "" {
+			t.Fatalf("n=%d status: %q", n, st.Code)
+		}
+		x := parseAnswer(t, st)
+		if x.Ballot == nil || x.Ballot.ChoiceID != choice || len(x.Ballot.Pad) != 32-n || strings.Trim(x.Ballot.Pad, "0") != "" {
+			t.Fatalf("n=%d: ballot %+v", n, x.Ballot)
+		}
+		smsg, _ := vote.StatusMsg(f.p.ProposalID, m.Tag, leaf)
+		if vote.Verify(f.ik(), vote.LabelStatus, smsg, x.StatusSig) != nil {
+			t.Fatalf("n=%d: status signature", n)
+		}
+		if n == 1 {
+			statusLen = len(st.Body)
+		} else if len(st.Body) != statusLen {
+			t.Fatalf("n=%d: status is %d bytes, want %d", n, len(st.Body), statusLen)
+		}
+
+		other, otherLeaf := f.castBody("c0", "no")
+		av := f.send("c0", TypeCast, other, f.during()+1, true)
+		f.checkRefusal(av, "c0", CodeAlreadyVoted, m.Tag, sum(otherLeaf))
+		y := parseAnswer(t, av)
+		if y.Ballot == nil || y.Ballot.ChoiceID != choice || len(y.Ballot.Pad) != 32-n {
+			t.Fatalf("n=%d: refusal ballot %+v", n, y.Ballot)
+		}
+		if n == 1 {
+			refusalLen = len(av.Body)
+		} else if len(av.Body) != refusalLen {
+			t.Fatalf("n=%d: already_voted is %d bytes, want %d", n, len(av.Body), refusalLen)
+		}
+	}
+}
+
+func TestChoicePadLength(t *testing.T) {
+	for n, want := range map[int]int{0: 32, 1: 31, 31: 1, 32: 0, 33: 0, 100: 0} {
+		if got := choicePad(strings.Repeat("a", n)); len(got) != want || strings.Trim(got, "0") != "" {
+			t.Errorf("len %d: pad %q", n, got)
+		}
 	}
 }

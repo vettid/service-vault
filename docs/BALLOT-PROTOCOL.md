@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.13.1 (2026-11-02)
+**Status:** 0.13.2 (2026-11-03)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -339,6 +339,21 @@ listed anchor key. A second, different proposal under the same
 |---|---|---|
 | `vote.cast` | `{proposal_id, record_tag, vk, choice_id, ballot_sig, cast_sig}` (§5) | `{proposal_id, msg_ms, receipt_sig}`, or a refusal |
 | `vote.status` | `{proposal_id}` | `{proposal_id, proposal, proposal_sig, bundle, record_secret, record_proof, ballot?, msg_ms?, receipt_sig?, status_sig}`, or a refusal |
+
+Every JSON object above that carries a member's `choice_id` (the
+`vote.cast` body, the `ballot` of the `vote.status` answer and the
+`ballot` of the `already_voted` refusal) also carries `pad`: a string of
+ASCII `0` characters of length `max(0, 32 - len(choice_id))` (a choice
+id is 1 to 32 bytes, so `pad` is empty for a longer one). The relay sees
+the padded size of every message, and `pad` keeps it the same for every
+choice. `pad` is outside every signature (they cover binary messages,
+not the JSON) and outside every hash and every published document. A
+receiver ignores it, checks neither its value nor its length, and does
+not require it, so a sender without it still works. The service keeps
+nothing of it. The vault's `vote.evidence` export (VAULT-MESSAGING)
+holds the service's answers as the service sent them, byte for byte, so
+the service's padding is what keeps those exports one size for every
+choice. See VAULT-MESSAGING 0.83.4 §10.19.5.
 
 - **`vote.status`** gives a vault what the service holds for its
   connection: the proposal with its signature and anchor bundle, and its
@@ -782,6 +797,13 @@ item.
 
 ## Changes
 
+- **0.13.2 (2026-11-03):** §4.2: every JSON object that carries a
+  member's `choice_id` also carries `pad` (the `vote.cast` body, and the
+  `ballot` of the `vote.status` answer and of the `already_voted`
+  refusal), so the relay sees one message size for every choice id
+  (VAULT-MESSAGING 0.83.4 §10.19.5). `pad` is outside every signature,
+  receivers ignore it and do not require it. No change to the
+  signatures, the documents or the vectors.
 - **0.13.1 (2026-11-02):** §10.2: an extension is stored (pending) before
   it is published (and before its approval is used), a retry publishes the
   same bytes, the verified bundle's RFC 3161 time (read from the service's own kept bundle)
