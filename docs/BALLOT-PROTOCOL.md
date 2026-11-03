@@ -530,7 +530,9 @@ accepted carries the member's credential signature in its record.
 
 At `vote.closed`, and in any case at `closes_at` + 2 h (as extended),
 retrying with backoff for 7 days; the app runs pending checks whenever
-it opens.
+it opens. After 7 days the vault records that it gave up, and still
+judges a later check (VAULT-MESSAGING 0.83.6 §10.19.6): a service that
+publishes its results has every member's check settle by itself.
 1. **The app** fetches `results.json`, `rows.json` and the bundle from
    votes.vettid.org, with no session, verifies them as an observer does
    (§8.4), and hands the vault `results.json`, the bundle, the vault's
