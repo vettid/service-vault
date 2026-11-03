@@ -803,7 +803,8 @@ item.
   refusal), so the relay sees one message size for every choice id
   (VAULT-MESSAGING 0.83.4 §10.19.5). `pad` is outside every signature,
   receivers ignore it and do not require it. No change to the
-  signatures, the documents or the vectors.
+  signatures or the documents; the vectors gain `credential.cast_body`
+  (the padded `vote.cast` body, 418 bytes) and its SHA-256.
 - **0.13.1 (2026-11-02):** §10.2: an extension is stored (pending) before
   it is published (and before its approval is used), a retry publishes the
   same bytes, the verified bundle's RFC 3161 time (read from the service's own kept bundle)
