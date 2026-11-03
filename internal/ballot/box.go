@@ -165,6 +165,8 @@ type castBody struct {
 	ChoiceID   string `json:"choice_id"`
 	BallotSig  string `json:"ballot_sig"`
 	CastSig    string `json:"cast_sig"`
+	// The vault's "pad" (VAULT-MESSAGING §10.19.5) is ignored: it is
+	// neither required nor covered by a signature.
 }
 
 // decodeB64 is VAULT-MESSAGING §5.3's base64: standard, padded,
@@ -285,10 +287,22 @@ type rowBallotJSON struct {
 	VK        []byte `json:"vk"`
 	ChoiceID  string `json:"choice_id"`
 	BallotSig []byte `json:"ballot_sig"`
+	// Pad is ASCII zeros, 32 minus len(ChoiceID) of them, so the encoded
+	// answer has one size for every choice id (VAULT-MESSAGING §10.19.5).
+	// No signature covers it and receivers ignore it.
+	Pad string `json:"pad"`
 }
 
 func toRowBallot(b *vote.Ballot) *rowBallotJSON {
-	return &rowBallotJSON{VK: b.VK, ChoiceID: b.ChoiceID, BallotSig: b.BallotSig}
+	return &rowBallotJSON{VK: b.VK, ChoiceID: b.ChoiceID, BallotSig: b.BallotSig, Pad: choicePad(b.ChoiceID)}
+}
+
+// choicePad returns the pad for a JSON object carrying choiceID.
+func choicePad(choiceID string) string {
+	if n := 32 - len(choiceID); n > 0 {
+		return strings.Repeat("0", n)
+	}
+	return ""
 }
 
 func (b *Box) receiptAnswer(proposalID string, rec *BallotRecord) (peer.VoteAnswer, error) {

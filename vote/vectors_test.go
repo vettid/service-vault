@@ -5,12 +5,14 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/sha512"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"math/big"
 	"os"
 	"sort"
+	"strings"
 	"testing"
 
 	"filippo.io/edwards25519"
@@ -36,6 +38,10 @@ type vectors struct {
 		Key     string `json:"key"`
 		CastMsg string `json:"cast_msg"`
 		CastSig string `json:"cast_sig"`
+		// CastBody is the vault's vote.cast body for this ballot, with
+		// the pad of VAULT-MESSAGING 0.83.6 §10.19.5: always 418 bytes.
+		CastBody       string `json:"cast_body"`
+		CastBodySHA256 string `json:"cast_body_sha256"`
 	} `json:"credential"`
 	Service struct {
 		Seed       string `json:"seed"`
@@ -124,7 +130,17 @@ func makeVectors(t *testing.T) *vectors {
 	csk := ed25519.NewKeyFromSeed(cseed)
 	cast := must(CastMsg(ph, leaf))
 	v.Credential.Seed, v.Credential.Key = h(cseed), h(csk.Public().(ed25519.PublicKey))
-	v.Credential.CastMsg, v.Credential.CastSig = h(cast), h(must(suite.Sign(csk, LabelCast, cast)))
+	csig := must(suite.Sign(csk, LabelCast, cast))
+	v.Credential.CastMsg, v.Credential.CastSig = h(cast), h(csig)
+	b64 := base64.StdEncoding.EncodeToString
+	body := `{"proposal_id":"` + v.ProposalID + `","record_tag":"` + b64(tag) + `","vk":"` + b64(vk) +
+		`","choice_id":"` + v.ChoiceID + `","ballot_sig":"` + b64(sig) + `","cast_sig":"` + b64(csig) +
+		`","pad":"` + choicePadVector(v.ChoiceID) + `"}`
+	if len(body) != 418 {
+		t.Fatalf("cast body is %d bytes, want 418", len(body))
+	}
+	bodySum := sha256.Sum256([]byte(body))
+	v.Credential.CastBody, v.Credential.CastBodySHA256 = h([]byte(body)), h(bodySum[:])
 
 	s := &v.Service
 	sseed := digest("example service identity seed")
@@ -391,4 +407,12 @@ func makeDocVectors(t *testing.T) docVectors {
 		Extension: string(ext), ExtensionSig: h(v.sign(t, LabelExtended, m)),
 		Rows: string(rows), Results: string(results), ResultsSig: h(sig),
 	}
+}
+
+// choicePadVector is the pad of VAULT-MESSAGING §10.19.5 for a choice id.
+func choicePadVector(choiceID string) string {
+	if n := 32 - len(choiceID); n > 0 {
+		return strings.Repeat("0", n)
+	}
+	return ""
 }

@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.13.1 (2026-11-02)
+**Status:** 0.13.2 (2026-11-03)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -337,13 +337,31 @@ listed anchor key. A second, different proposal under the same
 
 | Type | Body | Answer |
 |---|---|---|
-| `vote.cast` | `{proposal_id, record_tag, vk, choice_id, ballot_sig, cast_sig}` (§5) | `{proposal_id, msg_ms, receipt_sig}`, or a refusal |
+| `vote.cast` | `{proposal_id, record_tag, vk, choice_id, ballot_sig, cast_sig, pad?}` (§5) | `{proposal_id, msg_ms, receipt_sig}`, or a refusal |
 | `vote.status` | `{proposal_id}` | `{proposal_id, proposal, proposal_sig, bundle, record_secret, record_proof, ballot?, msg_ms?, receipt_sig?, status_sig}`, or a refusal |
+
+Every JSON object above that carries a member's `choice_id` (the
+`vote.cast` body, the `ballot` of the `vote.status` answer and the
+`ballot` of the `already_voted` refusal) also carries `pad`: a string of
+ASCII `0` characters whose length is 32 minus the byte length of
+`choice_id` (empty for a foreign `choice_id` longer than 32 bytes). The
+relay sees the padded size of every message, and `pad` keeps it the same
+for every choice. No signature's message covers `pad` (they cover binary
+messages, not the JSON), with one exception: a refusal to a body too
+malformed to form them signs `H(the request body)`, pad included. `pad`
+is in no published document. A receiver checks neither its type, its
+value nor its length, and does not require it, so a sender without it
+still works; VAULT-MESSAGING §5.3's strict-JSON rules (no duplicate
+names, depth, UTF-8) still apply to it (the service does not yet refuse
+a duplicate name in `vote.cast`). The service keeps nothing of it. The vault's `vote.evidence` export (VAULT-MESSAGING)
+holds the service's answers as the service sent them, byte for byte, so
+the service's padding is what keeps those exports one size for every
+choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
 
 - **`vote.status`** gives a vault what the service holds for its
   connection: the proposal with its signature and anchor bundle, and its
   tag (as in `vote.proposal`), and the ballot with its receipt if one is
-  recorded. `ballot` is `{vk, choice_id, ballot_sig}`; `ballot`,
+  recorded. `ballot` is `{vk, choice_id, ballot_sig, pad}`; `ballot`,
   `msg_ms` and `receipt_sig` come together or not at all, and every
   other member is always present. A proposal not yet published (with no
   bundle) is `unknown_proposal`, so a vault can check one learned this
@@ -371,7 +389,7 @@ listed anchor key. A second, different proposal under the same
 | `not_open`, `closed` | `vote.cast` | The relay's time is outside the window. |
 | `not_active` | `vote.cast` | Removed or suspended, and `removed_may_vote` is false. |
 | `not_signed_in` | `vote.cast` | The member has never signed in, so no credential key is pinned (§5). |
-| `already_voted` | `vote.cast` | A different ballot is already recorded for this tag; the body also carries that ballot as `ballot` `{vk, choice_id, ballot_sig}`, with its `ballot_msg_ms` and `receipt_sig`. |
+| `already_voted` | `vote.cast` | A different ballot is already recorded for this tag; the body also carries that ballot as `ballot` `{vk, choice_id, ballot_sig, pad}`, with its `ballot_msg_ms` and `receipt_sig`. |
 | `bad_ballot` | `vote.cast` | The tag isn't the connection's, the choice isn't the proposal's, or a signature fails. After a credential-key rotation (`connection.authenticate.rotated`, VAULT-MESSAGING §10.4) the vault may sign `cast_sig` again under its current key and send the same ballot once more; the service checks `cast_sig` under the key pinned when the cast arrives. |
 | `late` | `vote.cast` | The window was open, but the results were already published (§7). |
 | `unknown_proposal` | `vote.status` | No such proposal. |
@@ -512,7 +530,9 @@ accepted carries the member's credential signature in its record.
 
 At `vote.closed`, and in any case at `closes_at` + 2 h (as extended),
 retrying with backoff for 7 days; the app runs pending checks whenever
-it opens.
+it opens. After 7 days the vault records that it gave up, and still
+judges a later check (VAULT-MESSAGING 0.83.6 §10.19.6): a service that
+publishes its results has every member's check settle by itself.
 1. **The app** fetches `results.json`, `rows.json` and the bundle from
    votes.vettid.org, with no session, verifies them as an observer does
    (§8.4), and hands the vault `results.json`, the bundle, the vault's
@@ -782,6 +802,14 @@ item.
 
 ## Changes
 
+- **0.13.2 (2026-11-03):** §4.2: every JSON object that carries a
+  member's `choice_id` also carries `pad` (the `vote.cast` body, and the
+  `ballot` of the `vote.status` answer and of the `already_voted`
+  refusal), so the relay sees one message size for every choice id
+  (VAULT-MESSAGING 0.83.6 §10.19.5). `pad` is outside every signature,
+  receivers ignore it and do not require it. No change to the
+  signatures or the documents; the vectors gain `credential.cast_body`
+  (the padded `vote.cast` body, 418 bytes) and its SHA-256.
 - **0.13.1 (2026-11-02):** §10.2: an extension is stored (pending) before
   it is published (and before its approval is used), a retry publishes the
   same bytes, the verified bundle's RFC 3161 time (read from the service's own kept bundle)
