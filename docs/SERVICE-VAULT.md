@@ -244,6 +244,28 @@ MEMBER-SERVICE-PLAN §4.5 and §5.2; the operator's view is in the README,
 - **Trust.** An approval is as strong as the admins' credential keys and
   the member vault's own checks: the service vault verifies each
   signature over the challenge it sent and pins the key per connection
-  (a different key is reported as `key_changed` and still counts). The
+  (a different key is reported as `key_changed`). The governance
+  actions (`admin_set.add`, `admin_set.remove`, `admin.repin`,
+  `proposal.create`, `vote.extend`, `contract_template.change`) count an
+  approval only if it is signed with the admin's *governance key*: the
+  credential key at the time the connection became an admin, moved on by a
+  rotation chain from it and otherwise only by `admin.repin`, which the
+  other admins approve (m of them, or all the other admins if fewer, never fewer than one: owner decision of 2026-11-02; never the admin re-pinned; a sole admin
+  has none to confirm it: the connection is removed and a bootstrap armed).
+  Before approving, the other admins ask the admin out of band (by phone or
+  in person) "did you recover or replace your vault's keys at <the time in
+  the summary>?" and approve only on a clear yes; a member's app will show
+  its own credential-key fingerprint in a later release (the
+  `vettid/vms/2/ck-fp` label will then be specified in VAULT-MESSAGING). A
+  stolen copy holding the old key can rotate the governance key away and
+  lock the real admin out, who then needs a re-pin. Governance keys of
+  existing admins are pinned from the audit log's earliest signed approval
+  (`gov_key.migrated`), a new admin's from the key their `admin_set.add`
+  summary showed, the first admin's only after the operator confirms its
+  fingerprint. Any other key is recorded with `counted: false`
+  and audited with reason `key_changed` or `not_repinned`; it does not
+  count toward the threshold, `Consume` does not count it and nothing is
+  applied on it. Ordinary sign-ins and votes follow the credential key as
+  before. `assignment.push` is not governance and counts as before. The
   ask gate of VAULT-MESSAGING §10.4.1 applies: a suppressed challenge
   reads as a denial.

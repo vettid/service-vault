@@ -22,6 +22,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -67,7 +68,7 @@ commands:
                                    skipped; does not wait for the answers; exit 1 if the
                                    run stopped early
   approve -action A -summary S -payload JSON
-                                   (no -summary for proposal.create, vote.extend, admin_set.add
+                                   (no -summary for proposal.create, vote.extend, admin.repin, admin_set.add
                                    and admin_set.remove: the service writes it from the payload)
                                    submit an action for admin approval, then follow it
                                    (ask_budget, exit 1, if fewer admins than the threshold
@@ -461,13 +462,14 @@ func (c *cli) approveAndFollow(ctx context.Context, req servicevault.ApprovalReq
 	}
 	c.printf("approval_id: %s\naction_hash: %s\nexpires_at: %s\n", ap.ID, ap.ActionHash, ap.ExpiresAt.UTC().Format(time.RFC3339))
 	summary := req.Summary
+	hashPayload := req.Payload // what the action hash covers
 	title := ""
 	if req.Action == servicevault.ActionVoteExtend {
 		if title, err = c.proposalTitle(ctx, req.Payload); err != nil {
 			return "", err
 		}
 	}
-	if req.Action == servicevault.ActionAdminSetAdd || req.Action == servicevault.ActionAdminSetRemove {
+	if req.Action == servicevault.ActionAdminSetAdd || req.Action == servicevault.ActionAdminSetRemove || req.Action == servicevault.ActionAdminRepin {
 		// The summary is the service's: who is added or removed, from its
 		// own record of the connection. It must name the connection asked.
 		var p struct {
@@ -478,11 +480,40 @@ func (c *cli) approveAndFollow(ctx context.Context, req servicevault.ApprovalReq
 			return ap.ID, err
 		}
 		if json.Unmarshal(req.Payload, &p) != nil || p.ConnectionID == "" || !strings.HasSuffix(st.Summary, ", connection "+p.ConnectionID) ||
-			(req.Action == servicevault.ActionAdminSetAdd && (!strings.Contains(st.Summary, ", connected ") || !addedKey.MatchString(st.Summary))) {
+			(req.Action == servicevault.ActionAdminSetAdd && (!strings.Contains(st.Summary, ", connected ") || !addedKey.MatchString(st.Summary))) ||
+			(req.Action == servicevault.ActionAdminRepin && !repinKeys.MatchString(st.Summary)) {
 			return ap.ID, errors.New("the summary the admins read does not name the connection asked for")
 		}
 		summary = st.Summary
 		c.printf("summary: %s\n", summary)
+		if req.Action == servicevault.ActionAdminRepin {
+			// The key the admins read in the summary is the key in the
+			// payload the hash covers.
+			var got struct {
+				NewKey string `json:"new_key"`
+			}
+			key, kerr := []byte(nil), error(nil)
+			if json.Unmarshal(st.Payload, &got) == nil {
+				key, kerr = base64.StdEncoding.DecodeString(got.NewKey)
+			}
+			if kerr != nil || len(key) != 32 || !strings.Contains(st.Summary, ", new key "+approval.CredentialKeyFingerprint(key)+", ") {
+				return ap.ID, errors.New("the new key in the payload does not match the fingerprint the admins read")
+			}
+		}
+		if req.Action == servicevault.ActionAdminRepin && !strings.Contains(string(req.Payload), "new_key") {
+			// The service filled in new_key (the connection's credential
+			// key now): the hash covers the payload it returns, which must
+			// be the one given with that key added.
+			var got, asked struct {
+				ConnectionID string `json:"connection_id"`
+				NewKey       string `json:"new_key"`
+			}
+			if json.Unmarshal(st.Payload, &got) != nil || json.Unmarshal(req.Payload, &asked) != nil ||
+				got.ConnectionID != asked.ConnectionID || got.NewKey == "" {
+				return ap.ID, errors.New("the payload the service approved is not the one asked for")
+			}
+			hashPayload = st.Payload
+		}
 	} else if want, built, err := ballot.SummaryFor(req.Action, req.Payload, title); err != nil {
 		return ap.ID, fmt.Errorf("the payload can't be summarized: %w", err)
 	} else if built {
@@ -496,7 +527,7 @@ func (c *cli) approveAndFollow(ctx context.Context, req servicevault.ApprovalReq
 		summary = want
 		c.printf("summary: %s\n", want)
 	}
-	if h, err := servicevault.ActionHash(req.Action, summary, req.Payload); err != nil || h != ap.ActionHash {
+	if h, err := servicevault.ActionHash(req.Action, summary, hashPayload); err != nil || h != ap.ActionHash {
 		return ap.ID, errors.New("the action hash does not match the one computed here")
 	}
 	c.printf("action_hash_check: ok\n")
@@ -524,6 +555,10 @@ func (c *cli) approveAndFollow(ctx context.Context, req servicevault.ApprovalReq
 	})
 	return ap.ID, err
 }
+
+// repinKeys is the new key's fingerprint of an admin.repin summary (16 hex
+// digits in 4 groups) and when the key changed (or that it is not recorded).
+var repinKeys = regexp.MustCompile(`, new key [0-9a-f]{4}( [0-9a-f]{4}){3}, (key changed [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2} UTC|key changed time not recorded), connection `)
 
 // addedKey is the key fingerprint of an admin_set.add summary: 16 hex
 // digits in 4 groups.
@@ -598,6 +633,11 @@ func (c *cli) printApproval(st *servicevault.Approval) {
 	}
 	c.printf("threshold: %d\n", st.Threshold)
 	for _, a := range st.Approvals {
+		if !a.Counted {
+			c.printf("not_counted: %s reason=%s key_changed=%t (it does not count; the other admins re-pin with: svctl approve -action admin.repin -payload '{\"connection_id\":\"%s\"}')\n",
+				a.ConnectionID, a.Reason, a.KeyChanged, a.ConnectionID)
+			continue
+		}
 		c.printf("approved_by: %s key_changed=%t\n", a.ConnectionID, a.KeyChanged)
 	}
 	for _, d := range st.Denials {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -118,6 +119,8 @@ type fakeApprovals struct {
 	req         approval.Request
 	badHash     bool
 	wrongTarget bool
+	noChangeAt  bool // admin.repin: the key change time is not recorded
+	wrongKeyFP  bool // admin.repin: the summary shows another key's fingerprint
 	forced      []string
 }
 
@@ -129,6 +132,34 @@ func (f *fakeApprovals) Create(_ context.Context, r approval.Request) (*approval
 			return nil, &approval.Error{Code: approval.CodeInvalidPayload}
 		}
 		r.Summary = sum
+	}
+	if r.Action == approval.ActionAdminRepin {
+		// As the service does: it builds the summary and fills in new_key.
+		if r.Summary != "" {
+			return nil, &approval.Error{Code: approval.CodeInvalidSummary}
+		}
+		var p struct {
+			ConnectionID string `json:"connection_id"`
+			NewKey       string `json:"new_key"`
+		}
+		_ = json.Unmarshal(r.Payload, &p)
+		if p.NewKey == "" {
+			p.NewKey = base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32))
+		}
+		r.Payload, _ = servicevault.CanonicalJSON([]byte(`{"connection_id":"` + p.ConnectionID + `","new_key":"` + p.NewKey + `"}`))
+		at := "key changed 2026-11-02 11:42 UTC"
+		if f.noChangeAt {
+			at = "key changed time not recorded"
+		}
+		nk, _ := base64.StdEncoding.DecodeString(p.NewKey)
+		fp := approval.CredentialKeyFingerprint(nk)
+		if f.wrongKeyFP {
+			fp = "9a1f bb7d 0123 4567"
+		}
+		r.Summary = `name given "Ann", new key ` + fp + `, ` + at + `, connection ` + p.ConnectionID
+		if f.wrongTarget {
+			r.Summary = `"Ann", connection c9`
+		}
 	}
 	if strings.HasPrefix(r.Action, "admin_set.") {
 		if r.Summary != "" {
@@ -164,11 +195,11 @@ func (f *fakeApprovals) Status(_ context.Context, id string) (*approval.Status, 
 		return nil, approval.ErrNotFound
 	}
 	f.n++
-	st := &approval.Status{ID: id, Action: f.req.Action, Summary: f.req.Summary, Status: approval.StatusPending, Threshold: 1, Admins: []string{"c1"}, RemindNeeded: []string{"c1"}, RemindAfter: &exp}
+	st := &approval.Status{ID: id, Action: f.req.Action, Summary: f.req.Summary, Payload: f.req.Payload, Status: approval.StatusPending, Threshold: 1, Admins: []string{"c1"}, RemindNeeded: []string{"c1"}, RemindAfter: &exp}
 	if f.n > 1 {
 		st.RemindNeeded = []string{}
 		st.Status = approval.StatusApproved
-		st.Approvals = []approval.Approver{{ConnectionID: "c1", At: exp}}
+		st.Approvals = []approval.Approver{{ConnectionID: "c1", At: exp, Counted: true}}
 	}
 	return st, nil
 }
@@ -371,7 +402,40 @@ func TestApprove(t *testing.T) {
 	if code, out, errOut := newFixture(t).run(t, "approve", "-action", "admin_set.add", "-payload", `{"connection_id":"c2"}`); code != exitOK || !strings.Contains(out, `summary: name given "Ann", connected 2026-11-02, key 9a1f bb7d 0123 4567, connection c2`) || !strings.Contains(out, "action_hash_check: ok") {
 		t.Fatalf("exit %d %s %s", code, out, errOut)
 	}
+	// admin.repin: the service builds the summary and fills in new_key; the
+	// hash is checked against the payload it returns.
+	for _, noAt := range []bool{false, true} {
+		rf := newFixture(t)
+		rf.apv.noChangeAt = noAt
+		code, out, errOut := rf.run(t, "approve", "-action", "admin.repin", "-payload", `{"connection_id":"c2"}`)
+		want := "key changed 2026-11-02 11:42 UTC, connection c2"
+		if noAt {
+			want = "key changed time not recorded, connection c2"
+		}
+		if code != exitOK || !strings.Contains(out, "summary: name given \"Ann\", new key "+approval.CredentialKeyFingerprint(bytes.Repeat([]byte{9}, 32))+", "+want) || !strings.Contains(out, "action_hash_check: ok") {
+			t.Fatalf("repin (no change time: %v): exit %d %s %s", noAt, code, out, errOut)
+		}
+	}
+	if code, out, errOut := newFixture(t).run(t, "approve", "-action", "admin.repin", "-payload", `{"connection_id":"c2","new_key":"`+base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32))+`"}`); code != exitOK || !strings.Contains(out, "action_hash_check: ok") {
+		t.Fatalf("repin with new_key: exit %d %s %s", code, out, errOut)
+	}
+	if code, _, errOut := newFixture(t).run(t, "approve", "-action", "admin.repin", "-summary", "x", "-payload", `{"connection_id":"c2"}`); code != exitUsage || !strings.Contains(errOut, "takes no -summary") {
+		t.Fatalf("exit %d %s", code, errOut)
+	}
+	// A summary whose fingerprint is not the payload key's is refused.
+	for _, payload := range []string{`{"connection_id":"c2"}`, `{"connection_id":"c2","new_key":"` + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32)) + `"}`} {
+		wf := newFixture(t)
+		wf.apv.wrongKeyFP = true
+		if code, _, errOut := wf.run(t, "approve", "-action", "admin.repin", "-payload", payload); code != exitError || !strings.Contains(errOut, "does not match the fingerprint") {
+			t.Fatalf("repin wrong fingerprint: exit %d %s", code, errOut)
+		}
+	}
 	wt := newFixture(t)
+	wt.apv.wrongTarget = true
+	if code, _, errOut := wt.run(t, "approve", "-action", "admin.repin", "-payload", `{"connection_id":"c2"}`); code != exitError || !strings.Contains(errOut, "does not name the connection") {
+		t.Fatalf("repin wrong target: exit %d %s", code, errOut)
+	}
+	wt = newFixture(t)
 	wt.apv.wrongTarget = true
 	if code, _, errOut := wt.run(t, "approve", "-action", "admin_set.remove", "-payload", `{"connection_id":"c2"}`); code != exitError || !strings.Contains(errOut, "does not name the connection") {
 		t.Fatalf("exit %d %s", code, errOut)

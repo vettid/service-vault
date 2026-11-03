@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -27,14 +28,15 @@ import (
 // Record kinds the manager keeps in the peer's store (DynamoDB in a
 // deployment).
 const (
-	kindApproval = "apv"        // an approval
-	kindOpen     = "apv_open"   // approval id -> "" while it is pending
-	kindReq      = "apv_req"    // challenge request id -> approval id
-	kindSeen     = "apv_seen"   // peer event id -> "": an answer already handled
-	kindAdmins   = "admin_set"  // "admins" -> the admin set
-	kindBoot     = "admin_boot" // "state" -> the bootstrap state (bootState)
-	kindAsks     = "apv_asks"   // admin connection id -> its newest approval challenges (askLog)
-	kindUsed     = "apv_used"   // approval id -> when it was used (Consume); written once (IfAbsent), never changed
+	kindApproval = "apv"          // an approval
+	kindOpen     = "apv_open"     // approval id -> "" while it is pending
+	kindReq      = "apv_req"      // challenge request id -> approval id
+	kindSeen     = "apv_seen"     // peer event id -> "": an answer already handled
+	kindAdmins   = "admin_set"    // "admins" -> the admin set
+	kindBoot     = "admin_boot"   // "state" -> the bootstrap state (bootState)
+	kindAsks     = "apv_asks"     // admin connection id -> its newest approval challenges (askLog)
+	kindGovMig   = "gov_migrated" // "done" -> when the governance key migration finished (migrateGov)
+	kindUsed     = "apv_used"     // approval id -> when it was used (Consume); written once (IfAbsent), never changed
 	// HookKind is the kind of the approvals' webhook Outbox: an event
 	// waiting to be delivered.
 	HookKind = "apv_hook"
@@ -135,6 +137,14 @@ type Peer interface {
 	Connection(id string) (peer.ConnectionInfo, bool)
 	Authenticate(ctx context.Context, connID, ctxt, purpose string, ttl time.Duration) (string, error)
 	CancelChallenge(ctx context.Context, requestID string) (bool, error)
+	// PinGov pins a connection's governance key to key, or to its
+	// credential key as it is now when key is empty (with onlyIfEmpty only
+	// if none is pinned). RepinGov moves it to key if that is still the
+	// connection's credential key. Both report whether they did, and
+	// peer.ErrNotFound for a connection the peer does not know (it may not
+	// have loaded its state yet).
+	PinGov(ctx context.Context, connID string, key []byte, onlyIfEmpty bool) (bool, error)
+	RepinGov(ctx context.Context, connID string, key []byte) (bool, error)
 }
 
 // Pager reads an append-only kind in id order (store.Table, peer.MemStore).
@@ -191,22 +201,28 @@ type Manager struct {
 	Now             func() time.Time
 	Log             *slog.Logger
 
-	mu     sync.Mutex
-	lastID string
-	kick   chan struct{}
-	once   sync.Once
+	mu        sync.Mutex
+	govWarned map[string]time.Time // admin -> when the migration last warned it waits for them
+	govDone   bool                 // migrateGov has seen every admin
+	lastID    string
+	kick      chan struct{}
+	once      sync.Once
 }
 
 // record is a stored approval.
 type record struct {
-	ID        string            `json:"id"`
-	Action    string            `json:"action"`
-	Summary   string            `json:"summary"`
-	Payload   json.RawMessage   `json:"payload"` // canonical
-	Hash      string            `json:"action_hash"`
-	Status    string            `json:"status"`
-	Reason    string            `json:"reason,omitempty"`
-	Threshold int               `json:"threshold"`
+	ID        string          `json:"id"`
+	Action    string          `json:"action"`
+	Summary   string          `json:"summary"`
+	Payload   json.RawMessage `json:"payload"` // canonical
+	Hash      string          `json:"action_hash"`
+	Status    string          `json:"status"`
+	Reason    string          `json:"reason,omitempty"`
+	Threshold int             `json:"threshold"`
+	// AuthKey, admin_set.add: the credential key of the connection added,
+	// whose fingerprint the admins were shown. Pinned as its governance
+	// key only if it is still the connection's credential key.
+	AuthKey   []byte            `json:"auth_key,omitempty"`
 	Admins    []string          `json:"admins"` // the admin set when it was created
 	Created   time.Time         `json:"created"`
 	Exp       time.Time         `json:"exp"`
@@ -219,7 +235,9 @@ type record struct {
 }
 
 func (r *record) answered(connID string) bool {
-	return slices.ContainsFunc(r.Approvals, func(a Approver) bool { return a.ConnectionID == connID }) ||
+	// An approval that does not count (a changed key) is not an answer: the
+	// admin may be asked again.
+	return slices.ContainsFunc(r.Approvals, func(a Approver) bool { return a.ConnectionID == connID && a.stands(r.Action) }) ||
 		slices.ContainsFunc(r.Denials, func(d Denier) bool { return d.ConnectionID == connID })
 }
 
@@ -422,6 +440,17 @@ func (m *Manager) load(ctx context.Context, id string) (*record, error) {
 	if err := json.Unmarshal(data, r); err != nil {
 		return nil, err
 	}
+	// An approval of a governance action stored before approvals carried
+	// Counted was never checked against a governance key: it never stands
+	// (and stays set aside once the record is saved again).
+	for i := range r.Approvals {
+		if a := &r.Approvals[i]; a.legacy {
+			a.legacy = false
+			if Governance(r.Action) {
+				a.Counted, a.Reason = false, ReasonLegacy
+			}
+		}
+	}
 	return r, nil
 }
 
@@ -469,55 +498,180 @@ const MaxAdminName = 32
 // credential key (it has never signed in) or no identity key, is refused.
 // Removing a connection the service no longer knows names only its id.
 func (m *Manager) adminSetSummary(action string, payload []byte) (string, error) {
+	s, _, err := m.adminSetSummaryKey(action, payload)
+	return s, err
+}
+
+// adminSetSummaryKey is adminSetSummary, and also returns the credential
+// key of an added connection, the one whose fingerprint the summary shows
+// and the governance key pinned at apply time only if it is still its
+// credential key.
+func (m *Manager) adminSetSummaryKey(action string, payload []byte) (string, []byte, error) {
 	target, err := adminSetTarget(payload)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if len(target) > 40 || checkSummary(target) != nil || strings.ContainsAny(target, "\"") {
-		return "", errCode(CodeInvalidPayload)
+		return "", nil, errCode(CodeInvalidPayload)
 	}
 	if m.Peer == nil {
-		return "", errCode(CodeInvalidConnection)
+		return "", nil, errCode(CodeInvalidConnection)
 	}
 	info, ok := m.Peer.Connection(target)
 	add := action == ActionAdminSetAdd
-	if add && (!ok || info.State != peer.StateActive || len(info.AuthKey) == 0 || len(info.IK) != ed25519.PublicKeySize ||
+	if add && (!ok || info.State != peer.StateActive || len(info.AuthKey) != ed25519.PublicKeySize || len(info.IK) != ed25519.PublicKeySize ||
 		info.Activated.IsZero()) {
-		return "", errCode(CodeInvalidConnection)
+		return "", nil, errCode(CodeInvalidConnection)
 	}
 	if !ok {
-		return "connection " + target, nil
+		return "connection " + target, nil, nil
 	}
-	name := "name not given"
-	if info.Name != "" {
-		if utf8.RuneCountInString(info.Name) > MaxAdminName || !adminNameOK(info.Name) {
-			if add {
-				return "", errCode(CodeFieldNotShown)
-			}
-			name = "name not shown"
-		} else {
-			name = "name given " + strconv.Quote(info.Name)
-		}
+	name, err := shownName(info.Name, add)
+	if err != nil {
+		return "", nil, err
 	}
 	s := name
 	if !info.Activated.IsZero() {
 		s += ", connected " + info.Activated.UTC().Format("2006-01-02")
 	}
 	if len(info.IK) == ed25519.PublicKeySize {
-		fp := sha256.Sum256(append([]byte("vettid/vms/2/ik-fp"), info.IK...))
-		h := hex.EncodeToString(fp[:8])
-		s += ", key " + h[:4] + " " + h[4:8] + " " + h[8:12] + " " + h[12:]
+		s += ", key " + fingerprint(ikFPLabel, info.IK)
+	}
+	var key []byte
+	if add {
+		// The key the new admin's governance key will be: shown here, and
+		// pinned only if it is still their credential key when applied.
+		s += ", cred key " + fingerprint(ckFPLabel, info.AuthKey)
+		key = slices.Clone(info.AuthKey)
 	}
 	s += ", connection " + target
 	if len(s) > MaxAdminSummary {
-		return "", errCode(CodeFieldNotShown)
+		return "", nil, errCode(CodeFieldNotShown)
 	}
-	return s, nil
+	return s, key, nil
+}
+
+// shownName is how a connection's self-declared name is shown to the
+// admins. A name that can't be shown whole is refused with strict, and
+// otherwise reads "name not shown".
+func shownName(n string, strict bool) (string, error) {
+	switch {
+	case n == "":
+		return "name not given", nil
+	case utf8.RuneCountInString(n) > MaxAdminName || !adminNameOK(n):
+		if strict {
+			return "", errCode(CodeFieldNotShown)
+		}
+		return "name not shown", nil
+	}
+	return "name given " + strconv.Quote(n), nil
+}
+
+// ckFPLabel domain-separates the fingerprint of a credential key, as
+// VAULT-MESSAGING §10.8's label does the identity key's.
+const ckFPLabel = "vettid/vms/2/ck-fp"
+
+// ikFPLabel is VAULT-MESSAGING §10.8's label for the identity key.
+const ikFPLabel = "vettid/vms/2/ik-fp"
+
+// fingerprint is the first 16 hex digits, in 4 groups of 4, of
+// SHA-256(label || key).
+func fingerprint(label string, key []byte) string {
+	fp := sha256.Sum256(append([]byte(label), key...))
+	h := hex.EncodeToString(fp[:8])
+	return h[:4] + " " + h[4:8] + " " + h[8:12] + " " + h[12:]
+}
+
+// CredentialKeyFingerprint is the fingerprint of a credential key as the
+// admin.repin and admin_set.add summaries show it: 16 hex digits in 4
+// groups of SHA-256("vettid/vms/2/ck-fp" || key).
+func CredentialKeyFingerprint(key []byte) string { return fingerprint(ckFPLabel, key) }
+
+// repinPayload is the payload of admin.repin: the admin and the
+// credential key their governance key is to become.
+type repinPayload struct {
+	ConnectionID string `json:"connection_id"`
+	NewKey       string `json:"new_key,omitempty"` // base64 (standard), 32 bytes
+}
+
+// parseRepin reads an admin.repin payload strictly. key is nil when the
+// payload gives none.
+func parseRepin(payload []byte) (target string, key []byte, err error) {
+	var p repinPayload
+	dec := json.NewDecoder(bytes.NewReader(payload))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil || p.ConnectionID == "" || len(p.ConnectionID) > 40 ||
+		checkSummary(p.ConnectionID) != nil || strings.ContainsAny(p.ConnectionID, "\"") {
+		return "", nil, errCode(CodeInvalidPayload)
+	}
+	if p.NewKey == "" {
+		return p.ConnectionID, nil, nil
+	}
+	key, err = base64.StdEncoding.DecodeString(p.NewKey)
+	if err != nil || len(key) != ed25519.PublicKeySize {
+		return "", nil, errCode(CodeInvalidPayload)
+	}
+	return p.ConnectionID, key, nil
+}
+
+// repinSummary checks an admin.repin payload against the connection the
+// service holds, fills in new_key when the payload gives none (the
+// connection's credential key now), and builds what the other admins read:
+//
+//	name given "<name>", new key xxxx xxxx xxxx xxxx, key changed YYYY-MM-DD HH:MM UTC, connection <id>
+//
+// The fingerprint is of the new credential key (ckFPLabel), and the time is
+// that of the first sign-in with it: what the other admins ask the admin
+// about, out of band, before approving. (The old key's fingerprint does
+// not fit with them.) Nothing is cut:
+// a name that can't be shown whole is refused. It returns the payload to
+// approve, with new_key.
+func (m *Manager) repinSummary(payload []byte) (out []byte, summary string, err error) {
+	target, key, err := parseRepin(payload)
+	if err != nil {
+		return nil, "", err
+	}
+	if m.Peer == nil {
+		return nil, "", errCode(CodeInvalidConnection)
+	}
+	info, ok := m.Peer.Connection(target)
+	if !ok || info.State != peer.StateActive || len(info.AuthKey) != ed25519.PublicKeySize || len(info.GovKey) != ed25519.PublicKeySize {
+		return nil, "", errCode(CodeInvalidConnection)
+	}
+	if key == nil {
+		key = info.AuthKey
+	}
+	// Only the key the connection signs in with now; and only if that is
+	// not the governance key already.
+	if !bytes.Equal(key, info.AuthKey) || bytes.Equal(key, info.GovKey) {
+		return nil, "", errCode(CodeInvalidPayload)
+	}
+	name, err := shownName(info.Name, true)
+	if err != nil {
+		return nil, "", err
+	}
+	changed := "key changed time not recorded"
+	if !info.AuthKeyChangedAt.IsZero() {
+		changed = "key changed " + info.AuthKeyChangedAt.UTC().Format("2006-01-02 15:04") + " UTC"
+	}
+	summary = name + ", new key " + fingerprint(ckFPLabel, key) + ", " + changed + ", connection " + target
+	if len(summary) > MaxAdminSummary {
+		return nil, "", errCode(CodeFieldNotShown)
+	}
+	raw, err := json.Marshal(repinPayload{ConnectionID: target, NewKey: base64.StdEncoding.EncodeToString(key)})
+	if err != nil {
+		return nil, "", err
+	}
+	out, err = servicevault.CanonicalJSON(raw)
+	if err != nil {
+		return nil, "", errCode(CodeInvalidPayload)
+	}
+	return out, summary, nil
 }
 
 // MaxAdminSummary bounds an admin_set.* summary, so that it is shown
 // whole in a challenge's context with the longest service name.
-const MaxAdminSummary = 165
+const MaxAdminSummary = 172
 
 // adminNameOK accepts printable ASCII and Latin-1 letters only, with no
 // space at either end.
@@ -559,6 +713,7 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 	// the actions that start or extend a vote; the application supplies
 	// no text for them.
 	title := ""
+	var addKey []byte // admin_set.add: the candidate's credential key, as shown
 	if req.Action == ActionVoteExtend {
 		// The admins are shown the proposal's title, from the store.
 		id, err := ballot.ExtensionProposalID(payload)
@@ -584,7 +739,18 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 		if req.Summary != "" {
 			return nil, errCode(CodeInvalidSummary)
 		}
-		if summary, err = m.adminSetSummary(req.Action, payload); err != nil {
+		if summary, addKey, err = m.adminSetSummaryKey(req.Action, payload); err != nil {
+			return nil, err
+		}
+		built, err = true, nil
+	}
+	if req.Action == ActionAdminRepin {
+		// The other admins read who is re-pinned, from what the service
+		// holds, not text the application wrote.
+		if req.Summary != "" {
+			return nil, errCode(CodeInvalidSummary)
+		}
+		if payload, summary, err = m.repinSummary(payload); err != nil {
 			return nil, err
 		}
 		built, err = true, nil
@@ -617,7 +783,21 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 		return nil, err
 	}
 	th := m.threshold()
+	asked := set // the admins asked; admin.repin leaves out the admin re-pinned
 	switch req.Action {
+	case ActionAdminRepin:
+		target, _, err := parseRepin(payload)
+		if err != nil {
+			return nil, err
+		}
+		switch {
+		case !slices.Contains(set, target) || !m.active(target):
+			return nil, errCode(CodeInvalidConnection)
+		case len(set) == 1:
+			return nil, errCode(CodeSoleAdmin)
+		}
+		asked = slices.DeleteFunc(slices.Clone(set), func(c string) bool { return c == target })
+		th = min(th, len(asked)) // see needed
 	case ActionAdminSetAdd:
 		target, err := adminSetTarget(payload)
 		if err != nil {
@@ -640,14 +820,14 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 			return nil, errCode(CodeUnreachable)
 		}
 	}
-	if th > len(set) {
+	if th > len(asked) {
 		return nil, errCode(CodeUnreachable)
 	}
 	now := m.now()
 	// Before anything is sent or stored: too few admins can be asked now
 	// (canAsk) for the threshold to be met.
 	askable := 0
-	for _, a := range set {
+	for _, a := range asked {
 		ok, err := m.canAsk(ctx, a, now)
 		if err != nil {
 			return nil, err
@@ -664,10 +844,10 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 		return nil, err
 	}
 	r := &record{ID: id, Action: req.Action, Summary: req.Summary, Payload: payload, Hash: hash, Status: StatusPending,
-		Threshold: th, Admins: slices.Clone(set), Created: now.UTC().Truncate(time.Millisecond),
+		AuthKey: addKey, Threshold: th, Admins: slices.Clone(asked), Created: now.UTC().Truncate(time.Millisecond),
 		Exp: now.Add(m.ttl()).UTC().Truncate(time.Second), LastSent: now, Pending: map[string]string{}}
 	b := m.batch(now)
-	sent, skipped, _ := m.challenge(ctx, b, r, set, ctxt)
+	sent, skipped, _ := m.challenge(ctx, b, r, asked, ctxt)
 	exp := r.Exp
 	if err := errors.Join(b.save(r), b.put(kindOpen, id, "", time.Time{}), b.audit(&AuditEntry{Type: AuditRequested,
 		ApprovalID: id, Action: r.Action, Summary: r.Summary, ActionHash: hash, Payload: payload, Threshold: th,
@@ -822,7 +1002,7 @@ func (m *Manager) Status(ctx context.Context, id string) (*Status, error) {
 		return nil, ErrNotFound
 	}
 	st := &Status{ID: r.ID, Action: r.Action, Summary: r.Summary, ActionHash: r.Hash, Status: r.Status, Reason: r.Reason,
-		Threshold: r.Threshold, Admins: r.Admins, Approvals: r.Approvals, Denials: r.Denials, CreatedAt: r.Created,
+		Payload: r.Payload, Threshold: r.Threshold, Admins: r.Admins, Approvals: r.Approvals, Denials: r.Denials, CreatedAt: r.Created,
 		ExpiresAt: r.Exp, Applied: r.Applied, RemindNeeded: []string{}}
 	if r.Action == ActionProposalCreate || r.Action == ActionVoteExtend {
 		if data, ok, err := m.Store.Get(ctx, kindUsed, id); err != nil {
@@ -1114,8 +1294,12 @@ func (m *Manager) Answer(ctx context.Context, e *peer.Event) (bool, error) {
 		answer = AnswerDenied
 	}
 	noPurpose := answer == AnswerApproved && e.Purpose == ""
-	counted := r.Status == StatusPending && now.Before(r.Exp) && outstanding && slices.Contains(set, e.ConnectionID) &&
+	valid := r.Status == StatusPending && now.Before(r.Exp) && outstanding && slices.Contains(set, e.ConnectionID) &&
 		!r.answered(e.ConnectionID) && answer != AnswerBadSignature && (!noPurpose || m.AllowNoPurpose)
+	// A governance approval signed with a changed key does not count: it
+	// is recorded and audited, and the admin may approve again.
+	keyChanged := answer == AnswerApproved && e.GovKeyChanged && Governance(r.Action)
+	counted := valid && !keyChanged
 	if outstanding {
 		delete(r.Pending, e.ConnectionID)
 	}
@@ -1127,6 +1311,13 @@ func (m *Manager) Answer(ctx context.Context, e *peer.Event) (bool, error) {
 	if noPurpose {
 		ent.Reason = ReasonNoPurpose
 	}
+	why := ReasonNotRepinned
+	if e.KeyChanged {
+		why = ReasonKeyChanged
+	}
+	if valid && keyChanged {
+		ent.Reason = why
+	}
 	if !e.SignedAt.IsZero() {
 		sa := e.SignedAt.UTC()
 		ent.SignedAt = &sa
@@ -1135,14 +1326,20 @@ func (m *Manager) Answer(ctx context.Context, e *peer.Event) (bool, error) {
 		return true, err
 	}
 	var settled []Challenge
+	if valid && keyChanged {
+		r.Approvals = slices.DeleteFunc(r.Approvals, func(a Approver) bool { return a.ConnectionID == e.ConnectionID })
+		r.Approvals = append(r.Approvals, Approver{ConnectionID: e.ConnectionID, At: at, KeyChanged: e.KeyChanged, GovKeyChanged: true, Reason: why})
+	}
 	if counted {
 		switch answer {
 		case AnswerApproved:
-			r.Approvals = append(r.Approvals, Approver{ConnectionID: e.ConnectionID, At: at, KeyChanged: e.KeyChanged})
+			// Replaces an earlier approval of theirs that did not count.
+			r.Approvals = slices.DeleteFunc(r.Approvals, func(a Approver) bool { return a.ConnectionID == e.ConnectionID })
+			r.Approvals = append(r.Approvals, Approver{ConnectionID: e.ConnectionID, At: at, KeyChanged: e.KeyChanged, Counted: true})
 		case AnswerDenied:
 			r.Denials = append(r.Denials, Denier{ConnectionID: e.ConnectionID, At: at})
 		}
-		if settled, err = m.evaluate(ctx, b, r, set, ReasonDenied); err != nil {
+		if settled, err = m.evaluate(ctx, b, r, set, m.needed(r, set), ReasonDenied); err != nil {
 			return true, err
 		}
 	}
@@ -1164,19 +1361,14 @@ func (m *Manager) Answer(ctx context.Context, e *peer.Event) (bool, error) {
 // evaluate settles a pending approval if m approvals of current admins
 // are in (approved) or can no longer be (denied, with reason). It returns the challenges
 // still outstanding at a settlement, to be cancelled once it is written.
-func (m *Manager) evaluate(ctx context.Context, b *batch, r *record, set []string, reason string) ([]Challenge, error) {
+func (m *Manager) evaluate(ctx context.Context, b *batch, r *record, set []string, threshold int, reason string) ([]Challenge, error) {
 	if r.Status != StatusPending {
 		return nil, nil
 	}
 	// Only approvals of admins still in the set count: an admin removed
 	// (or severed) since approving no longer stands behind the action.
-	counted := 0
-	for _, a := range r.Approvals {
-		if slices.Contains(set, a.ConnectionID) {
-			counted++
-		}
-	}
-	if counted >= r.Threshold {
+	counted := r.standing(set)
+	if counted >= threshold {
 		return m.settle(ctx, b, r, StatusApproved, "", set)
 	}
 	open := 0
@@ -1185,10 +1377,53 @@ func (m *Manager) evaluate(ctx context.Context, b *batch, r *record, set []strin
 			open++
 		}
 	}
-	if counted+open < r.Threshold {
+	if counted+open < threshold {
 		return m.settle(ctx, b, r, StatusDenied, reason, set)
 	}
 	return nil, nil
+}
+
+// needed is how many approvals settle r: the higher of its own threshold
+// and the current one. An admin.repin needs no more than the other admins
+// there are in the set now (owner decision of 2026-11-02: with 2 admins at
+// m = 2, the other one re-pins after asking out of band); never fewer than
+// one. The count is of the current admins, so removing admins to lower it
+// takes admin_set.remove approvals at the full threshold, and the approvals
+// of the removed no longer count.
+func (m *Manager) needed(r *record, set []string) int {
+	n := max(r.Threshold, m.threshold())
+	if r.Action != ActionAdminRepin {
+		return n
+	}
+	target, _, err := parseRepin(r.Payload)
+	if err != nil {
+		return n
+	}
+	others := len(set)
+	if slices.Contains(set, target) {
+		others--
+	}
+	return max(min(n, others), 1)
+}
+
+// standing counts the approvals that count toward the threshold: those of
+// admins in set, not set aside for a changed key.
+func (r *record) standing(set []string) int {
+	n := 0
+	self := "" // admin.repin: the admin re-pinned never approves their own
+	if r.Action == ActionAdminRepin {
+		t, _, err := parseRepin(r.Payload)
+		if err != nil {
+			return 0
+		}
+		self = t
+	}
+	for _, a := range r.Approvals {
+		if a.stands(r.Action) && slices.Contains(set, a.ConnectionID) && a.ConnectionID != self {
+			n++
+		}
+	}
+	return n
 }
 
 // settle ends an approval: its status, the audit entry, its webhook and,
@@ -1201,8 +1436,8 @@ func (m *Manager) settle(ctx context.Context, b *batch, r *record, status, reaso
 	}
 	r.Pending = nil
 	b.del(kindOpen, r.ID)
-	if status == StatusApproved && (r.Action == ActionAdminSetAdd || r.Action == ActionAdminSetRemove) {
-		applied, err := m.applyAdminSet(b, r, set)
+	if status == StatusApproved && (r.Action == ActionAdminSetAdd || r.Action == ActionAdminSetRemove || r.Action == ActionAdminRepin) {
+		applied, err := m.applyAdminSet(ctx, b, r, set)
 		if err != nil {
 			return nil, err
 		}
@@ -1228,7 +1463,32 @@ func (m *Manager) settle(ctx context.Context, b *batch, r *record, status, reaso
 // action, if it still applies: an added connection must still be active
 // and not an admin; a removed one must still be an admin, and the set
 // never becomes empty this way.
-func (m *Manager) applyAdminSet(b *batch, r *record, set []string) (bool, error) {
+func (m *Manager) applyAdminSet(ctx context.Context, b *batch, r *record, set []string) (bool, error) {
+	// Defence in depth: whatever settled the approval, the set is never
+	// changed on an approval signed with a changed key, or one that does
+	// not meet its threshold with the approvals that count.
+	for _, a := range r.Approvals {
+		if a.Counted && a.GovKeyChanged && slices.Contains(set, a.ConnectionID) {
+			return false, nil
+		}
+	}
+	if r.standing(set) < m.needed(r, set) {
+		return false, nil
+	}
+	if r.Action == ActionAdminRepin {
+		// The governance key becomes the connection's credential key,
+		// if that is still the key the admins were shown.
+		target, key, err := parseRepin(r.Payload)
+		if err != nil || key == nil || !slices.Contains(set, target) || !m.active(target) {
+			return false, nil
+		}
+		if ok, err := m.Peer.RepinGov(ctx, target, key); errors.Is(err, peer.ErrNotFound) || err == nil && !ok {
+			return false, b.audit(&AuditEntry{Type: AuditGovKeyRefused, ApprovalID: r.ID, ConnectionID: target, Reason: ReasonAuthKeyMoved})
+		} else if err != nil {
+			return false, err
+		}
+		return true, b.audit(&AuditEntry{Type: AuditAdminRepinned, ApprovalID: r.ID, ConnectionID: target})
+	}
 	target, err := adminSetTarget(r.Payload)
 	if err != nil {
 		return false, nil
@@ -1237,6 +1497,16 @@ func (m *Manager) applyAdminSet(b *batch, r *record, set []string) (bool, error)
 	case ActionAdminSetAdd:
 		if slices.Contains(set, target) || !m.active(target) {
 			return false, nil
+		}
+		// The new admin's governance key is the credential key the admins
+		// were shown, if it is still their credential key.
+		if len(r.AuthKey) == 0 {
+			return false, nil
+		}
+		if ok, err := m.Peer.RepinGov(ctx, target, r.AuthKey); errors.Is(err, peer.ErrNotFound) || err == nil && !ok {
+			return false, b.audit(&AuditEntry{Type: AuditGovKeyRefused, ApprovalID: r.ID, ConnectionID: target, Reason: ReasonAuthKeyMoved})
+		} else if err != nil {
+			return false, err
 		}
 		return true, b.adminSetChanged(append(slices.Clone(set), target), target, "", ChangeApproval, r.ID)
 	default:
@@ -1302,7 +1572,7 @@ func (m *Manager) reevaluate(ctx context.Context) error {
 				}
 			}
 			m.cancel(ctx, gone)
-			if settled, err = m.evaluate(ctx, b, r, set, ReasonAdminsRemoved); err != nil {
+			if settled, err = m.evaluate(ctx, b, r, set, m.needed(r, set), ReasonAdminsRemoved); err != nil {
 				return err
 			}
 		}
@@ -1332,9 +1602,19 @@ const (
 // bootState is the stored bootstrap state. With none stored, the
 // configured BootstrapKey applies.
 type bootState struct {
-	State    string    `json:"state"`
-	EmailKey string    `json:"email_key,omitempty"` // armed
-	At       time.Time `json:"at"`
+	State    string `json:"state"`
+	EmailKey string `json:"email_key,omitempty"` // armed
+	// Connection and IKFP: the connection bound to the email, and the 16 hex
+	// digits of its identity key's fingerprint, waiting for the operator's
+	// confirmation; Confirmed once given (ConfirmBootstrap).
+	Connection string `json:"connection,omitempty"`
+	IKFP       string `json:"ik_fp,omitempty"`
+	Confirmed  bool   `json:"confirmed,omitempty"`
+	// ConnectedAt and InviteID: when the connection was made and the
+	// invitation it came through, for the operator to ask the member about.
+	ConnectedAt time.Time `json:"connected_at,omitzero"`
+	InviteID    string    `json:"invite_id,omitempty"`
+	At          time.Time `json:"at"`
 }
 
 // ErrAdminsExist is returned by ArmBootstrap when the admin set is not
@@ -1386,14 +1666,57 @@ func (m *Manager) ConnectionAdded(ctx context.Context, connID, emailKey string, 
 	return m.bootstrap(ctx, connID)
 }
 
-// bootstrap makes connID the first admin and records, in the same
-// write, that the bootstrap has happened.
+// bootstrap makes connID the first admin once the operator has confirmed
+// it, and records, in the same write, that the bootstrap has happened.
+// Until then the connection bound to the bootstrap email is only recorded,
+// with the fingerprint of its identity key, as waiting for confirmation
+// (ConfirmBootstrap): anyone who can invite with the bootstrap address
+// would otherwise become the first admin unseen.
 func (m *Manager) bootstrap(ctx context.Context, connID string) error {
 	set, err := m.admins(ctx)
 	if err != nil || len(set) > 0 {
 		return err
 	}
 	now := m.now()
+	st, err := m.bootState(ctx)
+	if err != nil {
+		return err
+	}
+	fp := ""
+	var connected time.Time
+	invite := ""
+	if m.Peer != nil {
+		if info, ok := m.Peer.Connection(connID); ok && len(info.IK) == ed25519.PublicKeySize {
+			fp = compactFP(fingerprint(ikFPLabel, info.IK))
+			connected, invite = info.Activated.UTC().Truncate(time.Second), info.InviteID
+		}
+	}
+	if fp == "" {
+		return nil // nothing to show the operator: fail closed
+	}
+	if st == nil {
+		st = &bootState{State: bootArmed, EmailKey: m.BootstrapKey, At: now.UTC()}
+	}
+	if !st.Confirmed || st.Connection != connID || st.IKFP != fp {
+		if st.Connection != connID || st.IKFP != fp || st.Confirmed {
+			st.Connection, st.IKFP, st.Confirmed = connID, fp, false
+			st.ConnectedAt, st.InviteID = connected, invite
+			if err := m.Store.Apply(ctx, []peer.Change{{Kind: kindBoot, ID: bootID, Data: mustMarshal(st)}}); err != nil {
+				return err
+			}
+			m.log().Info("admin bootstrap waiting for the operator's confirmation", "connection_id", connID, "ik_fingerprint", fp,
+				"connected_at", connected, "invite_id", invite)
+		}
+		return nil
+	}
+	// Pinned now if it has a credential key and no governance key yet (its
+	// first sign-in pinned one: a key signed in since is not pinned
+	// unseen); otherwise by its first sign-in.
+	if m.Peer != nil {
+		if _, err := m.Peer.PinGov(ctx, connID, nil, true); err != nil && !errors.Is(err, peer.ErrNotFound) {
+			return err
+		}
+	}
 	b := m.batch(now)
 	if err := b.adminSetChanged([]string{connID}, connID, "", ChangeBootstrap, ""); err != nil {
 		return err
@@ -1407,6 +1730,84 @@ func (m *Manager) bootstrap(ctx context.Context, connID string) error {
 	m.log().Info("admin set bootstrapped", "connection_id", connID)
 	m.wake()
 	return nil
+}
+
+func mustMarshal(v any) []byte {
+	b, err := marshal(v)
+	if err != nil {
+		panic(err) // a plain struct
+	}
+	return b
+}
+
+// compactFP is a fingerprint in 16 hex digits, without the spaces.
+func compactFP(s string) string { return strings.ToLower(strings.ReplaceAll(s, " ", "")) }
+
+// Errors of ConfirmBootstrap.
+var (
+	// ErrBootNothing: no connection is waiting for confirmation.
+	ErrBootNothing = errors.New("approval: no bootstrap connection is waiting for confirmation")
+	// ErrBootMismatch: the connection or the fingerprint is not the one waiting.
+	ErrBootMismatch = errors.New("approval: the connection or fingerprint is not the one waiting for confirmation")
+)
+
+// BootstrapPending returns the connection waiting for the operator's
+// confirmation and the 16 hex digits of the fingerprint of its identity key
+// (the member's vault key fingerprint of VAULT-MESSAGING §10.8), if any.
+func (m *Manager) BootstrapPending(ctx context.Context) (connID, fp string, err error) {
+	w, err := m.BootstrapWaiting(ctx)
+	if err != nil || w == nil {
+		return "", "", err
+	}
+	return w.ConnectionID, w.Fingerprint, nil
+}
+
+// BootstrapWaiting is the connection waiting for the operator's
+// confirmation: what the operator asks the member about out of band.
+type BootstrapWaiting struct {
+	ConnectionID string
+	Fingerprint  string    // 16 hex digits of the identity key's fingerprint
+	ConnectedAt  time.Time // when the connection was made
+	InviteID     string    // the invitation it came through
+}
+
+// BootstrapWaiting returns the connection waiting for confirmation, or nil.
+func (m *Manager) BootstrapWaiting(ctx context.Context) (*BootstrapWaiting, error) {
+	st, err := m.bootState(ctx)
+	if err != nil || st == nil || st.State != bootArmed || st.Connection == "" {
+		return nil, err
+	}
+	return &BootstrapWaiting{ConnectionID: st.Connection, Fingerprint: st.IKFP, ConnectedAt: st.ConnectedAt, InviteID: st.InviteID}, nil
+}
+
+// ConfirmBootstrap confirms the connection waiting to become the first
+// admin: connID and the 16 hex digits of the fingerprint of its identity
+// key, which the operator has checked with the member out of band. The
+// running service vault then makes it the admin. The credential key it
+// signs in with first becomes its governance key.
+func (m *Manager) ConfirmBootstrap(ctx context.Context, connID, fp string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st, err := m.bootState(ctx)
+	if err != nil {
+		return err
+	}
+	if st == nil || st.State != bootArmed || st.Connection == "" {
+		return ErrBootNothing
+	}
+	if st.Connection != connID || compactFP(fp) != st.IKFP {
+		return ErrBootMismatch
+	}
+	st.Confirmed = true
+	now := m.now()
+	b := m.batch(now)
+	if err := b.put(kindBoot, bootID, st, time.Time{}); err != nil {
+		return err
+	}
+	if err := b.audit(&AuditEntry{Type: AuditBootstrapConfirmed, ConnectionID: connID, Fingerprint: st.IKFP}); err != nil {
+		return err
+	}
+	return b.apply(ctx)
 }
 
 // ArmBootstrap arms a new one-shot bootstrap for an email index key: the
@@ -1533,6 +1934,9 @@ func (m *Manager) Start(ctx context.Context) error {
 func (m *Manager) Tick(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := m.migrateGov(ctx); err != nil {
+		return err
+	}
 	key, err := m.bootstrapKey(ctx)
 	if err != nil {
 		return err
@@ -1555,6 +1959,213 @@ func (m *Manager) Tick(ctx context.Context) error {
 		}
 	}
 	return m.reevaluate(ctx)
+}
+
+// govEvidence is what the audit log shows of an admin's credential keys.
+type govEvidence struct {
+	first   []byte // the key of the earliest signed approval since they became admin
+	changed bool   // a later one was signed with another key, or reported a key change
+}
+
+// migrateGov pins the governance key of the admins that have none (those
+// from before it existed). It runs on each tick until it has seen every
+// admin's connection: the peer loads its state after the manager starts,
+// and an admin it does not know yet means it has not loaded. The key
+// pinned is the one the evidence shows, not whatever the connection holds
+// now: the credential key of the admin's earliest signed approval since
+// they became admin; with none at all, the current credential key
+// (audited with reason no_evidence). Each pin is audited with the key's
+// fingerprint. Open governance approvals holding approvals that were never
+// checked against a governance key are ended, so the admins approve again.
+func (m *Manager) migrateGov(ctx context.Context) error {
+	if m.Peer == nil || m.govDone {
+		return nil
+	}
+	if _, done, err := m.Store.Get(ctx, kindGovMig, govMigID); err != nil {
+		return err
+	} else if done {
+		m.govDone = true
+		return nil
+	}
+	set, err := m.admins(ctx)
+	if err != nil {
+		return err
+	}
+	notReady := false
+	keys := map[string][]byte{}
+	var todo []string
+	for _, a := range set {
+		info, ok := m.Peer.Connection(a)
+		switch {
+		case !ok:
+			notReady = true
+			m.warnGovWaiting(a)
+		case len(info.GovKey) == 0 && len(info.AuthKey) > 0:
+			todo = append(todo, a)
+			keys[a] = info.AuthKey
+		}
+	}
+	var ev map[string]*govEvidence
+	if len(todo) > 0 {
+		if ev, err = m.govEvidence(ctx, todo); err != nil {
+			return err
+		}
+	}
+	for _, a := range todo {
+		key, why, changed := keys[a], ReasonNoEvidence, false
+		if e := ev[a]; e != nil && e.first != nil {
+			key, why, changed = e.first, ReasonEvidence, e.changed
+		}
+		ok, err := m.Peer.PinGov(ctx, a, key, true)
+		if errors.Is(err, peer.ErrNotFound) {
+			notReady = true
+			m.warnGovWaiting(a)
+			continue
+		} else if err != nil {
+			return err
+		}
+		if !ok {
+			continue
+		}
+		b := m.batch(m.now())
+		if err := b.audit(&AuditEntry{Type: AuditGovKeyMigrated, ConnectionID: a, Reason: why, Key: key,
+			Fingerprint: compactFP(fingerprint(ckFPLabel, key)), KeyChangesSeen: changed}); err != nil {
+			return err
+		}
+		if err := b.apply(ctx); err != nil {
+			return err
+		}
+		m.log().Info("governance key pinned", "connection_id", a, "reason", why, "key_is_current", bytes.Equal(key, keys[a]), "key_changes_seen", changed)
+	}
+	if notReady {
+		return nil // the peer has not loaded every admin's connection yet: again at the next tick
+	}
+	// Every admin is pinned: end what was counted before a governance key
+	// was checked, then record that the migration is done. A failure in
+	// between leaves no marker, so the next tick ends them again (a
+	// governance approval stored without Counted never stands meanwhile).
+	if err := m.expireLegacyGov(ctx); err != nil {
+		return err
+	}
+	b := m.batch(m.now())
+	if err := b.put(kindGovMig, govMigID, &struct {
+		At time.Time `json:"at"`
+	}{b.now.UTC()}, time.Time{}); err != nil {
+		return err
+	}
+	if err := b.apply(ctx); err != nil {
+		return err
+	}
+	m.govDone = true
+	return nil
+}
+
+// govWarnEvery is how often the migration says it is waiting for an admin.
+const govWarnEvery = time.Hour
+
+// warnGovWaiting logs, at most once an hour per admin, that the migration
+// of governance keys waits for the peer to know the admin's connection
+// (until then their governance approvals do not count).
+func (m *Manager) warnGovWaiting(connID string) {
+	now := m.now()
+	if last, ok := m.govWarned[connID]; ok && now.Sub(last) < govWarnEvery {
+		return
+	}
+	if m.govWarned == nil {
+		m.govWarned = map[string]time.Time{}
+	}
+	m.govWarned[connID] = now
+	m.log().Warn("governance key migration waiting: the peer does not know this admin's connection",
+		"connection_id", connID, "alarm", "gov_migration_waiting")
+}
+
+// govMigID is the id of the stored marker that migrateGov has finished.
+const govMigID = "done"
+
+// govEvidence reads the audit log for the credential keys of conns' signed
+// approvals since each became an admin.
+func (m *Manager) govEvidence(ctx context.Context, conns []string) (map[string]*govEvidence, error) {
+	out := map[string]*govEvidence{}
+	after := ""
+	for {
+		recs, err := m.Pager.Page(ctx, KindAudit, after, MaxAuditPage)
+		if err != nil {
+			return nil, err
+		}
+		for _, rec := range recs {
+			var e AuditEntry
+			if err := json.Unmarshal(rec.Data, &e); err != nil {
+				return nil, err
+			}
+			switch {
+			case e.Type == AuditAdminSetChanged && slices.Contains(conns, e.Added):
+				delete(out, e.Added) // only what follows their becoming an admin
+			case e.Type == AuditResponse && slices.Contains(conns, e.ConnectionID) && e.Answer == AnswerApproved &&
+				len(e.Key) == ed25519.PublicKeySize:
+				g := out[e.ConnectionID]
+				switch {
+				case g == nil:
+					out[e.ConnectionID] = &govEvidence{first: e.Key, changed: e.KeyChanged}
+				case !bytes.Equal(g.first, e.Key) || e.KeyChanged:
+					g.changed = true
+				}
+			}
+		}
+		if len(recs) < MaxAuditPage {
+			return out, nil
+		}
+		after = recs[len(recs)-1].ID
+	}
+}
+
+// expireLegacyGov ends the governance approvals that were counted before
+// approvals were checked against a governance key: those still pending with
+// approvals, and the approved proposal.create and vote.extend not yet used
+// (Consume). The admins approve again. Records written since carry Counted
+// and are left alone.
+func (m *Manager) expireLegacyGov(ctx context.Context) error {
+	recs, err := m.Store.Load(ctx, kindApproval)
+	if err != nil {
+		return err
+	}
+	set, err := m.admins(ctx)
+	if err != nil {
+		return err
+	}
+	for _, rec := range recs {
+		r, err := m.load(ctx, rec.ID)
+		if err != nil {
+			return err
+		}
+		if r == nil || !Governance(r.Action) || !slices.ContainsFunc(r.Approvals, func(a Approver) bool { return a.Reason == ReasonLegacy }) {
+			continue
+		}
+		switch {
+		case r.Status == StatusPending:
+		case r.Status == StatusApproved && (r.Action == ActionProposalCreate || r.Action == ActionVoteExtend):
+			if _, used, err := m.Store.Get(ctx, kindUsed, r.ID); err != nil {
+				return err
+			} else if used {
+				continue
+			}
+		default:
+			continue
+		}
+		b := m.batch(m.now())
+		settled, err := m.settle(ctx, b, r, StatusExpired, ReasonGovMigrated, set)
+		if err != nil {
+			return err
+		}
+		if err := b.save(r); err != nil {
+			return err
+		}
+		if err := b.apply(ctx); err != nil {
+			return err
+		}
+		m.cancel(ctx, settled)
+		m.wake()
+	}
+	return nil
 }
 
 // TickInterval is how often Run ticks.
@@ -1591,5 +2202,5 @@ func (m *Manager) Run(ctx context.Context) {
 // their webhook outbox included), for a migration that must touch them
 // all.
 func Kinds() []string {
-	return []string{kindApproval, kindOpen, kindReq, kindSeen, kindAdmins, kindBoot, kindAsks, kindUsed, KindAudit, HookKind}
+	return []string{kindApproval, kindOpen, kindReq, kindSeen, kindAdmins, kindBoot, kindAsks, kindUsed, kindGovMig, KindAudit, HookKind}
 }

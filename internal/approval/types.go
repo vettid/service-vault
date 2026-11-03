@@ -29,11 +29,12 @@ const (
 	ActionAdminSetAdd            = "admin_set.add"
 	ActionAdminSetRemove         = "admin_set.remove"
 	ActionAssignmentPush         = "assignment.push"
+	ActionAdminRepin             = "admin.repin"
 )
 
 var actions = map[string]bool{
 	ActionProposalCreate: true, ActionVoteExtend: true, ActionContractTemplateChange: true,
-	ActionAdminSetAdd: true, ActionAdminSetRemove: true, ActionAssignmentPush: true,
+	ActionAdminSetAdd: true, ActionAdminSetRemove: true, ActionAssignmentPush: true, ActionAdminRepin: true,
 }
 
 // Approval statuses.
@@ -49,6 +50,47 @@ const (
 	ReasonDenied        = "denied"         // admins' denials left too few admins to reach the threshold
 	ReasonAdminsRemoved = "admins_removed" // admins left the set and too few remain to reach it
 )
+
+// Reasons an approval response was audited as not counted, for a
+// governance action (Governance): the admin signed with a credential key
+// other than their governance key, either one the service had not seen
+// (key_changed: it is not the key pinned at the last sign-in either) or
+// one it has seen sign in since but that the other admins have not
+// re-pinned (not_repinned).
+const (
+	ReasonKeyChanged  = "key_changed"
+	ReasonNotRepinned = "not_repinned"
+	// ReasonLegacy: a governance approval stored before approvals were
+	// checked against a governance key.
+	ReasonLegacy = "legacy_unpinned"
+)
+
+// Reasons of the migration of governance keys (AuditGovKeyMigrated and
+// AuditGovKeyRefused) and of the approvals it ends.
+const (
+	// ReasonEvidence: the key pinned is that of the admin's earliest signed
+	// approval in the audit log; a different current key then needs a
+	// re-pin. ReasonNoEvidence: there is none, the current key was pinned.
+	ReasonEvidence     = "evidence"
+	ReasonNoEvidence   = "no_evidence"
+	ReasonAuthKeyMoved = "auth_key_moved" // the key shown is no longer the credential key
+	// ReasonGovMigrated ends an open governance approval at the migration.
+	ReasonGovMigrated = "gov_key_migrated"
+)
+
+// Governance reports whether an action decides who governs or what binds
+// the members: the admin set and its governance keys, new votes, extended
+// votes and the contract template. An approval of one signed with a changed credential key does
+// not count, since someone else may now hold the member's credential.
+// assignment.push is not governance: it hands work to named members, and
+// changes neither who decides nor what binds them (chosen).
+func Governance(action string) bool {
+	switch action {
+	case ActionAdminSetAdd, ActionAdminSetRemove, ActionAdminRepin, ActionProposalCreate, ActionVoteExtend, ActionContractTemplateChange:
+		return true
+	}
+	return false
+}
 
 // Webhook event types.
 const (
@@ -74,9 +116,17 @@ const (
 	// once, for the proposal or extension it approved.
 	AuditConsumed        = "approval.consumed"
 	AuditAdminSetChanged = "admin_set.changed"
+	AuditAdminRepinned   = "admin.repinned" // an admin's governance key was re-pinned (admin.repin applied)
+	// AuditGovKeyMigrated: an existing admin's governance key was pinned
+	// when the feature began (Reason: the evidence, see ReasonNoEvidence);
+	// AuditGovKeyRefused: an approved change would have pinned a key that
+	// is no longer the connection's credential key (ReasonAuthKeyMoved).
+	AuditGovKeyMigrated = "gov_key.migrated"
+	AuditGovKeyRefused  = "gov_key.refused"
 	// AuditBootstrapArmed: the operator armed a new one-shot bootstrap
 	// (`service-vault admin bootstrap`); the email is not recorded.
-	AuditBootstrapArmed = "admin_set.bootstrap_armed"
+	AuditBootstrapArmed     = "admin_set.bootstrap_armed"
+	AuditBootstrapConfirmed = "admin_set.bootstrap_confirmed"
 )
 
 // Answers in an approval.response audit entry.
@@ -128,6 +178,7 @@ var ActionLabels = map[string]string{
 	ActionAdminSetRemove:         "Remove admin:",
 	ActionContractTemplateChange: "Contract template:",
 	ActionAssignmentPush:         "Push assignment:",
+	ActionAdminRepin:             "Re-pin admin:",
 }
 
 // builtSummary reports whether the service builds the action's summary
@@ -138,7 +189,7 @@ func builtSummary(action string) bool { return BuiltSummary(action) }
 // from its payload (the application gives none).
 func BuiltSummary(action string) bool {
 	switch action {
-	case ActionProposalCreate, ActionVoteExtend, ActionAdminSetAdd, ActionAdminSetRemove:
+	case ActionProposalCreate, ActionVoteExtend, ActionAdminSetAdd, ActionAdminSetRemove, ActionAdminRepin:
 		return true
 	}
 	return false
@@ -167,6 +218,7 @@ const (
 	CodeUnknownProposal   = "unknown_proposal"       // vote.extend: no such proposal
 	CodeInvalidConnection = "invalid_connection"     // admin_set.*: not an active connection, not an admin, or already one
 	CodeUnreachable       = "unreachable"            // the threshold is more than the admins there are (or would be)
+	CodeSoleAdmin         = "sole_admin"             // admin.repin with one admin: the others can't confirm it (bootstrap instead)
 	CodeLastAdmin         = "last_admin"             // admin_set.remove of the only admin
 	CodeNotPending        = "not_pending"
 	CodeTooSoon           = "too_soon"
@@ -216,14 +268,60 @@ type AskBudget struct {
 	NextAskAt    time.Time `json:"next_ask_at"` // oldest counting challenge's exp + 24 h + clock skew
 }
 
-// Approver is an admin's counted approval.
+// Approver is an admin's approval.
 type Approver struct {
 	ConnectionID string    `json:"connection_id"`
 	At           time.Time `json:"at"`
 	// KeyChanged: the admin signed with a credential key other than the
-	// one pinned for the connection that no rotation chain reaches
-	// (§10.4). The approval still counts; the application decides.
+	// one pinned at their last sign-in that no rotation chain reaches
+	// (§10.4).
 	KeyChanged bool `json:"key_changed"`
+	// GovKeyChanged: the key is not the admin's governance key, nor
+	// reached from it by a rotation chain, or none is pinned. The
+	// governance key moves only when the connection becomes an admin and
+	// when the other admins approve admin.repin, so unlike KeyChanged it
+	// stays set for every approval until then. It alone decides whether a
+	// governance approval counts: KeyChanged compares with a key any
+	// sign-in moves, so it can't.
+	GovKeyChanged bool `json:"gov_key_changed"`
+	// Counted: the approval counts toward the threshold. It does not when
+	// GovKeyChanged is set on a governance action (Governance): the admin
+	// can approve again once re-pinned.
+	Counted bool `json:"counted"`
+	// Reason, with Counted false: key_changed, key_changed or not_repinned.
+	Reason string `json:"reason,omitempty"`
+
+	legacy bool // read without a counted field (UnmarshalJSON)
+}
+
+// UnmarshalJSON reads an approval stored before Counted existed: it counted
+// unless it carried a changed key.
+func (a *Approver) UnmarshalJSON(b []byte) error {
+	type plain Approver
+	var p struct {
+		plain
+		Counted *bool `json:"counted"`
+	}
+	if err := json.Unmarshal(b, &p); err != nil {
+		return err
+	}
+	*a = Approver(p.plain)
+	// Before Counted existed an approval counted; one that carried a changed
+	// key did not (fail closed).
+	a.Counted = !a.KeyChanged
+	if p.Counted != nil {
+		a.Counted = *p.Counted
+	} else {
+		a.legacy = true // on a governance action, record.load sets it aside
+	}
+	return nil
+}
+
+// stands reports whether the approval counts for an action. It fails
+// closed: a governance approval signed with a key other than the governance key never stands,
+// whatever Counted says.
+func (a Approver) stands(action string) bool {
+	return a.Counted && !(a.GovKeyChanged && Governance(action))
 }
 
 // Denier is an admin's counted denial.
@@ -234,18 +332,21 @@ type Denier struct {
 
 // Status is what became of an approval.
 type Status struct {
-	ID         string     `json:"approval_id"`
-	Action     string     `json:"action"`
-	Summary    string     `json:"summary"`
-	ActionHash string     `json:"action_hash"`
-	Status     string     `json:"status"`
-	Reason     string     `json:"reason,omitempty"` // with denied
-	Threshold  int        `json:"threshold"`
-	Admins     []string   `json:"admins"` // the admins asked
-	Approvals  []Approver `json:"approvals"`
-	Denials    []Denier   `json:"denials"`
-	CreatedAt  time.Time  `json:"created_at"`
-	ExpiresAt  time.Time  `json:"expires_at"`
+	ID         string `json:"approval_id"`
+	Action     string `json:"action"`
+	Summary    string `json:"summary"`
+	ActionHash string `json:"action_hash"`
+	// Payload is the canonical payload the hash covers (the service may
+	// have added to it: admin.repin's new_key).
+	Payload   json.RawMessage `json:"payload,omitempty"`
+	Status    string          `json:"status"`
+	Reason    string          `json:"reason,omitempty"` // with denied
+	Threshold int             `json:"threshold"`
+	Admins    []string        `json:"admins"` // the admins asked
+	Approvals []Approver      `json:"approvals"`
+	Denials   []Denier        `json:"denials"`
+	CreatedAt time.Time       `json:"created_at"`
+	ExpiresAt time.Time       `json:"expires_at"`
 	// AskBudget, while pending: those of RemindNeeded at the ask budget.
 	AskBudget []AskBudget `json:"ask_budget,omitempty"`
 	// RemindNeeded, while pending: the admins asked who have not answered
@@ -333,6 +434,11 @@ type AuditEntry struct {
 	N          int64  `json:"n,omitempty"`
 	Added      string `json:"added,omitempty"`
 	Removed    string `json:"removed,omitempty"`
+	// Fingerprint, with gov_key.migrated: of the credential key pinned.
+	Fingerprint string `json:"fingerprint,omitempty"`
+	// KeyChangesSeen, with gov_key.migrated: the evidence showed a later
+	// approval signed with another key, or reporting a key change.
+	KeyChangesSeen bool `json:"key_changes_seen,omitempty"`
 }
 
 // AuditPage is a page of the audit log.

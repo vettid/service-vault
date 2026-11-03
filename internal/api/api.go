@@ -544,6 +544,7 @@ var approvalStatusCodes = map[string]int{
 	approval.CodeInvalidConnection: http.StatusUnprocessableEntity,
 	approval.CodeUnreachable:       http.StatusUnprocessableEntity,
 	approval.CodeLastAdmin:         http.StatusUnprocessableEntity,
+	approval.CodeSoleAdmin:         http.StatusUnprocessableEntity,
 	approval.CodeNotPending:        http.StatusConflict,
 	approval.CodeTooSoon:           http.StatusTooManyRequests,
 	approval.CodeNothingToRemind:   http.StatusConflict,

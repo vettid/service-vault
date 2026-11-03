@@ -263,6 +263,17 @@ func (p *Peer) connAuthResponse(c *Connection, body []byte, now time.Time) {
 	default:
 		ev.Type = EventSignInApproved
 		ev.KeyChanged = peerwire.PinnedKeyChanged(c.AuthKey, r.Key, r.Rotations)
+		if ev.KeyChanged {
+			c.AuthKeyChangedAt = now.UTC().Truncate(time.Millisecond)
+		}
+		switch {
+		case len(c.GovKey) == 0 && len(c.AuthKey) == 0:
+			c.GovKey = append([]byte(nil), r.Key...) // the first pin
+		case len(c.GovKey) == 0, peerwire.PinnedKeyChanged(c.GovKey, r.Key, r.Rotations):
+			ev.GovKeyChanged = true // fails closed; only a re-pin moves it
+		default:
+			c.GovKey = append([]byte(nil), r.Key...) // the same key, or its rotation
+		}
 		c.AuthKey, c.AuthAt = append([]byte(nil), r.Key...), now.UTC().Truncate(time.Millisecond)
 		p.markDirty(kindConn, c.ID)
 	}
@@ -277,15 +288,25 @@ func (p *Peer) connAuthRotated(c *Connection, body []byte) {
 		p.audit("bad_auth_rotated", c.ID)
 		return
 	}
-	if len(c.AuthKey) == 0 {
+	if len(c.AuthKey) == 0 && len(c.GovKey) == 0 {
 		return // nothing pinned
 	}
-	end, err := credwire.FollowChain(c.AuthKey, chain)
-	if err != nil {
+	ok := false
+	if len(c.AuthKey) > 0 {
+		if end, err := credwire.FollowChain(c.AuthKey, chain); err == nil {
+			c.AuthKey, ok = end, true
+		}
+	}
+	// The governance key follows a chain that starts at it, and no other.
+	if len(c.GovKey) > 0 {
+		if end, err := credwire.FollowChain(c.GovKey, chain); err == nil {
+			c.GovKey, ok = end, true
+		}
+	}
+	if !ok {
 		p.audit("auth_rotation_rejected", c.ID)
 		return
 	}
-	c.AuthKey = end
 	p.markDirty(kindConn, c.ID)
 }
 

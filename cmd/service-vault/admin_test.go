@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/vettid/service-vault/internal/approval"
 	"github.com/vettid/service-vault/internal/connect"
@@ -97,8 +98,27 @@ func TestArmBootstrap(t *testing.T) {
 	}
 	idx, _ := connect.NewEmailIndex(secrets.EmailPepper)
 	key, _ := idx.Key("admin@example.org")
-	m := &approval.Manager{Store: st}
+	m := &approval.Manager{Store: st, Peer: ikPeer{}, BoundConnection: func(context.Context, string) (string, bool, error) { return "c1", true, nil }}
 	if err := m.ConnectionAdded(ctx, "c1", key, true); err != nil {
+		t.Fatal(err)
+	}
+	// The connection waits for the operator, who is shown its fingerprint.
+	if a, _ := m.Admins(ctx); len(a.Admins) != 0 {
+		t.Fatalf("admins before the confirmation: %v", a.Admins)
+	}
+	out.Reset()
+	if err := confirmBootstrap(ctx, st, "c1", "", &out); err != nil || !strings.Contains(out.String(), "connection: c1") ||
+		!strings.Contains(out.String(), "connected: 2026-11-02 09:30:00 UTC") || !strings.Contains(out.String(), "invitation: inv1") {
+		t.Fatalf("show: %v %q", err, out.String())
+	}
+	_, fp, _ := m.BootstrapPending(ctx)
+	if err := confirmBootstrap(ctx, st, "c1", "0000000000000000", &out); err == nil {
+		t.Fatal("confirmed with a wrong fingerprint")
+	}
+	if err := confirmBootstrap(ctx, st, "c1", fp, &out); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if a, _ := m.Admins(ctx); len(a.Admins) != 1 || a.Admins[0] != "c1" {
@@ -109,3 +129,17 @@ func TestArmBootstrap(t *testing.T) {
 		t.Fatalf("armed with admins: %v", err)
 	}
 }
+
+// ikPeer knows every connection, with an identity key.
+type ikPeer struct{}
+
+func (ikPeer) Connection(id string) (peer.ConnectionInfo, bool) {
+	return peer.ConnectionInfo{ID: id, State: peer.StateActive, IK: bytes.Repeat([]byte{1}, 32), InviteID: "inv1",
+		Activated: time.Date(2026, 11, 2, 9, 30, 0, 0, time.UTC)}, true
+}
+func (ikPeer) Authenticate(context.Context, string, string, string, time.Duration) (string, error) {
+	return "r", nil
+}
+func (ikPeer) CancelChallenge(context.Context, string) (bool, error)      { return true, nil }
+func (ikPeer) PinGov(context.Context, string, []byte, bool) (bool, error) { return true, nil }
+func (ikPeer) RepinGov(context.Context, string, []byte) (bool, error)     { return true, nil }

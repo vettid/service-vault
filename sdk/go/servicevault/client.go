@@ -133,6 +133,7 @@ const (
 	CodeInvalidConnection = "invalid_connection" // admin_set.*: not an active connection, not an admin, or already one (422)
 	CodeUnreachable       = "unreachable"        // the threshold is more than the admins there are, or would be (422)
 	CodeLastAdmin         = "last_admin"         // admin_set.remove of the only admin (422)
+	CodeSoleAdmin         = "sole_admin"         // admin.repin with one admin: the others can't confirm it (422)
 	CodeNotPending        = "not_pending"        // the approval is settled or expired (409)
 	CodeTooSoon           = "too_soon"           // a reminder within 10 minutes of the last challenges (429)
 	CodeNotAdmin          = "not_admin"          // remind force: not an admin of the approval, or no longer in the set (422)
@@ -254,6 +255,7 @@ const (
 	ActionAdminSetAdd            = "admin_set.add"    // payload {"connection_id": "..."}; applied by the service vault
 	ActionAdminSetRemove         = "admin_set.remove" // payload {"connection_id": "..."}; applied by the service vault
 	ActionAssignmentPush         = "assignment.push"
+	ActionAdminRepin             = "admin.repin" // payload {"connection_id": "...", "new_key": "<base64>"} (new_key optional: the connection's credential key); applied by the service vault
 )
 
 // Approval statuses (Approval.Status).
@@ -300,13 +302,25 @@ type AskBudget struct {
 	NextAskAt time.Time `json:"next_ask_at"`
 }
 
-// Approver is an admin's counted approval.
+// Approver is an admin's approval.
 type Approver struct {
 	ConnectionID string    `json:"connection_id"`
 	At           time.Time `json:"at"`
 	// KeyChanged: the admin signed with a key other than the one pinned
-	// for the connection. The approval counts; the application decides.
+	// for the connection.
 	KeyChanged bool `json:"key_changed"`
+	// Counted: the approval counts toward the threshold. It does not when
+	// the key is not the admin's governance key on a governance action
+	// (admin_set.add, admin_set.remove, admin.repin, proposal.create,
+	// vote.extend, contract_template.change): their approvals count again
+	// once the other admins approve admin.repin for the key they sign with.
+	Counted bool `json:"counted"`
+	// GovKeyChanged: the key is not the admin's governance key.
+	GovKeyChanged bool `json:"gov_key_changed"`
+	// Reason, with Counted false: key_changed (a new key) or not_repinned
+	// (a key the service has seen since, that the other admins have not
+	// confirmed with admin.repin).
+	Reason string `json:"reason,omitempty"`
 }
 
 // Denier is an admin's counted denial.
@@ -317,18 +331,21 @@ type Denier struct {
 
 // Approval reports an approval.
 type Approval struct {
-	ID         string     `json:"approval_id"`
-	Action     string     `json:"action"`
-	Summary    string     `json:"summary"`
-	ActionHash string     `json:"action_hash"`
-	Status     string     `json:"status"`
-	Reason     string     `json:"reason,omitempty"` // with denied: denied | admins_removed
-	Threshold  int        `json:"threshold"`
-	Admins     []string   `json:"admins"` // the admins asked
-	Approvals  []Approver `json:"approvals"`
-	Denials    []Denier   `json:"denials"`
-	CreatedAt  time.Time  `json:"created_at"`
-	ExpiresAt  time.Time  `json:"expires_at"`
+	ID         string `json:"approval_id"`
+	Action     string `json:"action"`
+	Summary    string `json:"summary"`
+	ActionHash string `json:"action_hash"`
+	// Payload is the canonical payload the hash covers; for admin.repin it
+	// carries the new_key the service filled in.
+	Payload   json.RawMessage `json:"payload,omitempty"`
+	Status    string          `json:"status"`
+	Reason    string          `json:"reason,omitempty"` // with denied: denied | admins_removed
+	Threshold int             `json:"threshold"`
+	Admins    []string        `json:"admins"` // the admins asked
+	Approvals []Approver      `json:"approvals"`
+	Denials   []Denier        `json:"denials"`
+	CreatedAt time.Time       `json:"created_at"`
+	ExpiresAt time.Time       `json:"expires_at"`
 	// RemindNeeded, while pending: the admins who have not answered and
 	// hold no live challenge (it ran out after 10 minutes, or could not
 	// be sent); RemindApproval challenges them again.

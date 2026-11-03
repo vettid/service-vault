@@ -147,9 +147,11 @@ export interface ServiceVaultStackProps extends cdk.StackProps {
   readonly vpcCidr?: string;
   /**
    * The first admin's email (SV_ADMIN_BOOTSTRAP_EMAIL): the connection bound
-   * to it (from an invitation with a verified email) becomes the first
-   * admin, once; the bootstrap is one-shot and recorded in the table
-   * (README "Admin approvals"). Plain text in the task definition, kept in
+   * to it (from an invitation with a verified email) waits for the
+   * operator to confirm it with `service-vault admin bootstrap -connection
+   * -fingerprint`, and only then becomes the first admin, once; the
+   * bootstrap is one-shot and recorded in the table (README "Admin
+   * approvals"). Plain text in the task definition, kept in
    * its revisions after a redeploy without it.
    */
   readonly adminBootstrapEmail?: string;

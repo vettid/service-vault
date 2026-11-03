@@ -481,8 +481,8 @@ billed.
 | `POST /v1/signins` `{email, source?}` | `202 {signin_id, match_code}`, the same way and after the same delay whether or not the email is known and whether or not a rate limit was reached; `source` (optional, at most 64 printable ASCII bytes) is the end user's address as the application sees it, e.g. an IP or its /64, used only for the per-source limit |
 | `GET /v1/signins/{id}` | `{signin_id, status, connection_id?, key_changed?}`; `status` is `pending`, `approved`, `denied` or `expired`; `connection_id` and `key_changed` come with `approved` |
 | `POST /v1/signins/unsigned` | For testing only: `403 {error: test_only}` and nothing sent unless `SV_TEST_SIGNINS=true`. Otherwise `200 {signins: [{connection_id, signin_id?, match_code?, skipped?}], more, stopped?}`: one sign-in challenge to each eligible connection (active, vault advertises the vote feature) that has no pinned credential key, i.e. whose member has never signed in on it, so that its vault does not refuse their vote with `not_signed_in` (VAULT-MESSAGING §10.19.5). A call goes through the connections in id order until it has sent 10 challenges or looked at 100 connections; a skipped connection counts only toward the 100, so connections skipped for long do not keep the call from the ones after them. `more` is the number not yet looked at (call again). Within the member vault's limits (§10.4.1): never a second challenge to a connection with a sign-in pending, none within an hour of a decline, at most 10 in 24 h (a challenge that expires unanswered counts; they live 5 minutes); a connection left out says `skipped`: `pending`, `declined`, `daily_limit`, `not_sent`, or `not_recorded` (sent, with its `match_code`, but no `signin_id` to read). An error or the call's 8-second deadline ends it early with `stopped` (`error` or `timeout`) and the entries done so far, still status 200; the call goes on server-side if the client gives up. Each `signin_id` is read at `GET /v1/signins/{id}`, and its outcome is a `signin.*` webhook: the application did not start these sign-ins, so it will see webhooks for ids it does not know. A member's app tells them to approve a sign-in only if they are signing in right now, and one they did not start teaches the opposite, so a real service must not use this: its members sign in themselves. For test connections (`svctl signin -unsigned`) |
-| `POST /v1/approvals` `{action, summary, payload}` | `201 {approval_id, action_hash, status: "pending", expires_at, ask_budget?}`, where `ask_budget: [{connection_id, next_ask_at}]` (omitted when empty) lists the admins left out because they have 5 approval challenges still counting, `next_ask_at` being when their oldest counting challenge stops counting (its expiry plus 24 hours plus the clock skew); refused with `invalid_action`, `invalid_summary`, `invalid_payload` (400), `invalid_connection`, `unreachable`, `last_admin` (422); refused with `ask_budget` (409: fewer admins than the threshold can be asked, because the others have 5 approval challenges still counting; nothing is sent or stored) |
-| `GET /v1/approvals/{id}` | `{approval_id, action, summary, action_hash, status, reason?, threshold, admins, approvals: [{connection_id, at, key_changed}], denials: [{connection_id, at}], created_at, expires_at, remind_needed: [connection_id], remind_after?, applied?}`; `status` is `pending`, `approved`, `denied` or `expired`; `remind_needed`, while pending, lists the admins who have not answered and hold no live challenge (it ran out, or could not be sent); `remind_after` comes with it: the earliest a reminder is accepted |
+| `POST /v1/approvals` `{action, summary, payload}` | `201 {approval_id, action_hash, status: "pending", expires_at, ask_budget?}`, where `ask_budget: [{connection_id, next_ask_at}]` (omitted when empty) lists the admins left out because they have 5 approval challenges still counting, `next_ask_at` being when their oldest counting challenge stops counting (its expiry plus 24 hours plus the clock skew); refused with `invalid_action`, `invalid_summary`, `invalid_payload` (400), `invalid_connection`, `unreachable`, `last_admin`, `sole_admin` (422); refused with `ask_budget` (409: fewer admins than the threshold can be asked, because the others have 5 approval challenges still counting; nothing is sent or stored) |
+| `GET /v1/approvals/{id}` | `{approval_id, action, summary, action_hash, payload (canonical; admin.repin's carries the new_key the service filled in), status, reason?, threshold, admins, approvals: [{connection_id, at, key_changed, counted}], denials: [{connection_id, at}], created_at, expires_at, remind_needed: [connection_id], remind_after?, applied?}`; `status` is `pending`, `approved`, `denied` or `expired`; `counted` is `false`, with `reason` `key_changed` or `not_repinned` (and `gov_key_changed: true`), for a governance action (`admin_set.add`, `admin_set.remove`, `admin.repin`, `proposal.create`, `vote.extend`, `contract_template.change`) signed with a key other than the admin's governance key (see *Governance key* below): it does not count toward the threshold, never applies an `admin_set.*` or `admin.repin` change and is audited with that reason; the admin stays in `remind_needed`; `assignment.push` counts it as before; `remind_needed`, while pending, lists the admins who have not answered and hold no live challenge (it ran out, or could not be sent); `remind_after` comes with it: the earliest a reminder is accepted |
 | `POST /v1/approvals/{id}/remind` | `{approval_id, reminded: [connection_id]}`: the challenge again to the admins who have not answered and hold no live challenge (the `remind_needed` ones); `too_soon` (429) within 10 minutes of the last, `not_pending` (409) once settled, `nothing_to_remind` (409) when every admin who has not answered still holds a live challenge. An optional body `{"force": [connection_id, ...]}` (chosen; not in the spec) challenges only the named admins again, each even with a live challenge (the old one is withdrawn first): `not_admin` (422) for one outside the approval's admins or the current set, `answered` (409) for one who has answered, `ask_budget` (409) for one the service has sent 5 approval challenges, from any approval, that still count (each until its expiry plus 24 hours, since the member's vault may receive it as late as its expiry; a sixth would come back as a delayed denial); still `too_soon` within 10 minutes of the last. The answer carries the same `ask_budget` list (omitted when empty), and so does `GET /v1/approvals/{id}` for the `remind_needed` admins at the budget. Without a body, an admin at that budget is left out (and stays in `remind_needed`), and `ask_budget` (409) answers when that leaves nobody to challenge (an admin whose ask log cannot be read counts as at the budget), checked before `too_soon` and before anything is withdrawn. Each forced re-send spends one of that admin's 5 approval asks per 24 h (§10.4.1): use it only when the admin reports not seeing the request |
 | `GET /v1/admins` | `{admins: [connection_id], threshold}` |
 | `GET /v1/audit?since=&limit=` | `{entries: [...], next?}`: the audit log after entry `since`, oldest first, `limit` 1–100 (default 100); pass `next` as `since` for the next page |
@@ -667,6 +667,91 @@ admin's connection.
   the second is not applied. A member can always remove their connection,
   though: that takes them out of the set, even the last admin, and is
   recovered only by `service-vault admin bootstrap` or by lowering m.
+- *Governance key.* Besides the credential key pinned at the last
+  sign-in, which moves with every signed sign-in, the service pins a
+  governance key per admin: the credential key the connection has when it
+  becomes an admin (`admin_set.add` applied, or the bootstrap; for an admin
+  from before this existed, at start). A rotation chain that starts at it
+  moves it on (continuity), and nothing else does but `admin.repin`. A
+  governance approval (`admin_set.add`, `admin_set.remove`, `admin.repin`,
+  `proposal.create`, `vote.extend`, `contract_template.change`) counts only
+  if it is signed with the governance key; otherwise it is recorded with
+  `counted: false` and `reason` `key_changed` (a key the service had not
+  seen) or `not_repinned` (a key it has seen sign in since), audited so,
+  and the admin can be asked again. `Consume` and the threshold count only
+  approvals that count, and `admin_set.*` and `admin.repin` are never
+  applied on one that doesn't. `assignment.push` is not governance and
+  counts as before. An ordinary sign-in (and a vote) works with the new
+  key; only governance waits for the re-pin.
+- *Re-pinning.* `admin.repin`, payload `{"connection_id": "…", "new_key":
+  "<base64 of the 32-byte credential key>"}` (`new_key` may be left out:
+  the service fills in the connection's credential key now), makes the
+  connection's current credential key its governance key. It is approved by
+  m admins other than the one re-pinned, or all the other admins if
+  there are fewer than m (owner decision of 2026-11-02: with 2 admins at
+  m = 2 the other one re-pins after asking out of band; never fewer than
+  one, counted among the admins in the set when it settles and is
+  applied, so removing admins to lower it takes `admin_set.remove`
+  approvals at the full m, or an admin leaving on their own); they alone are asked and their own approval
+  never counts for their own re-pin; the approvals count as above, and is applied (`admin.repinned` audited) only if `new_key` is
+  still the connection's credential key. The application gives no
+  `summary`; the service writes `name given "<name>", new key <16 hex
+  digits in 4 groups>, key changed <YYYY-MM-DD HH:MM> UTC, connection
+  <id>`: the fingerprint is `SHA-256("vettid/vms/2/ck-fp" || key)` (the
+  first 16 hex digits) and the time that of the first sign-in with the new
+  key. **Before approving, the other admins ask the admin out of band, by
+  phone or in person, "did you recover or replace your vault's keys at
+  <that time>?", and approve only on a clear yes**; the admin cannot
+  compare the fingerprint yet. A summary that says "key changed time not
+  recorded" means the key changed before this release recorded it: the
+  admins then need a stronger out-of-band check (in person, or by a
+  channel they already trust) before approving. A member's app will show its own
+  credential-key fingerprint in a later release, and the
+  `vettid/vms/2/ck-fp` label will then be specified in VAULT-MESSAGING.
+  Know that a stolen copy of the vault, still holding the old key, can
+  rotate the governance key away from the real admin's and lock the real
+  admin out; they then need a re-pin too. With one admin a re-pin is
+  refused (`sole_admin`): a sole admin whose key changed has no one to
+  confirm it: the connection is removed (which empties the set) and the
+  operator arms `service-vault admin bootstrap` for a new one
+  (`ArmBootstrap` is refused while the set is not empty).
+  `svctl approve -action admin.repin -payload '{"connection_id":"…"}'`
+  runs it; `svctl approval` shows an approval that did not count as
+  `not_counted: <connection> reason=…`. `approvals[]` of the status answer
+  lists every admin's answer, including approvals that do not count
+  (`counted: false`); only `counted: true` ones count toward the threshold.
+- *Pinning at the start.* The governance key of an admin that has none (one
+  from before it existed) is pinned at a tick after the peer has loaded its
+  connections, from the audit log: the credential key of the admin's
+  earliest signed approval since they became an admin (`gov_key.migrated`,
+  reason `evidence`, with the key's fingerprint and `key_changes_seen`
+  when a later approval was signed with another key; if the connection holds
+  another key now, it needs a re-pin), or with no signed approval at all
+  the connection's current credential key (reason `no_evidence`). Open
+  governance approvals holding approvals are ended (`expired`, reason
+  `gov_key_migrated`) so the admins approve again. `admin_set.add` pins the
+  credential key whose fingerprint its summary shows (`cred key <16 hex
+  digits>`), and only if it is still the connection's credential key when
+  applied; otherwise nothing is applied and `gov_key.refused` is audited.
+  The migration ends once (a stored marker `gov_migrated`, written after
+  the expiry, so a failure in between retries it); until then and always, a
+  governance approval stored without a `counted` field never stands
+  (`reason: legacy_unpinned`), and pending ones, and approved
+  `proposal.create` and `vote.extend` not yet used, are expired. Known
+  limits: the evidence is only what the audit log holds, and the
+  fingerprints the admins compare are 64 bits of a SHA-256.
+  An approval's threshold is the higher of the one it was created with and
+  the current m when it settles and when it is applied.
+- *Bootstrap confirmation.* The connection bound to the bootstrap email
+  does not become the first admin by itself: the service records it with
+  the fingerprint of its identity key (logged, and shown by
+  `service-vault admin bootstrap -connection ID`, with the time the
+  connection was made and the invitation it came through, so the operator
+  can ask the member out of band "did you connect at <time> from the
+  invitation we sent?"), and the operator
+  confirms with `service-vault admin bootstrap -connection ID -fingerprint
+  16HEX` after checking the fingerprint with the member out of band. Its
+  governance key is the credential key of its first sign-in.
 - *Threshold.* m = `SV_ADMIN_THRESHOLD` (default 1, 1-of-n); each
   approval keeps the m it was created with, so m changes by configuration
   only. m distinct admins (connections) among those asked must approve,
@@ -678,7 +763,7 @@ admin's connection.
   admins is refused at creation (`unreachable`).
 - *The request.* `action` is one of `proposal.create`, `vote.extend`,
   `contract_template.change`, `admin_set.add`, `admin_set.remove`,
-  `assignment.push`; `summary` is plain text, 1–120
+  `admin.repin`, `assignment.push`; `summary` is plain text, 1–120
   bytes, without control characters, line separators or bidirectional
   controls; `payload` is a JSON object of at most 16 KiB in canonical
   form. Every admin gets a challenge whose context is
@@ -686,11 +771,11 @@ admin's connection.
   (at most 256 bytes; a long summary is cut and ends in `…`). The label is
   the service's, by action: `New vote:` (`proposal.create`), `Extend vote:`
   (`vote.extend`), `Add admin:` (`admin_set.add`), `Remove admin:`
-  (`admin_set.remove`), `Contract template:` (`contract_template.change`),
+  (`admin_set.remove`), `Re-pin admin:` (`admin.repin`), `Contract template:` (`contract_template.change`),
   `Push assignment:` (`assignment.push`). For `admin_set.add` and
   `admin_set.remove` the application gives no `summary` (`invalid_summary`):
   the service writes `name given "<name>", connected <date>, key <16 hex
-  digits in 4 groups>, connection <id>` for the connection. The name is the one the
+  digits in 4 groups>, cred key <16 hex digits in 4 groups>, connection <id>` for the connection (the credential key is the one pinned as its governance key). The name is the one the
   member's vault sent when it connected, so the wording says it is
   self-declared; it is shown whole, at most 32 characters of printable
   ASCII and Latin-1 letters, or the approval is refused (`field_not_shown`).

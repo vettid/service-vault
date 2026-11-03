@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -21,11 +22,15 @@ type approvalPeer struct {
 	mu   sync.Mutex
 	n    int
 	last map[string]string // connection -> its last request id
+	gov  map[string][]byte // connection -> its governance key
 }
 
 func (p *approvalPeer) Connection(id string) (peer.ConnectionInfo, bool) {
-	return peer.ConnectionInfo{ID: id, State: peer.StateActive, Name: "Member " + id, IK: make([]byte, 32),
-		AuthKey: make([]byte, 32), Activated: time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)}, id == "c1" || id == "c2" || id == "c3"
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return peer.ConnectionInfo{ID: id, State: peer.StateActive, Name: "Member " + id, IK: bytes.Repeat([]byte{1}, 32),
+		AuthKey: bytes.Repeat([]byte{7}, 32), GovKey: p.gov[id], InviteID: "inv-" + id,
+		Activated: time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)}, id == "c1" || id == "c2" || id == "c3"
 }
 
 func (p *approvalPeer) Authenticate(_ context.Context, conn, _, _ string, _ time.Duration) (string, error) {
@@ -40,6 +45,69 @@ func (p *approvalPeer) Authenticate(_ context.Context, conn, _, _ string, _ time
 }
 
 func (p *approvalPeer) CancelChallenge(context.Context, string) (bool, error) { return true, nil }
+
+func (p *approvalPeer) PinGov(_ context.Context, id string, key []byte, onlyIfEmpty bool) (bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.gov[id]) > 0 && onlyIfEmpty {
+		return false, nil
+	}
+	if len(key) == 0 {
+		key = bytes.Repeat([]byte{7}, 32)
+	}
+	if p.gov == nil {
+		p.gov = map[string][]byte{}
+	}
+	p.gov[id] = key
+	return true, nil
+}
+
+func (p *approvalPeer) RepinGov(_ context.Context, id string, key []byte) (bool, error) {
+	if !bytes.Equal(key, bytes.Repeat([]byte{7}, 32)) {
+		return false, nil
+	}
+	return p.PinGov(context.Background(), id, key, false)
+}
+
+// confirmBootstrap does what the operator does with `service-vault admin
+// bootstrap -connection ID -fingerprint HEX`: from a process of its own,
+// with the store only, it reads the connection waiting and its
+// fingerprint, and confirms them (approval.Manager.ConfirmBootstrap, which
+// that command calls).
+func confirmBootstrap(t *testing.T, ctx context.Context, st peer.Store, conn string) {
+	t.Helper()
+	op := &approval.Manager{Store: st}
+	w, err := op.BootstrapWaiting(ctx)
+	if err != nil || w == nil || w.ConnectionID != conn {
+		t.Fatalf("waiting for the operator: %+v %v", w, err)
+	}
+	if err := op.ConfirmBootstrap(ctx, w.ConnectionID, w.Fingerprint); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// bootstrapAdmin makes conn the first admin as production does: the tick
+// finds it bound and active and waits for the operator, who confirms; the
+// next tick makes it the admin, with its governance key pinned.
+func bootstrapAdmin(t *testing.T, ctx context.Context, m *approval.Manager, st peer.Store, p *approvalPeer, conn string) {
+	t.Helper()
+	if err := m.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := m.Admins(ctx); len(a.Admins) != 0 {
+		t.Fatalf("admin before the operator confirmed: %v", a.Admins)
+	}
+	confirmBootstrap(t, ctx, st, conn)
+	if err := m.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := m.Admins(ctx); len(a.Admins) != 1 || a.Admins[0] != conn {
+		t.Fatalf("admins after the confirmation: %v", a.Admins)
+	}
+	if ci, _ := p.Connection(conn); len(ci.GovKey) != 32 {
+		t.Fatalf("no governance key for the first admin: %x", ci.GovKey)
+	}
+}
 
 // Approvals on DynamoDB: the admin set, approvals and the webhook outbox
 // survive a restart (a new Manager on the same table); answers are
@@ -61,9 +129,7 @@ func TestApprovalsOnDynamoDB(t *testing.T) {
 			}}
 	}
 	m := newManager()
-	if err := m.Tick(ctx); err != nil { // c1 is bound and active: the first admin
-		t.Fatal(err)
-	}
+	bootstrapAdmin(t, ctx, m, tbl.Peer(), p, "c1") // c1 is bound and active: the first admin, once the operator confirms
 	answer := func(m *approval.Manager, id, conn string) {
 		t.Helper()
 		e := &peer.Event{ID: id, Type: peer.EventSignInApproved, ConnectionID: conn, RequestID: p.last[conn],
@@ -149,8 +215,9 @@ func TestApprovalsOnDynamoDB(t *testing.T) {
 			}
 		}
 	}
-	// bootstrap; 2 × (requested, response, admin_set.changed, approved); requested, 2 responses, approved
-	if len(all) != 1+8+4 || responses != 4 {
+	// bootstrap confirmed and the bootstrap; 2 × (requested, response,
+	// admin_set.changed, approved); requested, 2 responses, approved
+	if len(all) != 2+8+4 || responses != 4 {
 		t.Fatalf("%d entries, %d responses", len(all), responses)
 	}
 	// Append-only: an entry cannot be written again.
@@ -193,9 +260,7 @@ func TestBootstrapOneShotOnDynamoDB(t *testing.T) {
 	if err := m.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.Tick(ctx); err != nil || len(admins(m)) != 1 {
-		t.Fatalf("bootstrap: %v %v", err, admins(m))
-	}
+	bootstrapAdmin(t, ctx, m, tbl.Peer(), p, "c1")
 	if err := m.ConnectionRemoved(ctx, "c1"); err != nil || len(admins(m)) != 0 {
 		t.Fatalf("remove: %v", err)
 	}
@@ -213,9 +278,7 @@ func TestBootstrapOneShotOnDynamoDB(t *testing.T) {
 		t.Fatal(err)
 	}
 	bound["new-key"] = "c3"
-	if err := m.Tick(ctx); err != nil || len(admins(m)) != 1 || admins(m)[0] != "c3" {
-		t.Fatalf("armed bootstrap: %v %v", err, admins(m))
-	}
+	bootstrapAdmin(t, ctx, m, tbl.Peer(), p, "c3")
 	if err := newManager().ArmBootstrap(ctx, "new-key"); !errors.Is(err, approval.ErrAdminsExist) {
 		t.Fatalf("armed with admins: %v", err)
 	}
