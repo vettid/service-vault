@@ -39,7 +39,7 @@ type vectors struct {
 		CastMsg string `json:"cast_msg"`
 		CastSig string `json:"cast_sig"`
 		// CastBody is the vault's vote.cast body for this ballot, with
-		// the pad of VAULT-MESSAGING 0.83.4 §10.19.5: always 418 bytes.
+		// the pad of VAULT-MESSAGING 0.83.6 §10.19.5: always 418 bytes.
 		CastBody       string `json:"cast_body"`
 		CastBodySHA256 string `json:"cast_body_sha256"`
 	} `json:"credential"`

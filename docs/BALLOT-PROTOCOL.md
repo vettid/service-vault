@@ -353,7 +353,7 @@ not require it, so a sender without it still works. The service keeps
 nothing of it. The vault's `vote.evidence` export (VAULT-MESSAGING)
 holds the service's answers as the service sent them, byte for byte, so
 the service's padding is what keeps those exports one size for every
-choice. See VAULT-MESSAGING 0.83.4 §10.19.5.
+choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
 
 - **`vote.status`** gives a vault what the service holds for its
   connection: the proposal with its signature and anchor bundle, and its
@@ -801,7 +801,7 @@ item.
   member's `choice_id` also carries `pad` (the `vote.cast` body, and the
   `ballot` of the `vote.status` answer and of the `already_voted`
   refusal), so the relay sees one message size for every choice id
-  (VAULT-MESSAGING 0.83.4 §10.19.5). `pad` is outside every signature,
+  (VAULT-MESSAGING 0.83.6 §10.19.5). `pad` is outside every signature,
   receivers ignore it and do not require it. No change to the
   signatures or the documents; the vectors gain `credential.cast_body`
   (the padded `vote.cast` body, 418 bytes) and its SHA-256.
