@@ -337,19 +337,22 @@ listed anchor key. A second, different proposal under the same
 
 | Type | Body | Answer |
 |---|---|---|
-| `vote.cast` | `{proposal_id, record_tag, vk, choice_id, ballot_sig, cast_sig}` (§5) | `{proposal_id, msg_ms, receipt_sig}`, or a refusal |
+| `vote.cast` | `{proposal_id, record_tag, vk, choice_id, ballot_sig, cast_sig, pad?}` (§5) | `{proposal_id, msg_ms, receipt_sig}`, or a refusal |
 | `vote.status` | `{proposal_id}` | `{proposal_id, proposal, proposal_sig, bundle, record_secret, record_proof, ballot?, msg_ms?, receipt_sig?, status_sig}`, or a refusal |
 
 Every JSON object above that carries a member's `choice_id` (the
 `vote.cast` body, the `ballot` of the `vote.status` answer and the
 `ballot` of the `already_voted` refusal) also carries `pad`: a string of
-ASCII `0` characters of length `max(0, 32 - len(choice_id))` (a choice
-id is 1 to 32 bytes, so `pad` is empty for a longer one). The relay sees
-the padded size of every message, and `pad` keeps it the same for every
-choice. `pad` is outside every signature (they cover binary messages,
-not the JSON) and outside every hash and every published document. A
-receiver ignores it, checks neither its value nor its length, and does
-not require it, so a sender without it still works. The service keeps
+ASCII `0` characters whose length is 32 minus the byte length of
+`choice_id` (empty for a foreign `choice_id` longer than 32 bytes). The
+relay sees the padded size of every message, and `pad` keeps it the same
+for every choice. No signature's message covers `pad` (they cover binary
+messages, not the JSON), with one exception: a refusal to a body too
+malformed to form them signs `H(the request body)`, pad included. `pad`
+is in no published document. A receiver checks neither its value nor
+its length, and does not require it, so a sender without it still
+works; VAULT-MESSAGING §5.3's strict-JSON rules (no duplicate names,
+depth, UTF-8) still apply to it. The service keeps
 nothing of it. The vault's `vote.evidence` export (VAULT-MESSAGING)
 holds the service's answers as the service sent them, byte for byte, so
 the service's padding is what keeps those exports one size for every
@@ -358,7 +361,7 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
 - **`vote.status`** gives a vault what the service holds for its
   connection: the proposal with its signature and anchor bundle, and its
   tag (as in `vote.proposal`), and the ballot with its receipt if one is
-  recorded. `ballot` is `{vk, choice_id, ballot_sig}`; `ballot`,
+  recorded. `ballot` is `{vk, choice_id, ballot_sig, pad}`; `ballot`,
   `msg_ms` and `receipt_sig` come together or not at all, and every
   other member is always present. A proposal not yet published (with no
   bundle) is `unknown_proposal`, so a vault can check one learned this
@@ -386,7 +389,7 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
 | `not_open`, `closed` | `vote.cast` | The relay's time is outside the window. |
 | `not_active` | `vote.cast` | Removed or suspended, and `removed_may_vote` is false. |
 | `not_signed_in` | `vote.cast` | The member has never signed in, so no credential key is pinned (§5). |
-| `already_voted` | `vote.cast` | A different ballot is already recorded for this tag; the body also carries that ballot as `ballot` `{vk, choice_id, ballot_sig}`, with its `ballot_msg_ms` and `receipt_sig`. |
+| `already_voted` | `vote.cast` | A different ballot is already recorded for this tag; the body also carries that ballot as `ballot` `{vk, choice_id, ballot_sig, pad}`, with its `ballot_msg_ms` and `receipt_sig`. |
 | `bad_ballot` | `vote.cast` | The tag isn't the connection's, the choice isn't the proposal's, or a signature fails. After a credential-key rotation (`connection.authenticate.rotated`, VAULT-MESSAGING §10.4) the vault may sign `cast_sig` again under its current key and send the same ballot once more; the service checks `cast_sig` under the key pinned when the cast arrives. |
 | `late` | `vote.cast` | The window was open, but the results were already published (§7). |
 | `unknown_proposal` | `vote.status` | No such proposal. |

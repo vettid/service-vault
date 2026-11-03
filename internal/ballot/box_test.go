@@ -378,16 +378,6 @@ func TestCastPadIgnored(t *testing.T) {
 			t.Errorf("%s: receipt", name)
 		}
 	}
-	// A duplicate "pad" key is read like any other duplicate: last wins.
-	f := newBoxFixture(t)
-	body, _ := f.castBody("c0", "yes")
-	j, _ := json.Marshal(body)
-	j = append(j[:len(j)-1], []byte(`,"pad":"0","pad":"00"}`)...)
-	a, err := f.box.Vote(context.Background(), &peer.VoteRequest{ConnectionID: "c0",
-		CredentialKey: f.creds["c0"].Public().(ed25519.PublicKey), Active: true, Type: TypeCast, Body: j, MsgMS: f.during()})
-	if err != nil || a.Code != "" {
-		t.Fatalf("duplicate pad: %v %q", err, a.Code)
-	}
 }
 
 // The answers that carry a ballot have one encoded length for every
