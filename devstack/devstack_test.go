@@ -368,10 +368,41 @@ func TestConnectAndSignInAgainstDevStack(t *testing.T) {
 	}
 	t.Log("sign-in approved and verified")
 
-	// 5. The member is the bootstrap admin; a governance action reaches
-	// their phone with its hash, and their approval approves it.
-	if ad := call(t, srv, "GET", "/v1/admins", ""); fmt.Sprint(ad["admins"]) != "["+svcConn+"]" {
-		t.Fatalf("admins %v", ad)
+	// 5. The bound connection waits for the operator's confirmation
+	// (`service-vault admin bootstrap -connection -fingerprint`, which calls
+	// ConfirmBootstrap); once confirmed, a later tick makes the member the
+	// first admin. A governance action then reaches their phone with its
+	// hash, and their approval approves it.
+	var waiting *approval.BootstrapWaiting
+	for deadline := time.Now().Add(time.Minute); ; {
+		w, err := approvals.BootstrapWaiting(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if w != nil {
+			waiting = w
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the bootstrap never waited for the operator")
+		}
+		time.Sleep(time.Second)
+	}
+	if waiting.ConnectionID != svcConn {
+		t.Fatalf("bootstrap waiting for %q, want %q", waiting.ConnectionID, svcConn)
+	}
+	if err := approvals.ConfirmBootstrap(ctx, waiting.ConnectionID, waiting.Fingerprint); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(time.Minute); ; {
+		ad := call(t, srv, "GET", "/v1/admins", "")
+		if fmt.Sprint(ad["admins"]) == "["+svcConn+"]" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("admins %v", ad)
+		}
+		time.Sleep(time.Second)
 	}
 	ap := call(t, srv, "POST", "/v1/approvals", `{"action":"contract_template.change","summary":"Open the vote on proposal 7","payload":{"proposal":7}}`)
 	apID, _ := ap["approval_id"].(string)
