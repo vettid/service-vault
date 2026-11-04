@@ -339,7 +339,7 @@ func TestUnpublishedProposal(t *testing.T) {
 	f.box.Log = slog.New(slog.NewJSONHandler(&logs, nil))
 	body, _ := f.castBody("c0", "yes")
 	q := map[string]string{"proposal_id": f.p.ProposalID}
-	// Held but not published: no answer (the relay delivers it again),
+	// Held but not published: no answer (acknowledged; the vault sends again),
 	// never a final refusal, and an alarm for the operator.
 	for typ, b := range map[string]any{TypeCast: body, TypeStatus: q} {
 		j, _ := json.Marshal(b)

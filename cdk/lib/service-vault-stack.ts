@@ -102,7 +102,7 @@ export const ALARMS = {
   /** The ballot copy's key is missing or not the copy's (cmd/service-vault ballotCopySeal): votes are off, the rest runs. */
   ballots_off: 'Ballots are off: the ballot copy\'s key is missing or not the one its ballots are under; restore the keystore item ballot-copy-key from a backup of the table (README "Rotating the record key")',
   /** A vote request or a close for a proposal held but not published (internal/ballot/box.go, close.go): members get no answer and it can't close until it is published. */
-  vote_unpublished: 'Members sent vote requests for a proposal the service holds but has not published (after a restore or a lost publication), or its close was refused: they get no answer until it is published (POST /v1/proposals/{id}/publish)',
+  vote_unpublished: 'Members sent vote requests for a proposal the service holds but has not published (after a restore or a lost publication), or its close was refused: they get no answer until it is published (POST /v1/proposals/{id}/publish): publish before its close, extending it first if the close is near',
   /** A stored ballot failed the count's re-check and was left out (internal/ballot/close.go): the results may differ from what members were told. */
   ballot_not_counted: 'A stored ballot was not counted: it failed the count\'s re-check (tag, credential signature or time); look at the ERROR line for the proposal and tag',
   /** A removed connection left fewer admins than the threshold (internal/approval/approval.go): no approval can pass. */
