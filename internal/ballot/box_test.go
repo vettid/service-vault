@@ -35,7 +35,7 @@ func (s *memStore) Ballot(_ context.Context, id string, tag []byte) (*BallotReco
 	return s.ballots[id+"|"+string(tag)], nil
 }
 
-func (s *memStore) PutBallot(_ context.Context, id string, rec *BallotRecord) (*BallotRecord, error) {
+func (s *memStore) PutBallot(_ context.Context, id string, rec *BallotRecord, _ *Guard) (*BallotRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	k := id + "|" + string(rec.Ballot.RecordTag)

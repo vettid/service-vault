@@ -76,6 +76,11 @@ type OpenProposal struct {
 	// Published is set once collection ended and the results are being
 	// published (§7): a cast handled after it is late.
 	Published bool `json:"published"`
+	// Unhandled and Removed are counts.unhandled and counts.removed as
+	// they were when Published was set (§7); the count uses these, so
+	// that a retry doesn't change them. Nil until then.
+	Unhandled *int64 `json:"unhandled,omitempty"`
+	Removed   *int64 `json:"removed,omitempty"`
 
 	p       *vote.Proposal
 	version uint64 // as read from the record store (SaveProposal)
@@ -130,12 +135,15 @@ type BallotRecord struct {
 type BoxStore interface {
 	// OpenProposal returns a proposal by id, or nil if there is none.
 	OpenProposal(ctx context.Context, id string) (*OpenProposal, error)
-	// Ballot returns the ballot recorded for a tag, or nil.
+	// Ballot returns the ballot recorded for a tag, or nil. It reads the
+	// write-once copy, the one source of what was accepted.
 	Ballot(ctx context.Context, proposalID string, tag []byte) (*BallotRecord, error)
 	// PutBallot records rec only if its tag has no ballot yet (a
 	// conditional write, also kept write-once outside the table, §6). It
 	// returns the ballot recorded for the tag: rec, or the earlier one.
-	PutBallot(ctx context.Context, proposalID string, rec *BallotRecord) (*BallotRecord, error)
+	// With a guard it writes only while the guarded record is unchanged,
+	// and returns ErrGuard otherwise.
+	PutBallot(ctx context.Context, proposalID string, rec *BallotRecord, g *Guard) (*BallotRecord, error)
 }
 
 // Box answers vote.* requests (peer.Votes).
@@ -182,7 +190,20 @@ func decodeB64(s string, n int) ([]byte, bool) {
 	return b, true
 }
 
+// cast answers a vote.cast. The ballot is written only while the proposal
+// is as it was read (Guard), so one can't land after the close's
+// publication has changed it. A change meanwhile, whatever it was, makes
+// the cast start again from a fresh read, once; a second change is an
+// error, and the peer retries the message.
 func (b *Box) cast(ctx context.Context, r *peer.VoteRequest) (peer.VoteAnswer, error) {
+	a, err := b.castOnce(ctx, r)
+	if errors.Is(err, ErrGuard) {
+		a, err = b.castOnce(ctx, r)
+	}
+	return a, err
+}
+
+func (b *Box) castOnce(ctx context.Context, r *peer.VoteRequest) (peer.VoteAnswer, error) {
 	var body castBody
 	reqHash := sum(r.Body) // until the ballot's leaf is known
 	if json.Unmarshal(r.Body, &body) != nil || !vote.ValidProposalID(body.ProposalID) {
@@ -269,7 +290,7 @@ func (b *Box) cast(ctx context.Context, r *peer.VoteRequest) (peer.VoteAnswer, e
 		return peer.VoteAnswer{}, err
 	}
 	rec := &BallotRecord{Ballot: bal, ConnectionID: r.ConnectionID, CredentialKey: cred, CastSig: csig, MsgMS: r.MsgMS, ReceiptSig: rsig}
-	got, err := b.Store.PutBallot(ctx, p.ProposalID, rec)
+	got, err := b.Store.PutBallot(ctx, p.ProposalID, rec, &Guard{Kind: KindProposal, ID: p.ProposalID, Version: o.version})
 	if err != nil {
 		return peer.VoteAnswer{}, err
 	}

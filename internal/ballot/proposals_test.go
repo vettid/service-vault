@@ -635,3 +635,99 @@ func TestCreateCountsUnsigned(t *testing.T) {
 		t.Fatalf("all pinned: %+v, %v", c, err)
 	}
 }
+
+// The count re-checks each stored ballot: one whose tag differs from its
+// item's, whose cast_sig is bad, or whose relay time is outside the window
+// isn't counted; the others are.
+func TestCountSkipsBadStoredBallots(t *testing.T) {
+	cases := map[string]func(it *CopyItem, r *BallotRecord){
+		"tag":      func(it *CopyItem, _ *BallotRecord) { it.Tag = append([]byte{0xff}, it.Tag[1:]...) },
+		"cast_sig": func(_ *CopyItem, r *BallotRecord) { r.CastSig = bytes.Repeat([]byte{1}, vote.SigLen) },
+		"after":    func(_ *CopyItem, r *BallotRecord) { r.MsgMS = uint64(input().ClosesAt) * 1000 },
+		"before":   func(_ *CopyItem, r *BallotRecord) { r.MsgMS = uint64(input().OpensAt)*1000 - 1 },
+		"key":      func(_ *CopyItem, r *BallotRecord) { r.CredentialKey = bytes.Repeat([]byte{2}, 32) },
+	}
+	for name, tamper := range cases {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			m, _, _ := newManager(t)
+			m.Catcher = &fakeCatcher{caught: true}
+			c, err := m.Create(ctx, "apv", input())
+			if err != nil {
+				t.Fatal(err)
+			}
+			during := uint64(input().OpensAt)*1000 + 1
+			for _, conn := range []string{"c0", "c1", "c2"} {
+				if code := castFor(t, m, c.ProposalID, conn, "c1", during); code != "" {
+					t.Fatalf("cast refused: %s", code)
+				}
+			}
+			cp := m.Store.Copy.(*MemCopy)
+			o, _ := m.Store.OpenProposal(ctx, c.ProposalID)
+			k := ballotID(c.ProposalID, o.Members["c1"].Tag)
+			it := cp.items[k]
+			r, _ := decodeBallot(it.Data)
+			tamper(&it, r)
+			it.Data, _ = json.Marshal(r)
+			cp.items[k] = it
+			m.Now = func() time.Time { return time.Unix(input().ClosesAt, 0).Add(2 * CollectMargin) }
+			sum1, err := m.Close(ctx, c.ProposalID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sum1.Counts.Ballots != 2 || sum1.Tally["c1"] != 2 {
+				t.Fatalf("counted %+v", sum1)
+			}
+		})
+	}
+}
+
+// failResults makes the save of the results fail, once switched on.
+type failResults struct {
+	*peer.MemStore
+	fail bool
+}
+
+func (s *failResults) Apply(ctx context.Context, ch []peer.Change) error {
+	for _, c := range ch {
+		if s.fail && c.Kind == KindResults {
+			return errors.New("table unavailable")
+		}
+	}
+	return s.MemStore.Apply(ctx, ch)
+}
+
+// The counts fixed when the vote closed survive a first attempt that fails
+// before the results are saved, and a roster change and another relay
+// answer after it.
+func TestCloseFreezesCounts(t *testing.T) {
+	ctx := context.Background()
+	m, _, _ := newManager(t)
+	fr := &failResults{MemStore: peer.NewMemStore()}
+	m.Store = &RecordStore{Records: fr, Copy: &MemCopy{}}
+	ct := &fakeCatcher{caught: true, unhandled: 2}
+	m.Catcher = ct
+	c, err := m.Create(ctx, "apv", input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	during := uint64(input().OpensAt)*1000 + 1
+	if castFor(t, m, c.ProposalID, "c0", "c1", during) != "" {
+		t.Fatal("cast refused")
+	}
+	m.Now = func() time.Time { return time.Unix(input().ClosesAt, 0).Add(2 * CollectMargin) }
+	fr.fail = true
+	if _, err := m.Close(ctx, c.ProposalID); err == nil {
+		t.Fatal("closed while the results can't be saved")
+	}
+	fr.fail = false
+	m.Roster = fakeRoster{"c0"}
+	ct.unhandled = 7
+	res, err := m.Close(ctx, c.ProposalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Counts.Unhandled != 2 || res.Counts.Removed != 0 {
+		t.Fatalf("counts changed between attempts: %+v", res.Counts)
+	}
+}

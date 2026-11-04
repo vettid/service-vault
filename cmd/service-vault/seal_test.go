@@ -383,7 +383,7 @@ func TestBallotCopyKeyCheckOverOlderCopy(t *testing.T) {
 	}
 	older := func() *ballot.MemCopy {
 		cp := &ballot.MemCopy{}
-		if _, err := cp.PutOnce(ctx, "p", tag, sealed); err != nil {
+		if _, err := cp.PutOnce(ctx, "p", tag, sealed, nil); err != nil {
 			t.Fatal(err)
 		}
 		return cp

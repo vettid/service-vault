@@ -417,7 +417,7 @@ func serve(args []string) error {
 	var ballots *ballot.RecordStore
 	signIK := func(label string, msg []byte) ([]byte, error) { return suite.Sign(keys.IK, label, msg) }
 	if cfg.BallotsTable != "" {
-		raw := &store.Ballots{Client: ac.ddb, Name: cfg.BallotsTable}
+		raw := &store.Ballots{Client: ac.ddb, Name: cfg.BallotsTable, Main: tbl}
 		cs, err := ballotCopySeal(ctx, &keystore.AWSKMS{Client: ac.kms}, cfg.KMSKeyID, tbl.Blobs(), records, raw)
 		var ck *errCopyKey
 		switch {
@@ -956,7 +956,7 @@ func ballotCopySeal(ctx context.Context, kc keystore.KMS, keyID string, blobs ke
 			}
 		}
 	}
-	stored, err := cp.PutOnce(ctx, copyKeyCheckID, []byte{0}, check)
+	stored, err := cp.PutOnce(ctx, copyKeyCheckID, []byte{0}, check, nil)
 	if err != nil {
 		return nil, fmt.Errorf("ballot copy key check: %w", err)
 	}

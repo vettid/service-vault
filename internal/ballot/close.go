@@ -1,7 +1,9 @@
 package ballot
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -107,23 +109,26 @@ func (m *Manager) Close(ctx context.Context, id string) (*ResultsSummary, error)
 		if err != nil {
 			return nil, err
 		}
-		// unhandled counts the window's messages: one in the last minute
-		// would be a late cast.
-		caught, unhandled, err := m.Catcher.Caught(ctx, end, time.Unix(p.OpensAt, 0), time.Unix(o.ClosesAt, 0))
-		if err != nil {
-			return nil, err
-		}
-		if !caught {
-			return nil, ErrNotCaught
-		}
-		// From here a cast is late (§4.2).
-		if !o.Published {
-			o.Published = true
+		// From here a cast is late (§4.2), and the counts that depend on
+		// the moment are fixed: a retry after a failed count or publication
+		// uses them, not the roster or the relay as they are then.
+		if !o.Published || o.Unhandled == nil || o.Removed == nil {
+			// unhandled counts the window's messages: one in the last
+			// minute would be a late cast.
+			caught, unhandled, err := m.Catcher.Caught(ctx, end, time.Unix(p.OpensAt, 0), time.Unix(o.ClosesAt, 0))
+			if err != nil {
+				return nil, err
+			}
+			if !caught {
+				return nil, ErrNotCaught
+			}
+			removed := m.removed(o)
+			o.Published, o.Unhandled, o.Removed = true, &unhandled, &removed
 			if err := m.Store.SaveProposal(ctx, o, false); err != nil {
 				return nil, err
 			}
 		}
-		if pr, err = m.count(ctx, o, unhandled); err != nil {
+		if pr, err = m.count(ctx, o); err != nil {
 			return nil, err
 		}
 	}
@@ -157,25 +162,8 @@ func (m *Manager) Close(ctx context.Context, id string) (*ResultsSummary, error)
 	return &ResultsSummary{ProposalID: id, ResultsHash: sum(pr.Results), Tally: res.Tally, Counts: res.Counts}, nil
 }
 
-// count builds and signs the results from the copy's ballots, checks them
-// as an observer would, and stores them.
-func (m *Manager) count(ctx context.Context, o *OpenProposal, unhandled int64) (*PublishedResults, error) {
-	p, err := o.Parsed()
-	if err != nil {
-		return nil, err
-	}
-	items, err := m.Store.Copy.List(ctx, p.ProposalID)
-	if err != nil {
-		return nil, err
-	}
-	ballots := map[string]vote.Ballot{}
-	for _, it := range items {
-		r, err := decodeBallot(it.Data)
-		if err != nil {
-			return nil, err
-		}
-		ballots[string(r.Ballot.RecordTag)] = r.Ballot
-	}
+// removed counts the proposal's members no longer on the roster.
+func (m *Manager) removed(o *OpenProposal) int64 {
 	active := map[string]bool{}
 	for _, c := range m.Roster.Active() {
 		active[c] = true
@@ -186,8 +174,41 @@ func (m *Manager) count(ctx context.Context, o *OpenProposal, unhandled int64) (
 			removed++
 		}
 	}
-	c := &vote.Count{Proposal: vote.Signed{Doc: o.Doc, Sig: o.Sig}, Extensions: o.Extensions, Tags: o.Tags(), Ballots: ballots, Removed: removed,
-		Unhandled: unhandled}
+	return removed
+}
+
+// count builds and signs the results from the copy's ballots, checks them
+// as an observer would, and stores them. The copy is listed once: Close
+// saved o as Published before this, and a cast is written only while the
+// proposal is as that cast read it, so none can be written after the
+// list. Each ballot is checked again, and one that fails isn't counted.
+func (m *Manager) count(ctx context.Context, o *OpenProposal) (*PublishedResults, error) {
+	p, err := o.Parsed()
+	if err != nil {
+		return nil, err
+	}
+	if o.Unhandled == nil || o.Removed == nil {
+		return nil, errors.New("ballot: counting a proposal whose counts weren't fixed")
+	}
+	items, err := m.Store.Copy.List(ctx, p.ProposalID)
+	if err != nil {
+		return nil, err
+	}
+	ph := sum(o.Doc)
+	ballots := map[string]vote.Ballot{}
+	for _, it := range items {
+		r, err := decodeBallot(it.Data)
+		if err != nil {
+			return nil, err
+		}
+		if why := checkStored(p, o.ClosesAt, ph, it.Tag, r); why != "" {
+			m.log().Error("ballot not counted", "proposal_id", p.ProposalID, "tag", hex.EncodeToString(it.Tag), "connection_id", r.ConnectionID, "why", why)
+			continue
+		}
+		ballots[string(r.Ballot.RecordTag)] = r.Ballot
+	}
+	c := &vote.Count{Proposal: vote.Signed{Doc: o.Doc, Sig: o.Sig}, Extensions: o.Extensions, Tags: o.Tags(), Ballots: ballots, Removed: *o.Removed,
+		Unhandled: *o.Unhandled}
 	rows, results, err := c.Build()
 	if err != nil {
 		return nil, err
@@ -206,6 +227,28 @@ func (m *Manager) count(ctx context.Context, o *OpenProposal, unhandled int64) (
 	}
 	m.log().Info("vote counted", "proposal_id", p.ProposalID, "eligible", p.Eligible, "ballots", len(ballots))
 	return pr, nil
+}
+
+// checkStored re-checks a stored ballot as cast checked it: it is under
+// its own tag, the credential signature verifies under the key stored
+// with it, and the relay's time was inside the window. It returns why not,
+// or "".
+func checkStored(p *vote.Proposal, closesAt int64, ph, tag []byte, r *BallotRecord) string {
+	if !bytes.Equal(r.Ballot.RecordTag, tag) {
+		return "tag differs from the item's"
+	}
+	leaf, err := r.Ballot.Leaf()
+	if err != nil {
+		return "no leaf"
+	}
+	cmsg, err := vote.CastMsg(ph, leaf)
+	if err != nil || vote.Verify(r.CredentialKey, vote.LabelCast, cmsg, r.CastSig) != nil {
+		return "cast_sig doesn't verify"
+	}
+	if r.MsgMS < uint64(p.OpensAt)*1000 || r.MsgMS >= uint64(closesAt)*1000 {
+		return "relay time outside the window"
+	}
+	return ""
 }
 
 func (m *Manager) saveResults(ctx context.Context, id string, pr *PublishedResults, create bool) error {
