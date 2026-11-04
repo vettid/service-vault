@@ -215,8 +215,9 @@ from it or by the other admins' `admin.repin`) does not count, here or
 when the service counts again before using the approval: someone else
 may now hold that credential. An admin whose key changed is re-pinned only
 by the other admins' approval, who first ask them out of band whether they
-reset their credential, replaced their vault's keys or moved to a new
-phone at the time the summary names, and then compare the summary's `new key` with the credential-key
+reset their credential at the time the summary names (the expected
+cause: a rotation of the key moves the governance key by its verified
+chain, with no re-pin), and then compare the summary's `new key` with the credential-key
 fingerprint that admin reads to them from their own app (Settings → Vault
 status; VAULT-MESSAGING 0.83.8 §10.8). It is the same string: the first
 16 hex digits, in 4 groups of 4, of SHA-256("vettid/vms/2/ck-fp" || key).
