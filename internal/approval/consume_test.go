@@ -55,7 +55,21 @@ func (f *fixture) built(action string, payload []byte) *Created {
 	f.m.ProposalTitle = func(_ context.Context, id string) (string, bool, error) {
 		return "Adopt the 2027 budget", id == extProposal, nil
 	}
+	if action == ActionVoteExtend {
+		f.afterOutage()
+	}
 	return f.create(action, "", string(payload))
+}
+
+// afterOutage moves the fixture's clock past extensionInput's outage, if
+// it is before: an extension is approved only once its outage is over
+// (§10.2).
+func (f *fixture) afterOutage() {
+	f.clk.mu.Lock()
+	defer f.clk.mu.Unlock()
+	if end := time.Unix(extensionInput().Outage.To+60, 0).UTC(); f.clk.t.Before(end) {
+		f.clk.t = end
+	}
 }
 
 func (f *fixture) consume(id, action string, payload []byte) error {
@@ -561,4 +575,22 @@ func TestExtensionTitleWholeOrRefused(t *testing.T) {
 	if len(f.p.sent) != 0 {
 		t.Fatal("sent")
 	}
+}
+
+// A vote.extend approval for an outage not yet over is refused
+// (outage_not_over), before anything is sent; once it is over it goes.
+func TestExtensionOutageNotOver(t *testing.T) {
+	f := newFixture(t, 1, "c1")
+	f.m.ProposalTitle = func(_ context.Context, id string) (string, bool, error) {
+		return "Adopt the 2027 budget", id == extProposal, nil
+	}
+	pl := canonExtension(t, extensionInput())
+	f.clk.t = time.Unix(extensionInput().Outage.To-60, 0).UTC()
+	if _, err := f.m.Create(context.Background(), Request{Action: ActionVoteExtend, Payload: json.RawMessage(pl)}); codeOf(err) != CodeOutageNotOver {
+		t.Fatalf("outage not over: %v", err)
+	}
+	if len(f.p.sent) != 0 || f.openCount() != 0 {
+		t.Fatal("sent or stored")
+	}
+	f.built(ActionVoteExtend, pl)
 }

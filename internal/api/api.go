@@ -552,6 +552,7 @@ var approvalStatusCodes = map[string]int{
 	approval.CodeAnswered:          http.StatusConflict,
 	approval.CodeAskBudget:         http.StatusConflict,
 	approval.CodeRateLimited:       http.StatusTooManyRequests,
+	approval.CodeOutageNotOver:     http.StatusUnprocessableEntity,
 }
 
 func (s *Server) approvalError(w http.ResponseWriter, what string, err error) {
@@ -639,6 +640,8 @@ func (s *Server) createProposal(w http.ResponseWriter, r *http.Request) {
 		// Kept, but not published: POST /v1/proposals/{id}/publish retries.
 		s.log().Error("create proposal: not published", "proposal_id", np.ProposalID, "err", err)
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "not_published", "proposal_id": np.ProposalID})
+	case errors.Is(err, ballot.ErrTooManyEligible):
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "too_many_eligible", "max_eligible": ballot.MaxEligible})
 	case errors.As(err, &ei):
 		writeError(w, http.StatusBadRequest, "invalid_proposal")
 	case errors.Is(err, ballot.ErrNoPublisher):

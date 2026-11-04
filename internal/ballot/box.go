@@ -17,8 +17,10 @@ import (
 // strictBody reports whether a member's vote body follows VAULT-MESSAGING
 // §5.3's strict rules: valid UTF-8, no byte order mark, no duplicate
 // member names and no unpaired surrogate escape at any depth, nothing
-// after the value. encoding/json accepts all of those, keeping the last
-// of two equal names, so the body is checked first (BALLOT-PROTOCOL §4.2).
+// after the value. The session layer's parser already drops a message
+// that breaks most of them; an unpaired surrogate escape gets through it
+// (decoded as U+FFFD), and encoding/json would keep the last of two
+// equal names, so the box checks again (BALLOT-PROTOCOL §4.2).
 func strictBody(body []byte) bool {
 	_, err := servicevault.CanonicalJSON(body)
 	return err == nil

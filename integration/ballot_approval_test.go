@@ -173,6 +173,10 @@ func runProposalApproval(t *testing.T, ctx context.Context, st peer.Store, pager
 	// Extending takes its own approval of the exact extension.
 	ext := ballot.ExtensionInput{ClosesAt: opens + 86400 + 7200,
 		Outage: vote.Outage{From: opens + 3600, To: opens + 3600 + 5400, Source: "https://status.vettid.org/"}}
+	// An outage is approved and extended for once it is over: the
+	// service's clocks are moved past its end.
+	later := func() time.Time { return time.Unix(ext.Outage.To+60, 0) }
+	bm.Now, m.Now = later, later
 	xp, err := ballot.CanonicalExtension(pid, ext)
 	if err != nil {
 		t.Fatal(err)
@@ -191,9 +195,6 @@ func runProposalApproval(t *testing.T, ctx context.Context, st peer.Store, pager
 		}{approvalID, ext})
 		return string(b)
 	}
-	// An outage is extended for once it is over: the service's clock is
-	// moved past its end (the approval's stays real).
-	bm.Now = func() time.Time { return time.Unix(ext.Outage.To+60, 0) }
 	changed := ext
 	changed.Outage.Source += "x"
 	path := "/v1/proposals/" + pid + "/extend"

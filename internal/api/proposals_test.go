@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -126,11 +127,16 @@ func TestProposalRoutes(t *testing.T) {
 		ballot.ErrNoPublisher:                    "publication_not_configured",
 		errors.New("store down"):                 "unavailable",
 		&ballot.ErrNotPublished{ProposalID: "p1", Err: errors.New("rekor down")}: "not_published",
+		fmt.Errorf("%w: the roster has 1001", ballot.ErrTooManyEligible):         "too_many_eligible",
 	} {
 		fp.err = err
 		if _, m := do(t, h, "POST", "/v1/proposals", apiKey, body); m["error"] != want {
 			t.Errorf("%v: %v", err, m)
 		}
+	}
+	fp.err = fmt.Errorf("%w: the roster has 1001", ballot.ErrTooManyEligible)
+	if rec, m := do(t, h, "POST", "/v1/proposals", apiKey, body); rec.Code != 400 || m["max_eligible"] != float64(ballot.MaxEligible) {
+		t.Fatalf("too many eligible: %d %v", rec.Code, m)
 	}
 	fp.err = &ballot.ErrNotPublished{ProposalID: "p1", Err: errors.New("rekor down")}
 	if rec, m := do(t, h, "POST", "/v1/proposals", apiKey, body); rec.Code != 503 || m["proposal_id"] != "p1" {

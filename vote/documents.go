@@ -19,12 +19,10 @@ const MaxWindow = 7 * 24 * 3600
 // MaxProposal is the largest proposal document, in bytes (§3.1).
 const MaxProposal = 64 << 10
 
-// MaxEligible is the most eligible members a proposal may have (§3.2;
-// chosen, not in the spec). Its results carry a row for every tag, and
-// the rows travel in one upload to the votes site, which takes it within
-// Lambda's 6 MB request: past about 15,000 rows the upload no longer
-// fits, so the results of a bigger proposal could never be published.
-const MaxEligible = 15000
+// MaxEligible is the most eligible members a proposal document may
+// carry, as a member's vault bounds it (VAULT-MESSAGING 0.83.3 §10.19.2:
+// the same on both sides). A service may allow fewer (ballot.MaxEligible).
+const MaxEligible = 100000
 
 // MaxExtensionDoc is the largest extension document, in bytes (§8.5).
 const MaxExtensionDoc = 64 << 10

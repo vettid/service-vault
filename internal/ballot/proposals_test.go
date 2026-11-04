@@ -277,13 +277,13 @@ func TestCreateRefusals(t *testing.T) {
 	if _, err := m.Create(ctx, "apv", input()); !errors.As(err, &ei) {
 		t.Fatalf("no eligible members: %v", err)
 	}
-	big := make(fakeRoster, vote.MaxEligible+1)
+	big := make(fakeRoster, MaxEligible+1)
 	for i := range big {
 		big[i] = fmt.Sprintf("c%05d", i)
 	}
 	m.Roster = big
-	if _, err := m.Create(ctx, "apv", input()); !errors.As(err, &ei) {
-		t.Fatalf("more than %d eligible members: %v", vote.MaxEligible, err)
+	if _, err := m.Create(ctx, "apv", input()); !errors.Is(err, ErrTooManyEligible) {
+		t.Fatalf("more than %d eligible members: %v", MaxEligible, err)
 	}
 	m.Roster = roster
 	m.Publisher = nil
@@ -650,5 +650,48 @@ func TestCreateCountsUnsigned(t *testing.T) {
 	m2, _, _ := newManager(t)
 	if c, err = m2.Create(context.Background(), "apv", input()); err != nil || c.Unsigned != 0 {
 		t.Fatalf("all pinned: %+v, %v", c, err)
+	}
+}
+
+// At MaxEligible members, everyone voting, the proposal's record and the
+// results' record each still fit one DynamoDB item (400 KB), with room
+// for the seal, the keys and the attributes.
+func TestMaxEligibleFitsOneItem(t *testing.T) {
+	if testing.Short() {
+		t.Skip("casts MaxEligible ballots")
+	}
+	const itemLimit = 400_000 - 16_000 // the seal, keys and attribute names
+	ctx := context.Background()
+	m, _, _ := newManager(t)
+	ct := &fakeCatcher{caught: true}
+	m.Catcher = ct
+	roster := make(fakeRoster, MaxEligible)
+	for i := range roster {
+		roster[i] = fmt.Sprintf("c%05d", i)
+	}
+	m.Roster = roster
+	c, err := m.Create(ctx, "apv", input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	during := uint64(input().OpensAt)*1000 + 1
+	for _, conn := range roster {
+		if code := castFor(t, m, c.ProposalID, conn, vote.AbstainID, during); code != "" { // the longest choice id
+			t.Fatalf("%s: %q", conn, code)
+		}
+	}
+	m.Now = func() time.Time { return time.Unix(input().ClosesAt, 0).Add(2 * CollectMargin) }
+	if _, err := m.Close(ctx, c.ProposalID); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{KindProposal, KindResults} {
+		data, ok, err := m.Store.Records.Get(ctx, kind, c.ProposalID)
+		if err != nil || !ok {
+			t.Fatalf("%s: %v %v", kind, ok, err)
+		}
+		if len(data) > itemLimit {
+			t.Errorf("%s record: %d bytes, over %d", kind, len(data), itemLimit)
+		}
+		t.Logf("%s record: %d bytes at %d members", kind, len(data), MaxEligible)
 	}
 }

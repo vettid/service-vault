@@ -74,6 +74,7 @@ func TestCanonicalJSONRejects(t *testing.T) {
 	for _, in := range []string{
 		``, `{`, `{"a":1,"a":2}`, `"\ud800"`, `"\udc00x"`, `"\ud800\u0041"`, "\"\xff\"", "\"a\nb\"", `01`, `1.`, `.5`, `1e`,
 		`+1`, `1e400`, `NaN`, `[1,]`, `{"a":1,}`, `{"a" 1}`, `tru`, `[1] 2`, `"\x"`, `"\u12"`,
+		"\xef\xbb\xbf{}", `{"b":{"a":1,"a":1}}`, `[{"a":1,"a":1}]`,
 	} {
 		if got, err := servicevault.CanonicalJSON([]byte(in)); err == nil {
 			t.Errorf("%q accepted as %s", in, got)

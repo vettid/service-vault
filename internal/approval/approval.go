@@ -761,6 +761,14 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 			return nil, errCode(CodeUnknownProposal)
 		}
 		title = t
+		// The admins approve an extension for an outage that is over, so
+		// its length is known; the service would refuse to make one for
+		// an outage still going on.
+		if err := ballot.ExtensionOutageOver(payload, m.now()); errors.Is(err, ballot.ErrOutageNotOver) {
+			return nil, errCode(CodeOutageNotOver)
+		} else if err != nil {
+			return nil, summaryError(err)
+		}
 	}
 	summary, built, err := ballot.SummaryFor(req.Action, payload, title)
 	if req.Action == ActionAdminSetAdd || req.Action == ActionAdminSetRemove {

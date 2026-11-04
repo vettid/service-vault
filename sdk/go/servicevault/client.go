@@ -140,6 +140,8 @@ const (
 	CodeAnswered          = "answered"           // remind force: the admin has answered (409)
 	CodeNothingToRemind   = "nothing_to_remind"  // every admin who has not answered holds a live challenge (409)
 	CodeAskBudget         = "ask_budget"         // create or remind: too few admins can be asked, each at the ask limit: 4 approval challenges still counting, or 5 for a repair action (409)
+	CodeOutageNotOver     = "outage_not_over"    // create vote.extend: the outage hasn't ended (422)
+	CodeTooManyEligible   = "too_many_eligible"  // create a proposal: the roster has more eligible members than the service supports (400, with max_eligible)
 	CodeRateLimited       = "rate_limited"       // create: the limit of the action's group is reached (SV_APPROVAL_LIMITS; 429)
 )
 

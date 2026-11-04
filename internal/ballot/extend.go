@@ -136,10 +136,12 @@ func (m *Manager) Extend(ctx context.Context, id, approvalID string, in Extensio
 	switch {
 	case length <= MinOutage:
 		return nil, &ErrInput{errors.New("ballot: an outage must be over an hour")}
-	case out.To > now:
+	case o.Pending == nil && out.To > now:
 		// An outage is extended for once it is over, not for its
-		// expected end: the length must be known.
-		return nil, &ErrInput{errors.New("ballot: the outage hasn't ended yet")}
+		// expected end: the length must be known. A retry of a pending
+		// extension was checked when it was stored, and a clock stepping
+		// back must not hold it up.
+		return nil, &ErrInput{ErrOutageNotOver}
 	case out.From < p.OpensAt || out.From >= o.ClosesAt:
 		return nil, &ErrInput{errors.New("ballot: the outage isn't within the window")}
 	case in.ClosesAt <= o.ClosesAt || in.ClosesAt-o.ClosesAt > allowed:
