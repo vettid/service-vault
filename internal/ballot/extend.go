@@ -64,6 +64,13 @@ type ExtensionInput struct {
 // CollectMargin, the margin the count already allows after the close.
 const ExtendMargin = CollectMargin
 
+// MaxExtensions is the most extensions a vote may have, as the votes
+// site and the members' vaults bound them (BALLOT-PROTOCOL §10.2). The
+// 24 h total alone does not bound their number (one may move the close
+// by a second), and each is kept in the proposal's record and its
+// results', so this also bounds those records' size (MaxEligible).
+const MaxExtensions = 24
+
 // ErrTooLate is an extension asked for once the close it would extend has
 // passed, or one whose RFC 3161 time is not before that close.
 var ErrTooLate = errors.New("ballot: the close to extend has passed")
@@ -136,6 +143,8 @@ func (m *Manager) Extend(ctx context.Context, id, approvalID string, in Extensio
 	switch {
 	case length <= MinOutage:
 		return nil, &ErrInput{errors.New("ballot: an outage must be over an hour")}
+	case o.Pending == nil && len(o.Extensions) >= MaxExtensions:
+		return nil, &ErrInput{fmt.Errorf("ballot: a vote has at most %d extensions", MaxExtensions)}
 	case o.Pending == nil && out.To > now:
 		// An outage is extended for once it is over, not for its
 		// expected end: the length must be known. A retry of a pending

@@ -226,6 +226,7 @@ const (
 	CodeAnswered          = "answered"          // remind force: the admin has answered
 	CodeNothingToRemind   = "nothing_to_remind" // every admin who has not answered holds a live challenge
 	CodeAskBudget         = "ask_budget"        // no send: the admins to ask have their action's limit of approval challenges still counting (askLimit: 4, or 5 for a repair)
+	CodeTooManyEligible   = "too_many_eligible" // Create proposal.create: the roster has more than ballot.MaxEligible eligible members
 	CodeOutageNotOver     = "outage_not_over"   // Create vote.extend: the outage's to is after now (BALLOT-PROTOCOL §10.2)
 	CodeRateLimited       = "rate_limited"      // Create: the limit of the action's group (RateLimit) is reached
 

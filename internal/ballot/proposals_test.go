@@ -653,9 +653,12 @@ func TestCreateCountsUnsigned(t *testing.T) {
 	}
 }
 
-// At MaxEligible members, everyone voting, the proposal's record and the
-// results' record each still fit one DynamoDB item (400 KB), with room
-// for the seal, the keys and the attributes.
+// At MaxEligible members, everyone voting, with the largest inputs the
+// service takes (the longest title, text and labels, 16 choices, 26-byte
+// connection ids, MaxExtensions extensions and a 10 KB anchor bundle),
+// the proposal's record and the results' record each still fit one
+// DynamoDB item (400 KB), with room for the seal, the keys and the
+// attribute names.
 func TestMaxEligibleFitsOneItem(t *testing.T) {
 	if testing.Short() {
 		t.Skip("casts MaxEligible ballots")
@@ -667,28 +670,70 @@ func TestMaxEligibleFitsOneItem(t *testing.T) {
 	m.Catcher = ct
 	roster := make(fakeRoster, MaxEligible)
 	for i := range roster {
-		roster[i] = fmt.Sprintf("c%05d", i)
+		roster[i] = fmt.Sprintf("01JBQZ%020d", i) // a ULID's length
 	}
 	m.Roster = roster
-	c, err := m.Create(ctx, "apv", input())
-	if err != nil {
-		t.Fatal(err)
+	// The largest input create accepts: the longest title (the text may
+	// only repeat it), then the most and longest labels the admins'
+	// summary still shows whole.
+	in := input()
+	in.Title = strings.Repeat("T", MaxTitleBytes())
+	in.Text = in.Title
+	var c *Created
+	var err error
+	for n := MaxRealChoices; n >= 2 && c == nil; n-- {
+		for l := MaxLabelRunes; l >= 2 && c == nil; l-- {
+			in.Choices = nil
+			for i := range n {
+				in.Choices = append(in.Choices, ChoiceInput{Label: fmt.Sprintf("%c", 'A'+i) + strings.Repeat("l", l-1)})
+			}
+			if c, err = m.Create(ctx, "apv", in); err != nil {
+				c = nil
+			}
+		}
 	}
-	during := uint64(input().OpensAt)*1000 + 1
+	if c == nil {
+		t.Fatalf("no input accepted: %v", err)
+	}
+	t.Logf("%d choices, labels of %d, title of %d", len(in.Choices), len(in.Choices[0].Label), len(in.Title))
+	// MaxExtensions extensions, each moving the close by a second for an
+	// outage of just over an hour that is over.
+	out := vote.Outage{From: in.OpensAt + 60, To: in.OpensAt + 60 + MinOutage + 1, Source: "https://status.vettid.org/"}
+	now := time.Unix(out.To+60, 0)
+	m.Now = func() time.Time { return now }
+	closes := in.ClosesAt
+	for range MaxExtensions {
+		closes++
+		if _, err := m.Extend(ctx, c.ProposalID, "apv", ExtensionInput{ClosesAt: closes, Outage: out}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := m.Extend(ctx, c.ProposalID, "apv", ExtensionInput{ClosesAt: closes + 1, Outage: out}); err == nil {
+		t.Fatal("an extension past MaxExtensions")
+	}
+	during := uint64(in.OpensAt)*1000 + 1
 	for _, conn := range roster {
 		if code := castFor(t, m, c.ProposalID, conn, vote.AbstainID, during); code != "" { // the longest choice id
 			t.Fatalf("%s: %q", conn, code)
 		}
 	}
-	m.Now = func() time.Time { return time.Unix(input().ClosesAt, 0).Add(2 * CollectMargin) }
+	m.Now = func() time.Time { return time.Unix(closes, 0).Add(2 * CollectMargin) }
 	if _, err := m.Close(ctx, c.ProposalID); err != nil {
 		t.Fatal(err)
 	}
+	bundle, _ := json.Marshal(map[string]string{"pad": strings.Repeat("b", 10<<10)})
 	for _, kind := range []string{KindProposal, KindResults} {
 		data, ok, err := m.Store.Records.Get(ctx, kind, c.ProposalID)
 		if err != nil || !ok {
 			t.Fatalf("%s: %v %v", kind, ok, err)
 		}
+		// A real Sigstore bundle is larger than the test's.
+		var rec map[string]json.RawMessage
+		if err := json.Unmarshal(data, &rec); err != nil {
+			t.Fatal(err)
+		}
+		rec["bundle"] = bundle
+		data, _ = json.Marshal(rec)
 		if len(data) > itemLimit {
 			t.Errorf("%s record: %d bytes, over %d", kind, len(data), itemLimit)
 		}

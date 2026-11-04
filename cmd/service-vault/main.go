@@ -470,6 +470,7 @@ func serve(args []string) error {
 		anchorInfo = &api.AnchorKey{Key: spki, Cert: cert, IK: keys.IKPublic(), Sigstore: cfg.Sigstore}
 		mgr := &ballot.Manager{Store: ballots, Sign: signIK, IK: keys.IKPublic(), Roster: p, Sender: p,
 			Catcher: p, Approvals: approvals, NewID: envelope.NewULID, Now: time.Now, Log: log}
+		approvals.EligibleCount = func(context.Context) (int, error) { return len(p.Eligible()), nil }
 		approvals.ProposalTitle = func(ctx context.Context, id string) (string, bool, error) {
 			o, err := ballots.OpenProposal(ctx, id)
 			if err != nil || o == nil {

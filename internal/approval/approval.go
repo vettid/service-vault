@@ -226,6 +226,11 @@ type Manager struct {
 	BootstrapKey string
 	// BoundConnection returns the connection bound to an email index key.
 	BoundConnection func(ctx context.Context, emailKey string) (string, bool, error)
+	// EligibleCount returns how many members a proposal made now would
+	// have, so a proposal.create approval the ballot manager would refuse
+	// (ballot.MaxEligible) is refused before the admins are asked; nil
+	// skips the check.
+	EligibleCount func(ctx context.Context) (int, error)
 	// Rate limits Create per action (SV_APPROVAL_LIMITS); nil: no limit.
 	Rate *RateLimit
 	Now  func() time.Time
@@ -744,6 +749,15 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 	// no text for them.
 	title := ""
 	var addKey []byte // admin_set.add: the candidate's credential key, as shown
+	if req.Action == ActionProposalCreate && m.EligibleCount != nil {
+		n, err := m.EligibleCount(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if n > ballot.MaxEligible {
+			return nil, errCode(CodeTooManyEligible)
+		}
+	}
 	if req.Action == ActionVoteExtend {
 		// The admins are shown the proposal's title, from the store.
 		id, err := ballot.ExtensionProposalID(payload)

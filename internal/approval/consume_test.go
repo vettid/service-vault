@@ -597,3 +597,20 @@ func TestExtensionOutageNotOver(t *testing.T) {
 	}
 	f.built(ActionVoteExtend, pl)
 }
+
+// A proposal.create approval is refused (too_many_eligible) while the
+// roster has more members than the service supports, before anyone is
+// asked.
+func TestProposalApprovalTooManyEligible(t *testing.T) {
+	f := newFixture(t, 1, "c1")
+	n := ballot.MaxEligible + 1
+	f.m.EligibleCount = func(context.Context) (int, error) { return n, nil }
+	if _, err := f.m.Create(context.Background(), Request{Action: ActionProposalCreate, Payload: json.RawMessage(canonProposal(t, proposalInput()))}); codeOf(err) != CodeTooManyEligible {
+		t.Fatalf("over the cap: %v", err)
+	}
+	if len(f.p.sent) != 0 || f.openCount() != 0 {
+		t.Fatal("sent or stored")
+	}
+	n = ballot.MaxEligible
+	f.built(ActionProposalCreate, canonProposal(t, proposalInput()))
+}

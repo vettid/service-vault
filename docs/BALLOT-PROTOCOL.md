@@ -728,7 +728,12 @@ An outage still going on cannot be extended for, so one that runs past
 the close is extended in parts: as the close nears, an extension for the
 outage so far (its `to` the time of the request, over an hour), and once
 it is over, another for the rest. Each part is its own approval and must
-itself be over an hour and made before the `closes_at` it extends.
+itself be over an hour and made before the `closes_at` it extends. The
+approvals travel over the relay, so while the relay is down altogether
+none can reach the admins: an outage that takes the whole relay down
+through the close cannot be extended for before it, and the vote closes
+as scheduled. A vote has at most 24 extensions, as the votes site and
+the members' vaults bound them.
 
 The extension is **stored before it is published**, because the site's
 copy is write-once. The service signs the extension and stores it as *pending* on the
@@ -841,9 +846,11 @@ item.
 
 - **0.13.5 (2026-11-04):** §3.2: a proposal document has at most
   100,000 eligible members, and this service creates none over 1,000
-  (its store). §10.2: an extension is approved and made only once its
-  outage is over; an outage still going on near the close is extended in
-  parts. §4.2: a `vote.cast` or `vote.status` body that breaks
+  (its store), and a `proposal.create` approval is refused before the
+  admins are asked when the roster is over that. §10.2: an extension is
+  approved and made only once its outage is over; an outage still going
+  on near the close is extended in parts, which needs the relay to carry
+  the approvals; at most 24 extensions. §4.2: a `vote.cast` or `vote.status` body that breaks
   VAULT-MESSAGING §5.3's strict rules and reaches the ballot box (an
   unpaired surrogate escape; the session layer drops the rest) is
   refused. No change to the

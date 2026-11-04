@@ -553,6 +553,7 @@ var approvalStatusCodes = map[string]int{
 	approval.CodeAskBudget:         http.StatusConflict,
 	approval.CodeRateLimited:       http.StatusTooManyRequests,
 	approval.CodeOutageNotOver:     http.StatusUnprocessableEntity,
+	approval.CodeTooManyEligible:   http.StatusBadRequest,
 }
 
 func (s *Server) approvalError(w http.ResponseWriter, what string, err error) {
