@@ -171,8 +171,10 @@ type Box struct {
 	// Log is where an unpublished proposal's alarm goes; nil discards it.
 	Log *slog.Logger
 
-	mu   sync.Mutex
-	held map[string]*heldAlarm // the unpublished alarm, by proposal
+	mu sync.Mutex
+	// held is the unpublished alarm's state, by proposal: one small entry
+	// for each proposal ever held, which the proposals bound.
+	held map[string]*heldAlarm
 }
 
 // ErrUnpublished is a vote.cast or vote.status from a member for a

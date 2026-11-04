@@ -58,6 +58,13 @@ var ErrUnknownProposal = errors.New("ballot: unknown proposal")
 // be saved at the close, and so never published.
 const MaxEligible = 1000
 
+// ResendCover is how long before its close a held proposal must be
+// published for every member's vault to send its cast again in time: the
+// vaults send again at 1, 5 and 30 minutes, then hourly, and stop at the
+// close (VAULT-MESSAGING §10.19.5), so up to an hour and some minutes may
+// pass before a vault's next send (BALLOT-PROTOCOL §4.2).
+const ResendCover = 70 * time.Minute
+
 // ErrTooManyEligible refuses a proposal whose roster has more than
 // MaxEligible eligible members, before its approval is used.
 var ErrTooManyEligible = fmt.Errorf("ballot: this service supports at most %d eligible members per vote", MaxEligible)
@@ -271,6 +278,12 @@ func (m *Manager) Publish(ctx context.Context, id string) (int, error) {
 		return 0, ErrUnknownProposal
 	}
 	if o.Bundle == nil {
+		// Published late (members' requests went unanswered meanwhile):
+		// their vaults send a cast again hourly and stop at the close, so
+		// with less than ResendCover left some may not reach it in time.
+		if left := time.Unix(o.ClosesAt, 0).Sub(m.Now()); left > 0 && left < ResendCover {
+			m.log().Warn("publishing near the close: extend the vote so every member's vault sends again", "proposal_id", id, "left", left.Round(time.Minute).String())
+		}
 		if o.Bundle, err = m.Publisher.PublishProposal(ctx, id, o.Doc, o.Sig); err != nil {
 			return 0, fmt.Errorf("ballot: publish %s: %w", id, err)
 		}

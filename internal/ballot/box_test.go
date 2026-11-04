@@ -363,6 +363,17 @@ func TestUnpublishedProposal(t *testing.T) {
 	if a := f.send("c0", TypeStatus, q, f.during(), true); a.Code != "" {
 		t.Fatalf("status once published: %q", a.Code)
 	}
+	// The held cast, sent again once published, gets its receipt; a
+	// second resend (a new request) gets the same one, and the tag has
+	// one ballot.
+	a1 := f.send("c0", TypeCast, body, f.during(), true)
+	a2 := f.send("c0", TypeCast, body, f.during()+60_000, true)
+	if a1.Code != "" || a2.Code != "" || !bytes.Equal(a1.Body, a2.Body) {
+		t.Fatalf("resends: %q %q, same %v", a1.Code, a2.Code, bytes.Equal(a1.Body, a2.Body))
+	}
+	if n := len(f.store.ballots); n != 1 {
+		t.Fatalf("%d ballots stored", n)
+	}
 }
 
 // A vote.cast body may carry the vault's "pad" (VAULT-MESSAGING

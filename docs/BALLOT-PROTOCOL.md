@@ -402,12 +402,18 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
   MESSAGING §10.19.5, "Sending again", and `vote.status` after 24 hours),
   so once the proposal is published a later request is answered as
   usual. Meanwhile the vote is not counted: a close is refused until it
-  is published. Vaults stop sending a cast at `closes_at`, so a vote
-  published before its close leaves no ballot out; one published only
-  after it is counted without the casts that went unanswered. The
-  operator publishes at once on the alarm, and extends the vote first if
-  its close is near (§10.2). The service raises that alarm (owner
-  decision of 2026-11-04). The answer is signed:
+  is published. A vault sends an unanswered cast again at 1, 5 and 30
+  minutes, then hourly, and stops at `closes_at`, so a cast may not be
+  sent again between a late publication and the close: it would then be
+  refused `closed`. The service raises an alarm (owner decision of
+  2026-11-04), and the operator publishes at once; if the close is less
+  than about 1 h 10 min away, the operator also extends the vote (§10.2),
+  since a verified extension restarts each vault's schedule. An
+  extension needs the admins' approval, an outage of over an hour that is
+  over and inside the window (here, from the loss to the publication), a
+  request more than a minute before the close and at most 24 h in all,
+  so a publication lost within the last hour or so before the close
+  cannot be covered: those casts may be left out, which is accepted. The answer is signed:
   `status_sig = Sign(service IK, "vettid/vote/1/status\x00", lp(proposal_id) ‖ lp(record_tag) ‖ H(ballot_leaf))`,
   where with no ballot `H` is taken of the empty string.
   A vault asks it for a proposal on the site's index that it doesn't
@@ -874,8 +880,8 @@ item.
   for a proposal the service holds but has not published is not answered
   (the vault sends again), where it was refused `not_eligible` or
   `unknown_proposal`, final for the member's vault; such a vote is not
-  closed until it is published (no ballot is left out if that is before
-  its close). No
+  closed until it is published, and the operator extends it when that
+  is less than about 1 h 10 min before its close. No
   change to the messages, the documents or the vectors.
 - **0.13.6 (2026-11-04):** §6 "Durability": the write-once store answers
   duplicates and `vote.status`; a cast is written only while the
