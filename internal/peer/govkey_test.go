@@ -166,8 +166,14 @@ func TestRotatedChainFollowedFromPins(t *testing.T) {
 	k0 := m.Cred
 	k1 := ed25519.NewKeyFromSeed(bytesOf(0x51))
 	k2 := ed25519.NewKeyFromSeed(bytesOf(0x52))
-	r01, _ := credwire.NewKeyRotation(k0, k1)
-	r12, _ := credwire.NewKeyRotation(k1, k2)
+	r01, err := credwire.NewKeyRotation(k0, k1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r12, err := credwire.NewKeyRotation(k1, k2)
+	if err != nil {
+		t.Fatal(err)
+	}
 	pins := func(want ed25519.PrivateKey) {
 		t.Helper()
 		c := f.p.conns[cid]

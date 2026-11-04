@@ -254,8 +254,8 @@ bootstrap makes the first admin (only if none is pinned yet), and, for an
 admin from before the governance key existed, at the migration (the key of
 the earliest signed approval in the audit log, else the current credential
 key). Nothing else moves it but a rotation chain verified from it
-(VAULT-MESSAGING 0.83.9 §10.4: the chain may start before it, and is
-followed from it) and the other admins' `admin.repin`. Known limits: the migration can only use
+(VAULT-MESSAGING 0.83.9 §10.4: the chain must hold a statement from it,
+and may start earlier) and the other admins' `admin.repin`. Known limits: the migration can only use
 the approvals the audit log holds, so an admin who never approved is pinned
 to whatever key they hold then; and the fingerprints shown to the admins
 are 64 bits (16 hex digits) of a SHA-256.
