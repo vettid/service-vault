@@ -9,14 +9,13 @@ import (
 )
 
 // DefaultCreateLimits are the default limits on creating approvals
-// (chosen; not in the spec): 2 per hour and 4 per 24 hours, counted
-// across every action of a group, the repair actions (repairActions) in
-// one and all the others in the other. Each approval created asks every
-// admin and so spends one of each admin's askBudget challenges in 24
-// hours. The ordinary group's 4 per 24 hours matches askBudget -
-// askReserve, so the API key alone cannot create more ordinary approvals
-// in a day than the admins can be asked about, and a burst of them does
-// not also refuse a re-pin, whose own group keeps its own count.
+// (chosen; not in the spec): 2 per hour and 4 per 24 hours, in fixed
+// windows, counted across every action of a group, the repair actions
+// (repairActions) in one and all the others in the other, so a burst of
+// ordinary ones does not also refuse a re-pin. They bound how fast
+// approvals are created and stored; what keeps an ask for repairs is
+// askLimit, not these limits (reminders spend asks too, and fixed windows
+// let 4 at the end of one day and 4 at the start of the next through).
 var DefaultCreateLimits = []signin.Limit{{Max: 2, Window: time.Hour}, {Max: 4, Window: 24 * time.Hour}}
 
 // RateLimit limits Create per group of actions, in fixed windows
@@ -26,10 +25,11 @@ type RateLimit struct {
 	Limits   []signin.Limit
 }
 
-// countCreate counts one Create of action against every limit of its
-// group and refuses it (CodeRateLimited) when it exceeds any. A request
-// is counted before it is checked further, so a refused or invalid one
-// counts too; a counter error fails closed.
+// countCreate counts one valid Create of action against every limit of
+// its group and refuses it (CodeRateLimited) when it exceeds any. Create
+// calls it once the request has passed every check of its own, so an
+// invalid one does not count; a refused one does. A counter error fails
+// closed.
 func (m *Manager) countCreate(ctx context.Context, action string) error {
 	rl := m.Rate
 	if rl == nil || rl.Counters == nil {

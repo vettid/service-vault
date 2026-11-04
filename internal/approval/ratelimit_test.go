@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vettid/service-vault/internal/peer"
 	"github.com/vettid/service-vault/internal/signin"
 )
 
@@ -39,7 +40,8 @@ func TestAskReserveForRepairs(t *testing.T) {
 }
 
 // Create is limited per group of actions: the ordinary ones share one
-// count, the repair ones another, and a refused or invalid request counts.
+// count, the repair ones another; an invalid request does not count, a
+// refused one does.
 func TestCreateRateLimit(t *testing.T) {
 	f := newFixture(t, 1, "c1", "c2")
 	f.m.Rate = &RateLimit{Counters: &signin.MemCounters{}, Limits: DefaultCreateLimits}
@@ -52,8 +54,13 @@ func TestCreateRateLimit(t *testing.T) {
 	if err := ordinary(ActionContractTemplateChange, `{}`); err != nil {
 		t.Fatal(err)
 	}
-	if err := ordinary(ActionAssignmentPush, `{"x":1`); codeOf(err) != CodeInvalidPayload {
-		t.Fatalf("invalid: %v", err)
+	for range 3 {
+		if err := ordinary(ActionAssignmentPush, `{"x":1`); codeOf(err) != CodeInvalidPayload {
+			t.Fatalf("invalid: %v", err)
+		}
+	}
+	if err := ordinary(ActionAssignmentPush, `{}`); err != nil {
+		t.Fatalf("second, invalid ones not counted: %v", err)
 	}
 	if err := ordinary(ActionContractTemplateChange, `{}`); codeOf(err) != CodeRateLimited {
 		t.Fatalf("third in the hour: %v", err)
@@ -62,7 +69,7 @@ func TestCreateRateLimit(t *testing.T) {
 	if _, err := f.m.Create(ctx, Request{Action: ActionAdminSetRemove, Payload: json.RawMessage(`{"connection_id":"c2"}`)}); err != nil {
 		t.Fatalf("repair: %v", err)
 	}
-	// A new hour: two more, then the day's 4 are spent.
+	// A new hour: the refused third counted, so one more spends the day's 4.
 	f.clk.Advance(time.Hour)
 	for i := range 2 {
 		if err := ordinary(ActionContractTemplateChange, `{}`); i == 0 && err != nil || i == 1 && codeOf(err) != CodeRateLimited {
@@ -95,4 +102,35 @@ type failCounters struct{}
 
 func (failCounters) Incr(context.Context, string, time.Duration, time.Time) (int64, error) {
 	return 0, context.DeadlineExceeded
+}
+
+// With 5 counting entries an ordinary send is told when its limit of 4
+// frees (the second-oldest entry's end), a repair one when 5 does (the
+// oldest's), and only an ordinary approval lists an admin at 4.
+func TestAskLimitNextAndLists(t *testing.T) {
+	f := newFixture(t, 1, "c1", "c2")
+	f.fillAsks("c1", askBudget)
+	l, err := f.m.asks(context.Background(), "c1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ord, ok := f.m.budgetEntry(context.Background(), "c1", ActionContractTemplateChange)
+	rep, ok2 := f.m.budgetEntry(context.Background(), "c1", ActionAdminRepin)
+	end := func(e time.Time) time.Time { return e.Add(askWindow + peer.ClockSkew).UTC() }
+	if !ok || !ord.NextAskAt.Equal(end(l.Exp[1])) || !ok2 || !rep.NextAskAt.Equal(end(l.Exp[0])) {
+		t.Fatalf("ordinary %+v %v, repair %+v %v", ord, ok, rep, ok2)
+	}
+	g := newFixture(t, 1, "c1", "c2")
+	g.fillAsks("c1", ordinaryLimit)
+	c := g.create(ActionContractTemplateChange, "Open", `{}`)
+	if len(c.AskBudget) != 1 || c.AskBudget[0].ConnectionID != "c1" {
+		t.Fatalf("ordinary: %+v", c.AskBudget)
+	}
+	if st := g.status(c.ID); len(st.AskBudget) != 1 {
+		t.Fatalf("ordinary status: %+v", st.AskBudget)
+	}
+	rm := g.create(ActionAdminSetRemove, "", `{"connection_id":"c2"}`)
+	if len(rm.AskBudget) != 0 || len(g.status(rm.ID).AskBudget) != 0 {
+		t.Fatalf("repair: %+v", rm.AskBudget)
+	}
 }

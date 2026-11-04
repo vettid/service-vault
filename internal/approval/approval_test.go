@@ -1436,7 +1436,7 @@ func TestRemindForcePlaceLimit(t *testing.T) {
 	}
 }
 
-// A forced re-send is refused (ask_budget) while 5 approval challenges the
+// A forced re-send is refused (ask_budget) while the ordinary limit of approval challenges (4) the
 // service sent an admin, from any approval, still count: until each one's
 // exp plus 24 hours plus the clock skew, since the member's vault may
 // receive a challenge as late as its exp (VAULT-MESSAGING §10.4.1). A
@@ -1464,7 +1464,7 @@ func TestRemindForceAskBudget(t *testing.T) {
 		f.clk.Advance(RemindInterval)
 		before, cancelled := len(f.p.sent), len(f.p.cancelled)
 		if _, err := f.m.Remind(ctx, ids[ordinaryLimit-1], "c1"); codeOf(err) != CodeAskBudget {
-			t.Fatalf("gate %v: sixth: %v", gate, err)
+			t.Fatalf("gate %v: past the limit: %v", gate, err)
 		}
 		if len(f.p.sent) != before || len(f.p.cancelled) != cancelled || f.status(ids[ordinaryLimit-1]).Status != StatusPending {
 			t.Fatalf("gate %v: a refused force sent or withdrew something", gate)
@@ -1801,7 +1801,7 @@ func TestRemindAskBudget(t *testing.T) {
 	}
 }
 
-// Concurrent approvals never send an admin a sixth challenge.
+// Concurrent approvals never send an admin a challenge past the ordinary limit.
 func TestCreateAskBudgetConcurrent(t *testing.T) {
 	f := newFixture(t, 1, "c1")
 	f.fillAsks("c1", ordinaryLimit-2)

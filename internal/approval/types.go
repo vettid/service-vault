@@ -225,7 +225,7 @@ const (
 	CodeNotAdmin          = "not_admin"         // remind force: not an admin of the approval, or no longer in the set
 	CodeAnswered          = "answered"          // remind force: the admin has answered
 	CodeNothingToRemind   = "nothing_to_remind" // every admin who has not answered holds a live challenge
-	CodeAskBudget         = "ask_budget"        // no send: the admins to ask have 5 approval challenges still counting (askBudget)
+	CodeAskBudget         = "ask_budget"        // no send: the admins to ask have their action's limit of approval challenges still counting (askLimit: 4, or 5 for a repair)
 	CodeRateLimited       = "rate_limited"      // Create: the limit of the action's group (RateLimit) is reached
 
 	// Using an approval (Consume).
@@ -262,8 +262,9 @@ type Created struct {
 	AskBudget []AskBudget `json:"ask_budget,omitempty"`
 }
 
-// AskBudget is an admin not asked because 5 approval challenges still
-// count (askBudget), and when that stops being so.
+// AskBudget is an admin not asked because their action's limit of
+// approval challenges still count (askLimit: 4, or 5 for a repair
+// action), and when that stops being so.
 type AskBudget struct {
 	ConnectionID string    `json:"connection_id"`
 	NextAskAt    time.Time `json:"next_ask_at"` // oldest counting challenge's exp + 24 h + clock skew

@@ -77,9 +77,13 @@ type askLog struct {
 // askReserve of each admin's askBudget is kept for the actions that
 // repair the admin set (repairActions): every other action's sends, its
 // reminders included, stop at askBudget - askReserve (chosen; not in the
-// spec). So a burst of approvals for votes or contracts, by whoever holds
-// the application's API key, cannot leave the admins unaskable for the
-// re-pin or the change to the admin set that would deal with it.
+// spec). So a burst of ordinary approvals (votes, contracts), from a
+// runaway or buggy application, cannot leave the admins unaskable for a
+// re-pin or a change to the admin set. It does not stop a holder of the
+// API key who means harm: repair approvals of their own can spend the
+// reserve, and one declined challenge starts the member vault's 7-day
+// cooldown for the service's approval challenges (VAULT-MESSAGING
+// §10.4.1), repairs included.
 const askReserve = 1
 
 // repairActions may use the whole askBudget (askReserve).
@@ -731,9 +735,6 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 	if !actions[req.Action] {
 		return nil, errCode(CodeInvalidAction)
 	}
-	if err := m.countCreate(ctx, req.Action); err != nil {
-		return nil, err
-	}
 	payload, err := servicevault.CanonicalJSON(req.Payload)
 	if err != nil || len(payload) == 0 || payload[0] != '{' || len(payload) > MaxPayload {
 		return nil, errCode(CodeInvalidPayload)
@@ -851,6 +852,11 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 	}
 	if th > len(asked) {
 		return nil, errCode(CodeUnreachable)
+	}
+	// Only a valid request is counted, so an operator's mistakes while
+	// repairing the admin set do not use up the repair group's limit.
+	if err := m.countCreate(ctx, req.Action); err != nil {
+		return nil, err
 	}
 	now := m.now()
 	// Before anything is sent or stored: too few admins can be asked now
@@ -1085,13 +1091,14 @@ var ErrNotFound = errors.New("approval: not found")
 // remind_needed ones), each lasting as long as the approval, and
 // CodeNothingToRemind when there are none (checked before the interval).
 // Otherwise to every admin who has not answered, replacing their challenge.
-// An admin sent 5 approval challenges that still count is left out, with
+// An admin at the approval's ask limit (askLimit: 4 approval challenges
+// that still count, or 5 for a repair action) is left out, with
 // their challenge not withdrawn; CodeAskBudget when that leaves nobody
 // to send to (checked before anything is withdrawn).
 // With force, only to the named admins (CodeNotAdmin for one outside the
 // approval's admins or the current set, CodeAnswered for one who has
-// answered, CodeAskBudget for one sent 5 approval challenges that still
-// count, see askBudget): each one's live challenge is withdrawn and a new
+// answered, CodeAskBudget for one at the approval's ask limit, see
+// askLimit): each one's live challenge is withdrawn and a new
 // one sent, whatever the gate says, still at most once per
 // RemindInterval. Each
 // forced re-send uses one of the member's approval asks (VAULT-MESSAGING
