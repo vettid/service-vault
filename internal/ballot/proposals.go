@@ -50,10 +50,9 @@ var ErrNoPublisher = errors.New("ballot: proposals can't be published here")
 // ErrUnknownProposal is a proposal id the service doesn't hold.
 var ErrUnknownProposal = errors.New("ballot: unknown proposal")
 
-// Manager creates and publishes proposals.
 // MaxEligible is the most eligible members this service lets a proposal
 // have (chosen; not in the spec), below the protocol's vote.MaxEligible.
-// A proposal's record (its members' tags and proofs) and its results'
+// A proposal's record (its members' tags and record secrets) and its results'
 // record (a row per member) are each one item in the store, which
 // DynamoDB caps at 400 KB: past this many members the results could not
 // be saved at the close, and so never published.
@@ -63,6 +62,7 @@ const MaxEligible = 1000
 // MaxEligible eligible members, before its approval is used.
 var ErrTooManyEligible = fmt.Errorf("ballot: this service supports at most %d eligible members per vote", MaxEligible)
 
+// Manager creates and publishes proposals.
 type Manager struct {
 	Store     *RecordStore
 	Sign      func(label string, msg []byte) ([]byte, error)

@@ -20,7 +20,7 @@ const MaxWindow = 7 * 24 * 3600
 const MaxProposal = 64 << 10
 
 // MaxEligible is the most eligible members a proposal document may
-// carry, as a member's vault bounds it (VAULT-MESSAGING 0.83.3 §10.19.2:
+// carry, as a member's vault bounds it (VAULT-MESSAGING 0.83.3 §10.19.4 step 2:
 // the same on both sides). A service may allow fewer (ballot.MaxEligible).
 const MaxEligible = 100000
 

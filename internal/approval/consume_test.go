@@ -63,7 +63,10 @@ func (f *fixture) built(action string, payload []byte) *Created {
 
 // afterOutage moves the fixture's clock past extensionInput's outage, if
 // it is before: an extension is approved only once its outage is over
-// (§10.2).
+// (§10.2). From the fixture's start that is about 6 days on, so every
+// approval, ask and rate window made before it in the same test has aged
+// by then: a test that relies on one of them should create the
+// extension first.
 func (f *fixture) afterOutage() {
 	f.clk.mu.Lock()
 	defer f.clk.mu.Unlock()

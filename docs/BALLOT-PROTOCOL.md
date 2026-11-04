@@ -132,7 +132,7 @@ receives.
   `record_tag = H("vettid/vote/1/record\x00" ‖ proposal_id ‖ record_secret)`.
   `record_root` is the RFC 6962 root (§8.2) over the tags, sorted, and
   `eligible` their number: at most 100,000 in a proposal document, as a
-  member's vault bounds it (VAULT-MESSAGING §10.19.2). This service
+  member's vault bounds it (VAULT-MESSAGING §10.19.4 step 2). This service
   allows at most 1,000: a proposal's record and its results' record are
   each one item in its store, which DynamoDB caps at 400 KB, and past
   about 1,000 members the results could not be saved at the close. It
@@ -844,7 +844,9 @@ item.
   (its store). §10.2: an extension is approved and made only once its
   outage is over; an outage still going on near the close is extended in
   parts. §4.2: a `vote.cast` or `vote.status` body that breaks
-  VAULT-MESSAGING §5.3's strict rules is refused. No change to the
+  VAULT-MESSAGING §5.3's strict rules and reaches the ballot box (an
+  unpaired surrogate escape; the session layer drops the rest) is
+  refused. No change to the
   messages, the documents' fields or the vectors.
 - **0.13.4 (2026-11-04):** §3.4: a denial may be an automatic one, from
   a vault that suppressed the challenge, and counts as a denial (owner

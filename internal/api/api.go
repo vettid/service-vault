@@ -708,6 +708,9 @@ func (s *Server) extendProposal(w http.ResponseWriter, r *http.Request) {
 	case approvalProblem(w, err):
 	case errors.Is(err, ballot.ErrUnknownProposal):
 		writeError(w, http.StatusNotFound, "not_found")
+	case errors.Is(err, ballot.ErrOutageNotOver):
+		// As creating its approval answers (approval.CodeOutageNotOver).
+		writeError(w, http.StatusUnprocessableEntity, "outage_not_over")
 	case errors.As(err, &ei):
 		writeError(w, http.StatusBadRequest, "invalid_extension")
 	case errors.Is(err, ballot.ErrTooLate):
