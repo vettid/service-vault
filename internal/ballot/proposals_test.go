@@ -175,8 +175,11 @@ func newManager(t *testing.T) (*Manager, *fakeSender, *fakePublisher) {
 	ik := ed25519.NewKeyFromSeed(digest("service ik"))
 	clock := time.Unix(1793500000, 0)
 	s, p := &fakeSender{down: map[string]bool{}}, &fakePublisher{}
+	records := peer.NewMemStore()
 	m := &Manager{
-		Store: &RecordStore{Records: peer.NewMemStore(), Copy: &MemCopy{}},
+		// The copy enforces the cast's guard against the records, as the
+		// DynamoDB transaction does.
+		Store: &RecordStore{Records: records, Copy: &MemCopy{Records: records}},
 		Sign:  func(label string, msg []byte) ([]byte, error) { return suite.Sign(ik, label, msg) },
 		IK:    ik.Public().(ed25519.PublicKey), Roster: fakeRoster{"c2", "c0", "c1"}, Sender: s, Publisher: p,
 		NewID: envelope.NewULID, Now: func() time.Time { return clock }, Approvals: &fakeApprovals{auto: true}, Timestamp: ballottest.Time,
