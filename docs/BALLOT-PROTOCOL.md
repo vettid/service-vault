@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.13.9 (2026-11-04)
+**Status:** 0.13.10 (2026-11-04)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -187,6 +187,11 @@ design: vettid/votes, docs/VOTES-SITE.md).
   vaults (§8.5 "Rekor profile").
 - **The site checks** the service is listed, the signatures, the exact
   JCS bytes, the bundle under a listed anchor key, and the order above.
+  For the results, the proposal and each extension they carry must be
+  the published document and its published signature (`.sig`), both
+  byte for byte: another valid signature of the same document is
+  refused (`sig_mismatch`). The service embeds the signature it
+  uploaded, never a fresh one.
 - **Write-once:** each document has one path; the site accepts the same
   bytes again, refuses different bytes, and never changes or removes a
   document.
@@ -627,13 +632,17 @@ From votes.vettid.org alone:
 1. `results_sig` and every document's signature hold under the service's
    identity key; every bundle verifies under a listed anchor key; the
    service list verifies;
-2. `H(rows bytes)` is `rows_hash`; the tags are unique, number
+2. the proposal and each extension in `results.json` are, byte for
+   byte, the published documents with their published signatures
+   (`proposal.json.sig`, `extension-<n>.json.sig`), and there are
+   exactly the published extensions;
+3. `H(rows bytes)` is `rows_hash`; the tags are unique, number
    `eligible` and reach `record_root`; the rows reach `rows_root`;
-3. every ballot's `ballot_sig` verifies under its `vk` for
+4. every ballot's `ballot_sig` verifies under its `vk` for
    `ballot_msg(proposal_hash, tag, choice_id)`, and its choice is one of
    the proposal's;
-4. the tally and `ballots` recompute;
-5. each extension is timestamped (by its bundle) before the `closes_at`
+5. the tally and `ballots` recompute;
+6. each extension is timestamped (by its bundle) before the `closes_at`
    it extends, and they total at most 24 h.
 
 ### 8.5 Schemas
@@ -883,6 +892,12 @@ item.
 
 ## Changes
 
+- **0.13.10 (2026-11-04):** §3.3, §8.4: the proposal and extensions
+  that `results.json` carries must have the published signatures byte
+  for byte, not only the published documents; the votes site refuses
+  other results with `sig_mismatch` (VOTES-SITE 0.2.10). A service
+  already embeds the signatures it uploaded, so no change to the
+  messages, the documents or the vectors.
 - **0.13.9 (2026-11-04):** §3.4: a member vault from VAULT-MESSAGING
   0.83.10 starts no cooldown for a declined approval challenge and does
   not count it toward a pause, so declining a bogus approval request no
