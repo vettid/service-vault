@@ -741,12 +741,16 @@ admin's connection.
   *After the API key may have been misused* (bogus approvals the admins
   declined): rotate the API key first. A member vault from
   VAULT-MESSAGING 0.83.10 starts no cooldown and counts no pause for a
-  declined approval challenge, so the repair can be created at once. An
-  admin on an older vault release is in a 7-day cooldown for the
-  service's approval challenges, repairs included (three declines in 30
-  days pause them): ask them, out of band, to tap "Allow again" on the
-  service's connection in their app (`connection.asks.resume`) before
-  you create the `admin.repin` or `admin_set.*` approval.
+  declined approval challenge, but an older one starts a 7-day cooldown
+  of the service's approval challenges, repairs included, and three
+  declines in 30 days pause every ask of the connection; a pause, and
+  declines recorded before an upgrade, outlast the upgrade. So unless you
+  know an admin's vault carries 0.83.10 and their connection to the
+  service is not paused, ask them, out of band, to tap "Allow again" on
+  the service's connection in their app (`connection.asks.resume`)
+  before you create the `admin.repin` or `admin_set.*` approval. It is
+  harmless on any release: it clears declines and cooldowns and ends a
+  pause.
   `svctl approve -action admin.repin -payload '{"connection_id":"…"}'`
   runs it; `svctl approval` shows an approval that did not count as
   `not_counted: <connection> reason=…`, and each admin who did not

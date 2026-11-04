@@ -81,9 +81,10 @@ type askLog struct {
 // runaway or buggy application, cannot leave the admins unaskable for a
 // re-pin or a change to the admin set. It does not stop a holder of the
 // API key who means harm: repair approvals of their own can spend the
-// reserve, and one declined challenge starts the member vault's 7-day
-// cooldown for the service's approval challenges (VAULT-MESSAGING
-// §10.4.1), repairs included.
+// reserve. A declined approval challenge starts no cooldown in a member
+// vault from VAULT-MESSAGING 0.83.10; an older one still starts a 7-day
+// cooldown of the service's approval challenges, repairs included
+// (§10.4.1).
 const askReserve = 1
 
 // repairActions may use the whole askBudget (askReserve).

@@ -242,13 +242,15 @@ Creating an approval is rate-limited, and the admins' last approval ask
 of each 24 hours is kept for `admin.repin` and `admin_set.*`, so a burst
 of other approvals from a runaway or buggy application cannot leave the
 admins unaskable for a change to the set. A holder of the API key who
-means harm still can, with repair approvals of their own. Declining a
-bogus approval request costs nothing: a member vault from VAULT-MESSAGING
-0.83.10 starts no cooldown for a declined approval challenge and does not
-count it toward a pause (§10.4.1), so the service's real approval
+means harm still can, with repair approvals of their own. The decline
+of a bogus approval request costs nothing (the request itself used one
+of the admin's approval asks): a member vault from VAULT-MESSAGING
+0.83.10 starts no cooldown for a declined approval challenge and does
+not count it toward a pause (§10.4.1), so the service's real approval
 requests still reach that admin. An older member vault still starts a
-7-day cooldown of the service's approval challenges, which the admin
-lifts with "Allow again" on the service's connection.
+7-day cooldown of the service's approval challenges and counts the
+decline toward a pause, which the admin lifts with "Allow again" on the
+service's connection.
 
 The governance key is pinned at exactly these moments: when the
 connection first signs a response (the first sign-in), when
