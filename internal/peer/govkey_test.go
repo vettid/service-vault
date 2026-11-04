@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"github.com/vettid/service-vault/internal/peer/peertest"
+	"strings"
 	"testing"
 	"time"
 
@@ -189,10 +190,22 @@ func TestRotatedChainFollowedFromPins(t *testing.T) {
 	m.Send(peerwire.TypeConnAuthRotated, peerwire.ConnAuthRotatedBody([]*credwire.KeyRotation{r01, r12}))
 	f.pump()
 	pins(k2)
-	// A chain with no statement from the pins changes nothing.
+	// A repeated delivery, ending at the pins, changes nothing and is not
+	// logged as a rejection.
+	m.Send(peerwire.TypeConnAuthRotated, peerwire.ConnAuthRotatedBody([]*credwire.KeyRotation{r01, r12}))
+	f.pump()
+	pins(k2)
+	if strings.Contains(f.logs.String(), "auth_rotation_rejected") {
+		t.Fatalf("a repeated chain logged as rejected:\n%s", f.logs.String())
+	}
+	// A chain with no statement from the pins, ending before them, changes
+	// nothing and is logged as rejected.
 	m.Send(peerwire.TypeConnAuthRotated, peerwire.ConnAuthRotatedBody([]*credwire.KeyRotation{r01}))
 	f.pump()
 	pins(k2)
+	if !strings.Contains(f.logs.String(), "auth_rotation_rejected") {
+		t.Fatal("a chain ending before the pins was not logged as rejected")
+	}
 }
 
 func bytesOf(b byte) []byte {
