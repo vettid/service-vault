@@ -845,7 +845,7 @@ func (c *cli) proposal(ctx context.Context, args []string) error {
 		}
 		b, err = c.c.ExtendProposal(ctx, pid, id, body)
 		if err != nil {
-			fmt.Fprintf(c.err, "approval %s may be used up whatever the outcome: a new vote.extend needs a new approval\n", id)
+			fmt.Fprintf(c.err, "approval %s may be used up whatever the outcome (a refusal of the input itself, such as an outage not over, leaves it unused): a new vote.extend needs a new approval\n", id)
 		}
 	case "status", "publish", "close", "results":
 		if err := c.flags(flag.NewFlagSet("proposal "+sub, flag.ContinueOnError), args, 1); err != nil {
