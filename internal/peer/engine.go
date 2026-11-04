@@ -372,7 +372,7 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 		if d == ackAfterFlush {
 			p.mark(kindMsg, m.MsgID, []byte{1}, now.Add(DedupeRetention))
 		}
-		if d != noAck && d != redeliver {
+		if d != noAck {
 			p.handledUnacked(m.MsgID)
 		}
 		if err := p.flush(ctx); err != nil {
@@ -381,9 +381,6 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 		if d == noAck {
 			p.leaveUnacked(m, now) // it comes back after its lease
 			continue
-		}
-		if d == redeliver {
-			continue // it comes back after its lease; Caught does not wait for it
 		}
 		acks = append(acks, m.MsgID)
 		if ms, err := ulidMS(m.MsgID); err == nil && free && ms > p.lastMsgMS {
@@ -531,10 +528,6 @@ const (
 	ackAfterFlush disposition = iota
 	ackSeen                   // a msg_id seen before: acked again, nothing else
 	noAck                     // left for redelivery (an epoch not yet established, §6.3)
-	// redeliver is left for redelivery like noAck, but is known not to be
-	// a ballot of a vote that is closing (a request for a proposal not
-	// published, ErrRedeliver), so Caught does not wait for it.
-	redeliver
 )
 
 // handleMessage classifies one message only by its collect sender, its

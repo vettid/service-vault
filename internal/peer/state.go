@@ -327,12 +327,6 @@ type key struct{ kind, id string }
 func (p *Peer) markDirty(kind, id string) { p.dirty[key{kind, id}] = struct{}{} }
 
 // mark adds a write-once record (a dedupe marker, a cached response).
-// unmark drops a pending marker (one not yet flushed), so a message left
-// for redelivery is handled again when it comes back.
-func (p *Peer) unmark(kind, id string) {
-	p.extra = slices.DeleteFunc(p.extra, func(c Change) bool { return c.Kind == kind && c.ID == id })
-}
-
 func (p *Peer) mark(kind, id string, data []byte, exp time.Time) {
 	for i := range p.extra {
 		if p.extra[i].Kind == kind && p.extra[i].ID == id {
@@ -344,6 +338,12 @@ func (p *Peer) mark(kind, id string, data []byte, exp time.Time) {
 		}
 	}
 	p.extra = append(p.extra, Change{Kind: kind, ID: id, Data: data, Expires: exp, IfAbsent: true})
+}
+
+// unmark drops a pending marker (one not yet flushed), so a request left
+// unanswered is handled again if it is sent again with the same id.
+func (p *Peer) unmark(kind, id string) {
+	p.extra = slices.DeleteFunc(p.extra, func(c Change) bool { return c.Kind == kind && c.ID == id })
 }
 
 // recordData returns the current encoding of a record, or nil when it

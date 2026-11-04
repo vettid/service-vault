@@ -836,10 +836,10 @@ func TestHasPendingSignIn(t *testing.T) {
 	}
 }
 
-// A Votes error that wraps ErrRedeliver leaves only that request
-// unanswered and unacknowledged: the step does not fail, the next message
-// in the batch is handled, and the request comes back after its lease.
-func TestVoteRedeliver(t *testing.T) {
+// A Votes error that wraps ErrNoAnswer acknowledges the request without
+// answering it: the step does not fail, the next message in the batch is
+// handled, nothing holds the close, and it is not delivered again.
+func TestVoteNoAnswer(t *testing.T) {
 	f := newFixture(t)
 	rv := &recordVotes{}
 	f.votes = rv
@@ -851,7 +851,7 @@ func TestVoteRedeliver(t *testing.T) {
 	}
 	f.clk.Advance(2 * time.Minute) // past the start's leases
 	f.pump()
-	rv.fail = fmt.Errorf("held: %w", ErrRedeliver)
+	rv.fail = fmt.Errorf("held: %w", ErrNoAnswer)
 	held := m.Send("vote.cast", []byte(`{"n":1}`))
 	next := m.Send("vote.status", []byte(`{"n":2}`))
 	m.Step()
@@ -872,13 +872,13 @@ func TestVoteRedeliver(t *testing.T) {
 	if answered(held) || !answered(next) {
 		t.Fatalf("held answered %v, next answered %v", answered(held), answered(next))
 	}
-	// Not a ballot of a closing vote: the close does not wait for it.
 	if !f.caught(f.clk.Now().Add(-time.Millisecond)) {
-		t.Fatal("the held request holds the close")
+		t.Fatal("the unanswered request holds the close")
 	}
-	f.clk.Advance(2 * time.Minute) // past its lease
+	n := len(rv.reqs)
+	f.clk.Advance(2 * time.Minute) // past any lease
 	f.pump()
-	if !answered(held) {
-		t.Fatal("not delivered again after its lease")
+	if answered(held) || len(rv.reqs) != n {
+		t.Fatal("delivered again")
 	}
 }

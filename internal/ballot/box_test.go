@@ -347,8 +347,17 @@ func TestUnpublishedProposal(t *testing.T) {
 			t.Fatalf("%s: %v", typ, err)
 		}
 	}
-	if !strings.Contains(logs.String(), `"alarm":"vote_unpublished"`) {
-		t.Fatalf("no alarm: %s", logs.String())
+	// One alarm line for both requests (at most one per proposal per
+	// unpublishedAlarmEvery).
+	if c := strings.Count(logs.String(), `"alarm":"vote_unpublished"`); c != 1 {
+		t.Fatalf("%d alarm lines: %s", c, logs.String())
+	}
+	// Someone with no tag for it is refused as before.
+	if a := f.send("x9", TypeCast, body, f.during(), true); a.Code != CodeNotEligible {
+		t.Fatalf("non-member cast: %q", a.Code)
+	}
+	if a := f.send("x9", TypeStatus, q, f.during(), true); a.Code != CodeUnknownProposal {
+		t.Fatalf("non-member status: %q", a.Code)
 	}
 	f.open.Bundle = json.RawMessage(`{}`)
 	if a := f.send("c0", TypeStatus, q, f.during(), true); a.Code != "" {

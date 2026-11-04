@@ -742,6 +742,8 @@ func (s *Server) closeProposal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "not_closed")
 	case errors.Is(err, ballot.ErrNotCaught):
 		writeError(w, http.StatusServiceUnavailable, "collecting")
+	case errors.Is(err, ballot.ErrUnpublished):
+		writeError(w, http.StatusConflict, "not_published")
 	case errors.Is(err, ballot.ErrSiteMismatch):
 		s.log().Error("close proposal", "err", err)
 		writeError(w, http.StatusConflict, "site_mismatch")

@@ -394,15 +394,16 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
   `msg_ms` and `receipt_sig` come together or not at all, and every
   other member is always present. A proposal the service holds but has
   not published (with no bundle: before its first publication, or after
-  a restore of its table or a lost publication) gets **no answer** to a
-  `vote.status` or a `vote.cast`: the service leaves the message
-  unacknowledged, the relay delivers it again, and once the proposal is
-  published the next delivery is answered as usual (it is no ballot of a
-  vote that is closing, so no close waits for it). A refusal would be
-  final for the member's vault, and the fault is the service's; the
-  service raises an alarm for its operator (owner decision of
-  2026-11-04). A vault with no answer for 24 hours asks `vote.status`,
-  as it already does. The answer is signed:
+  a restore of its table or a lost publication) gets **no answer** from a
+  member to a `vote.status` or a `vote.cast` (the message is acknowledged
+  and dropped); anyone without a tag for it is refused as before. A
+  refusal would be final for the member's vault, and the fault is the
+  service's. With no answer the vault sends again on its own (VAULT-
+  MESSAGING §10.19.5, "Sending again", and `vote.status` after 24 hours),
+  so once the proposal is published a later request is answered as
+  usual. Meanwhile the vote is not counted: a close is refused until it
+  is published, so no ballot sent again later is left out. The service
+  raises an alarm for its operator (owner decision of 2026-11-04). The answer is signed:
   `status_sig = Sign(service IK, "vettid/vote/1/status\x00", lp(proposal_id) ‖ lp(record_tag) ‖ H(ballot_leaf))`,
   where with no ballot `H` is taken of the empty string.
   A vault asks it for a proposal on the site's index that it doesn't
@@ -865,10 +866,11 @@ item.
 
 ## Changes
 
-- **0.13.7 (2026-11-04):** §4.2: a `vote.cast` or `vote.status` for a
-  proposal the service holds but has not published is not answered (it is
-  redelivered until the proposal is published), where it was refused
-  `not_eligible` or `unknown_proposal`, final for the member's vault. No
+- **0.13.7 (2026-11-04):** §4.2: a member's `vote.cast` or `vote.status`
+  for a proposal the service holds but has not published is not answered
+  (the vault sends again), where it was refused `not_eligible` or
+  `unknown_proposal`, final for the member's vault; such a vote is not
+  closed until it is published. No
   change to the messages, the documents or the vectors.
 - **0.13.6 (2026-11-04):** §6 "Durability": the write-once store answers
   duplicates and `vote.status`; a cast is written only while the

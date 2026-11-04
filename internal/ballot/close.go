@@ -95,6 +95,13 @@ func (m *Manager) Close(ctx context.Context, id string) (*ResultsSummary, error)
 		if m.Now().Before(end) {
 			return nil, ErrNotClosed
 		}
+		// Held but not published: members' requests are not answered
+		// meanwhile (ErrUnpublished), so counting now would leave out
+		// ballots they will send again once it is published.
+		if o.Bundle == nil {
+			m.log().Error("close of an unpublished proposal: publish it", "alarm", "vote_unpublished", "proposal_id", id)
+			return nil, ErrUnpublished
+		}
 		// Before counting: the extensions are the site's (an extension
 		// published but not stored moves the close). Nothing is counted
 		// while they can't be reconciled.

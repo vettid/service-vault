@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/vettid/service-vault/internal/peer"
 	"github.com/vettid/service-vault/sdk/go/servicevault"
@@ -168,23 +170,54 @@ type Box struct {
 	Sign func(label string, msg []byte) ([]byte, error)
 	// Log is where an unpublished proposal's alarm goes; nil discards it.
 	Log *slog.Logger
+
+	mu   sync.Mutex
+	held map[string]*heldAlarm // the unpublished alarm, by proposal
 }
 
-// ErrUnpublished is a vote.cast or vote.status for a proposal the service
-// holds but has not published (its anchor is missing, for example after a
-// restore of the table or a lost publication). Such a request is not
-// answered: the message stays unacknowledged, the relay delivers it again,
-// and once the proposal is published (POST /v1/proposals/{id}/publish)
-// the next delivery is answered as usual. A refusal would be final for the
-// member's vault (BALLOT-PROTOCOL §4.2; owner decision of 2026-11-04).
-var ErrUnpublished = fmt.Errorf("ballot: the proposal is held but not published: %w", peer.ErrRedeliver)
+// ErrUnpublished is a vote.cast or vote.status from a member for a
+// proposal the service holds but has not published (its anchor is
+// missing, for example after a restore of the table or a lost
+// publication). It is acknowledged and not answered (peer.ErrNoAnswer): a
+// refusal would be final for the member's vault, and with no answer the
+// vault sends again on its own, so once the proposal is published (POST
+// /v1/proposals/{id}/publish) a later request is answered as usual
+// (BALLOT-PROTOCOL §4.2; owner decision of 2026-11-04). Close refuses it
+// too, so no ballot sent meanwhile is left out of a count.
+var ErrUnpublished = fmt.Errorf("ballot: the proposal is held but not published: %w", peer.ErrNoAnswer)
 
-// unpublished raises the alarm for a request held back by ErrUnpublished.
+// unpublishedAlarmEvery is how often the vote_unpublished alarm is logged
+// for one proposal: members send again every hour or so, so once per
+// request would flood the log.
+const unpublishedAlarmEvery = 10 * time.Minute
+
+// unpublished raises the alarm for a request held back by ErrUnpublished,
+// at most once per proposal per unpublishedAlarmEvery, with how many were
+// held since the last line.
 func (b *Box) unpublished(id string) error {
-	if b.Log != nil {
-		b.Log.Error("vote request for an unpublished proposal: publish it", "alarm", "vote_unpublished", "proposal_id", id)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.held == nil {
+		b.held = map[string]*heldAlarm{}
+	}
+	h := b.held[id]
+	if h == nil {
+		h = &heldAlarm{}
+		b.held[id] = h
+	}
+	h.n++
+	if now := time.Now(); h.at.IsZero() || now.Sub(h.at) >= unpublishedAlarmEvery {
+		if b.Log != nil {
+			b.Log.Error("vote requests for an unpublished proposal: publish it", "alarm", "vote_unpublished", "proposal_id", id, "requests", h.n)
+		}
+		h.at, h.n = now, 0
 	}
 	return ErrUnpublished
+}
+
+type heldAlarm struct {
+	at time.Time
+	n  int
 }
 
 var _ peer.Votes = (*Box)(nil)
@@ -251,9 +284,13 @@ func (b *Box) castOnce(ctx context.Context, r *peer.VoteRequest) (peer.VoteAnswe
 		return b.refuse(nil, r, nil, CodeNotEligible, reqHash, body.ProposalID)
 	}
 	// Held but not published (§3.3): no member should have it yet, so one
-	// that does got it before a restore or a lost publication. Not
-	// answered until it is published (ErrUnpublished).
+	// that does got it before a restore or a lost publication. A member is
+	// not answered until it is published (ErrUnpublished); anyone else is
+	// refused as before.
 	if o.Bundle == nil {
+		if _, member := o.Members[r.ConnectionID]; !member {
+			return b.refuse(nil, r, nil, CodeNotEligible, reqHash, body.ProposalID)
+		}
 		return peer.VoteAnswer{}, b.unpublished(body.ProposalID)
 	}
 	p, err := o.Parsed()
@@ -479,7 +516,10 @@ func (b *Box) status(ctx context.Context, r *peer.VoteRequest) (peer.VoteAnswer,
 		return b.refuse(nil, r, nil, CodeUnknownProposal, reqHash, body.ProposalID)
 	}
 	if o.Bundle == nil {
-		// As for a cast: not final, not answered until it is published.
+		// As for a cast: a member is not answered until it is published.
+		if _, member := o.Members[r.ConnectionID]; !member {
+			return b.refuse(nil, r, nil, CodeUnknownProposal, reqHash, body.ProposalID)
+		}
 		return peer.VoteAnswer{}, b.unpublished(body.ProposalID)
 	}
 	p, err := o.Parsed()

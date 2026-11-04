@@ -94,11 +94,11 @@ func (p *Peer) dispatch(ctx context.Context, c *Connection, in *envelope.Inner, 
 		p.audit("challenge_unsupported", c.ID)
 	default:
 		if isVoteType(in.Type) && p.cfg.Votes != nil {
-			if err := p.vote(ctx, c, in, ikey, msgID, now); errors.Is(err, ErrRedeliver) {
-				// Not seen: when the relay delivers it again it is
-				// handled again, not taken for a retransmission (§8.2).
+			if err := p.vote(ctx, c, in, ikey, msgID, now); errors.Is(err, ErrNoAnswer) {
+				// Acknowledged, unanswered and not marked seen: a resend
+				// with the same id is handled again, not taken for a
+				// retransmission (§8.2).
 				p.unmark(kindInner, ikey)
-				return redeliver, nil
 			} else if err != nil {
 				return 0, err
 			}
