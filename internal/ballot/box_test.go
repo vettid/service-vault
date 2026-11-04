@@ -7,7 +7,9 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"github.com/vettid/service-vault/vote"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -333,17 +335,44 @@ func TestStatus(t *testing.T) {
 func TestUnpublishedProposal(t *testing.T) {
 	f := newBoxFixture(t)
 	f.open.Bundle = nil
+	var logs bytes.Buffer
+	f.box.Log = slog.New(slog.NewJSONHandler(&logs, nil))
 	body, _ := f.castBody("c0", "yes")
-	if a := f.send("c0", TypeCast, body, f.during(), true); a.Code != CodeNotEligible {
-		t.Fatalf("cast: %q", a.Code)
-	}
 	q := map[string]string{"proposal_id": f.p.ProposalID}
-	if a := f.send("c0", TypeStatus, q, f.during(), true); a.Code != CodeUnknownProposal {
-		t.Fatalf("status: %q", a.Code)
+	// Held but not published: no answer (acknowledged; the vault sends again),
+	// never a final refusal, and an alarm for the operator.
+	for typ, b := range map[string]any{TypeCast: body, TypeStatus: q} {
+		j, _ := json.Marshal(b)
+		if _, err := f.box.Vote(context.Background(), &peer.VoteRequest{ConnectionID: "c0", Active: true, Type: typ, Body: j, MsgMS: f.during()}); !errors.Is(err, ErrUnpublished) {
+			t.Fatalf("%s: %v", typ, err)
+		}
+	}
+	// One alarm line for both requests (at most one per proposal per
+	// unpublishedAlarmEvery).
+	if c := strings.Count(logs.String(), `"alarm":"vote_unpublished"`); c != 1 {
+		t.Fatalf("%d alarm lines: %s", c, logs.String())
+	}
+	// Someone with no tag for it is refused as before.
+	if a := f.send("x9", TypeCast, body, f.during(), true); a.Code != CodeNotEligible {
+		t.Fatalf("non-member cast: %q", a.Code)
+	}
+	if a := f.send("x9", TypeStatus, q, f.during(), true); a.Code != CodeUnknownProposal {
+		t.Fatalf("non-member status: %q", a.Code)
 	}
 	f.open.Bundle = json.RawMessage(`{}`)
 	if a := f.send("c0", TypeStatus, q, f.during(), true); a.Code != "" {
 		t.Fatalf("status once published: %q", a.Code)
+	}
+	// The held cast, sent again once published, gets its receipt; a
+	// second resend (a new request) gets the same one, and the tag has
+	// one ballot.
+	a1 := f.send("c0", TypeCast, body, f.during(), true)
+	a2 := f.send("c0", TypeCast, body, f.during()+60_000, true)
+	if a1.Code != "" || a2.Code != "" || !bytes.Equal(a1.Body, a2.Body) {
+		t.Fatalf("resends: %q %q, same %v", a1.Code, a2.Code, bytes.Equal(a1.Body, a2.Body))
+	}
+	if n := len(f.store.ballots); n != 1 {
+		t.Fatalf("%d ballots stored", n)
 	}
 }
 

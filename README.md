@@ -96,6 +96,25 @@ destination.
 - `reconnect_slow`: such a reconnect is unanswered after a day. It
   stays open for 7 days, since a locked member vault answers when it is
   unlocked.
+- `vote_unpublished`: members sent vote requests for a proposal the
+  service holds but has not published, or its close was refused (at most
+  one line per proposal per 10 minutes). They get no answer, and the vote
+  can't close, until it is published (`POST /v1/proposals/{id}/publish`).
+  Publish at once. Member vaults send an unanswered cast again at 1, 5
+  and 30 minutes, then hourly, and stop at the close, so if the close is
+  less than about 1 h 10 min away, also extend the vote (a verified
+  extension restarts each vault's schedule; the service logs a WARN when
+  it publishes that late). An extension needs the admins' `vote.extend`
+  approval, an outage of over an hour that is over and inside the window
+  (from the loss to the publication), a request more than a minute
+  before the close and at most 24 h in all; a publication lost within
+  the last hour or so before the close can't be covered, and casts that
+  went unanswered then may not be counted. If publishing fails, fix the
+  publisher (Rekor, the timestamp authority, the votes site) and publish
+  again: the close stays refused until it succeeds, and publishing works
+  at any time, also after the close. A member vault restored meanwhile
+  may show the vote as being checked until the member opens it again or
+  checks it in the app.
 - `ballot_not_counted`: a stored ballot failed the count's re-check
   (tag, credential signature or time) and was left out; the ERROR line
   names the proposal and the tag.

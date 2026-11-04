@@ -43,10 +43,17 @@ type VoteAnswer struct {
 }
 
 // Votes answers vote.* requests. An error is a storage failure: the
-// message is not acknowledged, and the relay delivers it again.
+// batch is not acknowledged, and the relay delivers it again. An error
+// that wraps ErrNoAnswer acknowledges the request without answering it.
 type Votes interface {
 	Vote(ctx context.Context, r *VoteRequest) (VoteAnswer, error)
 }
+
+// ErrNoAnswer, wrapped by a Votes error, acknowledges the request and
+// sends no answer, without failing the batch. Its inner id is not marked
+// seen, so a resend with the same id is handled again (§8.2); the member's
+// vault sends again on its own when it gets no answer.
+var ErrNoAnswer = errors.New("peer: not answered")
 
 // isVoteType reports whether typ is one of the vote family (§4.2).
 func isVoteType(typ string) bool { return strings.HasPrefix(typ, "vote.") }

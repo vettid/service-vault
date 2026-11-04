@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.13.6 (2026-11-04)
+**Status:** 0.13.7 (2026-11-04)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -392,9 +392,28 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
   tag (as in `vote.proposal`), and the ballot with its receipt if one is
   recorded. `ballot` is `{vk, choice_id, ballot_sig, pad}`; `ballot`,
   `msg_ms` and `receipt_sig` come together or not at all, and every
-  other member is always present. A proposal not yet published (with no
-  bundle) is `unknown_proposal`, so a vault can check one learned this
-  way without the site. The answer is signed:
+  other member is always present. A proposal the service holds but has
+  not published (with no bundle: before its first publication, or after
+  a restore of its table or a lost publication) gets **no answer** from a
+  member to a `vote.status` or a `vote.cast` (the message is acknowledged
+  and dropped); anyone without a tag for it is refused as before. A
+  refusal would be final for the member's vault, and the fault is the
+  service's. With no answer the vault sends again on its own (VAULT-
+  MESSAGING §10.19.5, "Sending again", and `vote.status` after 24 hours),
+  so once the proposal is published a later request is answered as
+  usual. Meanwhile the vote is not counted: a close is refused until it
+  is published. A vault sends an unanswered cast again at 1, 5 and 30
+  minutes, then hourly, and stops at `closes_at`, so a cast may not be
+  sent again between a late publication and the close: it would then be
+  refused `closed`. The service raises an alarm (owner decision of
+  2026-11-04), and the operator publishes at once; if the close is less
+  than about 1 h 10 min away, the operator also extends the vote (§10.2),
+  since a verified extension restarts each vault's schedule. An
+  extension needs the admins' approval, an outage of over an hour that is
+  over and inside the window (here, from the loss to the publication), a
+  request more than a minute before the close and at most 24 h in all,
+  so a publication lost within the last hour or so before the close
+  cannot be covered: those casts may be left out, which is accepted. The answer is signed:
   `status_sig = Sign(service IK, "vettid/vote/1/status\x00", lp(proposal_id) ‖ lp(record_tag) ‖ H(ballot_leaf))`,
   where with no ballot `H` is taken of the empty string.
   A vault asks it for a proposal on the site's index that it doesn't
@@ -857,6 +876,13 @@ item.
 
 ## Changes
 
+- **0.13.7 (2026-11-04):** §4.2: a member's `vote.cast` or `vote.status`
+  for a proposal the service holds but has not published is not answered
+  (the vault sends again), where it was refused `not_eligible` or
+  `unknown_proposal`, final for the member's vault; such a vote is not
+  closed until it is published, and the operator extends it when that
+  is less than about 1 h 10 min before its close. No
+  change to the messages, the documents or the vectors.
 - **0.13.6 (2026-11-04):** §6 "Durability": the write-once store answers
   duplicates and `vote.status`; a cast is written only while the
   proposal is unchanged since it was read, so none lands after the count

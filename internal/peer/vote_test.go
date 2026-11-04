@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -832,5 +833,52 @@ func TestHasPendingSignIn(t *testing.T) {
 	f.clk.Advance(2 * time.Minute)
 	if f.p.HasPendingSignIn(cid) {
 		t.Fatal("pending past its exp")
+	}
+}
+
+// A Votes error that wraps ErrNoAnswer acknowledges the request without
+// answering it: the step does not fail, the next message in the batch is
+// handled, nothing holds the close, and it is not delivered again.
+func TestVoteNoAnswer(t *testing.T) {
+	f := newFixture(t)
+	rv := &recordVotes{}
+	f.votes = rv
+	f.p.cfg.Votes = rv
+	m := f.member(10)
+	cid := f.connect(m, "t")
+	if !f.signIn(m, cid) {
+		t.Fatal("sign-in failed")
+	}
+	f.clk.Advance(2 * time.Minute) // past the start's leases
+	f.pump()
+	rv.fail = fmt.Errorf("held: %w", ErrNoAnswer)
+	held := m.Send("vote.cast", []byte(`{"n":1}`))
+	next := m.Send("vote.status", []byte(`{"n":2}`))
+	m.Step()
+	if _, err := f.p.Step(context.Background(), 0); err != nil {
+		t.Fatalf("the step failed: %v", err)
+	}
+	answered := func(id string) bool {
+		for _, typ := range []string{"vote.cast", "vote.status"} {
+			for _, in := range m.Received(typ) {
+				if in.Re == id {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	m.Step()
+	if answered(held) || !answered(next) {
+		t.Fatalf("held answered %v, next answered %v", answered(held), answered(next))
+	}
+	if !f.caught(f.clk.Now().Add(-time.Millisecond)) {
+		t.Fatal("the unanswered request holds the close")
+	}
+	n := len(rv.reqs)
+	f.clk.Advance(2 * time.Minute) // past any lease
+	f.pump()
+	if answered(held) || len(rv.reqs) != n {
+		t.Fatal("delivered again")
 	}
 }

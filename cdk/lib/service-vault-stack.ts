@@ -101,6 +101,8 @@ export const ALARMS = {
   reconnect_slow: 'A reconnect after a table restore is unanswered after a day: the member\'s vault may be locked; it stays open for 7 days',
   /** The ballot copy's key is missing or not the copy's (cmd/service-vault ballotCopySeal): votes are off, the rest runs. */
   ballots_off: 'Ballots are off: the ballot copy\'s key is missing or not the one its ballots are under; restore the keystore item ballot-copy-key from a backup of the table (README "Rotating the record key")',
+  /** A vote request or a close for a proposal held but not published (internal/ballot/box.go, close.go): members get no answer and it can't close until it is published. */
+  vote_unpublished: 'Members sent vote requests for a proposal the service holds but has not published (after a restore or a lost publication), or its close was refused: they get no answer until it is published (POST /v1/proposals/{id}/publish): publish at once, and extend the vote too if its close is less than about 70 minutes away (README "vote_unpublished")',
   /** A stored ballot failed the count's re-check and was left out (internal/ballot/close.go): the results may differ from what members were told. */
   ballot_not_counted: 'A stored ballot was not counted: it failed the count\'s re-check (tag, credential signature or time); look at the ERROR line for the proposal and tag',
   /** A removed connection left fewer admins than the threshold (internal/approval/approval.go): no approval can pass. */

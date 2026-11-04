@@ -869,3 +869,31 @@ func TestMaxEligibleFitsOneItem(t *testing.T) {
 		t.Logf("%s record: %d bytes at %d members", kind, len(data), MaxEligible)
 	}
 }
+
+// A proposal held but not published (its bundle lost, after a restore) is
+// not counted: its members' requests go unanswered meanwhile, so a count
+// would leave out ballots they send again once it is published.
+func TestCloseRefusesUnpublished(t *testing.T) {
+	ctx := context.Background()
+	m, _, _ := newManager(t)
+	m.Catcher = &fakeCatcher{caught: true}
+	c, err := m.Create(ctx, "apv", input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, err := m.Store.OpenProposal(ctx, c.ProposalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.Bundle = nil
+	if err := m.Store.SaveProposal(ctx, o, false); err != nil {
+		t.Fatal(err)
+	}
+	m.Now = func() time.Time { return time.Unix(input().ClosesAt, 0).Add(2 * CollectMargin) }
+	if _, err := m.Close(ctx, c.ProposalID); !errors.Is(err, ErrUnpublished) {
+		t.Fatalf("close: %v", err)
+	}
+	if pr, _ := m.Results(ctx, c.ProposalID); pr != nil {
+		t.Fatal("counted")
+	}
+}
