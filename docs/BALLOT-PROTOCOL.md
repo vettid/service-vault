@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.13.5 (2026-11-04)
+**Status:** 0.13.6 (2026-11-04)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -495,6 +495,19 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
   store outside the service vault's table (one object per tag), so a
   table restore can't lose it or let a second ballot in. After a
   restore, the service rebuilds the table's ballots from that store.
+  That store is the one source of what was accepted: duplicates
+  (`already_voted`, a repeated cast) and `vote.status` are answered from
+  it, not from the table. A ballot is written only while the proposal
+  record is unchanged since the cast read it (the write checks its
+  version atomically), so none can be written after the close's
+  publication has changed it, and the count, which starts after that, lists
+  every ballot there will be. A cast whose proposal changed meanwhile
+  is read again once; a second change leaves it unacknowledged, and
+  the relay delivers it again. The count re-checks each ballot: its tag matches its
+  item, `cast_sig` verifies under the credential key stored with it,
+  and its `msg_ms` is inside the window; one that fails isn't counted.
+  `counts.unhandled` and `counts.removed` are fixed when collection
+  ends, in the same save as `published`, and a retried count uses them.
 - **The record** of each connection's tag, ballot, `cast_sig` and
   `msg_ms` is kept for the organisation's records (owner decision
   2026-10-29), sealed like the service vault's other records. It is not
@@ -844,6 +857,12 @@ item.
 
 ## Changes
 
+- **0.13.6 (2026-11-04):** §6 "Durability": the write-once store answers
+  duplicates and `vote.status`; a cast is written only while the
+  proposal is unchanged since it was read, so none lands after the count
+  starts; the count re-checks each ballot's tag, `cast_sig` and time;
+  `counts.unhandled` and `counts.removed` are fixed when collection
+  ends. No change to the messages, the documents or the vectors.
 - **0.13.5 (2026-11-04):** §3.2: a proposal document has at most
   100,000 eligible members, and this service creates none over 1,000
   (its store), and a `proposal.create` approval is refused before the

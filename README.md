@@ -96,6 +96,9 @@ destination.
 - `reconnect_slow`: such a reconnect is unanswered after a day. It
   stays open for 7 days, since a locked member vault answers when it is
   unlocked.
+- `ballot_not_counted`: a stored ballot failed the count's re-check
+  (tag, credential signature or time) and was left out; the ERROR line
+  names the proposal and the tag.
 - `ballots_off`: the ballot copy's key (`ballot-copy-key`) is missing
   while proposals or copied ballots exist, or isn't the key the copy's
   ballots are under (the copy holds a key check). The daemon runs with

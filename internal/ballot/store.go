@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/vettid/service-vault/internal/peer"
 )
@@ -29,11 +30,31 @@ func Kinds() []string { return []string{KindProposal, KindBallot, KindResults} }
 // the table can't lose a ballot or let a second one in.
 type Copy interface {
 	// PutOnce writes data under (proposal, tag) unless something is
-	// there, and returns what is stored: data, or the earlier bytes.
-	PutOnce(ctx context.Context, proposalID string, tag, data []byte) ([]byte, error)
+	// there, and returns what is stored: data, or the earlier bytes. With
+	// a guard, the write happens only while the guarded record still has
+	// the version the guard names, atomically with the write: otherwise
+	// nothing is written and the error is ErrGuard. An item already there
+	// is returned whatever the guard says.
+	PutOnce(ctx context.Context, proposalID string, tag, data []byte, g *Guard) ([]byte, error)
+	// Get returns the bytes stored under (proposal, tag), read
+	// consistently, and whether there are any.
+	Get(ctx context.Context, proposalID string, tag []byte) ([]byte, bool, error)
 	// List returns every stored ballot of a proposal.
 	List(ctx context.Context, proposalID string) ([]CopyItem, error)
 }
+
+// Guard conditions a copy write on a record of the record store: the
+// write is made only if the record (Kind, ID) still has Version. A cast
+// is guarded by the proposal it read, so that a change to the proposal
+// (the close's publication, §7) after the read stops the write.
+type Guard struct {
+	Kind, ID string
+	Version  uint64
+}
+
+// ErrGuard is a guarded write that was not made: the record's version is
+// no longer the guard's.
+var ErrGuard = errors.New("ballot: the guarded record changed since it was read")
 
 // CopyItem is one stored ballot: its tag and its bytes.
 type CopyItem struct {
@@ -112,9 +133,10 @@ func (s *RecordStore) SaveProposal(ctx context.Context, o *OpenProposal, create 
 	return nil
 }
 
-// Ballot implements BoxStore.
+// Ballot implements BoxStore. The copy is the one source: the record
+// store's row of a ballot may be missing (a restore) and is not read.
 func (s *RecordStore) Ballot(ctx context.Context, proposalID string, tag []byte) (*BallotRecord, error) {
-	data, ok, err := s.Records.Get(ctx, KindBallot, ballotID(proposalID, tag))
+	data, ok, err := s.Copy.Get(ctx, proposalID, tag)
 	if err != nil || !ok {
 		return nil, err
 	}
@@ -131,12 +153,15 @@ func decodeBallot(data []byte) (*BallotRecord, error) {
 
 // PutBallot implements BoxStore. The copy decides which ballot a tag has:
 // it is written first, and the record store then holds the same.
-func (s *RecordStore) PutBallot(ctx context.Context, proposalID string, rec *BallotRecord) (*BallotRecord, error) {
+//
+// With a guard the copy is written only while the guarded record is
+// unchanged (ErrGuard otherwise, nothing written).
+func (s *RecordStore) PutBallot(ctx context.Context, proposalID string, rec *BallotRecord, g *Guard) (*BallotRecord, error) {
 	data, err := json.Marshal(rec)
 	if err != nil {
 		return nil, err
 	}
-	stored, err := s.Copy.PutOnce(ctx, proposalID, rec.Ballot.RecordTag, data)
+	stored, err := s.Copy.PutOnce(ctx, proposalID, rec.Ballot.RecordTag, data, g)
 	if err != nil {
 		return nil, err
 	}
@@ -151,6 +176,20 @@ func (s *RecordStore) PutBallot(ctx context.Context, proposalID string, rec *Bal
 		return nil, err
 	}
 	return got, nil
+}
+
+// HealBallot writes a ballot's row in the record store if it has none, for
+// a row lost in a restore; an existing row is left as it is.
+func (s *RecordStore) HealBallot(ctx context.Context, proposalID string, rec *BallotRecord) error {
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	err = s.Records.Apply(ctx, []peer.Change{{Kind: KindBallot, ID: ballotID(proposalID, rec.Ballot.RecordTag), Data: data, IfAbsent: true}})
+	if errors.Is(err, peer.ErrConflict) {
+		return nil
+	}
+	return err
 }
 
 // Rebuild puts back into the record store every ballot of a proposal the
@@ -185,13 +224,13 @@ type SealedCopy struct {
 }
 
 // PutOnce implements Copy.
-func (c *SealedCopy) PutOnce(ctx context.Context, proposalID string, tag, data []byte) ([]byte, error) {
+func (c *SealedCopy) PutOnce(ctx context.Context, proposalID string, tag, data []byte, g *Guard) ([]byte, error) {
 	id := ballotID(proposalID, tag)
 	sealed, err := c.Seal(KindBallot, id, data)
 	if err != nil {
 		return nil, err
 	}
-	stored, err := c.Inner.PutOnce(ctx, proposalID, tag, sealed)
+	stored, err := c.Inner.PutOnce(ctx, proposalID, tag, sealed, g)
 	if err != nil {
 		return nil, err
 	}
@@ -199,6 +238,19 @@ func (c *SealedCopy) PutOnce(ctx context.Context, proposalID string, tag, data [
 		return data, nil
 	}
 	return c.Open(KindBallot, id, stored)
+}
+
+// Get implements Copy.
+func (c *SealedCopy) Get(ctx context.Context, proposalID string, tag []byte) ([]byte, bool, error) {
+	stored, ok, err := c.Inner.Get(ctx, proposalID, tag)
+	if err != nil || !ok {
+		return nil, false, err
+	}
+	data, err := c.Open(KindBallot, ballotID(proposalID, tag), stored)
+	if err != nil {
+		return nil, false, err
+	}
+	return data, true, nil
 }
 
 // List implements Copy.
@@ -218,13 +270,22 @@ func (c *SealedCopy) List(ctx context.Context, proposalID string) ([]CopyItem, e
 	return out, nil
 }
 
-// MemCopy is an in-memory Copy, for tests and local runs.
+// MemCopy is an in-memory Copy, for tests only. With Records set, a
+// guarded write checks the guarded record's version there; that check is
+// not atomic with the record store (only MemCopy's own state is locked),
+// unlike the guard of store.Ballots.
 type MemCopy struct {
+	// Records is where a guard's record is read (a peer.RecordGetter).
+	Records peer.Store
+
+	mu    sync.Mutex
 	items map[string]CopyItem
 }
 
 // PutOnce implements Copy.
-func (m *MemCopy) PutOnce(_ context.Context, proposalID string, tag, data []byte) ([]byte, error) {
+func (m *MemCopy) PutOnce(ctx context.Context, proposalID string, tag, data []byte, g *Guard) ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.items == nil {
 		m.items = map[string]CopyItem{}
 	}
@@ -232,13 +293,39 @@ func (m *MemCopy) PutOnce(_ context.Context, proposalID string, tag, data []byte
 	if prev, ok := m.items[k]; ok {
 		return prev.Data, nil
 	}
+	if g != nil && m.Records != nil {
+		rg, ok := m.Records.(peer.RecordGetter)
+		if !ok {
+			return nil, errors.New("ballot: the record store returns no versions")
+		}
+		r, found, err := rg.GetRecord(ctx, g.Kind, g.ID)
+		if err != nil {
+			return nil, err
+		}
+		if !found || r.Version != g.Version {
+			return nil, ErrGuard
+		}
+	}
 	m.items[k] = CopyItem{Tag: append([]byte(nil), tag...), Data: append([]byte(nil), data...)}
 	return data, nil
+}
+
+// Get implements Copy.
+func (m *MemCopy) Get(_ context.Context, proposalID string, tag []byte) ([]byte, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	it, ok := m.items[ballotID(proposalID, tag)]
+	if !ok {
+		return nil, false, nil
+	}
+	return append([]byte(nil), it.Data...), true, nil
 }
 
 // Any returns one stored ballot of any proposal but skip, if there is
 // one (store.Ballots.Any).
 func (m *MemCopy) Any(_ context.Context, skip string) (string, CopyItem, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	for k, v := range m.items {
 		if pid, _, _ := strings.Cut(k, "|"); pid != skip {
 			return pid, v, true, nil
@@ -249,6 +336,8 @@ func (m *MemCopy) Any(_ context.Context, skip string) (string, CopyItem, bool, e
 
 // List implements Copy.
 func (m *MemCopy) List(_ context.Context, proposalID string) ([]CopyItem, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	var out []CopyItem
 	for k, v := range m.items {
 		if len(k) > len(proposalID) && k[:len(proposalID)+1] == proposalID+"|" {

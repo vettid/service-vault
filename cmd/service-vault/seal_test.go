@@ -383,7 +383,7 @@ func TestBallotCopyKeyCheckOverOlderCopy(t *testing.T) {
 	}
 	older := func() *ballot.MemCopy {
 		cp := &ballot.MemCopy{}
-		if _, err := cp.PutOnce(ctx, "p", tag, sealed); err != nil {
+		if _, err := cp.PutOnce(ctx, "p", tag, sealed, nil); err != nil {
 			t.Fatal(err)
 		}
 		return cp
@@ -416,7 +416,7 @@ func TestBallotCopyKeyCheckOverOlderCopy(t *testing.T) {
 	if _, err := ballotCopySeal(ctx, plainKMS{}, "k", blobs, st, cp); err != nil {
 		t.Fatalf("the key the ballots are under: %v", err)
 	}
-	if checks, _ := cp.List(ctx, copyKeyCheckID); len(checks) != 1 {
+	if _, ok, _ := cp.Get(ctx, copyKeyCheckID, []byte{0}); !ok {
 		t.Fatal("no check after the right key")
 	}
 }

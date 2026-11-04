@@ -20,8 +20,12 @@ import { Construct } from 'constructs';
 /** The port the daemon's private API listens on (SV_LISTEN). */
 export const API_PORT = 8080;
 
-/** DynamoDB actions of the task role, on the table only. */
-export const TABLE_ACTIONS = ['GetItem', 'PutItem', 'UpdateItem', 'DeleteItem', 'Query', 'Scan'] as const;
+/**
+ * DynamoDB actions of the task role, on the table only. ConditionCheckItem
+ * is for the guarded ballot write, whose transaction checks the proposal's
+ * version in this table (IAM authorises each item of a transaction).
+ */
+export const TABLE_ACTIONS = ['GetItem', 'PutItem', 'UpdateItem', 'DeleteItem', 'Query', 'Scan', 'ConditionCheckItem'] as const;
 
 /**
  * The calls the daemon makes on the ballots table: a conditional put, a
@@ -97,6 +101,8 @@ export const ALARMS = {
   reconnect_slow: 'A reconnect after a table restore is unanswered after a day: the member\'s vault may be locked; it stays open for 7 days',
   /** The ballot copy's key is missing or not the copy's (cmd/service-vault ballotCopySeal): votes are off, the rest runs. */
   ballots_off: 'Ballots are off: the ballot copy\'s key is missing or not the one its ballots are under; restore the keystore item ballot-copy-key from a backup of the table (README "Rotating the record key")',
+  /** A stored ballot failed the count's re-check and was left out (internal/ballot/close.go): the results may differ from what members were told. */
+  ballot_not_counted: 'A stored ballot was not counted: it failed the count\'s re-check (tag, credential signature or time); look at the ERROR line for the proposal and tag',
   /** A removed connection left fewer admins than the threshold (internal/approval/approval.go): no approval can pass. */
   admins_short: 'An admin connection was removed and fewer admins than the threshold remain: no approval can pass until the operator recovers the set (README "Recovering admins")',
 } as const;
