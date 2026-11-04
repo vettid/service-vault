@@ -251,3 +251,40 @@ func TestRotatedChainEndingAtGovKeyMovesAuthKey(t *testing.T) {
 		t.Fatalf("logged as rejected:\n%s", f.logs.String())
 	}
 }
+
+// A chain that ends at AuthKey but cannot move a GovKey left behind (a
+// key change with no chain, which only a re-pin moves) is still logged.
+func TestRotatedChainLeavingGovKeyLogged(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(12)
+	cid := f.connect(m, "tag")
+	ctx := context.Background()
+	if _, err := f.p.Authenticate(ctx, cid, "Approve", peerwire.PurposeApproval, 2*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	f.pump()
+	r, err := peerwire.SignConnAuth(m.Cred, f.keys.IKPublic(), m.IK.Public().(ed25519.PublicKey), m.Challenges[len(m.Challenges)-1], f.clk.Now(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Send(peerwire.TypeConnAuthResponse, r.Marshal())
+	f.pump()
+	k1 := m.Cred
+	k2 := ed25519.NewKeyFromSeed(bytesOf(0x72))
+	g := ed25519.NewKeyFromSeed(bytesOf(0x73)) // an unrelated governance pin
+	r12, err := credwire.NewKeyRotation(k1, k2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.p.conns[cid].AuthKey = append([]byte(nil), k2.Public().(ed25519.PublicKey)...)
+	f.p.conns[cid].GovKey = append([]byte(nil), g.Public().(ed25519.PublicKey)...)
+	m.Send(peerwire.TypeConnAuthRotated, peerwire.ConnAuthRotatedBody([]*credwire.KeyRotation{r12}))
+	f.pump()
+	c := f.p.conns[cid]
+	if !ed25519.PublicKey(c.AuthKey).Equal(k2.Public()) || !ed25519.PublicKey(c.GovKey).Equal(g.Public()) {
+		t.Fatalf("pins moved: %x %x", c.AuthKey, c.GovKey)
+	}
+	if !strings.Contains(f.logs.String(), "auth_rotation_rejected") {
+		t.Fatal("a chain the governance pin cannot follow was not logged")
+	}
+}

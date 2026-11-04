@@ -307,11 +307,14 @@ func (p *Peer) connAuthRotated(c *Connection, body []byte) {
 		}
 	}
 	if !ok {
-		// A chain that ends at a pinned key is a repeated delivery (the
+		// A chain that ends at the pinned keys is a repeated delivery (the
 		// member vault queues the chain before each ballot it sends) or one
 		// already followed: nothing has changed, and it is not a rejection
-		// (VAULT-MESSAGING 0.83.11 §10.4).
-		if last := ed25519.PublicKey(chain[len(chain)-1].New); last.Equal(ed25519.PublicKey(c.AuthKey)) || last.Equal(ed25519.PublicKey(c.GovKey)) {
+		// (VAULT-MESSAGING 0.83.11 §10.4). Every pin must be at its end: a
+		// governance key left behind that the chain cannot move is logged.
+		last := ed25519.PublicKey(chain[len(chain)-1].New)
+		atEnd := func(pin []byte) bool { return len(pin) == 0 || last.Equal(ed25519.PublicKey(pin)) }
+		if atEnd(c.AuthKey) && atEnd(c.GovKey) {
 			return
 		}
 		p.audit("auth_rotation_rejected", c.ID)
