@@ -15,7 +15,7 @@ require (
 	github.com/digitorus/timestamp v0.0.0-20231217203849-220c5c2851b7
 	github.com/sigstore/timestamp-authority/v2 v2.1.3
 	github.com/vettid/vettid-relay v0.0.0-20261027144202-528df9b0bf76
-	github.com/vettid/vettid-vault v0.0.0-20261030185125-eda711ff0a13
+	github.com/vettid/vettid-vault v0.0.0-20261104162927-4e1750f37928
 	rsc.io/qr v0.2.0
 )
 
