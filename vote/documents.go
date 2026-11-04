@@ -19,6 +19,13 @@ const MaxWindow = 7 * 24 * 3600
 // MaxProposal is the largest proposal document, in bytes (§3.1).
 const MaxProposal = 64 << 10
 
+// MaxEligible is the most eligible members a proposal may have (§3.2;
+// chosen, not in the spec). Its results carry a row for every tag, and
+// the rows travel in one upload to the votes site, which takes it within
+// Lambda's 6 MB request: past about 15,000 rows the upload no longer
+// fits, so the results of a bigger proposal could never be published.
+const MaxEligible = 15000
+
 // MaxExtensionDoc is the largest extension document, in bytes (§8.5).
 const MaxExtensionDoc = 64 << 10
 
@@ -298,7 +305,7 @@ func (p *Proposal) Validate() error {
 		return bad("outage rule")
 	case p.RecordAt > p.OpensAt || p.OpensAt >= p.ClosesAt || p.ClosesAt-p.OpensAt > MaxWindow:
 		return bad("times")
-	case p.Eligible < 1 || len(p.RecordRoot) != HashLen:
+	case p.Eligible < 1 || p.Eligible > MaxEligible || len(p.RecordRoot) != HashLen:
 		return bad("record")
 	}
 	seen, abstain := map[string]bool{}, false

@@ -184,6 +184,10 @@ func (m *Manager) Create(ctx context.Context, approvalID string, in ProposalInpu
 		// (§3.1), and none would get it.
 		return nil, &ErrInput{errors.New("ballot: no eligible members")}
 	}
+	if len(conns) > vote.MaxEligible {
+		// Its results could not be published (vote.MaxEligible).
+		return nil, &ErrInput{fmt.Errorf("ballot: more than %d eligible members", vote.MaxEligible)}
+	}
 	sort.Strings(conns)
 	members := map[string]Member{}
 	tags := make([][]byte, 0, len(conns))

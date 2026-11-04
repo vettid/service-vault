@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.13.4 (2026-11-04)
+**Status:** 0.13.5 (2026-11-04)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -131,7 +131,11 @@ receives.
   `record_secret`. The member's tag is
   `record_tag = H("vettid/vote/1/record\x00" ‖ proposal_id ‖ record_secret)`.
   `record_root` is the RFC 6962 root (§8.2) over the tags, sorted, and
-  `eligible` their number.
+  `eligible` their number, at most 15,000: the results carry a row for
+  every tag, and the votes site takes the rows in one upload, which past
+  about 15,000 rows no longer fits its 6 MB request limit. The service
+  refuses to create a bigger proposal, and a proposal document with more
+  is invalid. **(chosen; not in the spec.)**
 - **Delivery:** each member receives, in `vote.proposal` (§4.1), their
   `record_secret` and an inclusion proof of their tag. The vault checks
   the proof at once against `record_root` (RFC 9162 §2.1.3.2).
@@ -374,8 +378,9 @@ malformed to form them signs `H(the request body)`, pad included. `pad`
 is in no published document. A receiver checks neither its type, its
 value nor its length, and does not require it, so a sender without it
 still works; VAULT-MESSAGING §5.3's strict-JSON rules (no duplicate
-names, depth, UTF-8) still apply to it (the service does not yet refuse
-a duplicate name in `vote.cast`). The service keeps nothing of it. The vault's `vote.evidence` export (VAULT-MESSAGING)
+names, UTF-8, byte order mark, unpaired surrogate escapes) still apply
+to it, and the service refuses a `vote.cast` or `vote.status` body that
+breaks them, as it does any other malformed body. The service keeps nothing of it. The vault's `vote.evidence` export (VAULT-MESSAGING)
 holds the service's answers as the service sent them, byte for byte, so
 the service's padding is what keeps those exports one size for every
 choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
@@ -701,7 +706,8 @@ SubjectPublicKeyInfo; `?` marks a field present only where stated.
 
 If the relay's status page shows an outage of more than 1 hour within
 the window, the service may extend `closes_at` by the outage, rounded up
-to the hour, by extensions totalling at most 24 h. Each extension is
+to the hour, once the outage is over (its `to` is not after the time the
+service creates the extension, so its length is known), by extensions totalling at most 24 h. Each extension is
 published and anchored before the `closes_at` it extends, listed in the
 site's index, and sent as `vote.extended`; a vault also learns of it
 from the index. An extension needs the admins' approval, as creating a
@@ -824,6 +830,11 @@ item.
 
 ## Changes
 
+- **0.13.5 (2026-11-04):** §3.2: at most 15,000 eligible members. §10.2:
+  an extension is created only once its outage is over. §4.2: the
+  service now refuses a `vote.cast` or `vote.status` body that breaks
+  VAULT-MESSAGING §5.3's strict rules. No change to the messages, the
+  documents' fields or the vectors.
 - **0.13.4 (2026-11-04):** §3.4: a denial may be an automatic one, from
   a vault that suppressed the challenge, and counts as a denial (owner
   decision of 2026-11-04); creating approvals is rate-limited, and each admin's last

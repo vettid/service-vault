@@ -191,6 +191,9 @@ func runProposalApproval(t *testing.T, ctx context.Context, st peer.Store, pager
 		}{approvalID, ext})
 		return string(b)
 	}
+	// An outage is extended for once it is over: the service's clock is
+	// moved past its end (the approval's stays real).
+	bm.Now = func() time.Time { return time.Unix(ext.Outage.To+60, 0) }
 	changed := ext
 	changed.Outage.Source += "x"
 	path := "/v1/proposals/" + pid + "/extend"

@@ -136,6 +136,15 @@ func TestProposalBounds(t *testing.T) {
 	if _, err := EncodeProposal(p); err != nil {
 		t.Fatalf("empty quorum text: %v", err)
 	}
+	p.Eligible = MaxEligible
+	if err := p.Validate(); err != nil {
+		t.Fatalf("eligible at the cap: %v", err)
+	}
+	p.Eligible = MaxEligible + 1
+	if err := p.Validate(); err == nil {
+		t.Fatal("eligible over the cap")
+	}
+	p.Eligible = 1
 	// Canonical, every field in bounds, over 64 KiB.
 	p.Text = strings.Repeat("\x01", 16<<10)
 	big, err := encodeCanonical(p)

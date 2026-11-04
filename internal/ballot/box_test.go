@@ -432,3 +432,28 @@ func TestChoicePadLength(t *testing.T) {
 		}
 	}
 }
+
+// A vote.cast or vote.status body that breaks VAULT-MESSAGING §5.3's
+// strict rules is refused, as any malformed body: a duplicate name (which
+// encoding/json would read as the last one) or an unpaired surrogate
+// escape, even in the unchecked pad.
+func TestStrictVoteBodies(t *testing.T) {
+	f := newBoxFixture(t)
+	body, _ := f.castBody("c1", "yes")
+	j, _ := json.Marshal(body)
+	for name, raw := range map[string]string{
+		"duplicate choice": `{"choice_id":"no",` + string(j[1:]),
+		"lone surrogate":   `{"pad":"\ud800",` + string(j[1:]),
+	} {
+		if a := f.send("c1", TypeCast, json.RawMessage(raw), f.during(), true); a.Code != CodeBadBallot {
+			t.Errorf("cast %s: %q", name, a.Code)
+		}
+	}
+	if a := f.send("c1", TypeCast, json.RawMessage(j), f.during(), true); a.Code != "" {
+		t.Fatalf("the strict body: %q", a.Code)
+	}
+	st := `{"proposal_id":"` + body["proposal_id"] + `","proposal_id":"` + body["proposal_id"] + `"}`
+	if a := f.send("c1", TypeStatus, json.RawMessage(st), f.during(), true); a.Code != CodeUnknownProposal {
+		t.Errorf("status duplicate: %q", a.Code)
+	}
+}

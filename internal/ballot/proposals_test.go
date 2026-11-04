@@ -6,8 +6,10 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/vettid/service-vault/internal/ballot/ballottest"
 	"github.com/vettid/service-vault/vote"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -275,6 +277,14 @@ func TestCreateRefusals(t *testing.T) {
 	if _, err := m.Create(ctx, "apv", input()); !errors.As(err, &ei) {
 		t.Fatalf("no eligible members: %v", err)
 	}
+	big := make(fakeRoster, vote.MaxEligible+1)
+	for i := range big {
+		big[i] = fmt.Sprintf("c%05d", i)
+	}
+	m.Roster = big
+	if _, err := m.Create(ctx, "apv", input()); !errors.As(err, &ei) {
+		t.Fatalf("more than %d eligible members: %v", vote.MaxEligible, err)
+	}
 	m.Roster = roster
 	m.Publisher = nil
 	if _, err := m.Create(ctx, "apv", input()); !errors.Is(err, ErrNoPublisher) {
@@ -469,6 +479,13 @@ func TestExtend(t *testing.T) {
 		}
 	}
 	s.sent = nil
+	// An outage still going on: its length is not known yet.
+	now := m.Now().Unix()
+	going := vote.Outage{From: now - 5400, To: now + 60, Source: outage.Source}
+	if _, err := m.Extend(ctx, c.ProposalID, "apv", ExtensionInput{ClosesAt: in.ClosesAt + 7200, Outage: going}); !errors.As(err, &ei) ||
+		!strings.Contains(err.Error(), "hasn't ended") {
+		t.Fatalf("an outage not over: %v", err)
+	}
 	e, err := m.Extend(ctx, c.ProposalID, "apv", ExtensionInput{ClosesAt: in.ClosesAt + 7200, Outage: outage})
 	if err != nil || e.N != 1 {
 		t.Fatalf("Extend: %v", err)
