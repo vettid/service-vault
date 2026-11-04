@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.13.2 (2026-11-03)
+**Status:** 0.13.3 (2026-11-04)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -215,9 +215,16 @@ from it or by the other admins' `admin.repin`) does not count, here or
 when the service counts again before using the approval: someone else
 may now hold that credential. An admin whose key changed is re-pinned only
 by the other admins' approval, who first ask them out of band whether they
-recovered or replaced their vault's keys at the time the summary names; a
-member's app will show its own credential-key fingerprint in a later
-release.
+reset their credential at the time the summary names (the expected
+cause: a rotation of the key moves the governance key by its verified
+chain, with no re-pin), and then compare the summary's `new key` with the credential-key
+fingerprint that admin reads to them from their own app (Settings → Vault
+status; VAULT-MESSAGING 0.83.8 §10.8). It is the same string: the first
+16 hex digits, in 4 groups of 4, of SHA-256("vettid/vms/2/ck-fp" || key).
+An app that does not show it yet (one built before VAULT-MESSAGING
+0.83.8) shows no fingerprint, and then the question alone is the check.
+Before approving an `admin_set.add`, the admins likewise compare its
+`cred key` with the fingerprint the new admin reads from their own app.
 
 The governance key is pinned at exactly these moments: when the
 connection first signs a response (the first sign-in), when
@@ -802,6 +809,13 @@ item.
 
 ## Changes
 
+- **0.13.3 (2026-11-04):** §3.4: before re-pinning an admin whose key
+  changed, the other admins compare the summary's `new key` with the
+  credential-key fingerprint that admin reads from their own app
+  (VAULT-MESSAGING 0.83.8 §10.8, the same string as the summaries), and
+  the admins compare an `admin_set.add`'s `cred key` the same way. No
+  change to the service, the messages, the documents or the vectors; a
+  test pins the fingerprint to VAULT-MESSAGING's §16 vector.
 - **0.13.2 (2026-11-03):** §4.2: every JSON object that carries a
   member's `choice_id` also carries `pad` (the `vote.cast` body, and the
   `ballot` of the `vote.status` answer and of the `already_voted`
