@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.13.7 (2026-11-04)
+**Status:** 0.13.8 (2026-11-04)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -253,8 +253,9 @@ approval showed, and only if it is still the connection's), when the
 bootstrap makes the first admin (only if none is pinned yet), and, for an
 admin from before the governance key existed, at the migration (the key of
 the earliest signed approval in the audit log, else the current credential
-key). Nothing else moves it but a rotation chain that starts at it and the
-other admins' `admin.repin`. Known limits: the migration can only use
+key). Nothing else moves it but a rotation chain verified from it
+(VAULT-MESSAGING 0.83.9 §10.4: the chain may start before it, and is
+followed from it) and the other admins' `admin.repin`. Known limits: the migration can only use
 the approvals the audit log holds, so an admin who never approved is pinned
 to whatever key they hold then; and the fingerprints shown to the admins
 are 64 bits (16 hex digits) of a SHA-256.
@@ -876,6 +877,11 @@ item.
 
 ## Changes
 
+- **0.13.8 (2026-11-04):** §3.4: the governance key follows a rotation
+  chain verified from it, which may start before it (VAULT-MESSAGING
+  0.83.9 §10.4), so two credential-key rotations with no sign-in between
+  no longer read as a key change that needs a re-pin. No change to the
+  messages, the documents or the vectors.
 - **0.13.7 (2026-11-04):** §4.2: a member's `vote.cast` or `vote.status`
   for a proposal the service holds but has not published is not answered
   (the vault sends again), where it was refused `not_eligible` or

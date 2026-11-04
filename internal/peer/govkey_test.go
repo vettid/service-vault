@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vettid/vettid-vault/vms/credwire"
 	"github.com/vettid/vettid-vault/vms/peerwire"
 )
 
@@ -141,4 +142,57 @@ func TestGovKeyBeforeAndAfterPeerLoad(t *testing.T) {
 	if ci, ok := p.Connection(cid); !ok || !ed25519.PublicKey(ci.GovKey).Equal(m.Cred.Public()) {
 		t.Fatal("the governance key did not survive the restart")
 	}
+}
+
+// A delivered connection.authenticate.rotated moves both pins along the
+// chain from each (VAULT-MESSAGING 0.83.9 §10.4): a second delivery that
+// starts before the pins, as the member's vault sends it, is followed from
+// them; a chain that never starts at a pin moves nothing.
+func TestRotatedChainFollowedFromPins(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "tag")
+	ctx := context.Background()
+	if _, err := f.p.Authenticate(ctx, cid, "Approve", peerwire.PurposeApproval, 2*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	f.pump()
+	r, err := peerwire.SignConnAuth(m.Cred, f.keys.IKPublic(), m.IK.Public().(ed25519.PublicKey), m.Challenges[len(m.Challenges)-1], f.clk.Now(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Send(peerwire.TypeConnAuthResponse, r.Marshal())
+	f.pump()
+	k0 := m.Cred
+	k1 := ed25519.NewKeyFromSeed(bytesOf(0x51))
+	k2 := ed25519.NewKeyFromSeed(bytesOf(0x52))
+	r01, _ := credwire.NewKeyRotation(k0, k1)
+	r12, _ := credwire.NewKeyRotation(k1, k2)
+	pins := func(want ed25519.PrivateKey) {
+		t.Helper()
+		c := f.p.conns[cid]
+		if !ed25519.PublicKey(c.AuthKey).Equal(want.Public()) || !ed25519.PublicKey(c.GovKey).Equal(want.Public()) {
+			t.Fatalf("pins %x %x", c.AuthKey, c.GovKey)
+		}
+	}
+	pins(k0)
+	m.Send(peerwire.TypeConnAuthRotated, peerwire.ConnAuthRotatedBody([]*credwire.KeyRotation{r01}))
+	f.pump()
+	pins(k1)
+	// The next chain starts at the key the member last signed with (K0).
+	m.Send(peerwire.TypeConnAuthRotated, peerwire.ConnAuthRotatedBody([]*credwire.KeyRotation{r01, r12}))
+	f.pump()
+	pins(k2)
+	// A chain with no statement from the pins changes nothing.
+	m.Send(peerwire.TypeConnAuthRotated, peerwire.ConnAuthRotatedBody([]*credwire.KeyRotation{r01}))
+	f.pump()
+	pins(k2)
+}
+
+func bytesOf(b byte) []byte {
+	out := make([]byte, 32)
+	for i := range out {
+		out[i] = b
+	}
+	return out
 }

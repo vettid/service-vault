@@ -297,7 +297,9 @@ func (p *Peer) connAuthRotated(c *Connection, body []byte) {
 			c.AuthKey, ok = end, true
 		}
 	}
-	// The governance key follows a chain that starts at it, and no other.
+	// The governance key follows a chain verified from it (VAULT-MESSAGING
+	// 0.83.9 §10.4: statements before it, which the sender may still
+	// include, are skipped), and no other.
 	if len(c.GovKey) > 0 {
 		if end, err := credwire.FollowChain(c.GovKey, chain); err == nil {
 			c.GovKey, ok = end, true
