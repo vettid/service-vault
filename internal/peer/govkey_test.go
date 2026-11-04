@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"github.com/vettid/service-vault/internal/peer/peertest"
+	"strings"
 	"testing"
 	"time"
 
@@ -189,10 +190,22 @@ func TestRotatedChainFollowedFromPins(t *testing.T) {
 	m.Send(peerwire.TypeConnAuthRotated, peerwire.ConnAuthRotatedBody([]*credwire.KeyRotation{r01, r12}))
 	f.pump()
 	pins(k2)
-	// A chain with no statement from the pins changes nothing.
+	// A repeated delivery, ending at the pins, changes nothing and is not
+	// logged as a rejection.
+	m.Send(peerwire.TypeConnAuthRotated, peerwire.ConnAuthRotatedBody([]*credwire.KeyRotation{r01, r12}))
+	f.pump()
+	pins(k2)
+	if strings.Contains(f.logs.String(), "auth_rotation_rejected") {
+		t.Fatalf("a repeated chain logged as rejected:\n%s", f.logs.String())
+	}
+	// A chain with no statement from the pins, ending before them, changes
+	// nothing and is logged as rejected.
 	m.Send(peerwire.TypeConnAuthRotated, peerwire.ConnAuthRotatedBody([]*credwire.KeyRotation{r01}))
 	f.pump()
 	pins(k2)
+	if !strings.Contains(f.logs.String(), "auth_rotation_rejected") {
+		t.Fatal("a chain ending before the pins was not logged as rejected")
+	}
 }
 
 func bytesOf(b byte) []byte {
@@ -201,4 +214,77 @@ func bytesOf(b byte) []byte {
 		out[i] = b
 	}
 	return out
+}
+
+// After a re-pin the governance key may be ahead of the sign-in key: a
+// chain that ends at GovKey still moves AuthKey to it, and is no
+// rejection (VAULT-MESSAGING 0.83.11 §10.4).
+func TestRotatedChainEndingAtGovKeyMovesAuthKey(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(11)
+	cid := f.connect(m, "tag")
+	ctx := context.Background()
+	if _, err := f.p.Authenticate(ctx, cid, "Approve", peerwire.PurposeApproval, 2*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	f.pump()
+	r, err := peerwire.SignConnAuth(m.Cred, f.keys.IKPublic(), m.IK.Public().(ed25519.PublicKey), m.Challenges[len(m.Challenges)-1], f.clk.Now(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Send(peerwire.TypeConnAuthResponse, r.Marshal())
+	f.pump()
+	k1 := m.Cred
+	k2 := ed25519.NewKeyFromSeed(bytesOf(0x62))
+	r12, err := credwire.NewKeyRotation(k1, k2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.p.conns[cid].GovKey = append([]byte(nil), k2.Public().(ed25519.PublicKey)...) // as a re-pin to K2 leaves it
+	m.Send(peerwire.TypeConnAuthRotated, peerwire.ConnAuthRotatedBody([]*credwire.KeyRotation{r12}))
+	f.pump()
+	c := f.p.conns[cid]
+	if !ed25519.PublicKey(c.AuthKey).Equal(k2.Public()) || !ed25519.PublicKey(c.GovKey).Equal(k2.Public()) {
+		t.Fatalf("pins %x %x, want K2 for both", c.AuthKey, c.GovKey)
+	}
+	if strings.Contains(f.logs.String(), "auth_rotation_rejected") {
+		t.Fatalf("logged as rejected:\n%s", f.logs.String())
+	}
+}
+
+// A chain that ends at AuthKey but cannot move a GovKey left behind (a
+// key change with no chain, which only a re-pin moves) is still logged.
+func TestRotatedChainLeavingGovKeyLogged(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(12)
+	cid := f.connect(m, "tag")
+	ctx := context.Background()
+	if _, err := f.p.Authenticate(ctx, cid, "Approve", peerwire.PurposeApproval, 2*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	f.pump()
+	r, err := peerwire.SignConnAuth(m.Cred, f.keys.IKPublic(), m.IK.Public().(ed25519.PublicKey), m.Challenges[len(m.Challenges)-1], f.clk.Now(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Send(peerwire.TypeConnAuthResponse, r.Marshal())
+	f.pump()
+	k1 := m.Cred
+	k2 := ed25519.NewKeyFromSeed(bytesOf(0x72))
+	g := ed25519.NewKeyFromSeed(bytesOf(0x73)) // an unrelated governance pin
+	r12, err := credwire.NewKeyRotation(k1, k2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.p.conns[cid].AuthKey = append([]byte(nil), k2.Public().(ed25519.PublicKey)...)
+	f.p.conns[cid].GovKey = append([]byte(nil), g.Public().(ed25519.PublicKey)...)
+	m.Send(peerwire.TypeConnAuthRotated, peerwire.ConnAuthRotatedBody([]*credwire.KeyRotation{r12}))
+	f.pump()
+	c := f.p.conns[cid]
+	if !ed25519.PublicKey(c.AuthKey).Equal(k2.Public()) || !ed25519.PublicKey(c.GovKey).Equal(g.Public()) {
+		t.Fatalf("pins moved: %x %x", c.AuthKey, c.GovKey)
+	}
+	if !strings.Contains(f.logs.String(), "auth_rotation_rejected") {
+		t.Fatal("a chain the governance pin cannot follow was not logged")
+	}
 }
