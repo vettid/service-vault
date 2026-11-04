@@ -239,9 +239,9 @@ MEMBER-SERVICE-PLAN §4.5 and §5.2; the operator's view is in the README,
   of ordinary approvals from a runaway or buggy application cannot leave
   the admins unaskable for a change to the admin set. It does not stop a
   holder of the API key who means harm: repair approvals of their own
-  spend the fifth, and one declined challenge starts the member vault's
-  7-day cooldown for all of the service's approval challenges
-  (VAULT-MESSAGING §10.4.1). Creating an approval is also limited per
+  spend the fifth. A declined approval challenge starts no cooldown in a
+  member vault from VAULT-MESSAGING 0.83.10 (an older one still starts a
+  7-day cooldown, §10.4.1). Creating an approval is also limited per
   group of actions (the repair ones, and all the others), by default 2
   per hour and 4 per 24 hours each, in fixed windows
   (`SV_APPROVAL_LIMITS`): past it, `rate_limited` (429), counted once

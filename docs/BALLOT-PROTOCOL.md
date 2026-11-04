@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.13.8 (2026-11-04)
+**Status:** 0.13.9 (2026-11-04)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -242,9 +242,13 @@ Creating an approval is rate-limited, and the admins' last approval ask
 of each 24 hours is kept for `admin.repin` and `admin_set.*`, so a burst
 of other approvals from a runaway or buggy application cannot leave the
 admins unaskable for a change to the set. A holder of the API key who
-means harm still can: with repair approvals of their own, or with one
-declined challenge, which starts the member vault's 7-day cooldown for
-all of the service's approval challenges (VAULT-MESSAGING §10.4.1).
+means harm still can, with repair approvals of their own. Declining a
+bogus approval request costs nothing: a member vault from VAULT-MESSAGING
+0.83.10 starts no cooldown for a declined approval challenge and does not
+count it toward a pause (§10.4.1), so the service's real approval
+requests still reach that admin. An older member vault still starts a
+7-day cooldown of the service's approval challenges, which the admin
+lifts with "Allow again" on the service's connection.
 
 The governance key is pinned at exactly these moments: when the
 connection first signs a response (the first sign-in), when
@@ -877,6 +881,11 @@ item.
 
 ## Changes
 
+- **0.13.9 (2026-11-04):** §3.4: a member vault from VAULT-MESSAGING
+  0.83.10 starts no cooldown for a declined approval challenge and does
+  not count it toward a pause, so declining a bogus approval request no
+  longer blocks the service's real ones. No change to the messages, the
+  documents or the vectors.
 - **0.13.8 (2026-11-04):** §3.4: the governance key follows a rotation
   chain verified from it, which may start before it (VAULT-MESSAGING
   0.83.9 §10.4), so two credential-key rotations with no sign-in between
