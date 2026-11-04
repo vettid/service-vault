@@ -552,6 +552,8 @@ var approvalStatusCodes = map[string]int{
 	approval.CodeAnswered:          http.StatusConflict,
 	approval.CodeAskBudget:         http.StatusConflict,
 	approval.CodeRateLimited:       http.StatusTooManyRequests,
+	approval.CodeOutageNotOver:     http.StatusUnprocessableEntity,
+	approval.CodeTooManyEligible:   http.StatusBadRequest,
 }
 
 func (s *Server) approvalError(w http.ResponseWriter, what string, err error) {
@@ -639,6 +641,8 @@ func (s *Server) createProposal(w http.ResponseWriter, r *http.Request) {
 		// Kept, but not published: POST /v1/proposals/{id}/publish retries.
 		s.log().Error("create proposal: not published", "proposal_id", np.ProposalID, "err", err)
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "not_published", "proposal_id": np.ProposalID})
+	case errors.Is(err, ballot.ErrTooManyEligible):
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "too_many_eligible", "max_eligible": ballot.MaxEligible})
 	case errors.As(err, &ei):
 		writeError(w, http.StatusBadRequest, "invalid_proposal")
 	case errors.Is(err, ballot.ErrNoPublisher):
@@ -705,6 +709,9 @@ func (s *Server) extendProposal(w http.ResponseWriter, r *http.Request) {
 	case approvalProblem(w, err):
 	case errors.Is(err, ballot.ErrUnknownProposal):
 		writeError(w, http.StatusNotFound, "not_found")
+	case errors.Is(err, ballot.ErrOutageNotOver):
+		// As creating its approval answers (approval.CodeOutageNotOver).
+		writeError(w, http.StatusUnprocessableEntity, "outage_not_over")
 	case errors.As(err, &ei):
 		writeError(w, http.StatusBadRequest, "invalid_extension")
 	case errors.Is(err, ballot.ErrTooLate):

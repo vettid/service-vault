@@ -19,6 +19,11 @@ const MaxWindow = 7 * 24 * 3600
 // MaxProposal is the largest proposal document, in bytes (§3.1).
 const MaxProposal = 64 << 10
 
+// MaxEligible is the most eligible members a proposal document may
+// carry, as a member's vault bounds it (VAULT-MESSAGING 0.83.3 §10.19.4 step 2:
+// the same on both sides). A service may allow fewer (ballot.MaxEligible).
+const MaxEligible = 100000
+
 // MaxExtensionDoc is the largest extension document, in bytes (§8.5).
 const MaxExtensionDoc = 64 << 10
 
@@ -298,7 +303,7 @@ func (p *Proposal) Validate() error {
 		return bad("outage rule")
 	case p.RecordAt > p.OpensAt || p.OpensAt >= p.ClosesAt || p.ClosesAt-p.OpensAt > MaxWindow:
 		return bad("times")
-	case p.Eligible < 1 || len(p.RecordRoot) != HashLen:
+	case p.Eligible < 1 || p.Eligible > MaxEligible || len(p.RecordRoot) != HashLen:
 		return bad("record")
 	}
 	seen, abstain := map[string]bool{}, false

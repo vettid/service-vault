@@ -324,6 +324,24 @@ func ExtensionProposalID(payload []byte) (string, error) {
 	return x.ProposalID, nil
 }
 
+// ErrOutageNotOver is an extension whose outage has not ended (its to is
+// after now): its length is not known yet, so it is neither approved nor
+// made (§10.2).
+var ErrOutageNotOver = errors.New("ballot: the outage hasn't ended yet")
+
+// ExtensionOutageOver checks that a vote.extend payload's outage has
+// ended at now; ErrOutageNotOver if not.
+func ExtensionOutageOver(payload []byte, now time.Time) error {
+	var x ExtensionPayload
+	if err := parseCanonical(payload, &x); err != nil {
+		return err
+	}
+	if x.Outage.To > now.Unix() {
+		return ErrOutageNotOver
+	}
+	return nil
+}
+
 func checkExtension(x *ExtensionPayload) error {
 	if len(x.ProposalID) != 26 || strings.Trim(x.ProposalID, "0123456789ABCDEFGHJKMNPQRSTVWXYZ") != "" {
 		return errors.New("ballot: bad proposal id")

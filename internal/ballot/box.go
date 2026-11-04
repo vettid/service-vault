@@ -7,11 +7,24 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"github.com/vettid/service-vault/vote"
 	"strings"
 
 	"github.com/vettid/service-vault/internal/peer"
+	"github.com/vettid/service-vault/sdk/go/servicevault"
+	"github.com/vettid/service-vault/vote"
 )
+
+// strictBody reports whether a member's vote body follows VAULT-MESSAGING
+// §5.3's strict rules: valid UTF-8, no byte order mark, no duplicate
+// member names and no unpaired surrogate escape at any depth, nothing
+// after the value. The session layer's parser already drops a message
+// that breaks most of them; an unpaired surrogate escape gets through it
+// (decoded as U+FFFD), and encoding/json would keep the last of two
+// equal names, so the box checks again (BALLOT-PROTOCOL §4.2).
+func strictBody(body []byte) bool {
+	_, err := servicevault.CanonicalJSON(body)
+	return err == nil
+}
 
 // The ballot box's side of the members' requests (BALLOT-PROTOCOL §4.2,
 // §6): vote.cast and vote.status, answered with signed receipts, status
@@ -206,7 +219,7 @@ func (b *Box) cast(ctx context.Context, r *peer.VoteRequest) (peer.VoteAnswer, e
 func (b *Box) castOnce(ctx context.Context, r *peer.VoteRequest) (peer.VoteAnswer, error) {
 	var body castBody
 	reqHash := sum(r.Body) // until the ballot's leaf is known
-	if json.Unmarshal(r.Body, &body) != nil || !vote.ValidProposalID(body.ProposalID) {
+	if !strictBody(r.Body) || json.Unmarshal(r.Body, &body) != nil || !vote.ValidProposalID(body.ProposalID) {
 		return b.refuse(nil, r, nil, CodeBadBallot, reqHash)
 	}
 	o, err := b.Store.OpenProposal(ctx, body.ProposalID)
@@ -428,7 +441,7 @@ func (b *Box) status(ctx context.Context, r *peer.VoteRequest) (peer.VoteAnswer,
 	var body struct {
 		ProposalID string `json:"proposal_id"`
 	}
-	if json.Unmarshal(r.Body, &body) != nil || !vote.ValidProposalID(body.ProposalID) {
+	if !strictBody(r.Body) || json.Unmarshal(r.Body, &body) != nil || !vote.ValidProposalID(body.ProposalID) {
 		return b.refuse(nil, r, nil, CodeUnknownProposal, sum(r.Body))
 	}
 	reqHash := sum([]byte(body.ProposalID))
