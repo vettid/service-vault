@@ -200,6 +200,10 @@ func (f *fakeApprovals) Status(_ context.Context, id string) (*approval.Status, 
 		st.RemindNeeded = []string{}
 		st.Status = approval.StatusApproved
 		st.Approvals = []approval.Approver{{ConnectionID: "c1", At: exp, Counted: true}}
+		if f.req.Summary == "Refused" {
+			st.Status, st.Approvals = approval.StatusDenied, nil
+			st.Denials = []approval.Denier{{ConnectionID: "c1", At: exp}}
+		}
 	}
 	return st, nil
 }
@@ -390,6 +394,12 @@ func TestApprove(t *testing.T) {
 	if code != exitOK || out != want {
 		t.Fatalf("exit %d\n%s\nstderr %s", code, out, errOut)
 	}
+	// A denial may be the admin's or their vault's (a muted or paused
+	// service), so it reads as not approved, never as declined.
+	code, out, _ = newFixture(t).run(t, "approve", "-action", "contract_template.change", "-summary", "Refused", "-payload", `{}`)
+	if code != exitOutcome || !strings.Contains(out, "\nnot_approved_by: c1\n") || strings.Contains(out, "denied_by") {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
 	// The summary of proposal.create and vote.extend is the service's:
 	// none is given.
 	if code, _, errOut := newFixture(t).run(t, "approve", "-action", "proposal.create", "-summary", "x", "-payload", "{}"); code != exitUsage || !strings.Contains(errOut, "takes no -summary") {
@@ -512,7 +522,7 @@ func TestRemindAdminsAuditHealth(t *testing.T) {
 		t.Fatalf("answered: exit %d %s", code, errOut)
 	}
 	if code, _, errOut := f.run(t, "remind", "-force", "spent", "a1"); code != exitError || !strings.Contains(errOut, "ask_budget") ||
-		!strings.Contains(errOut, "5 approval challenges still counting") {
+		!strings.Contains(errOut, "4 approval challenges still counting, 5 for admin.repin") {
 		t.Fatalf("ask budget: exit %d %s", code, errOut)
 	}
 	if code, _, _ := f.run(t, "remind", "-force", ",", "a1"); code != exitUsage {

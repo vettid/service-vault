@@ -226,13 +226,26 @@ MEMBER-SERVICE-PLAN §4.5 and §5.2; the operator's view is in the README,
   (ids only), queues the `approval.challenge_expired` webhook with the
   save, and the approval's status lists the admin in `remind_needed`
   (admins asked, not answered, holding no live challenge) until a
-  reminder sends a new one. An admin with 5 approval challenges still
-  counting (the member vault's ask gate) is skipped by every send and
+  reminder sends a new one. An admin at the ask limit (approval
+  challenges still counting, against the member vault's ask gate of 5
+  per 24 hours) is skipped by every send and
   shows in `remind_needed`, and in an optional `ask_budget` list
   (`[{connection_id, next_ask_at}]`, on the create, remind and status
   answers) with when it can be asked again; creating an approval answers `ask_budget`
   (409) when fewer admins than the threshold can be asked, and a plain
-  reminder when none can, before anything is sent or withdrawn.
+  reminder when none can, before anything is sent or withdrawn. For
+  every action but `admin.repin`, `admin_set.add` and `admin_set.remove`,
+  the limit is 4: the fifth is kept for those repair actions, so a burst
+  of ordinary approvals from a runaway or buggy application cannot leave
+  the admins unaskable for a change to the admin set. It does not stop a
+  holder of the API key who means harm: repair approvals of their own
+  spend the fifth, and one declined challenge starts the member vault's
+  7-day cooldown for all of the service's approval challenges
+  (VAULT-MESSAGING §10.4.1). Creating an approval is also limited per
+  group of actions (the repair ones, and all the others), by default 2
+  per hour and 4 per 24 hours each, in fixed windows
+  (`SV_APPROVAL_LIMITS`): past it, `rate_limited` (429), counted once
+  the request passes every other check, the ask budget included.
 - **Periodic work** (every 15 s and at once after a change): bootstrap,
   expiry (`expired`), re-checking open approvals after admins left, and
   webhook delivery. Webhooks are written to an outbox in the same write
@@ -268,4 +281,8 @@ MEMBER-SERVICE-PLAN §4.5 and §5.2; the operator's view is in the README,
   applied on it. Ordinary sign-ins and votes follow the credential key as
   before. `assignment.push` is not governance and counts as before. The
   ask gate of VAULT-MESSAGING §10.4.1 applies: a suppressed challenge
-  reads as a denial.
+  reads as a denial (owner decision of 2026-11-04). The service cannot
+  tell a person's denial from their vault's automatic one (a muted or
+  paused service), so `svctl` shows the admins who did not approve as
+  `not_approved_by`, never "declined by", and an admin who mutes the
+  service abstains from its approvals.

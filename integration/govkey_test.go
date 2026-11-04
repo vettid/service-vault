@@ -249,6 +249,9 @@ func TestGovKeyAndMigrationOnDynamoDB(t *testing.T) {
 	if s := approve(other, "4"); s.Approvals[0].Counted {
 		t.Fatalf("the current key counts before a re-pin: %+v", s)
 	}
+	// A fifth ordinary approval within the day would find the admin at
+	// the ask limit (4, the fifth being kept for repairs): a day later.
+	clk.Advance(25 * time.Hour)
 	if s := approve(m.Cred, "5"); s.Status != approval.StatusApproved || !s.Approvals[0].Counted {
 		t.Fatalf("the migrated key does not count: %+v", s)
 	}

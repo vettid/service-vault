@@ -551,6 +551,7 @@ var approvalStatusCodes = map[string]int{
 	approval.CodeNotAdmin:          http.StatusUnprocessableEntity,
 	approval.CodeAnswered:          http.StatusConflict,
 	approval.CodeAskBudget:         http.StatusConflict,
+	approval.CodeRateLimited:       http.StatusTooManyRequests,
 }
 
 func (s *Server) approvalError(w http.ResponseWriter, what string, err error) {

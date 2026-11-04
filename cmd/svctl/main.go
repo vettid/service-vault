@@ -72,19 +72,20 @@ commands:
                                    and admin_set.remove: the service writes it from the payload)
                                    submit an action for admin approval, then follow it
                                    (ask_budget, exit 1, if fewer admins than the threshold
-                                   can be asked: the others have 5 approval challenges
-                                   still counting; nothing is sent)
+                                   can be asked: the others are at their ask limit, 4
+                                   approval challenges still counting, 5 for admin.repin
+                                   and admin_set.*; nothing is sent)
   approval ID                      print an approval's status; "remind needed" lists admins with no live challenge
   remind [-force CONN,...] ID      challenge again the admins who have not answered (with long
                                    approval challenges, only those holding no live challenge;
                                    exit 0 and "nothing to remind" if there are none; exit 1 on
-                                   too_soon; an admin with 5 approval challenges still
-                                   counting is left out, and if that leaves none to
+                                   too_soon; an admin at the ask limit (4 approval
+                                   challenges still counting, 5 for a repair) is left out, and if that leaves none to
                                    challenge, ask_budget, exit 1). -force names admins to challenge again even with a
                                    live challenge (the old one is withdrawn); each forced re-send
                                    spends one of that admin's 5 approval asks per 24 h, and a
-                                   force naming an admin with 5 approval challenges still
-                                   counting (each until its expiry + 24 h) is refused
+                                   force naming an admin at the ask limit (each challenge
+                                   counting until its expiry + 24 h) is refused
                                    (ask_budget, exit 1): use it only when the admin reports not
                                    seeing the request
   admins                           print the admin set and the threshold
@@ -454,7 +455,7 @@ func (c *cli) approveAndFollow(ctx context.Context, req servicevault.ApprovalReq
 	ap, err := c.c.CreateApproval(ctx, req)
 	var ae *servicevault.APIError
 	if errors.As(err, &ae) && ae.Code == servicevault.CodeAskBudget {
-		return "", fmt.Errorf("approve: too few admins can be asked now: the others have 5 approval challenges still counting "+
+		return "", fmt.Errorf("approve: too few admins can be asked now: the others are at their ask limit (4 approval challenges still counting, 5 for admin.repin and admin_set.*) "+
 			"(each until its expiry plus 24 hours); nothing was sent (%w)", err)
 	}
 	if err != nil {
@@ -641,7 +642,9 @@ func (c *cli) printApproval(st *servicevault.Approval) {
 		c.printf("approved_by: %s key_changed=%t\n", a.ConnectionID, a.KeyChanged)
 	}
 	for _, d := range st.Denials {
-		c.printf("denied_by: %s\n", d.ConnectionID)
+		// A denial may be the admin's or their vault's, for a muted or
+		// paused service (VAULT-MESSAGING §10.4.1): the service cannot tell.
+		c.printf("not_approved_by: %s\n", d.ConnectionID)
 	}
 	c.printf("%s", remindLine(st))
 	if st.Applied != nil {
@@ -684,11 +687,11 @@ func (c *cli) remind(ctx context.Context, args []string) error {
 	}
 	if errors.As(err, &ae) && ae.Code == servicevault.CodeAskBudget {
 		if len(named) > 0 {
-			return fmt.Errorf("remind: a named admin has 5 approval challenges still counting (each until its expiry plus 24 hours); "+
-				"a sixth would come back as a denial (%w)", err)
+			return fmt.Errorf("remind: a named admin is at their ask limit (4 approval challenges still counting, 5 for admin.repin and admin_set.*), each until its expiry plus 24 hours; "+
+				"one more would leave none for a repair, or come back as a denial (%w)", err)
 		}
-		return fmt.Errorf("remind: no admin to challenge is within the budget: each has 5 approval challenges still counting "+
-			"(each until its expiry plus 24 hours) or an ask log that cannot be read; nothing was sent or withdrawn (%w)", err)
+		return fmt.Errorf("remind: no admin to challenge is within the budget: each is at their ask limit (4 approval challenges still counting, 5 for admin.repin and admin_set.*) "+
+			"(each until its expiry plus 24 hours) or has an ask log that cannot be read; nothing was sent or withdrawn (%w)", err)
 	}
 	if err != nil {
 		return err

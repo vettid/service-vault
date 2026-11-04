@@ -128,6 +128,9 @@ type Config struct {
 	Profile       peer.Profile
 	EmailLimits   []signin.Limit // SV_SIGNIN_LIMITS_EMAIL
 	SourceLimits  []signin.Limit // SV_SIGNIN_LIMITS_SOURCE
+	// ApprovalLimits limit creating approvals, per action
+	// (SV_APPROVAL_LIMITS, default approval.DefaultCreateLimits).
+	ApprovalLimits []signin.Limit
 	// Admin approvals (MEMBER-SERVICE-PLAN §4.5).
 	AdminBootstrapEmail string        // SV_ADMIN_BOOTSTRAP_EMAIL, normalized; "" for none
 	AdminThreshold      int           // SV_ADMIN_THRESHOLD (m), default 1
@@ -202,6 +205,9 @@ func configFromEnv(getenv func(string) string) (*Config, error) {
 	}
 	if c.SourceLimits, err = signin.ParseLimits(getenv("SV_SIGNIN_LIMITS_SOURCE"), signin.DefaultSourceLimits); err != nil {
 		return nil, fmt.Errorf("SV_SIGNIN_LIMITS_SOURCE: %w", err)
+	}
+	if c.ApprovalLimits, err = signin.ParseLimits(getenv("SV_APPROVAL_LIMITS"), approval.DefaultCreateLimits); err != nil {
+		return nil, fmt.Errorf("SV_APPROVAL_LIMITS: %w", err)
 	}
 	if v := strings.TrimSpace(getenv("SV_ADMIN_BOOTSTRAP_EMAIL")); v != "" {
 		if c.AdminBootstrapEmail, err = connect.NormalizeEmail(v); err != nil {
@@ -400,6 +406,7 @@ func serve(args []string) error {
 	}
 	approvals := &approval.Manager{Store: records, Pager: records, ServiceName: cfg.ServiceName,
 		Threshold: cfg.AdminThreshold, TTL: cfg.ApprovalTTL, LongChallenges: cfg.LongChallenges, AllowNoPurpose: cfg.AllowNoPurpose, BootstrapKey: bootKey, BoundConnection: svc.BoundConnection, Log: log,
+		Rate:  &approval.RateLimit{Counters: tbl.Counters(), Limits: cfg.ApprovalLimits},
 		Hooks: &webhook.Outbox{Store: records, Kind: approval.HookKind, Sender: sender, Log: log}}
 	if err := approvals.Start(ctx); err != nil {
 		return fmt.Errorf("approvals: %w", err)

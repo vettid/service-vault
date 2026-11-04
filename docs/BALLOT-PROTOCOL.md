@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.13.3 (2026-11-04)
+**Status:** 0.13.4 (2026-11-04)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -225,6 +225,21 @@ An app that does not show it yet (one built before VAULT-MESSAGING
 0.83.8) shows no fingerprint, and then the question alone is the check.
 Before approving an `admin_set.add`, the admins likewise compare its
 `cred key` with the fingerprint the new admin reads from their own app.
+
+A denial may be the admin's own or their vault's: a vault answers a
+challenge it suppresses (its member muted or paused the service, the
+decline cooldown, the pending cap or the rate) exactly as a decline,
+after a random delay, so that the service cannot tell (VAULT-MESSAGING
+§10.4.1; owner decision of 2026-11-04). The service counts both alike,
+so an admin who mutes the service abstains from its approvals, and it
+shows the admins who did not approve as such, never as having declined.
+Creating an approval is rate-limited, and the admins' last approval ask
+of each 24 hours is kept for `admin.repin` and `admin_set.*`, so a burst
+of other approvals from a runaway or buggy application cannot leave the
+admins unaskable for a change to the set. A holder of the API key who
+means harm still can: with repair approvals of their own, or with one
+declined challenge, which starts the member vault's 7-day cooldown for
+all of the service's approval challenges (VAULT-MESSAGING §10.4.1).
 
 The governance key is pinned at exactly these moments: when the
 connection first signs a response (the first sign-in), when
@@ -809,6 +824,11 @@ item.
 
 ## Changes
 
+- **0.13.4 (2026-11-04):** §3.4: a denial may be an automatic one, from
+  a vault that suppressed the challenge, and counts as a denial (owner
+  decision of 2026-11-04); creating approvals is rate-limited, and each admin's last
+  approval ask of a day is kept for the actions that repair the admin
+  set. No change to the messages, the documents or the vectors.
 - **0.13.3 (2026-11-04):** §3.4: before re-pinning an admin whose key
   changed, the other admins compare the summary's `new key` with the
   credential-key fingerprint that admin reads from their own app

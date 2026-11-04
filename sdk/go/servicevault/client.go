@@ -139,7 +139,8 @@ const (
 	CodeNotAdmin          = "not_admin"          // remind force: not an admin of the approval, or no longer in the set (422)
 	CodeAnswered          = "answered"           // remind force: the admin has answered (409)
 	CodeNothingToRemind   = "nothing_to_remind"  // every admin who has not answered holds a live challenge (409)
-	CodeAskBudget         = "ask_budget"         // create or remind: too few admins can be asked, 5 approval challenges still counting each (409)
+	CodeAskBudget         = "ask_budget"         // create or remind: too few admins can be asked, each at the ask limit: 4 approval challenges still counting, or 5 for a repair action (409)
+	CodeRateLimited       = "rate_limited"       // create: the limit of the action's group is reached (SV_APPROVAL_LIMITS; 429)
 )
 
 // APIError is a non-2xx answer from the API.
@@ -288,8 +289,10 @@ type ApprovalCreated struct {
 	ActionHash string    `json:"action_hash"`
 	Status     string    `json:"status"`
 	ExpiresAt  time.Time `json:"expires_at"`
-	// AskBudget: the admins not asked because they have 5 approval
-	// challenges still counting, with when each can be asked again.
+	// AskBudget: the admins not asked because they are at the ask limit
+	// (4 approval challenges still counting, or 5 for a repair action:
+	// admin.repin, admin_set.add, admin_set.remove), with when each can be
+	// asked again.
 	AskBudget []AskBudget `json:"ask_budget,omitempty"`
 }
 
@@ -364,8 +367,8 @@ type Approval struct {
 type Reminder struct {
 	ID       string   `json:"approval_id"`
 	Reminded []string `json:"reminded"` // the admins challenged again
-	// AskBudget: the admins left out because they have 5 approval
-	// challenges still counting.
+	// AskBudget: the admins left out because they are at the ask limit
+	// (4 approval challenges still counting, or 5 for a repair action).
 	AskBudget []AskBudget `json:"ask_budget,omitempty"`
 }
 
@@ -449,10 +452,10 @@ func (c *Client) Approval(ctx context.Context, id string) (*Approval, error) {
 // (CodeNotAdmin, CodeAnswered otherwise). Each forced re-send uses one of
 // the member's 5 approval asks per 24 hours (VAULT-MESSAGING §10.4.1), and
 // a sixth would come back as a delayed denial, so a force naming an admin
-// already sent 5 approval challenges that still count (each until its
-// expiry plus 24 hours) is refused (CodeAskBudget): use it only when an
-// admin reports not seeing the request. Without force, an admin with 5
-// such challenges is left out (they stay in RemindNeeded), and if that
+// at the ask limit (4 approval challenges that still count, each until its
+// expiry plus 24 hours, the fifth being kept for repair actions; or 5 for
+// those) is refused (CodeAskBudget): use it only when an admin reports not
+// seeing the request. Without force, an admin at the ask limit is left out (they stay in RemindNeeded), and if that
 // leaves none to challenge, nothing is withdrawn or sent (CodeAskBudget).
 func (c *Client) RemindApproval(ctx context.Context, id string, force ...string) (*Reminder, error) {
 	if id == "" {

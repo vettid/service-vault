@@ -74,26 +74,54 @@ type askLog struct {
 	Exp []time.Time `json:"exp"`
 }
 
-// next is when a full log stops being full: its oldest counting entry's end.
-func (l *askLog) next() time.Time {
-	return l.Exp[len(l.Exp)-askBudget].Add(askWindow + peer.ClockSkew)
+// askReserve of each admin's askBudget is kept for the actions that
+// repair the admin set (repairActions): every other action's sends, its
+// reminders included, stop at askBudget - askReserve (chosen; not in the
+// spec). So a burst of ordinary approvals (votes, contracts), from a
+// runaway or buggy application, cannot leave the admins unaskable for a
+// re-pin or a change to the admin set. It does not stop a holder of the
+// API key who means harm: repair approvals of their own can spend the
+// reserve, and one declined challenge starts the member vault's 7-day
+// cooldown for the service's approval challenges (VAULT-MESSAGING
+// §10.4.1), repairs included.
+const askReserve = 1
+
+// repairActions may use the whole askBudget (askReserve).
+var repairActions = map[string]bool{ActionAdminRepin: true, ActionAdminSetAdd: true, ActionAdminSetRemove: true}
+
+// askLimit is how many counting challenges a send for action may find in
+// an admin's log and still go: askBudget for repairActions, otherwise
+// askBudget - askReserve.
+func askLimit(action string) int {
+	if repairActions[action] {
+		return askBudget
+	}
+	return askBudget - askReserve
 }
 
-// budgetEntry reports connID as left out for the budget, if its log is full.
-func (m *Manager) budgetEntry(ctx context.Context, connID string) (AskBudget, bool) {
+// next is when a log full at limit stops being full: the end of the
+// oldest of its newest limit entries.
+func (l *askLog) next(limit int) time.Time {
+	return l.Exp[len(l.Exp)-limit].Add(askWindow + peer.ClockSkew)
+}
+
+// budgetEntry reports connID as left out for the budget, if its log is
+// full for action (askLimit).
+func (m *Manager) budgetEntry(ctx context.Context, connID, action string) (AskBudget, bool) {
 	l, err := m.asks(ctx, connID)
-	if err != nil || !l.full(m.now()) {
+	limit := askLimit(action)
+	if err != nil || !l.full(m.now(), limit) {
 		return AskBudget{}, false
 	}
-	return AskBudget{ConnectionID: connID, NextAskAt: l.next().UTC()}, true
+	return AskBudget{ConnectionID: connID, NextAskAt: l.next(limit).UTC()}, true
 }
 
 // counts reports whether a challenge with this exp still counts at now.
 func counts(exp, now time.Time) bool { return now.Before(exp.Add(askWindow + peer.ClockSkew)) }
 
-// full reports whether askBudget logged challenges still count at now.
-func (l *askLog) full(now time.Time) bool {
-	return len(l.Exp) >= askBudget && counts(l.Exp[len(l.Exp)-askBudget], now)
+// full reports whether limit logged challenges still count at now.
+func (l *askLog) full(now time.Time, limit int) bool {
+	return len(l.Exp) >= limit && counts(l.Exp[len(l.Exp)-limit], now)
 }
 
 func (m *Manager) asks(ctx context.Context, connID string) (*askLog, error) {
@@ -198,8 +226,10 @@ type Manager struct {
 	BootstrapKey string
 	// BoundConnection returns the connection bound to an email index key.
 	BoundConnection func(ctx context.Context, emailKey string) (string, bool, error)
-	Now             func() time.Time
-	Log             *slog.Logger
+	// Rate limits Create per action (SV_APPROVAL_LIMITS); nil: no limit.
+	Rate *RateLimit
+	Now  func() time.Time
+	Log  *slog.Logger
 
 	mu        sync.Mutex
 	govWarned map[string]time.Time // admin -> when the migration last warned it waits for them
@@ -828,7 +858,7 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 	// (canAsk) for the threshold to be met.
 	askable := 0
 	for _, a := range asked {
-		ok, err := m.canAsk(ctx, a, now)
+		ok, err := m.canAsk(ctx, a, req.Action, now)
 		if err != nil {
 			return nil, err
 		}
@@ -838,6 +868,13 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 	}
 	if askable < th {
 		return nil, errCode(CodeAskBudget)
+	}
+	// Only a request that would be sent is counted, so an operator's
+	// mistakes or retries while repairing the admin set (an invalid
+	// payload, admins still at their ask limit) do not use up the repair
+	// group's limit.
+	if err := m.countCreate(ctx, req.Action); err != nil {
+		return nil, err
 	}
 	id, err := envelope.NewULID(now)
 	if err != nil {
@@ -885,11 +922,11 @@ func (m *Manager) challenge(ctx context.Context, b *batch, r *record, conns []st
 		// A minute of slack: the peer sets the challenge's exp from its own
 		// clock a little later, after this write.
 		exp := m.now().Add(max(ttl, peerwire.ConnAuthChallengeTTL) + askSlack)
-		if err := m.logAsk(ctx, c, exp); err != nil {
+		if err := m.logAsk(ctx, c, r.Action, exp); err != nil {
 			m.log().Warn("approval ask log", "approval_id", r.ID, "connection_id", c, "err", errName(err))
 			if errors.Is(err, errAskFull) {
 				full++
-				if e, ok := m.budgetEntry(ctx, c); ok {
+				if e, ok := m.budgetEntry(ctx, c, r.Action); ok {
 					skipped = append(skipped, e)
 				}
 			}
@@ -916,7 +953,7 @@ var errAskFull = errors.New("approval: ask budget full")
 // does not decode, is not askable; a store error is returned. m.mu is
 // held across the check and the logAsk that follows, and logAsk's write
 // is conditional, so no other send can fill the log in between.
-func (m *Manager) canAsk(ctx context.Context, connID string, now time.Time) (bool, error) {
+func (m *Manager) canAsk(ctx context.Context, connID, action string, now time.Time) (bool, error) {
 	l, err := m.asks(ctx, connID)
 	if errors.Is(err, errAskUndecodable) {
 		return false, nil
@@ -924,7 +961,7 @@ func (m *Manager) canAsk(ctx context.Context, connID string, now time.Time) (boo
 	if err != nil {
 		return false, err
 	}
-	return !l.full(now), nil
+	return !l.full(now, askLimit(action)), nil
 }
 
 // logAsk adds a challenge to connID's askLog, with exp (at least the
@@ -935,12 +972,12 @@ func (m *Manager) canAsk(ctx context.Context, connID string, now time.Time) (boo
 // reachable now, the peer's limits) still fill the log, and may refuse a
 // later forced reminder to that admin. It refuses (errAskFull) when the
 // log is already full, so no send is a sixth.
-func (m *Manager) logAsk(ctx context.Context, connID string, exp time.Time) error {
+func (m *Manager) logAsk(ctx context.Context, connID, action string, exp time.Time) error {
 	l, ver, err := m.asksVersion(ctx, connID)
 	if err != nil {
 		return err
 	}
-	if l.full(m.now()) {
+	if l.full(m.now(), askLimit(action)) {
 		return errAskFull
 	}
 	l.Exp = append(l.Exp, exp.UTC().Truncate(time.Millisecond).Add(time.Millisecond))
@@ -1029,7 +1066,7 @@ func (m *Manager) Status(ctx context.Context, id string) (*Status, error) {
 			}
 		}
 		for _, a := range st.RemindNeeded {
-			if e, ok := m.budgetEntry(ctx, a); ok {
+			if e, ok := m.budgetEntry(ctx, a, r.Action); ok {
 				st.AskBudget = append(st.AskBudget, e)
 			}
 		}
@@ -1056,13 +1093,14 @@ var ErrNotFound = errors.New("approval: not found")
 // remind_needed ones), each lasting as long as the approval, and
 // CodeNothingToRemind when there are none (checked before the interval).
 // Otherwise to every admin who has not answered, replacing their challenge.
-// An admin sent 5 approval challenges that still count is left out, with
+// An admin at the approval's ask limit (askLimit: 4 approval challenges
+// that still count, or 5 for a repair action) is left out, with
 // their challenge not withdrawn; CodeAskBudget when that leaves nobody
 // to send to (checked before anything is withdrawn).
 // With force, only to the named admins (CodeNotAdmin for one outside the
 // approval's admins or the current set, CodeAnswered for one who has
-// answered, CodeAskBudget for one sent 5 approval challenges that still
-// count, see askBudget): each one's live challenge is withdrawn and a new
+// answered, CodeAskBudget for one at the approval's ask limit, see
+// askLimit): each one's live challenge is withdrawn and a new
 // one sent, whatever the gate says, still at most once per
 // RemindInterval. Each
 // forced re-send uses one of the member's approval asks (VAULT-MESSAGING
@@ -1097,7 +1135,7 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 		if slices.Contains(conns, a) {
 			continue
 		}
-		if ok, err := m.canAsk(ctx, a, now); err != nil {
+		if ok, err := m.canAsk(ctx, a, r.Action, now); err != nil {
 			return nil, err
 		} else if !ok {
 			return nil, errCode(CodeAskBudget)
@@ -1131,13 +1169,13 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 		cands++
 		// Before anything is withdrawn: an admin at the budget keeps the
 		// challenge they hold, and stays in remind_needed if they hold none.
-		ok, err := m.canAsk(ctx, a, now)
+		ok, err := m.canAsk(ctx, a, r.Action, now)
 		if err != nil {
 			return nil, err
 		}
 		if !ok {
 			limited++
-			if e, ok := m.budgetEntry(ctx, a); ok {
+			if e, ok := m.budgetEntry(ctx, a, r.Action); ok {
 				skipped = append(skipped, e)
 			}
 			continue
