@@ -30,6 +30,9 @@ func (f *fakeApprovals) Create(_ context.Context, req approval.Request) (*approv
 	if req.Summary == "bad" {
 		return nil, &approval.Error{Code: approval.CodeInvalidSummary}
 	}
+	if req.Summary == "burst" {
+		return nil, &approval.Error{Code: approval.CodeRateLimited}
+	}
 	return &approval.Created{ID: "a1", ActionHash: strings.Repeat("ab", 32), Status: approval.StatusPending,
 		ExpiresAt: time.Unix(1_800_086_400, 0).UTC()}, nil
 }
@@ -102,6 +105,7 @@ func TestApprovalRoutes(t *testing.T) {
 	for body, want := range map[string]int{
 		`{"action":"contract_template.change","summary":"unreachable","payload":{}}`:                                         422,
 		`{"action":"contract_template.change","summary":"bad","payload":{}}`:                                                 400,
+		`{"action":"contract_template.change","summary":"burst","payload":{}}`:                                               429,
 		`{"action":"contract_template.change","summary":"x","payload":{},"extra":1}`:                                         400,
 		`{"action":"contract_template.change","summary":"x","payload":"` + strings.Repeat("y", 3*approval.MaxPayload) + `"}`: 400,
 	} {

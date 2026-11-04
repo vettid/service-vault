@@ -37,12 +37,15 @@ func TestConfigFromEnv(t *testing.T) {
 	if c.RelayURL != "https://relay.vettid.org" || len(c.APIKeyHashes) != 2 ||
 		c.Profile.FirstName != "VettID" || c.Profile.LastName != "Member Service" ||
 		len(c.EmailLimits) != 2 || c.EmailLimits[0].String() != "5/15m" || c.EmailLimits[1].String() != "20/24h" ||
-		len(c.SourceLimits) != 1 || c.SourceLimits[0].String() != "20/15m" {
+		len(c.SourceLimits) != 1 || c.SourceLimits[0].String() != "20/15m" ||
+		len(c.ApprovalLimits) != 2 || c.ApprovalLimits[0].String() != "2/1h" || c.ApprovalLimits[1].String() != "4/24h" {
 		t.Fatalf("%+v", c)
 	}
 	e := goodEnv()
 	e["SV_SIGNIN_LIMITS_EMAIL"], e["SV_SIGNIN_LIMITS_SOURCE"] = "3/10m", "none"
-	if c, err := configFromEnv(env(e)); err != nil || len(c.EmailLimits) != 1 || c.EmailLimits[0].Max != 3 || c.SourceLimits != nil {
+	e["SV_APPROVAL_LIMITS"] = "1/24h"
+	if c, err := configFromEnv(env(e)); err != nil || len(c.EmailLimits) != 1 || c.EmailLimits[0].Max != 3 || c.SourceLimits != nil ||
+		len(c.ApprovalLimits) != 1 || c.ApprovalLimits[0].String() != "1/24h" {
 		t.Fatalf("limits %+v %v", c, err)
 	}
 	if c.AdminBootstrapEmail != "" || c.AdminThreshold != 1 || c.ApprovalTTL != 24*time.Hour || c.RecordKeyVersion != 1 {
@@ -150,7 +153,7 @@ func TestConfigFromEnv(t *testing.T) {
 		"SV_ADMIN_BOOTSTRAP_EMAIL": "nope", "SV_ADMIN_THRESHOLD": "0", "SV_APPROVAL_TTL": "1m",
 		"SV_TABLE": "", "SV_WEBHOOK_URL": "http://member.example/", "SV_WEBHOOK_SECRET": "short",
 		"SV_API_KEY_HASHES": "zz", "SV_SERVICE_NAME": "VettID",
-		"SV_SIGNIN_LIMITS_EMAIL": "5", "SV_SIGNIN_LIMITS_SOURCE": "0/1m",
+		"SV_SIGNIN_LIMITS_EMAIL": "5", "SV_SIGNIN_LIMITS_SOURCE": "0/1m", "SV_APPROVAL_LIMITS": "x/1h",
 		"SV_RECORD_KEY_VERSION": "0", "SV_TEST_SIGNINS": "yes",
 	} {
 		e := goodEnv()

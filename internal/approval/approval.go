@@ -74,26 +74,50 @@ type askLog struct {
 	Exp []time.Time `json:"exp"`
 }
 
-// next is when a full log stops being full: its oldest counting entry's end.
-func (l *askLog) next() time.Time {
-	return l.Exp[len(l.Exp)-askBudget].Add(askWindow + peer.ClockSkew)
+// askReserve of each admin's askBudget is kept for the actions that
+// repair the admin set (repairActions): every other action's sends, its
+// reminders included, stop at askBudget - askReserve (chosen; not in the
+// spec). So a burst of approvals for votes or contracts, by whoever holds
+// the application's API key, cannot leave the admins unaskable for the
+// re-pin or the change to the admin set that would deal with it.
+const askReserve = 1
+
+// repairActions may use the whole askBudget (askReserve).
+var repairActions = map[string]bool{ActionAdminRepin: true, ActionAdminSetAdd: true, ActionAdminSetRemove: true}
+
+// askLimit is how many counting challenges a send for action may find in
+// an admin's log and still go: askBudget for repairActions, otherwise
+// askBudget - askReserve.
+func askLimit(action string) int {
+	if repairActions[action] {
+		return askBudget
+	}
+	return askBudget - askReserve
 }
 
-// budgetEntry reports connID as left out for the budget, if its log is full.
-func (m *Manager) budgetEntry(ctx context.Context, connID string) (AskBudget, bool) {
+// next is when a log full at limit stops being full: the end of the
+// oldest of its newest limit entries.
+func (l *askLog) next(limit int) time.Time {
+	return l.Exp[len(l.Exp)-limit].Add(askWindow + peer.ClockSkew)
+}
+
+// budgetEntry reports connID as left out for the budget, if its log is
+// full for action (askLimit).
+func (m *Manager) budgetEntry(ctx context.Context, connID, action string) (AskBudget, bool) {
 	l, err := m.asks(ctx, connID)
-	if err != nil || !l.full(m.now()) {
+	limit := askLimit(action)
+	if err != nil || !l.full(m.now(), limit) {
 		return AskBudget{}, false
 	}
-	return AskBudget{ConnectionID: connID, NextAskAt: l.next().UTC()}, true
+	return AskBudget{ConnectionID: connID, NextAskAt: l.next(limit).UTC()}, true
 }
 
 // counts reports whether a challenge with this exp still counts at now.
 func counts(exp, now time.Time) bool { return now.Before(exp.Add(askWindow + peer.ClockSkew)) }
 
-// full reports whether askBudget logged challenges still count at now.
-func (l *askLog) full(now time.Time) bool {
-	return len(l.Exp) >= askBudget && counts(l.Exp[len(l.Exp)-askBudget], now)
+// full reports whether limit logged challenges still count at now.
+func (l *askLog) full(now time.Time, limit int) bool {
+	return len(l.Exp) >= limit && counts(l.Exp[len(l.Exp)-limit], now)
 }
 
 func (m *Manager) asks(ctx context.Context, connID string) (*askLog, error) {
@@ -198,8 +222,10 @@ type Manager struct {
 	BootstrapKey string
 	// BoundConnection returns the connection bound to an email index key.
 	BoundConnection func(ctx context.Context, emailKey string) (string, bool, error)
-	Now             func() time.Time
-	Log             *slog.Logger
+	// Rate limits Create per action (SV_APPROVAL_LIMITS); nil: no limit.
+	Rate *RateLimit
+	Now  func() time.Time
+	Log  *slog.Logger
 
 	mu        sync.Mutex
 	govWarned map[string]time.Time // admin -> when the migration last warned it waits for them
@@ -705,6 +731,9 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 	if !actions[req.Action] {
 		return nil, errCode(CodeInvalidAction)
 	}
+	if err := m.countCreate(ctx, req.Action); err != nil {
+		return nil, err
+	}
 	payload, err := servicevault.CanonicalJSON(req.Payload)
 	if err != nil || len(payload) == 0 || payload[0] != '{' || len(payload) > MaxPayload {
 		return nil, errCode(CodeInvalidPayload)
@@ -828,7 +857,7 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 	// (canAsk) for the threshold to be met.
 	askable := 0
 	for _, a := range asked {
-		ok, err := m.canAsk(ctx, a, now)
+		ok, err := m.canAsk(ctx, a, req.Action, now)
 		if err != nil {
 			return nil, err
 		}
@@ -885,11 +914,11 @@ func (m *Manager) challenge(ctx context.Context, b *batch, r *record, conns []st
 		// A minute of slack: the peer sets the challenge's exp from its own
 		// clock a little later, after this write.
 		exp := m.now().Add(max(ttl, peerwire.ConnAuthChallengeTTL) + askSlack)
-		if err := m.logAsk(ctx, c, exp); err != nil {
+		if err := m.logAsk(ctx, c, r.Action, exp); err != nil {
 			m.log().Warn("approval ask log", "approval_id", r.ID, "connection_id", c, "err", errName(err))
 			if errors.Is(err, errAskFull) {
 				full++
-				if e, ok := m.budgetEntry(ctx, c); ok {
+				if e, ok := m.budgetEntry(ctx, c, r.Action); ok {
 					skipped = append(skipped, e)
 				}
 			}
@@ -916,7 +945,7 @@ var errAskFull = errors.New("approval: ask budget full")
 // does not decode, is not askable; a store error is returned. m.mu is
 // held across the check and the logAsk that follows, and logAsk's write
 // is conditional, so no other send can fill the log in between.
-func (m *Manager) canAsk(ctx context.Context, connID string, now time.Time) (bool, error) {
+func (m *Manager) canAsk(ctx context.Context, connID, action string, now time.Time) (bool, error) {
 	l, err := m.asks(ctx, connID)
 	if errors.Is(err, errAskUndecodable) {
 		return false, nil
@@ -924,7 +953,7 @@ func (m *Manager) canAsk(ctx context.Context, connID string, now time.Time) (boo
 	if err != nil {
 		return false, err
 	}
-	return !l.full(now), nil
+	return !l.full(now, askLimit(action)), nil
 }
 
 // logAsk adds a challenge to connID's askLog, with exp (at least the
@@ -935,12 +964,12 @@ func (m *Manager) canAsk(ctx context.Context, connID string, now time.Time) (boo
 // reachable now, the peer's limits) still fill the log, and may refuse a
 // later forced reminder to that admin. It refuses (errAskFull) when the
 // log is already full, so no send is a sixth.
-func (m *Manager) logAsk(ctx context.Context, connID string, exp time.Time) error {
+func (m *Manager) logAsk(ctx context.Context, connID, action string, exp time.Time) error {
 	l, ver, err := m.asksVersion(ctx, connID)
 	if err != nil {
 		return err
 	}
-	if l.full(m.now()) {
+	if l.full(m.now(), askLimit(action)) {
 		return errAskFull
 	}
 	l.Exp = append(l.Exp, exp.UTC().Truncate(time.Millisecond).Add(time.Millisecond))
@@ -1029,7 +1058,7 @@ func (m *Manager) Status(ctx context.Context, id string) (*Status, error) {
 			}
 		}
 		for _, a := range st.RemindNeeded {
-			if e, ok := m.budgetEntry(ctx, a); ok {
+			if e, ok := m.budgetEntry(ctx, a, r.Action); ok {
 				st.AskBudget = append(st.AskBudget, e)
 			}
 		}
@@ -1097,7 +1126,7 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 		if slices.Contains(conns, a) {
 			continue
 		}
-		if ok, err := m.canAsk(ctx, a, now); err != nil {
+		if ok, err := m.canAsk(ctx, a, r.Action, now); err != nil {
 			return nil, err
 		} else if !ok {
 			return nil, errCode(CodeAskBudget)
@@ -1131,13 +1160,13 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 		cands++
 		// Before anything is withdrawn: an admin at the budget keeps the
 		// challenge they hold, and stays in remind_needed if they hold none.
-		ok, err := m.canAsk(ctx, a, now)
+		ok, err := m.canAsk(ctx, a, r.Action, now)
 		if err != nil {
 			return nil, err
 		}
 		if !ok {
 			limited++
-			if e, ok := m.budgetEntry(ctx, a); ok {
+			if e, ok := m.budgetEntry(ctx, a, r.Action); ok {
 				skipped = append(skipped, e)
 			}
 			continue

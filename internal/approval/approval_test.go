@@ -1448,12 +1448,12 @@ func TestRemindForceAskBudget(t *testing.T) {
 		f.m.TTL = 72 * time.Hour
 		ctx := context.Background()
 		var ids []string
-		for i := range askBudget {
+		for i := range ordinaryLimit {
 			ids = append(ids, f.create(ActionContractTemplateChange, fmt.Sprint("Open ", i), `{}`).ID)
 			f.clk.Advance(time.Hour)
 		}
 		l, err := f.m.asks(ctx, "c1")
-		if err != nil || len(l.Exp) != askBudget {
+		if err != nil || len(l.Exp) != ordinaryLimit {
 			t.Fatalf("gate %v: %+v %v", gate, l, err)
 		}
 		// Each counts at least until its challenge's exp plus a day.
@@ -1463,25 +1463,25 @@ func TestRemindForceAskBudget(t *testing.T) {
 		}
 		f.clk.Advance(RemindInterval)
 		before, cancelled := len(f.p.sent), len(f.p.cancelled)
-		if _, err := f.m.Remind(ctx, ids[4], "c1"); codeOf(err) != CodeAskBudget {
+		if _, err := f.m.Remind(ctx, ids[ordinaryLimit-1], "c1"); codeOf(err) != CodeAskBudget {
 			t.Fatalf("gate %v: sixth: %v", gate, err)
 		}
-		if len(f.p.sent) != before || len(f.p.cancelled) != cancelled || f.status(ids[4]).Status != StatusPending {
+		if len(f.p.sent) != before || len(f.p.cancelled) != cancelled || f.status(ids[ordinaryLimit-1]).Status != StatusPending {
 			t.Fatalf("gate %v: a refused force sent or withdrew something", gate)
 		}
 		// Up to the first one's exp + 24 h + skew it still counts.
 		end := l.Exp[0].Add(askWindow + peer.ClockSkew)
 		f.clk.Advance(end.Sub(f.clk.Now()) - time.Millisecond)
-		if _, err := f.m.Remind(ctx, ids[4], "c1"); codeOf(err) != CodeAskBudget {
+		if _, err := f.m.Remind(ctx, ids[ordinaryLimit-1], "c1"); codeOf(err) != CodeAskBudget {
 			t.Fatalf("gate %v: just before the end: %v", gate, err)
 		}
 		f.clk.Advance(time.Millisecond)
-		if r, err := f.m.Remind(ctx, ids[4], "c1"); err != nil || fmt.Sprint(r.Reminded) != "[c1]" {
+		if r, err := f.m.Remind(ctx, ids[ordinaryLimit-1], "c1"); err != nil || fmt.Sprint(r.Reminded) != "[c1]" {
 			t.Fatalf("gate %v: after: %+v %v", gate, r, err)
 		}
 		// That send counts too: the next force is refused again.
 		f.clk.Advance(RemindInterval)
-		if _, err := f.m.Remind(ctx, ids[3], "c1"); codeOf(err) != CodeAskBudget {
+		if _, err := f.m.Remind(ctx, ids[ordinaryLimit-2], "c1"); codeOf(err) != CodeAskBudget {
 			t.Fatalf("gate %v: after the re-send: %v", gate, err)
 		}
 	}
@@ -1497,7 +1497,7 @@ func TestRemindForceAskBudgetLateDelivery(t *testing.T) {
 	f.m.TTL = 72 * time.Hour
 	ctx := context.Background()
 	var ids []string
-	for i := range askBudget {
+	for i := range ordinaryLimit {
 		ids = append(ids, f.create(ActionContractTemplateChange, fmt.Sprint("Open ", i), `{}`).ID)
 	}
 	// Each is logged with the life asked for (24 h), even one the peer
@@ -1522,7 +1522,7 @@ func TestRemindForceAskBudgetAnyNamed(t *testing.T) {
 	f := newFixture(t, 1, "c1", "c2")
 	ctx := context.Background()
 	for range askBudget {
-		if err := f.m.logAsk(ctx, "c1", f.clk.Now().Add(RemindInterval)); err != nil {
+		if err := f.m.logAsk(ctx, "c1", ActionAdminRepin, f.clk.Now().Add(RemindInterval)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1596,11 +1596,15 @@ func TestAskLogBounded(t *testing.T) {
 	f := newFixture(t, 1, "c1")
 	ctx := context.Background()
 	c := f.create(ActionContractTemplateChange, "Open", `{}`)
-	for range askBudget - 1 {
+	for range ordinaryLimit - 1 {
 		f.clk.Advance(RemindInterval)
 		if _, err := f.m.Remind(ctx, c.ID); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// The reserved one is a repair action's (askReserve).
+	if err := f.m.logAsk(ctx, "c1", ActionAdminRepin, f.clk.Now().Add(RemindInterval)); err != nil {
+		t.Fatal(err)
 	}
 	// The sixth is not sent, so the log stays at 5.
 	f.clk.Advance(RemindInterval)
@@ -1608,7 +1612,7 @@ func TestAskLogBounded(t *testing.T) {
 		t.Fatalf("sixth: %v", err)
 	}
 	l, err := f.m.asks(ctx, "c1")
-	if err != nil || len(l.Exp) != askBudget || !l.full(f.clk.Now()) {
+	if err != nil || len(l.Exp) != askBudget || !l.full(f.clk.Now(), askBudget) {
 		t.Fatalf("%+v %v", l, err)
 	}
 	newest := l.Exp[askBudget-1]
@@ -1616,7 +1620,7 @@ func TestAskLogBounded(t *testing.T) {
 		t.Fatalf("newest %v, want at least %v", newest, want)
 	}
 	// A full log takes no sixth entry.
-	if err := f.m.logAsk(ctx, "c1", l.Exp[0].Add(-time.Minute)); !errors.Is(err, errAskFull) {
+	if err := f.m.logAsk(ctx, "c1", ActionAdminRepin, l.Exp[0].Add(-time.Minute)); !errors.Is(err, errAskFull) {
 		t.Fatal(err)
 	}
 	if l2, _ := f.m.asks(ctx, "c1"); !slices.Equal(l2.Exp, l.Exp) {
@@ -1800,7 +1804,7 @@ func TestRemindAskBudget(t *testing.T) {
 // Concurrent approvals never send an admin a sixth challenge.
 func TestCreateAskBudgetConcurrent(t *testing.T) {
 	f := newFixture(t, 1, "c1")
-	f.fillAsks("c1", askBudget-2)
+	f.fillAsks("c1", ordinaryLimit-2)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	ok, refused := 0, 0
@@ -1830,7 +1834,7 @@ func TestCreateAskBudgetConcurrent(t *testing.T) {
 // in remind_needed).
 func TestAskLogTwoManagers(t *testing.T) {
 	f := newFixture(t, 1, "c1")
-	f.fillAsks("c1", askBudget-1)
+	f.fillAsks("c1", ordinaryLimit-1)
 	m2 := &Manager{Peer: f.m.Peer, Store: f.st, Pager: f.st, ServiceName: f.m.ServiceName, Threshold: 1, Now: f.clk.Now}
 	var wg sync.WaitGroup
 	for _, m := range []*Manager{f.m, m2} {
@@ -1847,7 +1851,7 @@ func TestAskLogTwoManagers(t *testing.T) {
 	if len(f.p.sent) != 1 {
 		t.Fatalf("sent %d", len(f.p.sent))
 	}
-	if l, _ := f.m.asks(context.Background(), "c1"); len(l.Exp) != askBudget {
+	if l, _ := f.m.asks(context.Background(), "c1"); len(l.Exp) != ordinaryLimit {
 		t.Fatalf("log %+v", l)
 	}
 }
@@ -1918,7 +1922,7 @@ func TestRemindLosesRace(t *testing.T) {
 // 24 h plus the clock skew.
 func TestAskBudgetListsAdmins(t *testing.T) {
 	f := newFixture(t, 1, "c1", "c2")
-	f.fillAsks("c1", askBudget)
+	f.fillAsks("c1", ordinaryLimit)
 	l, _ := f.m.asks(context.Background(), "c1")
 	want := l.Exp[0].Add(askWindow + peer.ClockSkew)
 	check := func(what string, got []AskBudget) {
@@ -1948,3 +1952,7 @@ func TestAskBudgetListsAdmins(t *testing.T) {
 		t.Fatalf("%s", b)
 	}
 }
+
+// ordinaryLimit is how many counting challenges an ordinary action's send
+// may find (askLimit); the tests above use ActionContractTemplateChange.
+var ordinaryLimit = askLimit(ActionContractTemplateChange)

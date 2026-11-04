@@ -641,7 +641,9 @@ func (c *cli) printApproval(st *servicevault.Approval) {
 		c.printf("approved_by: %s key_changed=%t\n", a.ConnectionID, a.KeyChanged)
 	}
 	for _, d := range st.Denials {
-		c.printf("denied_by: %s\n", d.ConnectionID)
+		// A denial may be the admin's or their vault's, for a muted or
+		// paused service (VAULT-MESSAGING §10.4.1): the service cannot tell.
+		c.printf("not_approved_by: %s\n", d.ConnectionID)
 	}
 	c.printf("%s", remindLine(st))
 	if st.Applied != nil {

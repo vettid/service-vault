@@ -232,7 +232,14 @@ MEMBER-SERVICE-PLAN §4.5 and §5.2; the operator's view is in the README,
   (`[{connection_id, next_ask_at}]`, on the create, remind and status
   answers) with when it can be asked again; creating an approval answers `ask_budget`
   (409) when fewer admins than the threshold can be asked, and a plain
-  reminder when none can, before anything is sent or withdrawn.
+  reminder when none can, before anything is sent or withdrawn. For
+  every action but `admin.repin`, `admin_set.add` and `admin_set.remove`,
+  the limit is 4: the fifth is kept for those repair actions, so a burst
+  of other approvals cannot leave the admins unaskable for a change to
+  the admin set. Creating an approval is also limited per group of
+  actions (the repair ones, and all the others), by default 2 per hour
+  and 4 per 24 hours each (`SV_APPROVAL_LIMITS`): past it, `rate_limited`
+  (429), counted before any other check.
 - **Periodic work** (every 15 s and at once after a change): bootstrap,
   expiry (`expired`), re-checking open approvals after admins left, and
   webhook delivery. Webhooks are written to an outbox in the same write
@@ -268,4 +275,8 @@ MEMBER-SERVICE-PLAN §4.5 and §5.2; the operator's view is in the README,
   applied on it. Ordinary sign-ins and votes follow the credential key as
   before. `assignment.push` is not governance and counts as before. The
   ask gate of VAULT-MESSAGING §10.4.1 applies: a suppressed challenge
-  reads as a denial.
+  reads as a denial (owner decision a, 2026-11-04). The service cannot
+  tell a person's denial from their vault's automatic one (a muted or
+  paused service), so `svctl` shows the admins who did not approve as
+  `not_approved_by`, never "declined by", and an admin who mutes the
+  service abstains from its approvals.
