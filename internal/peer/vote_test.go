@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -832,5 +833,52 @@ func TestHasPendingSignIn(t *testing.T) {
 	f.clk.Advance(2 * time.Minute)
 	if f.p.HasPendingSignIn(cid) {
 		t.Fatal("pending past its exp")
+	}
+}
+
+// A Votes error that wraps ErrRedeliver leaves only that request
+// unanswered and unacknowledged: the step does not fail, the next message
+// in the batch is handled, and the request comes back after its lease.
+func TestVoteRedeliver(t *testing.T) {
+	f := newFixture(t)
+	rv := &recordVotes{}
+	f.votes = rv
+	f.p.cfg.Votes = rv
+	m := f.member(10)
+	cid := f.connect(m, "t")
+	if !f.signIn(m, cid) {
+		t.Fatal("sign-in failed")
+	}
+	f.clk.Advance(2 * time.Minute) // past the start's leases
+	f.pump()
+	rv.fail = fmt.Errorf("held: %w", ErrRedeliver)
+	held := m.Send("vote.cast", []byte(`{"n":1}`))
+	next := m.Send("vote.status", []byte(`{"n":2}`))
+	m.Step()
+	if _, err := f.p.Step(context.Background(), 0); err != nil {
+		t.Fatalf("the step failed: %v", err)
+	}
+	answered := func(id string) bool {
+		for _, typ := range []string{"vote.cast", "vote.status"} {
+			for _, in := range m.Received(typ) {
+				if in.Re == id {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	m.Step()
+	if answered(held) || !answered(next) {
+		t.Fatalf("held answered %v, next answered %v", answered(held), answered(next))
+	}
+	// Not a ballot of a closing vote: the close does not wait for it.
+	if !f.caught(f.clk.Now().Add(-time.Millisecond)) {
+		t.Fatal("the held request holds the close")
+	}
+	f.clk.Advance(2 * time.Minute) // past its lease
+	f.pump()
+	if !answered(held) {
+		t.Fatal("not delivered again after its lease")
 	}
 }

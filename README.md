@@ -96,6 +96,7 @@ destination.
 - `reconnect_slow`: such a reconnect is unanswered after a day. It
   stays open for 7 days, since a locked member vault answers when it is
   unlocked.
+- `vote_unpublished`: a member's vote request for a proposal the service holds but has not published is left unanswered for the relay to redeliver; publish the proposal (`POST /v1/proposals/{id}/publish`)
 - `ballot_not_counted`: a stored ballot failed the count's re-check
   (tag, credential signature or time) and was left out; the ERROR line
   names the proposal and the tag.

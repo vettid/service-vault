@@ -428,7 +428,7 @@ func serve(args []string) error {
 			return err
 		default:
 			ballots = &ballot.RecordStore{Records: records, Copy: &ballot.SealedCopy{Inner: raw, Seal: cs.Seal, Open: cs.Open}}
-			pc.Votes = &ballot.Box{Store: ballots, Sign: signIK}
+			pc.Votes = &ballot.Box{Store: ballots, Sign: signIK, Log: log}
 		}
 	}
 	if restored, err := tbl.Restored(ctx); err != nil {

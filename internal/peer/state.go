@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 
@@ -326,6 +327,12 @@ type key struct{ kind, id string }
 func (p *Peer) markDirty(kind, id string) { p.dirty[key{kind, id}] = struct{}{} }
 
 // mark adds a write-once record (a dedupe marker, a cached response).
+// unmark drops a pending marker (one not yet flushed), so a message left
+// for redelivery is handled again when it comes back.
+func (p *Peer) unmark(kind, id string) {
+	p.extra = slices.DeleteFunc(p.extra, func(c Change) bool { return c.Kind == kind && c.ID == id })
+}
+
 func (p *Peer) mark(kind, id string, data []byte, exp time.Time) {
 	for i := range p.extra {
 		if p.extra[i].Kind == kind && p.extra[i].ID == id {

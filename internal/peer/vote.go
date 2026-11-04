@@ -43,10 +43,17 @@ type VoteAnswer struct {
 }
 
 // Votes answers vote.* requests. An error is a storage failure: the
-// message is not acknowledged, and the relay delivers it again.
+// batch is not acknowledged, and the relay delivers it again. An error
+// that wraps ErrRedeliver leaves only that message unanswered and
+// unacknowledged, for the relay to deliver again after its lease, while
+// the rest of the batch is handled.
 type Votes interface {
 	Vote(ctx context.Context, r *VoteRequest) (VoteAnswer, error)
 }
+
+// ErrRedeliver, wrapped by a Votes error, leaves the request unanswered
+// and unacknowledged for redelivery, without failing the batch.
+var ErrRedeliver = errors.New("peer: left for redelivery")
 
 // isVoteType reports whether typ is one of the vote family (§4.2).
 func isVoteType(typ string) bool { return strings.HasPrefix(typ, "vote.") }

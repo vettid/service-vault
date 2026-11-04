@@ -7,6 +7,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/vettid/service-vault/internal/peer"
@@ -164,6 +166,25 @@ type Box struct {
 	Store BoxStore
 	// Sign signs label ‖ msg with the service identity key.
 	Sign func(label string, msg []byte) ([]byte, error)
+	// Log is where an unpublished proposal's alarm goes; nil discards it.
+	Log *slog.Logger
+}
+
+// ErrUnpublished is a vote.cast or vote.status for a proposal the service
+// holds but has not published (its anchor is missing, for example after a
+// restore of the table or a lost publication). Such a request is not
+// answered: the message stays unacknowledged, the relay delivers it again,
+// and once the proposal is published (POST /v1/proposals/{id}/publish)
+// the next delivery is answered as usual. A refusal would be final for the
+// member's vault (BALLOT-PROTOCOL §4.2; owner decision of 2026-11-04).
+var ErrUnpublished = fmt.Errorf("ballot: the proposal is held but not published: %w", peer.ErrRedeliver)
+
+// unpublished raises the alarm for a request held back by ErrUnpublished.
+func (b *Box) unpublished(id string) error {
+	if b.Log != nil {
+		b.Log.Error("vote request for an unpublished proposal: publish it", "alarm", "vote_unpublished", "proposal_id", id)
+	}
+	return ErrUnpublished
 }
 
 var _ peer.Votes = (*Box)(nil)
@@ -226,9 +247,14 @@ func (b *Box) castOnce(ctx context.Context, r *peer.VoteRequest) (peer.VoteAnswe
 	if err != nil {
 		return peer.VoteAnswer{}, err
 	}
-	// Not yet published (§3.3): no member should have it.
-	if o == nil || o.Bundle == nil {
+	if o == nil {
 		return b.refuse(nil, r, nil, CodeNotEligible, reqHash, body.ProposalID)
+	}
+	// Held but not published (§3.3): no member should have it yet, so one
+	// that does got it before a restore or a lost publication. Not
+	// answered until it is published (ErrUnpublished).
+	if o.Bundle == nil {
+		return peer.VoteAnswer{}, b.unpublished(body.ProposalID)
 	}
 	p, err := o.Parsed()
 	if err != nil {
@@ -449,8 +475,12 @@ func (b *Box) status(ctx context.Context, r *peer.VoteRequest) (peer.VoteAnswer,
 	if err != nil {
 		return peer.VoteAnswer{}, err
 	}
-	if o == nil || o.Bundle == nil {
+	if o == nil {
 		return b.refuse(nil, r, nil, CodeUnknownProposal, reqHash, body.ProposalID)
+	}
+	if o.Bundle == nil {
+		// As for a cast: not final, not answered until it is published.
+		return peer.VoteAnswer{}, b.unpublished(body.ProposalID)
 	}
 	p, err := o.Parsed()
 	if err != nil {

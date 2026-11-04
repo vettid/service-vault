@@ -7,7 +7,9 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"github.com/vettid/service-vault/vote"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -333,13 +335,20 @@ func TestStatus(t *testing.T) {
 func TestUnpublishedProposal(t *testing.T) {
 	f := newBoxFixture(t)
 	f.open.Bundle = nil
+	var logs bytes.Buffer
+	f.box.Log = slog.New(slog.NewJSONHandler(&logs, nil))
 	body, _ := f.castBody("c0", "yes")
-	if a := f.send("c0", TypeCast, body, f.during(), true); a.Code != CodeNotEligible {
-		t.Fatalf("cast: %q", a.Code)
-	}
 	q := map[string]string{"proposal_id": f.p.ProposalID}
-	if a := f.send("c0", TypeStatus, q, f.during(), true); a.Code != CodeUnknownProposal {
-		t.Fatalf("status: %q", a.Code)
+	// Held but not published: no answer (the relay delivers it again),
+	// never a final refusal, and an alarm for the operator.
+	for typ, b := range map[string]any{TypeCast: body, TypeStatus: q} {
+		j, _ := json.Marshal(b)
+		if _, err := f.box.Vote(context.Background(), &peer.VoteRequest{ConnectionID: "c0", Active: true, Type: typ, Body: j, MsgMS: f.during()}); !errors.Is(err, ErrUnpublished) {
+			t.Fatalf("%s: %v", typ, err)
+		}
+	}
+	if !strings.Contains(logs.String(), `"alarm":"vote_unpublished"`) {
+		t.Fatalf("no alarm: %s", logs.String())
 	}
 	f.open.Bundle = json.RawMessage(`{}`)
 	if a := f.send("c0", TypeStatus, q, f.during(), true); a.Code != "" {
