@@ -25,11 +25,11 @@ type RateLimit struct {
 	Limits   []signin.Limit
 }
 
-// countCreate counts one valid Create of action against every limit of
-// its group and refuses it (CodeRateLimited) when it exceeds any. Create
-// calls it once the request has passed every check of its own, so an
-// invalid one does not count; a refused one does. A counter error fails
-// closed.
+// countCreate counts one Create of action against every limit of its
+// group and refuses it (CodeRateLimited) when it exceeds any. Create calls
+// it once the request has passed every other check, the ask budget
+// included, so one refused for those does not count; one refused here
+// does. A counter error fails closed.
 func (m *Manager) countCreate(ctx context.Context, action string) error {
 	rl := m.Rate
 	if rl == nil || rl.Counters == nil {

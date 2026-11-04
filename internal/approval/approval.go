@@ -853,11 +853,6 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 	if th > len(asked) {
 		return nil, errCode(CodeUnreachable)
 	}
-	// Only a valid request is counted, so an operator's mistakes while
-	// repairing the admin set do not use up the repair group's limit.
-	if err := m.countCreate(ctx, req.Action); err != nil {
-		return nil, err
-	}
 	now := m.now()
 	// Before anything is sent or stored: too few admins can be asked now
 	// (canAsk) for the threshold to be met.
@@ -873,6 +868,13 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 	}
 	if askable < th {
 		return nil, errCode(CodeAskBudget)
+	}
+	// Only a request that would be sent is counted, so an operator's
+	// mistakes or retries while repairing the admin set (an invalid
+	// payload, admins still at their ask limit) do not use up the repair
+	// group's limit.
+	if err := m.countCreate(ctx, req.Action); err != nil {
+		return nil, err
 	}
 	id, err := envelope.NewULID(now)
 	if err != nil {

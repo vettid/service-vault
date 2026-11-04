@@ -245,7 +245,7 @@ MEMBER-SERVICE-PLAN §4.5 and §5.2; the operator's view is in the README,
   group of actions (the repair ones, and all the others), by default 2
   per hour and 4 per 24 hours each, in fixed windows
   (`SV_APPROVAL_LIMITS`): past it, `rate_limited` (429), counted once
-  the request is otherwise valid.
+  the request passes every other check, the ask budget included.
 - **Periodic work** (every 15 s and at once after a change): bootstrap,
   expiry (`expired`), re-checking open approvals after admins left, and
   webhook delivery. Webhooks are written to an outbox in the same write

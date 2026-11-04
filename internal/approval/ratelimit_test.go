@@ -40,13 +40,16 @@ func TestAskReserveForRepairs(t *testing.T) {
 }
 
 // Create is limited per group of actions: the ordinary ones share one
-// count, the repair ones another; an invalid request does not count, a
-// refused one does.
+// count, the repair ones another; a request refused as invalid or for the
+// ask budget does not count, one refused for the limit does.
 func TestCreateRateLimit(t *testing.T) {
 	f := newFixture(t, 1, "c1", "c2")
 	f.m.Rate = &RateLimit{Counters: &signin.MemCounters{}, Limits: DefaultCreateLimits}
 	ctx := context.Background()
 	ordinary := func(action, payload string) error {
+		// The admins' ask logs are cleared, so only the rate limit refuses.
+		f.fillAsks("c1", 0)
+		f.fillAsks("c2", 0)
 		_, err := f.m.Create(ctx, Request{Action: action, Summary: "Open", Payload: json.RawMessage(payload)})
 		return err
 	}
@@ -59,13 +62,21 @@ func TestCreateRateLimit(t *testing.T) {
 			t.Fatalf("invalid: %v", err)
 		}
 	}
+	// Admins at their ask limit: refused, and not counted.
+	f.fillAsks("c1", ordinaryLimit)
+	f.fillAsks("c2", ordinaryLimit)
+	if _, err := f.m.Create(ctx, Request{Action: ActionAssignmentPush, Summary: "Open", Payload: json.RawMessage(`{}`)}); codeOf(err) != CodeAskBudget {
+		t.Fatalf("ask budget: %v", err)
+	}
 	if err := ordinary(ActionAssignmentPush, `{}`); err != nil {
-		t.Fatalf("second, invalid ones not counted: %v", err)
+		t.Fatalf("second, invalid and ask_budget ones not counted: %v", err)
 	}
 	if err := ordinary(ActionContractTemplateChange, `{}`); codeOf(err) != CodeRateLimited {
 		t.Fatalf("third in the hour: %v", err)
 	}
 	// The repair group keeps its own count.
+	f.fillAsks("c1", 0)
+	f.fillAsks("c2", 0)
 	if _, err := f.m.Create(ctx, Request{Action: ActionAdminSetRemove, Payload: json.RawMessage(`{"connection_id":"c2"}`)}); err != nil {
 		t.Fatalf("repair: %v", err)
 	}
