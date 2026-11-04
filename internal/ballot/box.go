@@ -248,6 +248,12 @@ func (b *Box) castOnce(ctx context.Context, r *peer.VoteRequest) (peer.VoteAnswe
 	}
 	if prev != nil {
 		if sameBallot(&prev.Ballot, &bal) {
+			// Best effort: a row lost in a restore comes back.
+			if h, ok := b.Store.(interface {
+				HealBallot(ctx context.Context, proposalID string, rec *BallotRecord) error
+			}); ok {
+				_ = h.HealBallot(ctx, p.ProposalID, prev)
+			}
 			return b.receiptAnswer(p.ProposalID, prev)
 		}
 		return b.alreadyVoted(o, r, m.Tag, prev, reqHash)

@@ -72,8 +72,13 @@ func (b *Ballots) PutOnce(ctx context.Context, proposalID string, tag, data []by
 		// An item already there wins over the guard.
 		if len(tc.CancellationReasons) == 2 && aws.ToString(tc.CancellationReasons[1].Code) == "ConditionalCheckFailed" {
 			exists = true
-		} else if len(tc.CancellationReasons) == 2 && aws.ToString(tc.CancellationReasons[0].Code) == "ConditionalCheckFailed" {
-			return nil, ballot.ErrGuard
+		} else if len(tc.CancellationReasons) == 2 {
+			// A transaction conflict on the check means the record is being
+			// written: the same as a changed version, and the cast reads again.
+			switch aws.ToString(tc.CancellationReasons[0].Code) {
+			case "ConditionalCheckFailed", "TransactionConflict":
+				return nil, ballot.ErrGuard
+			}
 		}
 	}
 	if !exists {

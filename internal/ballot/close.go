@@ -202,7 +202,7 @@ func (m *Manager) count(ctx context.Context, o *OpenProposal) (*PublishedResults
 			return nil, err
 		}
 		if why := checkStored(p, o.ClosesAt, ph, it.Tag, r); why != "" {
-			m.log().Error("ballot not counted", "proposal_id", p.ProposalID, "tag", hex.EncodeToString(it.Tag), "connection_id", r.ConnectionID, "why", why)
+			m.log().Error("ballot not counted", "proposal_id", p.ProposalID, "tag", hex.EncodeToString(it.Tag), "why", why, "alarm", "ballot_not_counted")
 			continue
 		}
 		ballots[string(r.Ballot.RecordTag)] = r.Ballot

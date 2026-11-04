@@ -495,8 +495,8 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
   version atomically), so none can be written after the close's
   publication has changed it, and the count, which starts after that, lists
   every ballot there will be. A cast whose proposal changed meanwhile
-  is read again once; a second change leaves it unanswered, and the
-  peer retries it. The count re-checks each ballot: its tag matches its
+  is read again once; a second change leaves it unacknowledged, and
+  the relay delivers it again. The count re-checks each ballot: its tag matches its
   item, `cast_sig` verifies under the credential key stored with it,
   and its `msg_ms` is inside the window; one that fails isn't counted.
   `counts.unhandled` and `counts.removed` are fixed when collection

@@ -331,7 +331,7 @@ describe('data', () => {
     const ddb = taskRoleStatements().filter((s) => asList(s.Action).some((a: string) => a.startsWith('dynamodb:')));
     expect(ddb).toHaveLength(2);
     const bySid = Object.fromEntries(ddb.map((s) => [s.Sid, s]));
-    expect(asList(bySid.Table.Action).sort()).toEqual(['dynamodb:DeleteItem', 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:Query', 'dynamodb:Scan', 'dynamodb:UpdateItem']);
+    expect(asList(bySid.Table.Action).sort()).toEqual(['dynamodb:ConditionCheckItem', 'dynamodb:DeleteItem', 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:Query', 'dynamodb:Scan', 'dynamodb:UpdateItem']);
     expect(asList(bySid.Table.Resource)).toEqual([{ 'Fn::GetAtt': [mainTableId(), 'Arn'] }]);
     // The ballots' copy is write-once: no update or delete.
     expect(asList(bySid.Ballots.Action).sort()).toEqual(['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:Query', 'dynamodb:Scan']);

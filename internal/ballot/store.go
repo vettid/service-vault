@@ -178,6 +178,20 @@ func (s *RecordStore) PutBallot(ctx context.Context, proposalID string, rec *Bal
 	return got, nil
 }
 
+// HealBallot writes a ballot's row in the record store if it has none, for
+// a row lost in a restore; an existing row is left as it is.
+func (s *RecordStore) HealBallot(ctx context.Context, proposalID string, rec *BallotRecord) error {
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	err = s.Records.Apply(ctx, []peer.Change{{Kind: KindBallot, ID: ballotID(proposalID, rec.Ballot.RecordTag), Data: data, IfAbsent: true}})
+	if errors.Is(err, peer.ErrConflict) {
+		return nil
+	}
+	return err
+}
+
 // Rebuild puts back into the record store every ballot of a proposal the
 // copy holds (after a restore of the table), and returns how many it put.
 func (s *RecordStore) Rebuild(ctx context.Context, proposalID string) (int, error) {
@@ -256,8 +270,10 @@ func (c *SealedCopy) List(ctx context.Context, proposalID string) ([]CopyItem, e
 	return out, nil
 }
 
-// MemCopy is an in-memory Copy, for tests and local runs. With Records
-// set, a guarded write checks the guarded record's version there.
+// MemCopy is an in-memory Copy, for tests only. With Records set, a
+// guarded write checks the guarded record's version there; that check is
+// not atomic with the record store (only MemCopy's own state is locked),
+// unlike the guard of store.Ballots.
 type MemCopy struct {
 	// Records is where a guard's record is read (a peer.RecordGetter).
 	Records peer.Store

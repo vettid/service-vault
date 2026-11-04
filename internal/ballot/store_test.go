@@ -32,7 +32,7 @@ func TestRecordStoreSurvivesRestore(t *testing.T) {
 		t.Fatalf("cast refused: %s", a.Code)
 	}
 	tag := f.open.Members["c0"].Tag
-	if r, _ := rs.Ballot(ctx, f.p.ProposalID, tag); r == nil || r.Ballot.ChoiceID != "yes" {
+	if _, ok, _ := rs.Records.Get(ctx, KindBallot, ballotID(f.p.ProposalID, tag)); !ok {
 		t.Fatal("ballot not in the record store")
 	}
 
@@ -276,5 +276,25 @@ func TestStatusAndDuplicatesReadTheCopy(t *testing.T) {
 	st := f.send("c0", TypeStatus, map[string]string{"proposal_id": f.p.ProposalID}, f.during()+3, true)
 	if x := parseAnswer(t, st); st.Code != "" || x.Ballot == nil || x.Ballot.ChoiceID != "yes" {
 		t.Fatalf("status: %q %+v", st.Code, x)
+	}
+}
+
+// A lost table row comes back when the same ballot is cast again.
+func TestRepeatedCastHealsTheRow(t *testing.T) {
+	ctx := context.Background()
+	f, rs, _ := guardedBox(t)
+	body, _ := f.castBody("c0", "yes")
+	if a := f.send("c0", TypeCast, body, f.during(), true); a.Code != "" {
+		t.Fatalf("cast refused: %q", a.Code)
+	}
+	id := ballotID(f.p.ProposalID, f.open.Members["c0"].Tag)
+	if err := rs.Records.Apply(ctx, []peer.Change{{Kind: KindBallot, ID: id}}); err != nil {
+		t.Fatal(err)
+	}
+	if a := f.send("c0", TypeCast, body, f.during()+1, true); a.Code != "" {
+		t.Fatalf("repeat refused: %q", a.Code)
+	}
+	if _, ok, _ := rs.Records.Get(ctx, KindBallot, id); !ok {
+		t.Fatal("the row didn't come back")
 	}
 }

@@ -731,3 +731,33 @@ func TestCloseFreezesCounts(t *testing.T) {
 		t.Fatalf("counts changed between attempts: %+v", res.Counts)
 	}
 }
+
+// A proposal marked published by a build that didn't fix the counts gets
+// them fixed, and saved, by the next Close.
+func TestCloseFixesCountsOfAnOldPublishedRecord(t *testing.T) {
+	ctx := context.Background()
+	m, _, _ := newManager(t)
+	m.Catcher = &fakeCatcher{caught: true, unhandled: 3}
+	c, err := m.Create(ctx, "apv", input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, _ := m.Store.OpenProposal(ctx, c.ProposalID)
+	o.Published = true
+	if err := m.Store.SaveProposal(ctx, o, false); err != nil {
+		t.Fatal(err)
+	}
+	m.Roster = fakeRoster{"c0"}
+	m.Now = func() time.Time { return time.Unix(input().ClosesAt, 0).Add(2 * CollectMargin) }
+	res, err := m.Close(ctx, c.ProposalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Counts.Unhandled != 3 || res.Counts.Removed != 2 {
+		t.Fatalf("counts %+v", res.Counts)
+	}
+	o, _ = m.Store.OpenProposal(ctx, c.ProposalID)
+	if o.Unhandled == nil || *o.Unhandled != 3 || o.Removed == nil || *o.Removed != 2 {
+		t.Fatal("the counts weren't saved")
+	}
+}
