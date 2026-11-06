@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.13.9 (2026-11-04)
+**Status:** 0.13.10 (2026-11-06)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -883,6 +883,12 @@ item.
 
 ## Changes
 
+- **0.13.10 (2026-11-06):** §11 item 4: twelve more Ed25519 vectors:
+  mixed-order keys (one valid, one whose equation holds only times 8),
+  `R` of small order with the equation holding, and non-canonical
+  encodings (`y = p`, `y = p + 1`, `x = 0` with the sign bit) of
+  small-order keys and `R`. No change to the rules, the messages or the
+  documents.
 - **0.13.9 (2026-11-04):** §3.4: a member vault from VAULT-MESSAGING
   0.83.10 starts no cooldown for a declined approval challenge and does
   not count it toward a pause, so declining a bogus approval request no

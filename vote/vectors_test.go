@@ -212,7 +212,159 @@ func sigVectors(t *testing.T, sk ed25519.PrivateKey, msg []byte) []sigVector {
 	// S + L: the valid signature with a non-canonical S.
 	out = append(out, sigVector{Case: "S not below L", Key: h(pub), Msg: h(msg),
 		Sig: h(append(append([]byte{}, sig[:32]...), addL(sig[32:])...))})
+	return append(out, edgeVectors(t, msg)...)
+}
+
+// edgeVectors builds §11 item 4's mixed-order keys and non-canonical
+// encodings of small-order keys and R, each over msg ‖ i for the first
+// suffix byte i that gives the case.
+func edgeVectors(t *testing.T, msg []byte) []sigVector {
+	t.Helper()
+	var out []sigVector
+	add := func(c string, key, m, sig []byte, valid bool) {
+		out = append(out, sigVector{Case: c, Key: h(key), Msg: h(m), Sig: h(sig), Valid: valid})
+	}
+	suffixed := func(i int) []byte { return append(append([]byte{}, msg...), byte(i)) }
+	identity := edwards25519.NewIdentityPoint()
+
+	// The mixed-order key A = [a]B + T8, T8 a point of order 8: of neither
+	// small nor prime order, so rules 1 and 2 pass it.
+	ad := sha512.Sum512([]byte("example mixed-order key"))
+	a, err := new(edwards25519.Scalar).SetUniformBytes(ad[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	t8 := mustPoint(t, "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05")
+	am := new(edwards25519.Point).ScalarBaseMult(a)
+	mixed := am.Add(am, t8).Bytes()
+	nd := sha512.Sum512([]byte("example mixed-order nonce"))
+	r, err := new(edwards25519.Scalar).SetUniformBytes(nd[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	rB := new(edwards25519.Point).ScalarBaseMult(r).Bytes()
+
+	// A signature made with a under the mixed key: [S]B = R + [k]A − [k]T8,
+	// so the cofactorless equation holds exactly when k ≡ 0 mod 8 (valid),
+	// and otherwise only times 8 (refused by rule 4; a cofactored verifier
+	// would accept it).
+	for _, want := range []bool{true, false} {
+		for i := 0; ; i++ {
+			if i == 256 {
+				t.Fatalf("mixed-order key, valid %v: no message", want)
+			}
+			m := suffixed(i)
+			k := challenge(rB, mixed, m)
+			if (k.Bytes()[0]%8 == 0) != want {
+				continue
+			}
+			s := new(edwards25519.Scalar).MultiplyAdd(k, a, r)
+			if want {
+				add("mixed-order key, k = 0 mod 8", mixed, m, append(append([]byte{}, rB...), s.Bytes()...), true)
+			} else {
+				add("mixed-order key, equation only times 8", mixed, m, append(append([]byte{}, rB...), s.Bytes()...), false)
+			}
+			break
+		}
+	}
+
+	// R of small order, canonical or not, under the mixed key, with S = k·a
+	// and a message for which R + [k]T8 is the identity: the cofactorless
+	// equation holds as points, and only rule 1 (non-canonical) or rule 2
+	// (small order) refuses it. Go's ed25519.Verify alone accepts the
+	// canonical ones; it compares R's bytes, so it refuses the others.
+	for _, c := range []struct{ name, r string }{
+		// A point of order 8.
+		{"R of small order: order 8", "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a"},
+		// y = 0: a point of order 4.
+		{"R of small order: order 4", "0000000000000000000000000000000000000000000000000000000000000000"},
+		// y = p reads as y = 0: a point of order 4.
+		{"R with y = p", "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"},
+		// y = p + 1 reads as y = 1: the identity.
+		{"R with y = p + 1", "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"},
+		// y = 1 with the sign bit: the identity with x = 0 and the sign bit.
+		{"R with x = 0 and the sign bit, y = 1", "0100000000000000000000000000000000000000000000000000000000000080"},
+		// y = p − 1 with the sign bit: the point of order 2, x = 0 and the
+		// sign bit.
+		{"R with x = 0 and the sign bit, y = p - 1", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},
+	} {
+		rb, _ := hex.DecodeString(c.r)
+		p := mustPoint(t, c.r)
+		for i := 0; ; i++ {
+			if i == 256 {
+				t.Fatalf("%s: no message", c.name)
+			}
+			m := suffixed(i)
+			k := challenge(rb, mixed, m)
+			x := new(edwards25519.Point).ScalarMult(k, t8)
+			if x.Add(x, p).Equal(identity) != 1 {
+				continue
+			}
+			s := new(edwards25519.Scalar).Multiply(k, a)
+			add(c.name, mixed, m, append(append([]byte{}, rb...), s.Bytes()...), false)
+			break
+		}
+	}
+
+	// Non-canonical encodings of small-order keys, as forge does for the
+	// canonical ones: R = the identity, S = 0, and a message for which [k]A
+	// is the identity. Go's ed25519.Verify alone accepts them.
+	identityEnc := identity.Bytes()
+	for _, c := range []struct{ name, key string }{
+		// y = p reads as y = 0: a point of order 4.
+		{"key with y = p", "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"},
+		// The same with the sign bit: the other point of order 4.
+		{"key with y = p and the sign bit", "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},
+		// y = p + 1 with the sign bit: the identity, read as x = 0 with the
+		// sign bit.
+		{"key with y = p + 1 and the sign bit", "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},
+		// y = p − 1 with the sign bit: the point of order 2, x = 0 and the
+		// sign bit.
+		{"key with x = 0 and the sign bit, y = p - 1", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},
+	} {
+		kb, _ := hex.DecodeString(c.key)
+		p := mustPoint(t, c.key)
+		for i := 0; ; i++ {
+			if i == 256 {
+				t.Fatalf("%s: no message", c.name)
+			}
+			m := suffixed(i)
+			if new(edwards25519.Point).ScalarMult(challenge(identityEnc, kb, m), p).Equal(identity) != 1 {
+				continue
+			}
+			add(c.name, kb, m, append(append([]byte{}, identityEnc...), make([]byte, 32)...), false)
+			break
+		}
+	}
 	return out
+}
+
+// challenge is k = SHA-512(R ‖ A ‖ LabelBallot ‖ m) mod L.
+func challenge(r, a, m []byte) *edwards25519.Scalar {
+	d := sha512.New()
+	d.Write(r)
+	d.Write(a)
+	d.Write([]byte(LabelBallot))
+	d.Write(m)
+	k, err := new(edwards25519.Scalar).SetUniformBytes(d.Sum(nil))
+	if err != nil {
+		panic(err)
+	}
+	return k
+}
+
+// mustPoint decodes a point as Go does, accepting non-canonical encodings.
+func mustPoint(t *testing.T, s string) *edwards25519.Point {
+	t.Helper()
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := new(edwards25519.Point).SetBytes(b)
+	if err != nil {
+		t.Fatalf("%s: %v", s, err)
+	}
+	return p
 }
 
 // forgeMsg finds a message m' = msg ‖ i for which R = identity, S = 0 is a
