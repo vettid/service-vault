@@ -113,17 +113,17 @@ func (t *Tree) build(leaves [][]byte, lo, hi int) []byte {
 // Size is the number of leaves.
 func (t *Tree) Size() int { return t.n }
 
-// Root is the tree head (Root of the same leaves).
+// Root is the tree head (Root of the same leaves), a copy.
 func (t *Tree) Root() []byte {
 	if t.n == 0 {
 		s := sha256.Sum256(nil)
 		return s[:]
 	}
-	return t.nodes[[2]int{0, t.n}]
+	return bytes.Clone(t.nodes[[2]int{0, t.n}])
 }
 
 // Proof is the audit path of leaf index m, nearest sibling first (Proof
-// of the same leaves).
+// of the same leaves), in copies: a caller may change it.
 func (t *Tree) Proof(m int) ([][]byte, error) {
 	if m < 0 || m >= t.n {
 		return nil, errors.New("ballot: leaf index out of range")
@@ -133,10 +133,10 @@ func (t *Tree) Proof(m int) ([][]byte, error) {
 	for hi-lo > 1 {
 		k := split(hi - lo)
 		if m < lo+k {
-			out = append(out, t.nodes[[2]int{lo + k, hi}])
+			out = append(out, bytes.Clone(t.nodes[[2]int{lo + k, hi}]))
 			hi = lo + k
 		} else {
-			out = append(out, t.nodes[[2]int{lo, lo + k}])
+			out = append(out, bytes.Clone(t.nodes[[2]int{lo, lo + k}]))
 			lo += k
 		}
 	}

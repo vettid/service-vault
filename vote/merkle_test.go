@@ -85,6 +85,26 @@ func TestTreeMatchesProof(t *testing.T) {
 	}
 }
 
+// What a Tree returns is a copy: changing a path or the root leaves the
+// tree's later answers as they were.
+func TestTreeCopies(t *testing.T) {
+	leaves := [][]byte{{1}, {2}, {3}, {4}, {5}}
+	tr := NewTree(leaves)
+	p, _ := tr.Proof(0)
+	p[0][0] ^= 1
+	r := tr.Root()
+	r[0] ^= 1
+	for m := range leaves {
+		q, _ := tr.Proof(m)
+		if !VerifyProof(Root(leaves), leaves[m], m, len(leaves), q) {
+			t.Fatalf("m=%d: a changed path changed the tree", m)
+		}
+	}
+	if hex.EncodeToString(tr.Root()) != hex.EncodeToString(Root(leaves)) {
+		t.Fatal("a changed root changed the tree")
+	}
+}
+
 // Every proof of every leaf, in trees of 1 to 33 leaves, verifies with
 // the RFC 9162 algorithm, and fails for another index, another tree's
 // root, another leaf or a shortened path. (An audit path doesn't bind
