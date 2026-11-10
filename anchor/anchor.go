@@ -56,7 +56,10 @@ var Instances = map[string]Endpoints{
 
 // DigestSigner signs a SHA-256 digest with an anchor key (ECDSA P-256,
 // ASN.1 DER): the key in memory (LocalSigner), or a KMS key the signer
-// function alone may use (key protection, GC #7406).
+// function alone may use (key protection, GC #7406). It fails closed: on
+// any error it returns no signature, never a partial or a guessed one.
+// Each call is a sign of its own (a KMS Sign, journaled), never a cached
+// answer. Public is read once, when the Anchorer is made.
 type DigestSigner interface {
 	Public() *ecdsa.PublicKey
 	SignDigest(ctx context.Context, digest []byte) ([]byte, error)
@@ -76,6 +79,7 @@ func (l LocalSigner) SignDigest(_ context.Context, digest []byte) ([]byte, error
 // Anchorer anchors documents under one key.
 type Anchorer struct {
 	signer DigestSigner
+	pub    *ecdsa.PublicKey // the key at construction, which every signature must verify under
 	spki   []byte
 	ep     Endpoints
 	client *http.Client
@@ -120,7 +124,8 @@ func NewWithSigner(s DigestSigner, ep Endpoints, client *http.Client) (*Anchorer
 	if err != nil {
 		return nil, err
 	}
-	return &Anchorer{signer: s, spki: spki, ep: ep, client: client}, nil
+	fixed := *pub
+	return &Anchorer{signer: s, pub: &fixed, spki: spki, ep: ep, client: client}, nil
 }
 
 // PublicKeyDER is the anchor key's SubjectPublicKeyInfo.
@@ -156,7 +161,8 @@ func (a *Anchorer) Anchor(ctx context.Context, doc []byte) (json.RawMessage, err
 }
 
 // Sign returns doc's SHA-256 and the signer's signature over it, checked
-// against the anchor key before it is used: a signer that answers with
+// against the anchor key as it was when the Anchorer was made (not as the
+// signer names it now) before it is used: a signer that answers with
 // anything else is an error.
 func (a *Anchorer) Sign(ctx context.Context, doc []byte) (digest, sig []byte, err error) {
 	d := sha256.Sum256(doc)
@@ -164,7 +170,7 @@ func (a *Anchorer) Sign(ctx context.Context, doc []byte) (digest, sig []byte, er
 	if err != nil {
 		return nil, nil, fmt.Errorf("anchor: sign: %w", err)
 	}
-	if !ecdsa.VerifyASN1(a.signer.Public(), d[:], sig) {
+	if !ecdsa.VerifyASN1(a.pub, d[:], sig) {
 		return nil, nil, errors.New("anchor: the signer's signature doesn't verify under the anchor key")
 	}
 	return d[:], sig, nil
@@ -187,11 +193,49 @@ func (a *Anchorer) Enter(ctx context.Context, digest, sig []byte) (json.RawMessa
 	return json.Marshal(e)
 }
 
-// Bundle assembles the Sigstore bundle from the steps' results.
+// ErrSignAgain is Bundle's refusal of a timestamp and an entry too far
+// apart in time: they can't make a bundle, and the document has to be
+// signed again (a new signature, timestamp and entry).
+var ErrSignAgain = errors.New("anchor: the timestamp and the Rekor entry are too far apart in time: sign again")
+
+// The window a bundle's Rekor integrated time may fall in, after its
+// RFC 3161 time (BALLOT-PROTOCOL §8.5 "Rekor profile"; GC #7501): a
+// retry never pairs one attempt's timestamp with a much later entry.
+const (
+	minEntryAfterTSA = -60 * time.Second
+	maxEntryAfterTSA = 600 * time.Second
+)
+
+// Bundle assembles the Sigstore bundle from the steps' results, which may
+// have been kept between attempts: the token must be the authority's for
+// sig, the entry Rekor's for digest and sig under this key, and the
+// entry integrated −60 s to 600 s after the token's time (ErrSignAgain
+// otherwise).
 func (a *Anchorer) Bundle(digest, sig, ts []byte, entry json.RawMessage) (json.RawMessage, error) {
 	var e tlogEntry
 	if err := json.Unmarshal(entry, &e); err != nil {
 		return nil, fmt.Errorf("anchor: the kept entry: %w", err)
+	}
+	tok, err := timestamp.ParseResponse(ts)
+	h := sha256.Sum256(sig)
+	if err != nil || tok.HashAlgorithm != crypto.SHA256 || !bytes.Equal(tok.HashedMessage, h[:]) {
+		return nil, errors.New("anchor: the kept timestamp isn't one for this signature")
+	}
+	var body hashedrekord
+	if err := json.Unmarshal(e.CanonicalizedBody, &body); err != nil || body.Kind != "hashedrekord" ||
+		body.Spec.Data.Hash.Algorithm != "sha256" || body.Spec.Data.Hash.Value != hex.EncodeToString(digest) ||
+		!bytes.Equal(body.Spec.Signature.Content, sig) {
+		return nil, errors.New("anchor: the kept entry isn't one for this digest and signature")
+	}
+	if blk, _ := pem.Decode(body.Spec.Signature.PublicKey.Content); blk == nil || !bytes.Equal(blk.Bytes, a.spki) {
+		return nil, errors.New("anchor: the kept entry names another key")
+	}
+	it, err := strconv.ParseInt(e.IntegratedTime, 10, 64)
+	if err != nil {
+		return nil, errors.New("anchor: the kept entry has no integrated time")
+	}
+	if d := time.Unix(it, 0).Sub(tok.Time); d < minEntryAfterTSA || d > maxEntryAfterTSA {
+		return nil, ErrSignAgain
 	}
 	b := bundleJSON{
 		MediaType: "application/vnd.dev.sigstore.bundle.v0.3+json",
