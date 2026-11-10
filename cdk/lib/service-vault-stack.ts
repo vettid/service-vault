@@ -17,6 +17,7 @@ import * as subs from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 import { AnchorSigner, AnchorSignerProps } from './anchor-signer';
+import { KEY_ADMIN_ACTIONS } from './kms-actions';
 
 /** The port the daemon's private API listens on (SV_LISTEN). */
 export const API_PORT = 8080;
@@ -57,18 +58,7 @@ export const KEY_CHANGE_EVENTS = [
   'CreateAlias', 'DeleteAlias', 'UpdateAlias', 'TagResource', 'UntagResource', 'ImportKeyMaterial', 'ReplicateKey',
 ];
 
-/**
- * What the account may do with the keystore key: administer it, never
- * encrypt or decrypt with it. PutKeyPolicy stays, so the policy can be
- * corrected without AWS support.
- */
-export const KEY_ADMIN_ACTIONS = [
-  // CreateAlias only: kms:Create* would include CreateGrant, with which
-  // any principal the account allows it could grant itself Decrypt.
-  'kms:CreateAlias', 'kms:Describe*', 'kms:Enable*', 'kms:List*', 'kms:Put*', 'kms:Update*',
-  'kms:Revoke*', 'kms:Disable*', 'kms:Get*', 'kms:Delete*', 'kms:TagResource', 'kms:UntagResource',
-  'kms:ScheduleKeyDeletion', 'kms:CancelKeyDeletion', 'kms:RotateKeyOnDemand',
-];
+export { KEY_ADMIN_ACTIONS } from './kms-actions';
 
 /**
  * Where the stack publishes what its API client's stack needs, in SSM

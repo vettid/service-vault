@@ -12,6 +12,18 @@ fs.writeFileSync(path.join(dir, 'bootstrap'), 'not a real binary');
 const sha = crypto.createHash('sha256').update('not a real binary').digest('hex');
 const SITE_KEY = Buffer.alloc(32, 7).toString('base64');
 const BREAK_GLASS = 'arn:aws:iam::123456789012:role/owner-break-glass';
+const DEPLOY = 'arn:aws:iam::123456789012:role/cdk-deploy';
+const FN_ARN = 'arn:aws:lambda:us-east-1:123456789012:function:vettid-service-vault-test-anchor-signer';
+// A rendered ARN: a plain string, or a Fn::Join of strings and pseudo
+// parameters, resolved for this test's account, region and partition.
+const render = (x: any): string => {
+  if (typeof x === 'string') return x;
+  if (x?.Ref === 'AWS::Partition') return 'aws';
+  if (x?.Ref === 'AWS::Region') return 'us-east-1';
+  if (x?.Ref === 'AWS::AccountId') return '123456789012';
+  if (x?.['Fn::Join']) return x['Fn::Join'][1].map(render).join(x['Fn::Join'][0]);
+  return JSON.stringify(x);
+};
 const base: ServiceVaultStackProps = {
   envName: 'test',
   image: `ghcr.io/vettid/service-vault@sha256:${'a'.repeat(64)}`,
@@ -23,6 +35,7 @@ const base: ServiceVaultStackProps = {
 const signer = {
   codeDir: dir, bootstrapSha256: sha, votesBucketName: 'votes-staging-site', votesApiUrl: 'https://votes.example.org',
   votesSiteKey: SITE_KEY, sigstore: 'staging' as 'staging' | 'production', breakGlassRoleArn: BREAK_GLASS as string | undefined,
+  deployRoleArn: DEPLOY as string | undefined,
 };
 const synth = (extra: Partial<typeof signer> = {}) => Template.fromStack(
   new ServiceVaultStack(new cdk.App(), 'SV', { ...base, anchorSigner: { ...signer, ...extra } }));
@@ -60,6 +73,7 @@ test('the key policy: no grants, Sign only for the signer and only digests, no d
   expect(signs[0].Condition).toEqual({ StringEquals: { 'kms:SigningAlgorithm': 'ECDSA_SHA_256', 'kms:MessageType': 'DIGEST' } });
   expect(JSON.stringify(signs[0].Principal)).toContain('AnchorSignerRole');
   const admin = st.find((s) => s.Sid === 'Administer');
+  expect(JSON.stringify(admin.Principal)).toContain(DEPLOY);
   expect(asList(admin.Action).some((a: string) => /^kms:(Sign|Encrypt|Decrypt|Create\*|Generate)/.test(a))).toBe(false);
   const deny = st.find((s) => s.Effect === 'Deny');
   expect(asList(deny.Action).sort()).toEqual(['kms:DisableKey', 'kms:ScheduleKeyDeletion']);
@@ -70,7 +84,10 @@ test('the key policy: no grants, Sign only for the signer and only digests, no d
 test('without a break-glass role, nobody disables or deletes it', () => {
   const st = Object.values<any>(synth({ breakGlassRoleArn: undefined }).findResources('AWS::KMS::Key'))
     .find((k) => k.Properties.KeySpec === 'ECC_NIST_P256').Properties.KeyPolicy.Statement;
-  expect(st.find((s: any) => s.Effect === 'Deny').Condition).toBeUndefined();
+  const deny = st.find((s: any) => s.Effect === 'Deny');
+  expect(deny.Condition).toBeUndefined();
+  expect(deny.Principal).toEqual({ AWS: '*' });
+  expect(asList(deny.Action).sort()).toEqual(['kms:DisableKey', 'kms:ScheduleKeyDeletion']);
 });
 
 test('the role: Lambda for this function only, and Sign denied from anywhere else', () => {
@@ -78,15 +95,20 @@ test('the role: Lambda for this function only, and Sign denied from anywhere els
   const trust = role.Properties.AssumeRolePolicyDocument.Statement[0];
   expect(trust.Principal).toEqual({ Service: 'lambda.amazonaws.com' });
   expect(trust.Condition.StringEquals['aws:SourceAccount']).toBe('123456789012');
-  expect(JSON.stringify(trust.Condition.ArnLike['aws:SourceArn'])).toContain('function:vettid-service-vault-test-anchor-signer');
+  expect(render(trust.Condition.ArnLike['aws:SourceArn'])).toBe(FN_ARN);
   const deny = signerStatements().find((s) => s.Sid === 'SignOnlyFromTheFunction');
   expect(deny.Effect).toBe('Deny');
   expect(deny.Action).toBe('kms:Sign');
-  expect(JSON.stringify(deny.Condition.StringNotEquals['lambda:SourceFunctionArn'])).toContain('function:vettid-service-vault-test-anchor-signer');
+  expect(render(deny.Condition.StringNotEquals['lambda:SourceFunctionArn'])).toBe(FN_ARN);
   const actions = signerStatements().filter((s) => s.Effect === 'Allow').flatMap((s) => asList(s.Action));
   expect(actions.sort()).toEqual(['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'kms:GetPublicKey', 'kms:Sign',
     'logs:CreateLogStream', 'logs:PutLogEvents', 'logs:PutLogEvents', 's3:GetObject'].sort());
   expect(actions).not.toContain('dynamodb:DeleteItem');
+  const res = (sid: string) => asList(signerStatements().find((s) => s.Sid === sid).Resource).map(render);
+  expect(res('Journal')).toEqual(['arn:aws:logs:us-east-1:123456789012:log-group:/vettid/service-vault/test/anchor-journal:log-stream:signs']);
+  expect(res('Site')).toEqual(['arn:aws:s3:::votes-staging-site/v1/*']);
+  expect(res('OwnLogs').join()).toContain('AnchorSignerLogs');
+  expect(JSON.stringify(signerStatements().find((s) => s.Sid === 'Claims').Resource)).toContain('AnchorSignerClaims');
 });
 
 test('the function: 120 s, two at once, arm64 custom runtime, its environment', () => {
@@ -116,7 +138,7 @@ test('the task invokes it and reads the public key and claims, and never signs',
   const actions = st.flatMap((s) => asList(s.Action));
   expect(actions).toContain('lambda:InvokeFunction');
   expect(actions).toContain('kms:GetPublicKey');
-  expect(actions).not.toContain('kms:Sign');
+  expect(actions.some((a: string) => /^kms:(\*|Sign)/.test(a) || a === '*')).toBe(false);
 });
 
 test('refused: another binary, a bad URL, production off prod', () => {

@@ -8,11 +8,15 @@ import * as kms from 'aws-cdk-lib/aws-kms';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import { Construct } from 'constructs';
-import { KEY_ADMIN_ACTIONS } from './service-vault-stack';
+import { KEY_ADMIN_ACTIONS } from './kms-actions';
 
 /** The function's own limits (GC #7406 §1): 120 s, at most two at once. */
 export const SIGNER_TIMEOUT_SECONDS = 120;
 export const SIGNER_CONCURRENCY = 2;
+
+/** The journal's log group and its one stream (GC #7406 §3). */
+export const JOURNAL_GROUP = (envName: string) => `/vettid/service-vault/${envName}/anchor-journal`;
+export const JOURNAL_STREAM = 'signs';
 
 /** The claim table's calls (GC #7406 §2): conditional writes, no delete. */
 export const CLAIM_ACTIONS = ['GetItem', 'PutItem', 'UpdateItem'] as const;
@@ -164,17 +168,20 @@ export class AnchorSigner extends Construct {
 
     // The journal (GC #7406 §3): its own group and stream, a year.
     this.journal = new logs.LogGroup(this, 'Journal', {
-      logGroupName: `/vettid/service-vault/${props.envName}/anchor-journal`,
+      logGroupName: JOURNAL_GROUP(props.envName),
       retention: logs.RetentionDays.ONE_YEAR,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
     const stream = new logs.LogStream(this, 'JournalStream', {
-      logGroup: this.journal, logStreamName: 'signs', removalPolicy: cdk.RemovalPolicy.RETAIN,
+      logGroup: this.journal, logStreamName: JOURNAL_STREAM, removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
     this.role.addToPrincipalPolicy(new iam.PolicyStatement({
       sid: 'Journal',
       actions: ['logs:PutLogEvents'],
-      resources: [`${this.journal.logGroupArn.replace(/:\*$/, '')}:log-stream:signs`],
+      resources: [stack.formatArn({
+        service: 'logs', resource: 'log-group', arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME,
+        resourceName: `${JOURNAL_GROUP(props.envName)}:log-stream:${JOURNAL_STREAM}`,
+      })],
     }));
 
     // The site, read from its bucket (documents and the service list).
@@ -210,7 +217,7 @@ export class AnchorSigner extends Construct {
         SIGNER_KEY_ID: this.key.keyArn,
         SIGNER_CLAIMS_TABLE: this.claims.tableName,
         SIGNER_JOURNAL_GROUP: this.journal.logGroupName,
-        SIGNER_JOURNAL_STREAM: 'signs',
+        SIGNER_JOURNAL_STREAM: JOURNAL_STREAM,
         VOTES_BUCKET: props.votesBucketName,
         VOTES_API: props.votesApiUrl,
         VOTES_SIGSTORE: props.sigstore,
