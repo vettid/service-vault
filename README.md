@@ -272,10 +272,16 @@ contexts still open without one. `service-vault admin reseal-blobs`, run
 by the operator as a one-off task in the same environment as `serve`
 (the service stopped), moves every item to its context: each is sealed
 again and put only over its exact old bytes, never deleted first, and
-then each is opened with its context. It prints the items' names, never
-their contents, and a run again picks up where one stopped. The policy
-that requires the context, and the deletion of the old anchor-key item,
-are later steps, each on the owner's go.
+then each is opened with its context. The anchor-key item is left as it
+is, without a context, for deletion, so that no copy of it can be opened
+once the policy is in place. It prints the items' names, never their
+contents, and a run again picks up where one stopped. After it, a table
+or backup from before can't be restored into this deployment (its keys
+can't be opened once the policy is in place): the re-seal is the last
+point to roll back to a release before it. The policy that requires the
+context (its allow-list covers record-key.v* and ballot-copy-key, and
+never matches anchor-key), and the deletion of the anchor-key item, are
+later steps, each on the owner's go.
 
 An unsealed record is refused and fails the start. Only the operator
 turns on accepting them, for the one deploy that upgrades a deployment

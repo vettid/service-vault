@@ -11,9 +11,16 @@ import (
 // ResealReport is what Reseal did.
 type ResealReport struct {
 	// Resealed are the records moved to an encryption context; Already
-	// those that had one.
-	Resealed, Already []string
+	// those that had one; Left those it leaves as they are, for deletion
+	// (the anchor key).
+	Resealed, Already, Left []string
 }
+
+// leftForDeletion is whether Reseal leaves a record as it is: the anchor
+// key is deleted after the re-seal, never re-sealed (GC #7406 §7, draft 3;
+// #7501), so every copy of it, in the table and in every backup, stays
+// without a context, which the CMK's policy then refuses to everyone.
+func leftForDeletion(name string) bool { return name == AnchorKeyName }
 
 // Reseal moves every record in blobs to its encryption context (key
 // protection, GC #7406 §7): each record without one is opened, sealed
@@ -22,9 +29,10 @@ type ResealReport struct {
 // with the plaintext, and only then put in place of its exact old bytes
 // (Blobs.Replace), never deleted and made again. Then every record (listed
 // again, so one made meanwhile is seen) is read back and opened with its
-// context. A record that doesn't open, or changed meanwhile, stops it
-// with an error; what it moved stays moved, and a run again picks up the
-// rest. It runs with the service stopped, as an owner-run one-off.
+// context, under keyID. The anchor key is left as it is, for deletion
+// (Left). A record that doesn't open, or changed meanwhile, stops it with
+// an error; what it moved stays moved, and a run again picks up the rest.
+// It runs with the service stopped, as an owner-run one-off.
 func Reseal(ctx context.Context, kms KMS, keyID string, blobs Blobs) (*ResealReport, error) {
 	names, err := blobs.List(ctx)
 	if err != nil {
@@ -33,6 +41,10 @@ func Reseal(ctx context.Context, kms KMS, keyID string, blobs Blobs) (*ResealRep
 	sort.Strings(names)
 	rep := &ResealReport{}
 	for _, name := range names {
+		if leftForDeletion(name) {
+			rep.Left = append(rep.Left, name)
+			continue
+		}
 		raw, err := blobs.Get(ctx, name)
 		if err != nil {
 			return rep, fmt.Errorf("keystore: %s: %w", name, err)
@@ -67,6 +79,9 @@ func Reseal(ctx context.Context, kms KMS, keyID string, blobs Blobs) (*ResealRep
 		return rep, fmt.Errorf("keystore: list: %w", err)
 	}
 	for _, name := range names {
+		if leftForDeletion(name) {
+			continue
+		}
 		raw, err := blobs.Get(ctx, name)
 		if err != nil {
 			return rep, fmt.Errorf("keystore: check %s: %w", name, err)
@@ -74,6 +89,9 @@ func Reseal(ctx context.Context, kms KMS, keyID string, blobs Blobs) (*ResealRep
 		var s Sealed
 		if err := json.Unmarshal(raw, &s); err != nil || !s.Context {
 			return rep, fmt.Errorf("keystore: check %s: not sealed with its context", name)
+		}
+		if s.KeyID != keyID {
+			return rep, fmt.Errorf("keystore: check %s: sealed under another KMS key than the configured one", name)
 		}
 		pt, err := Open(ctx, kms, name, &s)
 		if err != nil {

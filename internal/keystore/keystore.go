@@ -50,13 +50,17 @@ type Sealed struct {
 	Context bool `json:"ctx,omitempty"`
 	// Sum is the SHA-256 of the plaintext, which a re-seal keeps: a table
 	// restore tells the same deployment by it rather than by the sealed
-	// bytes (SameSecrets). The plaintexts are high-entropy keys, so the
-	// sum gives nothing of them away.
+	// bytes (SameSecrets), and Open checks it. The plaintexts are
+	// high-entropy keys (never a password, a PIN or another guessable
+	// value: see Seal), so the sum gives nothing of them away.
 	Sum []byte `json:"sum,omitempty"`
 }
 
 // SameSecrets reports whether two stored records hold the same secrets:
-// by their sums when both have one, else by their bytes.
+// by their sums when both have one, else by their bytes. It trusts the
+// sums as stored, unopened: it is for telling deployments apart in a
+// restore (whose operator can write the table anyway), never for deciding
+// what a secret is.
 func SameSecrets(a, b []byte) bool {
 	var sa, sb Sealed
 	if json.Unmarshal(a, &sa) == nil && json.Unmarshal(b, &sb) == nil && len(sa.Sum) == sha256.Size && len(sb.Sum) == sha256.Size {
@@ -78,7 +82,9 @@ func aad(name string) []byte { return []byte("vettid/service-vault/keystore/v1\x
 
 // Seal seals plaintext under a fresh data key from kms, bound to the
 // encryption context {ContextKey: name}. name binds the record to its
-// purpose: a record sealed as one name does not open as another.
+// purpose: a record sealed as one name does not open as another. The
+// plaintext must be a high-entropy key, never a password, a PIN or any
+// other low-entropy value: the record carries its SHA-256 (Sum).
 func Seal(ctx context.Context, kms KMS, keyID, name string, plaintext []byte) (*Sealed, error) {
 	dk, wrapped, err := kms.GenerateDataKey(ctx, keyID, encContext(name))
 	if err != nil {
@@ -124,6 +130,12 @@ func Open(ctx context.Context, kms KMS, name string, s *Sealed) ([]byte, error) 
 	if err != nil {
 		return nil, ErrOpen
 	}
+	if s.Sum != nil {
+		if sum := sha256.Sum256(pt); !bytes.Equal(sum[:], s.Sum) {
+			clear(pt)
+			return nil, ErrOpen
+		}
+	}
 	return pt, nil
 }
 
@@ -164,6 +176,8 @@ var (
 
 // LoadOrCreate returns the secrets stored under name, opening them with
 // kms; if none exist it makes them with create, seals and stores them.
+// create makes high-entropy keys, never a password, a PIN or another
+// low-entropy value (Seal).
 // When two tasks race on first start, the loser discards its secrets and
 // loads the winner's, so every task ends up with the same identity.
 func LoadOrCreate[T any](ctx context.Context, kms KMS, keyID string, blobs Blobs, name string, create func() (*T, error)) (*T, error) {

@@ -68,7 +68,8 @@ func (c *changingBlobs) Replace(ctx context.Context, name string, old, data []by
 
 // Reseal moves every record without a context to one, keeps what each
 // holds, leaves those with one as they are, and then each opens with its
-// context; a record changed meanwhile stops it with nothing lost; a run
+// context; the anchor key is left as it was, without a context, for
+// deletion; a record changed meanwhile stops it with nothing lost; a run
 // again finishes.
 func TestReseal(t *testing.T) {
 	ctx := context.Background()
@@ -99,10 +100,20 @@ func TestReseal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rep.Already) != 2 || len(rep.Resealed) != 2 { // anchor-key was moved in the first run
+	if len(rep.Already) != 1 || len(rep.Resealed) != 2 || len(rep.Left) != 1 || rep.Left[0] != AnchorKeyName {
 		t.Fatalf("report %+v", rep)
 	}
+	if !bytes.Equal(b.m[AnchorKeyName], before[AnchorKeyName]) {
+		t.Fatal("the anchor key was changed")
+	}
+	var as Sealed
+	if err := json.Unmarshal(b.m[AnchorKeyName], &as); err != nil || as.Context || as.Sum != nil {
+		t.Fatalf("the anchor key: %+v %v", as, err)
+	}
 	for n := range before {
+		if n == AnchorKeyName {
+			continue
+		}
 		var s Sealed
 		if err := json.Unmarshal(b.m[n], &s); err != nil || !s.Context {
 			t.Fatalf("%s: no context", n)
@@ -112,14 +123,45 @@ func TestReseal(t *testing.T) {
 			t.Fatalf("%s: %q %v", n, pt, err)
 		}
 	}
-	if rep, err := Reseal(ctx, k, "k1", b); err != nil || len(rep.Resealed) != 0 || len(rep.Already) != 4 {
+	if rep, err := Reseal(ctx, k, "k1", b); err != nil || len(rep.Resealed) != 0 || len(rep.Already) != 3 || len(rep.Left) != 1 {
 		t.Fatalf("again: %+v %v", rep, err)
 	}
+
+	// The final pass pins the key: a record with its context under
+	// another key stops it.
+	o, _ := Seal(ctx, k, "k2", "record-key.v3", []byte("pt"))
+	b.m["record-key.v3"], _ = json.Marshal(o)
+	if _, err := Reseal(ctx, k, "k1", b); err == nil {
+		t.Fatal("a record under another key passed")
+	}
+	delete(b.m, "record-key.v3")
 
 	// A record that doesn't open stops it.
 	b.m["broken"] = []byte("{")
 	if _, err := Reseal(ctx, k, "k1", b); err == nil {
 		t.Fatal("a record that doesn't open passed")
+	}
+}
+
+// Open refuses a record whose plaintext isn't its sum.
+func TestOpenChecksSum(t *testing.T) {
+	ctx := context.Background()
+	k := newFakeKMS("k1")
+	s, err := Seal(ctx, k, "k1", "n", []byte("pt"))
+	if err != nil || len(s.Sum) != 32 {
+		t.Fatal(err)
+	}
+	if _, err := Open(ctx, k, "n", s); err != nil {
+		t.Fatal(err)
+	}
+	s.Sum = append([]byte(nil), s.Sum...)
+	s.Sum[0] ^= 1
+	if _, err := Open(ctx, k, "n", s); !errors.Is(err, ErrOpen) {
+		t.Fatalf("a wrong sum: %v", err)
+	}
+	s.Sum = s.Sum[:31]
+	if _, err := Open(ctx, k, "n", s); !errors.Is(err, ErrOpen) {
+		t.Fatalf("a short sum: %v", err)
 	}
 }
 

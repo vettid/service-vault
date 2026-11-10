@@ -103,8 +103,15 @@ func TestResealBlobs(t *testing.T) {
 	if err := resealBlobs(ctx, plainKMS{}, "k", b, &out); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), keystore.SecretsName) || strings.Contains(out.String(), "pepper") {
+	if !strings.Contains(out.String(), keystore.SecretsName) || strings.Contains(out.String(), "pepper") ||
+		strings.Contains(out.String(), "INCOMPLETE") {
 		t.Fatalf("report: %s", out.String())
+	}
+	// A record that doesn't open: the run says it is incomplete.
+	b.m["broken"] = []byte("{")
+	out.Reset()
+	if err := resealBlobs(ctx, plainKMS{}, "k", b, &out); err == nil || !strings.Contains(out.String(), "INCOMPLETE") {
+		t.Fatalf("a failed run: %v %s", err, out.String())
 	}
 }
 

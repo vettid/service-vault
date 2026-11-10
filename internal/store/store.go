@@ -4,6 +4,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -88,8 +89,13 @@ func (b blobs) Replace(ctx context.Context, name string, old, data []byte) error
 	})
 	var cf *types.ConditionalCheckFailedException
 	if errors.As(err, &cf) {
-		if _, gerr := b.Get(ctx, name); errors.Is(gerr, keystore.ErrNotFound) {
+		now, gerr := b.Get(ctx, name)
+		switch {
+		case errors.Is(gerr, keystore.ErrNotFound):
 			return keystore.ErrNotFound
+		case gerr == nil && bytes.Equal(now, data):
+			// A retry of a put that went through, whose answer was lost.
+			return nil
 		}
 		return keystore.ErrChanged
 	}

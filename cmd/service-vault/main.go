@@ -783,31 +783,38 @@ func adminReseal(args []string, out io.Writer) error {
 	defer stop()
 	ac, err := newAWSClients(ctx, *awsEndpoint)
 	if err != nil {
-		return err
+		return incomplete(out, err)
 	}
 	tbl := &store.Table{Client: ac.ddb, Name: cfg.Table}
 	// Only with the service stopped, as table restore asks.
 	at, ok, err := tbl.LastHeartbeat(ctx)
 	if err != nil {
-		return err
+		return incomplete(out, err)
 	}
 	if ok && time.Since(at) < store.HeartbeatStale {
-		return fmt.Errorf("the service is running (heartbeat %s ago): stop it first", time.Since(at).Round(time.Second))
+		return incomplete(out, fmt.Errorf("the service is running (heartbeat %s ago): stop it first", time.Since(at).Round(time.Second)))
 	}
 	return resealBlobs(ctx, &keystore.AWSKMS{Client: ac.kms}, cfg.KMSKeyID, tbl.Blobs(), out)
+}
+
+// incomplete says the re-seal isn't done, and returns err.
+func incomplete(out io.Writer, err error) error {
+	fmt.Fprintln(out, "INCOMPLETE: run it again once the error is fixed")
+	return err
 }
 
 // resealBlobs runs keystore.Reseal and reports it.
 func resealBlobs(ctx context.Context, kc keystore.KMS, keyID string, blobs keystore.Blobs, out io.Writer) error {
 	rep, err := keystore.Reseal(ctx, kc, keyID, blobs)
 	if rep != nil {
-		fmt.Fprintf(out, "resealed %d: %s\nalready with their context %d: %s\n", len(rep.Resealed), strings.Join(rep.Resealed, " "),
-			len(rep.Already), strings.Join(rep.Already, " "))
+		fmt.Fprintf(out, "resealed %d: %s\nalready with their context %d: %s\nleft for deletion %d: %s\n",
+			len(rep.Resealed), strings.Join(rep.Resealed, " "), len(rep.Already), strings.Join(rep.Already, " "),
+			len(rep.Left), strings.Join(rep.Left, " "))
 	}
 	if err != nil {
-		fmt.Fprintln(out, "INCOMPLETE: run it again once the error is fixed")
+		return incomplete(out, err)
 	}
-	return err
+	return nil
 }
 
 // confirmBootstrap shows the connection waiting to become the first admin,

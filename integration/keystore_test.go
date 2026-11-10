@@ -11,10 +11,10 @@ package integration
 
 import (
 	"bytes"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -113,6 +113,17 @@ func TestKeystoreOnKMSAndDynamoDB(t *testing.T) {
 	}
 	if err := tbl.Blobs().Replace(ctx, "none-such", raw, []byte("x")); !errors.Is(err, keystore.ErrNotFound) {
 		t.Fatalf("Replace of a missing record: %v", err)
+	}
+	if err := tbl.Blobs().Replace(ctx, keystore.SecretsName, raw, []byte("moved")); err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+	// The same Replace again (a retry whose first answer was lost)
+	// succeeds, since the record holds its bytes now.
+	if err := tbl.Blobs().Replace(ctx, keystore.SecretsName, raw, []byte("moved")); err != nil {
+		t.Fatalf("a retried Replace: %v", err)
+	}
+	if err := tbl.Blobs().Replace(ctx, keystore.SecretsName, []byte("moved"), raw); err != nil {
+		t.Fatalf("Replace back: %v", err)
 	}
 	if err := tbl.Blobs().Replace(ctx, keystore.SecretsName, raw, raw); err != nil {
 		t.Fatalf("Replace over its own bytes: %v", err)
