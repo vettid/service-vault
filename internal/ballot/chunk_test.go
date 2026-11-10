@@ -184,6 +184,39 @@ func TestProposalMembersInChunks(t *testing.T) {
 		t.Errorf("a chunk missing: %v", err)
 	}
 
+	// A member chunk with other bytes (here, a chunk of the same
+	// proposal's other value), another proposal's chunk, and a list over
+	// the members' bound of intact chunks: refused.
+	st5 := peer.NewMemStore()
+	rs5 := &RecordStore{Records: st5, Copy: &MemCopy{}}
+	if err := rs5.SaveProposal(ctx, f.open, true); err != nil {
+		t.Fatal(err)
+	}
+	named, _, _ := st5.GetRecord(ctx, KindProposal, f.p.ProposalID)
+	var rec OpenProposal
+	_ = json.Unmarshal(named.Data, &rec)
+	otherVal, _ := putChunks(ctx, st5, f.p.ProposalID, []byte("other value"), 8)
+	ov, _, _ := st5.Get(ctx, KindChunk, otherVal[0].ID)
+	if err := st5.Apply(ctx, []peer.Change{{Kind: KindChunk, ID: rec.MemberChunks[0].ID, Data: ov}}); err != nil {
+		t.Fatal(err)
+	}
+	if o, err := rs5.OpenProposal(ctx, f.p.ProposalID); o != nil || !errors.Is(err, ErrChunkBad) {
+		t.Errorf("a member chunk swapped: %v", err)
+	}
+	foreign, _ := putChunks(ctx, st5, "another-proposal", []byte("x"), 8)
+	three, _ := putChunks(ctx, st5, f.p.ProposalID, bigValue(3*ChunkSize), 8)
+	for name, refs := range map[string][]chunkRef{"foreign": foreign, "over the bound": three} {
+		r := rec
+		r.MemberChunks = refs
+		data, _ := json.Marshal(&r)
+		if err := st5.Apply(ctx, []peer.Change{{Kind: KindProposal, ID: f.p.ProposalID, Data: data}}); err != nil {
+			t.Fatal(err)
+		}
+		if o, err := rs5.OpenProposal(ctx, f.p.ProposalID); o != nil || !errors.Is(err, ErrChunkBad) {
+			t.Errorf("member chunks %s: %v", name, err)
+		}
+	}
+
 	// Other members than the proposal names (none, one lost, one added),
 	// inline or in chunks: refused, never a vote with other voters.
 	for _, change := range []string{"none", "lost", "added"} {
@@ -212,6 +245,7 @@ func TestProposalMembersInChunks(t *testing.T) {
 		if o, err := rs4.OpenProposal(ctx, f.p.ProposalID); o != nil || err == nil {
 			t.Errorf("a proposal with %d of %d members was read", len(short.Members), len(f.open.Members))
 		}
+		short.MemberChunks = nil // SaveProposal named its chunks
 		data, _ := json.Marshal(&short)
 		if err := st4.Apply(ctx, []peer.Change{{Kind: KindProposal, ID: f.p.ProposalID, Data: data}}); err != nil {
 			t.Fatal(err)
@@ -296,6 +330,45 @@ func TestResultsRowsInChunks(t *testing.T) {
 	if got, err := m.Results(ctx, "p4"); got != nil || !errors.Is(err, ErrChunkMissing) {
 		t.Errorf("results with a chunk missing: %v", err)
 	}
+	// Row chunks over their bound, each intact: refused.
+	three, _ := putChunks(ctx, st, "p5", bigValue(3*ChunkSize), 8)
+	over, _ := json.Marshal(map[string]any{"results": []byte(`{}`), "results_sig": []byte("s"), "row_chunks": three})
+	if err := st.Apply(ctx, []peer.Change{{Kind: KindResults, ID: "p5", Data: over}}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := m.Results(ctx, "p5"); got != nil || !errors.Is(err, ErrChunkBad) {
+		t.Errorf("row chunks over the bound: %v", err)
+	}
+	// Results without rows are not saved.
+	if err := m.saveResults(ctx, "p6", &PublishedResults{Results: []byte(`{}`), Sig: []byte("s")}, true); err == nil {
+		t.Error("results without rows were saved")
+	}
+	if c, _ := st.Load(ctx, KindResults); len(c) != 5 {
+		t.Errorf("%d results records", len(c))
+	}
+}
+
+// A chunk write that conflicts holds only if the chunk stored under the
+// id is the same (a retry after a lost answer); another chunk there is an
+// error (the write is IfAbsent: it never replaces one).
+func TestChunkWriteConflict(t *testing.T) {
+	ctx := context.Background()
+	st := peer.NewMemStore()
+	n := 0
+	newChunkID = func(p string) (string, error) { n++; return p + "|fixed", nil }
+	defer func() { newChunkID = chunkID }()
+	if err := st.Apply(ctx, []peer.Change{{Kind: KindChunk, ID: "p1|fixed", Data: []byte("same")}}); err != nil {
+		t.Fatal(err)
+	}
+	if refs, err := putChunks(ctx, st, "p1", []byte("same"), 8); err != nil || len(refs) != 1 {
+		t.Fatalf("a retry finding its own chunk: %v", err)
+	}
+	if _, err := putChunks(ctx, st, "p1", []byte("different"), 8); err == nil {
+		t.Fatal("a write over another chunk held")
+	}
+	if d, _, _ := st.Get(ctx, KindChunk, "p1|fixed"); string(d) != "same" {
+		t.Errorf("the stored chunk was replaced: %q", d)
+	}
 }
 
 // A copy of the table taken at any point holds every chunk its records
@@ -336,6 +409,54 @@ func TestChunksSurviveRestore(t *testing.T) {
 		}
 		if o != nil && len(o.Members) != len(f.open.Members) {
 			t.Fatalf("copy %d: %d members", i, len(o.Members))
+		}
+	}
+}
+
+// The results' rows too: every copy taken before each of the save's
+// writes either lacks the results or holds them whole.
+func TestResultsChunksSurviveRestore(t *testing.T) {
+	ctx := context.Background()
+	m, _, _ := newManager(t)
+	st := peer.NewMemStore()
+	var snaps [][]peer.Record
+	take := func() {
+		var all []peer.Record
+		for _, k := range Kinds() {
+			recs, _ := st.Load(ctx, k)
+			for _, r := range recs {
+				r.Kind = k
+				all = append(all, r)
+			}
+		}
+		snaps = append(snaps, all)
+	}
+	m.Store.Records = &snapStore{MemStore: st, before: take}
+	rows := bigValue(ChunkSize + 3)
+	if err := m.saveResults(ctx, "p1", &PublishedResults{Results: []byte(`{}`), Sig: []byte("s"), Rows: rows}, true); err != nil {
+		t.Fatal(err)
+	}
+	take()
+	if len(snaps) != 4 { // two chunks, the record, and after
+		t.Fatalf("%d copies", len(snaps))
+	}
+	for i, s := range snaps {
+		restored := peer.NewMemStore()
+		for _, r := range s {
+			if err := restored.Apply(ctx, []peer.Change{{Kind: r.Kind, ID: r.ID, Data: r.Data}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		m.Store.Records = restored
+		got, err := m.Results(ctx, "p1")
+		if err != nil {
+			t.Fatalf("copy %d: %v", i, err)
+		}
+		if got != nil && !bytes.Equal(got.Rows, rows) {
+			t.Fatalf("copy %d: rows differ", i)
+		}
+		if i == len(snaps)-1 && got == nil {
+			t.Fatal("the last copy lacks the results")
 		}
 	}
 }

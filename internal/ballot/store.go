@@ -133,10 +133,10 @@ func (s *RecordStore) SaveProposal(ctx context.Context, o *OpenProposal, create 
 	if err != nil {
 		return err
 	}
-	// The members go to chunks when the proposal is created (a new record,
-	// new chunks), before its
-	// record, and are never written again: later saves name the same
-	// chunks. A record from before chunks keeps its members inline.
+	// The members go to chunks when the proposal is created (a new
+	// record, new chunks), before its record, and are never written
+	// again: later saves name the same chunks. A record from before
+	// chunks keeps its members inline.
 	if create {
 		md, err := json.Marshal(o.Members)
 		if err != nil {

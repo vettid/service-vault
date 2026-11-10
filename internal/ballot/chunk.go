@@ -56,6 +56,9 @@ var (
 	ErrChunkBad     = errors.New("ballot: a stored chunk is not the one named")
 )
 
+// newChunkID makes chunk ids (tests replace it).
+var newChunkID = chunkID
+
 // chunkID is a new chunk's id: random, so that the table shows nothing
 // of what the chunk holds, and with the proposal's id first, so that a
 // proposal's chunks can all be found by prefix.
@@ -77,8 +80,14 @@ func ChunksOf(proposalID, chunkID string) bool {
 // write (a transaction holds at most 4 MB), and returns the list that
 // names them. They are written before the record that names them, so a
 // copy of the table from any moment that holds the record holds its
-// chunks; the chunks of a record whose write then fails stay behind
-// unnamed, and are deleted with the proposal.
+// chunks. The chunks of a record whose write then fails stay behind
+// unnamed. Nothing deletes a proposal or its results today; whatever
+// comes to delete them must delete their chunks too, found by prefix
+// (ChunksOf), named or not.
+//
+// A write that the store answered with a conflict (a retry after a lost
+// answer found its own chunk there) holds if the chunk stored is this
+// one; any other chunk under the id is an error.
 func putChunks(ctx context.Context, recs peer.Store, proposalID string, data []byte, maxChunks int) ([]chunkRef, error) {
 	n := (len(data) + ChunkSize - 1) / ChunkSize
 	if n > maxChunks {
@@ -87,14 +96,23 @@ func putChunks(ctx context.Context, recs peer.Store, proposalID string, data []b
 	refs := make([]chunkRef, 0, n)
 	for off := 0; off < len(data); off += ChunkSize {
 		part := data[off:min(off+ChunkSize, len(data))]
-		id, err := chunkID(proposalID)
+		id, err := newChunkID(proposalID)
 		if err != nil {
 			return nil, err
 		}
-		if err := recs.Apply(ctx, []peer.Change{{Kind: KindChunk, ID: id, Data: part, IfAbsent: true}}); err != nil {
+		s := sha256.Sum256(part)
+		switch err := recs.Apply(ctx, []peer.Change{{Kind: KindChunk, ID: id, Data: part, IfAbsent: true}}); {
+		case errors.Is(err, peer.ErrConflict):
+			have, ok, gerr := recs.Get(ctx, KindChunk, id)
+			if gerr != nil {
+				return nil, gerr
+			}
+			if hs := sha256.Sum256(have); !ok || !bytes.Equal(hs[:], s[:]) {
+				return nil, fmt.Errorf("ballot: another chunk is stored under a new chunk's id: %w", err)
+			}
+		case err != nil:
 			return nil, err
 		}
-		s := sha256.Sum256(part)
 		refs = append(refs, chunkRef{ID: id, Sum: s[:]})
 	}
 	return refs, nil

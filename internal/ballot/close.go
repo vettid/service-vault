@@ -262,6 +262,10 @@ func checkStored(p *vote.Proposal, closesAt int64, ph, tag []byte, r *BallotReco
 }
 
 func (m *Manager) saveResults(ctx context.Context, id string, pr *PublishedResults, create bool) error {
+	// Results always have a row per member; none is never saved.
+	if len(pr.Rows) == 0 {
+		return fmt.Errorf("ballot: results of %s without rows", id)
+	}
 	// The rows go to chunks at the first save, before the record; later
 	// saves name the same chunks.
 	if create {
