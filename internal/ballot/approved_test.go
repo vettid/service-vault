@@ -71,6 +71,7 @@ func TestCreateNeedsApproval(t *testing.T) {
 			if _, err := m.Create(ctx, tc.id, in); err == nil {
 				t.Fatal("created without a matching approval")
 			}
+			m.Wait()
 			if stored(t, m) != 0 || pub.calls != 0 || len(s.sent) != 0 || a.consumed != 0 {
 				t.Fatalf("something was done: stored %d, published %d, sent %d, consumed %d", stored(t, m), pub.calls, len(s.sent), a.consumed)
 			}
@@ -94,6 +95,7 @@ func TestCreateConsumesApprovalOnce(t *testing.T) {
 	if _, err := m.Create(ctx, "a", input()); err != nil {
 		t.Fatal(err)
 	}
+	m.Wait()
 	if !a.used["a"] || stored(t, m) != 1 || len(s.sent) != 3 {
 		t.Fatalf("used %v, stored %d", a.used["a"], stored(t, m))
 	}
@@ -172,6 +174,7 @@ func extendFixture(t *testing.T) (*Manager, *fakeSender, *fakeApprovals, string,
 	clock := time.Unix(in.ClosesAt-600, 0)
 	m.Now = func() time.Time { return clock }
 	x := ExtensionInput{ClosesAt: in.ClosesAt + 7200, Outage: vote.Outage{From: in.ClosesAt - 7200, To: in.ClosesAt - 7200 + 5400, Source: "https://status.vettid.org/"}}
+	m.Wait()
 	s.sent = nil
 	return m, s, a, c.ProposalID, x
 }
@@ -226,6 +229,7 @@ func TestExtendNeedsApproval(t *testing.T) {
 			if _, err := m.Extend(ctx, pid, id, x); err == nil {
 				t.Fatal("extended without a matching approval")
 			}
+			m.Wait()
 			if extended(t, m, pid) != 0 || len(s.sent) != 0 || a.consumed != 0 {
 				t.Fatalf("something was done: %d extensions, %d sent", extended(t, m, pid), len(s.sent))
 			}
@@ -399,6 +403,7 @@ func TestCreateRefusesFieldsNotShown(t *testing.T) {
 			if _, err := m.Create(ctx, "a", in); !errors.As(err, &ei) {
 				t.Fatalf("%v", err)
 			}
+			m.Wait()
 			if stored(t, m) != 0 || pub.calls != 0 || len(s.sent) != 0 || a.consumed != 0 {
 				t.Fatal("something was done")
 			}

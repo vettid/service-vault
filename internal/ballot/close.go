@@ -151,7 +151,7 @@ func (m *Manager) Close(ctx context.Context, id string) (*ResultsSummary, error)
 		if err := m.saveResults(ctx, id, pr, false); err != nil {
 			return nil, err
 		}
-		m.announce(ctx, o, pr)
+		m.announce(o, pr)
 	} else if pr.IndexStale {
 		// The site has the results; its index missed them. The identical
 		// upload again reruns the index update.
@@ -311,17 +311,15 @@ func (m *Manager) Results(ctx context.Context, id string) (*PublishedResults, er
 	return &pr, nil
 }
 
-// announce sends vote.closed to every eligible member (§4.1); a member it
-// misses checks at its fixed time anyway (§8.3).
-func (m *Manager) announce(ctx context.Context, o *OpenProposal, pr *PublishedResults) {
+// announce starts sending vote.closed to every eligible member in the
+// background (§4.1, sends.go); a member it misses checks at its fixed
+// time anyway (§8.3).
+func (m *Manager) announce(o *OpenProposal, pr *PublishedResults) {
 	p, _ := o.Parsed()
 	body, _ := json.Marshal(struct {
 		ProposalID  string `json:"proposal_id"`
 		ResultsHash []byte `json:"results_hash"`
 	}{p.ProposalID, sum(pr.Results)})
-	for c := range o.Members {
-		if _, err := m.Sender.SendMessage(ctx, c, TypeClosed, body); err != nil {
-			m.log().Warn("vote.closed not sent", "proposal_id", p.ProposalID, "connection_id", c, "err", err.Error())
-		}
-	}
+	m.sendInBackground("closed/"+p.ProposalID, TypeClosed, sortedConns(o.Members),
+		func(string) (json.RawMessage, error) { return body, nil })
 }

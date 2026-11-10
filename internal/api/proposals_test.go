@@ -25,7 +25,7 @@ func (f *fakeProposals) Create(_ context.Context, approvalID string, in ballot.P
 	if f.err != nil {
 		return nil, f.err
 	}
-	return &ballot.Created{ProposalID: "01JBQZ0000000000000000000A", ProposalHash: []byte{1}, Eligible: 3, Unsigned: 1, Sent: 3}, nil
+	return &ballot.Created{ProposalID: "01JBQZ0000000000000000000A", ProposalHash: []byte{1}, Eligible: 3, Unsigned: 1, Sending: 3}, nil
 }
 
 func (f *fakeProposals) Status(_ context.Context, id string) (*ballot.ProposalStatus, error) {
@@ -143,7 +143,7 @@ func TestProposalRoutes(t *testing.T) {
 		t.Fatalf("not published: %d %v", rec.Code, m)
 	}
 	for id, want := range map[string]int{"p1": 200, "nope": 404} {
-		if rec, m := do(t, h, "POST", "/v1/proposals/"+id+"/publish", apiKey, ""); rec.Code != want || (want == 200 && m["sent"] != float64(3)) {
+		if rec, m := do(t, h, "POST", "/v1/proposals/"+id+"/publish", apiKey, ""); rec.Code != want || (want == 200 && m["sending"] != float64(3)) {
 			t.Errorf("publish %s: %d %v", id, rec.Code, m)
 		}
 	}
