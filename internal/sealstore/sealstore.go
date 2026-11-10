@@ -217,6 +217,14 @@ func (s *Store) Load(ctx context.Context, kind string) ([]peer.Record, error) {
 	if err != nil {
 		return nil, err
 	}
+	return s.openAndReseal(ctx, kind, recs)
+}
+
+// openAndReseal opens records as read, rewriting each one unsealed (with
+// Legacy) or under an older version of the key under the current one
+// (each conditional on its version), and returns them opened with their
+// new versions.
+func (s *Store) openAndReseal(ctx context.Context, kind string, recs []peer.Record) ([]peer.Record, error) {
 	var reseal []peer.Change
 	var at []int
 	for i := range recs {
@@ -309,14 +317,40 @@ func (s *Store) Apply(ctx context.Context, changes []peer.Change) error {
 	return s.Inner.Apply(ctx, out)
 }
 
-// Reseal loads every record of the kinds, so that each one found
+// ResealPage is how many records Reseal reads and rewrites at once
+// through Pages: a kind as large as every vote's member and row chunks
+// (#6946) is never held whole.
+const ResealPage = 25
+
+// Reseal reads every record of the kinds, so that each one found
 // unsealed (with Legacy) or under an older version of the key is sealed
-// in place under the current one. Expired records are not read, and stay
+// in place under the current one: a page at a time through Pages when it
+// is set, else each kind whole. Expired records are not read, and stay
 // as they are until the table deletes them.
 func (s *Store) Reseal(ctx context.Context, kinds []string) error {
 	for _, k := range kinds {
-		if _, err := s.Load(ctx, k); err != nil {
-			return err
+		if s.Pages == nil {
+			if _, err := s.Load(ctx, k); err != nil {
+				return err
+			}
+			continue
+		}
+		after := ""
+		for {
+			recs, err := s.Pages.Page(ctx, k, after, ResealPage)
+			if err != nil {
+				return err
+			}
+			if len(recs) == 0 {
+				break
+			}
+			after = recs[len(recs)-1].ID
+			if _, err := s.openAndReseal(ctx, k, recs); err != nil {
+				return err
+			}
+			if len(recs) < ResealPage {
+				break
+			}
 		}
 	}
 	return nil
