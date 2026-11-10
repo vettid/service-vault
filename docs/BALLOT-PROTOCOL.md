@@ -194,6 +194,23 @@ design: vettid/votes, docs/VOTES-SITE.md).
     2. **another live key:** in every version, a service with a retired
        anchor key also lists another anchor key, certified by one of its
        identity keys, without `retired_at`.
+  - **The reader's bounds** (the owner's (a) of 2026-11-10, #7485), which
+    a vault and an observer apply, by their own clocks, to a version that
+    newly sets a `retired_at` (one the version before lacked):
+    - **backdated:** a `retired_at` more than 300 s earlier than the time
+      the reader last took or confirmed the version before is not taken:
+      that version doesn't chain for that reader, which keeps its last
+      list and audits it (`vote.list_rejected`, reason
+      `retired_backdated`). A genuine retirement is set at publish time,
+      so it always passes, however long the reader was offline (its last
+      take is then old);
+    - **future:** a `retired_at` more than 600 s after the reader's clock
+      is not taken **yet**: the reader keeps its last list and tries
+      again at its next sync. That is not a refusal.
+
+    The site and `votesctl` refuse both outright (VOTES-SITE §4). An
+    observer that holds no time of its own for the version before (a
+    first run) applies the future bound only.
   - **The site's publishing condition, forward only,** which the site and
     `votesctl` apply and readers never do: a `retired_at` is set only
     **later than** the time of every bundle the site holds under that key,
@@ -796,6 +813,14 @@ SubjectPublicKeyInfo; `?` marks a field present only where stated.
   could show different readers different results. Each reader's own
   checks still hold for what they were shown.
 - **The site alone** can withhold a document, not alter one.
+- **Retiring with a stolen site key** (0.14.0, the owner's (a) of
+  2026-11-10, #7485): whoever holds the site key can retire any anchor
+  key but a service's last live one, at "now" (within §3.3's reader
+  bounds). That stops the key's future documents until a new key is
+  listed. It cancels nothing a vault already holds, since a backdated
+  value is refused, but it could keep a stolen anchor key live by
+  retiring the new key instead. A countersignature by the service's
+  identity key waits for phase 2 of key protection.
 
 ## 10. Availability
 
@@ -936,7 +961,11 @@ item.
    can't be made from fixed seeds), a time one second before
    `retired_at` (valid), equal to it and after it (not anchored), and one
    with a fractional second that truncates to `retired_at` (not
-   anchored).
+   anchored). The reader's bounds, with the reader's times given
+   directly: a `retired_at` 299 s before the last take (taken) and 301 s
+   before (refused, `retired_backdated`); 599 s ahead of the reader's
+   clock (taken) and 601 s ahead (not taken yet); and a vault offline for
+   weeks taking a genuine retirement (taken).
 
 ## 12. Decisions for the owner
 
@@ -977,7 +1006,9 @@ item.
   one may be retired (`retired_at` on its `anchor_keys[]` entry). Two
   chain rules (set once; another live key) that every reader checks, and
   the site's own condition (later than every bundle it holds under the
-  key), which readers don't. A document whose bundle's RFC 3161 time,
+  key), which readers don't; the reader's bounds (backdated by over
+  300 s: refused; over 600 s ahead: not yet), the owner's (a) of #7485,
+  with its residual in §9.2. A document whose bundle's RFC 3161 time,
   in whole seconds, is at or after it is refused by the site, failed by
   an observer and rejected by a vault, which takes the list. The rollout
   order. Key protection, phase 1 (GC #7406, the owner's (a) of #7385).
