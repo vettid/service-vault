@@ -173,34 +173,71 @@ design: vettid/votes, docs/VOTES-SITE.md).
     connection's identity key (current, or a past one learned through
     `identity.rotate`). The list only adds which anchor keys that
     service uses.
-- **The anchor key:** each service has one long-lived ECDSA P-256 key,
-  sealed in its keystore, certified by its identity key:
+- **Anchor keys:** each service has one or more long-lived ECDSA P-256
+  anchor keys, one of them in use at a time, each kept sealed and
+  certified by its identity key:
   `anchor_cert = Sign(service IK, "vettid/vote/1/anchor-key\x00", H(anchor_key SPKI DER))`.
-- **Retiring an anchor key** (0.14.0; key protection, owner's (a) of
-  2026-11-10): an `anchor_keys[]` entry may carry `retired_at` (Unix
-  seconds), from which the key anchors nothing more. The list's rules:
-  - **set once:** `retired_at` appears in some version, and every later
-    version keeps it with the same value; it is never removed, moved or
-    added to an entry that had one;
-  - **another live key:** an entry may be retired only while the same
-    service lists another anchor key without `retired_at`;
-  - **forward only (the site):** the site refuses a list that sets
-    `retired_at` earlier than the RFC 3161 time of a bundle it already
-    holds under that key, so retiring cancels nothing already published.
-
-  A document whose bundle's RFC 3161 time is at or after its anchor key's
-  `retired_at` is not anchored: the site refuses it (§3.3 "The site
-  checks"), an observer fails it (§8.4), and a member's vault rejects it
-  (§8.3). A document timestamped earlier stays valid. A vault takes a
-  list that sets `retired_at` like any list that chains; a version that
-  breaks one of the rules above doesn't chain. **A vault rejects
-  documents, not lists:** one it already holds whose bundle time is at or
-  after the key's `retired_at` is marked rejected, with an audit entry
-  and a feed item, so that a vault holding a document only it was sent is
-  told. **Readers before 0.14.0** take only the members they know, so a
-  list with `retired_at` is one they can't take (they keep their last
-  list, as above): the site publishes `retired_at` only once the oldest
-  vault release it supports reads it.
+- **Retiring an anchor key** (0.14.0; key protection, the owner's (a)
+  of 2026-11-10, #7385): an `anchor_keys[]` entry may carry `retired_at`
+  (Unix seconds), from which the key anchors nothing more.
+  - **Times:** every comparison with `retired_at`, here and at the site,
+    an observer and a vault, uses the bundle's RFC 3161 time (`genTime`)
+    truncated to whole seconds, never Rekor's integrated time. A bundle
+    under a retired key counts only if that time is **before**
+    `retired_at`.
+  - **The chain rules,** which every reader checks when it takes a
+    version (a version that breaks one doesn't chain, and nothing else
+    about `retired_at` stops a list from chaining):
+    1. **set once:** once an entry carries `retired_at`, every later
+       version keeps it with the same value; it is never removed or
+       changed. An entry may carry it from its first listing.
+    2. **another live key:** in every version, a service with a retired
+       anchor key also lists another anchor key, certified by one of its
+       identity keys, without `retired_at`.
+  - **The site's publishing condition, forward only,** which the site and
+    `votesctl` apply and readers never do: a `retired_at` is set only
+    **later than** the time of every bundle the site holds under that key,
+    partial uploads included, so retiring cancels nothing already
+    published (VOTES-SITE §4 "Retired anchor keys"). A reader that holds a
+    bundle under the key at or after its `retired_at` (one only it was
+    sent, or one the condition missed) fails **that document** and takes
+    the list.
+  - **The service** anchors only under a key without `retired_at`.
+    Mixed keys within one proposal are fine: its proposal, extensions and
+    results may be anchored under different listed keys, each judged on
+    its own. A key is retired only after the service has switched away
+    from it: the replacement key is listed in an **earlier** version than
+    the retirement, the service anchors under the replacement, and the
+    value is later than any bundle the service may still upload under the
+    old key (a pending extension, a results upload retried). `votesctl`
+    sets the value from its own clock (VOTES-SITE §4).
+  - **Documents:** a document whose bundle's time is at or after its
+    anchor key's `retired_at` is not anchored. The site refuses it
+    (`retired_anchor_key`, §3.3 "The site checks"), an observer fails it
+    (§8.4), and a vault does not keep such a proposal (§4.1), take such a
+    `vote.status` bundle (§4.2) or put such an extension in effect
+    (§10.2), and fails such results (§8.3). Each judges the bundle it
+    holds: a vault the one it received with the document, the service
+    the one it kept, an observer the one the site serves. A document
+    timestamped earlier stays valid.
+  - **Rejected later: a vault rejects documents, not lists.** When it
+    takes a list that sets `retired_at`, a vault checks again every
+    document it holds under that key; one whose bundle's time is at or
+    after it is marked rejected, with an audit entry and a feed item, so
+    that a vault holding a document only it was sent is told. A rejected
+    proposal takes no more casts; a rejected extension is no longer in
+    effect, so `closes_at` reverts to what the extensions still in effect
+    give; ballots already cast, with their receipts, are kept as
+    evidence. The vault's side of this, its audit name, feed item and
+    state, is VAULT-MESSAGING's (the erratum in step 2 below).
+  - **Rollout:** a reader before 0.14.0 refuses an unknown member
+    (§8.5), so it can't take a list with `retired_at` and keeps its last
+    list, as above. The order: (1) the site's upload function,
+    `votesctl` and the service's signer; (2) the vault release that reads
+    `retired_at`, with the VAULT-MESSAGING erratum; (3) a list naming the
+    replacement key; (4) only once the **oldest supported vault release**
+    (the oldest that member vaults may still run) reads `retired_at`, a
+    list using it.
 - **Documents,** uploaded in this order:
   1. the proposal, before it is sent to any member;
   2. any extensions, before the `closes_at` they extend (§10.2);
@@ -211,8 +248,9 @@ design: vettid/votes, docs/VOTES-SITE.md).
   goes up with the document and with the message that carries it to
   vaults (§8.5 "Rekor profile").
 - **The site checks** the service is listed, the signatures, the exact
-  JCS bytes, the bundle under a listed anchor key timestamped before that
-  key's `retired_at` if it has one, and the order above.
+  JCS bytes, the bundle under a listed anchor key, timestamped before that
+  key's `retired_at` if it has one (`retired_anchor_key`), and the order
+  above.
 - **Write-once:** each document has one path; the site accepts the same
   bytes again, refuses different bytes, and never changes or removes a
   document.
@@ -389,8 +427,9 @@ acknowledges and drops every answer, whatever its body: it changes
 nothing, and a member it missed asks `vote.status` (§4.2).
 
 **The vault keeps** a proposal whose signature verifies under its
-connection's identity key and whose bundle verifies under that service's
-listed anchor key. A second, different proposal under the same
+connection's identity key and whose bundle verifies under one of that
+service's listed anchor keys, timestamped before that key's `retired_at`
+if it has one (§3.3). A second, different proposal under the same
 `proposal_id` is kept as evidence and not used.
 
 ### 4.2 From the member's vault
@@ -425,7 +464,9 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
   tag (as in `vote.proposal`), and the ballot with its receipt if one is
   recorded. `ballot` is `{vk, choice_id, ballot_sig, pad}`; `ballot`,
   `msg_ms` and `receipt_sig` come together or not at all, and every
-  other member is always present. A proposal the service holds but has
+  other member is always present. The vault takes the answer's proposal
+  only as §4.1 keeps one: under a listed anchor key, timestamped before
+  that key's `retired_at` if it has one. A proposal the service holds but has
   not published (with no bundle: before its first publication, or after
   a restore of its table or a lost publication) gets **no answer** from a
   member to a `vote.status` or a `vote.cast` (the message is acknowledged
@@ -633,8 +674,9 @@ publishes its results has every member's check settle by itself.
    own row and its inclusion proof to `rows_root`.
 2. **The vault** checks `results_sig` and the bundle; that the proposal
    and extensions in `results.json` are the ones it received; that no
-   bundle's RFC 3161 time is at or after its anchor key's `retired_at`
-   (§3.3); and its row's proof.
+   bundle it holds (the results' and those it received with the proposal
+   and extensions) is timestamped at or after its anchor key's
+   `retired_at` (§3.3); and its row's proof.
 3. **Its row:**
    - it holds a receipt: the row carries exactly that ballot;
    - it never cast: the row is empty;
@@ -653,8 +695,9 @@ publishes its results has every member's check settle by itself.
 From votes.vettid.org alone:
 1. `results_sig` and every document's signature hold under the service's
    identity key; every bundle verifies under a listed anchor key, and is
-   timestamped before that key's `retired_at` if it has one; the service
-   list verifies, each version chaining by §3.3's rules;
+   timestamped before that key's `retired_at` if it has one (one that
+   isn't fails that document, not the list); the service list verifies,
+   each version chaining by §3.3's chain rules;
 2. `H(rows bytes)` is `rows_hash`; the tags are unique, number
    `eligible` and reach `record_root`; the rows reach `rows_root`;
 3. every ballot's `ballot_sig` verifies under its `vk` for
@@ -818,7 +861,9 @@ is refused (`extension_pending`, 409). **Whether an extension is in
 effect is decided by the RFC 3161 time (`genTime`) in the Sigstore bundle
 the service anchored for it**, as the site decides (VOTES-SITE §4) and a
 vault does (VAULT-MESSAGING §10.19.6): before the `closes_at` it extends,
-or it does not apply (`too_late`). The service reads that time only from
+or it does not apply (`too_late`); nor does one whose bundle's time is
+at or after its anchor key's `retired_at` (§3.3; the site refuses it,
+`retired_anchor_key`). The service reads that time only from
 the bundle it kept itself, never from the one the site serves, and only
 after verifying the token: its message imprint is SHA-256 of the bundle's
 message signature (the ECDSA signature the anchor timestamps), the bundle's
@@ -852,13 +897,18 @@ finishes the index (§3.3).
 (cached) can delay a close by the CDN's error time to live: liveness
 only. (2) An extension with no bundle of the service's own is never
 adopted. (3) A probe answered `422` with a code other than `too_late`
-(`bad_anchor`, `unknown_service`) is an error: every close fails, and
+(`bad_anchor`, `unknown_service`, `retired_anchor_key`) is an error: every close fails, and
 nothing is dropped or counted, until the site accepts the document. The
 operator corrects the cause at the site (for instance the service list
 entry naming the anchor key) and closes again; if the site can never
 accept it, the pending extension has to be removed from the proposal's
 record by hand (there is no API for it), after which the close counts
-without it. **(chosen; not in the spec.)** Counting the votes after the close (§7) needs no approval: it
+without it. `retired_anchor_key` is such a case: the extension was
+anchored under a key retired before its time, which the service avoids
+by anchoring only under a key without `retired_at` and retiring a key
+only after any bundle it may still upload (§3.3); the operator removes
+it by hand, and the service may ask for a new extension, anchored under
+its key in use, if the close it extends has not passed. **(chosen; not in the spec.)** Counting the votes after the close (§7) needs no approval: it
 decides nothing that the window and the ballots have not.
 
 ## 11. Test vectors
@@ -879,6 +929,14 @@ item.
 4. Ed25519: every §2 rule: small-order keys and `R`, including
    non-canonical encodings; mixed-order keys; `y ≥ p`; `x = 0` with the
    sign bit set; a non-canonical `S`; valid signatures.
+5. Retired anchor keys (0.14.0, §3.3), from fixed keys: service lists
+   that chain (a `retired_at` set, kept, or carried from the first
+   listing) and ones that don't (removed; changed; set on a service's
+   last live key); and, with the RFC 3161 time given directly (a bundle
+   can't be made from fixed seeds), a time one second before
+   `retired_at` (valid), equal to it and after it (not anchored), and one
+   with a fractional second that truncates to `retired_at` (not
+   anchored).
 
 ## 12. Decisions for the owner
 
@@ -908,18 +966,23 @@ item.
 11. **Receipt times are not published** (§7).
 12. **Accepted ballots are also kept outside the table,** write-once
     (§6).
+13. **An anchor key may be retired** (§3.3; 0.14.0, the owner's (a) of
+    2026-11-10, #7385): forward only at the site; a vault rejects
+    documents under it, never the list.
 
 ## Changes
 
-- **0.14.0 (2026-11-10), draft:** §3.3, §8.3, §8.4, §8.5: an anchor key
-  may be retired (`retired_at` on its `anchor_keys[]` entry), set once,
-  only while another of the service's anchor keys is live, and never
-  earlier than a bundle the site holds under it. A document timestamped
-  at or after it is refused by the site, failed by an observer and
-  rejected by a vault, which takes the list and marks documents rather
-  than refusing it. Key protection, phase 1 (GC #7406, the owner's (a)
-  of #7385). The documents and the vectors don't change; the service
-  list's schema gains one optional member.
+- **0.14.0 (2026-11-10), draft:** §3.3, §4.1, §4.2, §8.3, §8.4, §8.5,
+  §10.2, §11, §12: a service has one or more anchor keys, one in use;
+  one may be retired (`retired_at` on its `anchor_keys[]` entry). Two
+  chain rules (set once; another live key) that every reader checks, and
+  the site's own condition (later than every bundle it holds under the
+  key), which readers don't. A document whose bundle's RFC 3161 time,
+  in whole seconds, is at or after it is refused by the site, failed by
+  an observer and rejected by a vault, which takes the list. The rollout
+  order. Key protection, phase 1 (GC #7406, the owner's (a) of #7385).
+  The documents and the earlier vectors don't change; the service list's
+  schema gains one optional member, and §11 gains item 5.
 - **0.13.10 (2026-11-06):** §11 item 4: twelve more Ed25519 vectors:
   mixed-order keys (one valid, one whose equation holds only times 8),
   `R` of small order with the equation holding, and non-canonical
