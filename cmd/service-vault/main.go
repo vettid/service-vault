@@ -49,7 +49,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/suite"
 
-	"github.com/vettid/service-vault/internal/anchor"
+	"github.com/vettid/service-vault/anchor"
 	"github.com/vettid/service-vault/internal/api"
 	"github.com/vettid/service-vault/internal/approval"
 	"github.com/vettid/service-vault/internal/ballot"
