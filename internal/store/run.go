@@ -1,7 +1,6 @@
 package store
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -146,7 +145,7 @@ func (t *Table) CheckTarget(ctx context.Context, src string, otherKeys bool, now
 	case errors.Is(err, keystore.ErrNotFound):
 	case err != nil:
 		return err
-	case !bytes.Equal(srcKeys, dstKeys) && !otherKeys:
+	case !keystore.SameSecrets(srcKeys, dstKeys) && !otherKeys:
 		return fmt.Errorf("store: %s holds other keys than %s: not the same deployment (-other-keys replaces them)", t.Name, src)
 	}
 	at, ok, err := t.LastHeartbeat(ctx)

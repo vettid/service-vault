@@ -11,6 +11,9 @@ package integration
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"context"
 	"encoding/json"
 	"errors"
@@ -114,8 +117,30 @@ func TestKeystoreOnKMSAndDynamoDB(t *testing.T) {
 	if err := tbl.Blobs().Replace(ctx, keystore.SecretsName, raw, raw); err != nil {
 		t.Fatalf("Replace over its own bytes: %v", err)
 	}
-	if rep, err := keystore.Reseal(ctx, k, tbl.Blobs()); err != nil || len(rep.Already) == 0 || len(rep.Resealed) != 0 {
+	// A legacy item (its data key wrapped with no context, as before P1.1)
+	// is re-sealed through real KMS, and then opens with its context.
+	dk, wrapped, err := k.GenerateDataKey(ctx, keyID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blk, _ := aes.NewCipher(dk)
+	g, _ := cipher.NewGCM(blk)
+	nonce := make([]byte, g.NonceSize())
+	_, _ = rand.Read(nonce)
+	legacy, _ := json.Marshal(&keystore.Sealed{Version: 1, KeyID: keyID, WrappedKey: wrapped, Nonce: nonce,
+		Ciphertext: g.Seal(nil, nonce, []byte("legacy"), []byte("vettid/service-vault/keystore/v1\x00legacy-item"))})
+	if err := tbl.Blobs().Create(ctx, "legacy-item", legacy); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := keystore.Reseal(ctx, k, keyID, tbl.Blobs())
+	if err != nil || len(rep.Resealed) != 1 || rep.Resealed[0] != "legacy-item" {
 		t.Fatalf("Reseal: %+v %v", rep, err)
+	}
+	moved, _ := tbl.Blobs().Get(ctx, "legacy-item")
+	var ms keystore.Sealed
+	_ = json.Unmarshal(moved, &ms)
+	if pt, err := keystore.Open(ctx, k, "legacy-item", &ms); err != nil || !ms.Context || string(pt) != "legacy" {
+		t.Fatalf("the re-sealed legacy item: %q %v", pt, err)
 	}
 
 	// A second create of the same name is refused.

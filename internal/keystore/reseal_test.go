@@ -85,7 +85,7 @@ func TestReseal(t *testing.T) {
 	}
 
 	cb := &changingBlobs{memBlobs: b, name: "record-key.v1"}
-	rep, err := Reseal(ctx, k, cb)
+	rep, err := Reseal(ctx, k, "k1", cb)
 	if !errors.Is(err, ErrChanged) {
 		t.Fatalf("a record changed meanwhile: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestReseal(t *testing.T) {
 	b.m["record-key.v1"] = before["record-key.v1"]
 	_ = rep
 
-	rep, err = Reseal(ctx, k, b)
+	rep, err = Reseal(ctx, k, "k1", b)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,13 +112,114 @@ func TestReseal(t *testing.T) {
 			t.Fatalf("%s: %q %v", n, pt, err)
 		}
 	}
-	if rep, err := Reseal(ctx, k, b); err != nil || len(rep.Resealed) != 0 || len(rep.Already) != 4 {
+	if rep, err := Reseal(ctx, k, "k1", b); err != nil || len(rep.Resealed) != 0 || len(rep.Already) != 4 {
 		t.Fatalf("again: %+v %v", rep, err)
 	}
 
 	// A record that doesn't open stops it.
 	b.m["broken"] = []byte("{")
-	if _, err := Reseal(ctx, k, b); err == nil {
+	if _, err := Reseal(ctx, k, "k1", b); err == nil {
 		t.Fatal("a record that doesn't open passed")
+	}
+}
+
+// recordingKMS records the encryption contexts it is given, and can refuse
+// a Decrypt with a context (as a CMK policy written wrong would).
+type recordingKMS struct {
+	*fakeKMS
+	seen          []map[string]string
+	refuseContext bool
+}
+
+func (r *recordingKMS) GenerateDataKey(ctx context.Context, id string, ec map[string]string) ([]byte, []byte, error) {
+	r.seen = append(r.seen, ec)
+	return r.fakeKMS.GenerateDataKey(ctx, id, ec)
+}
+
+func (r *recordingKMS) Decrypt(ctx context.Context, id string, w []byte, ec map[string]string) ([]byte, error) {
+	if ec != nil && r.refuseContext {
+		return nil, errors.New("access denied")
+	}
+	return r.fakeKMS.Decrypt(ctx, id, w, ec)
+}
+
+// The context names the record. A new seal that doesn't open stops the
+// re-seal before anything is replaced. A record on another KMS key, or a
+// legacy record that parses but doesn't open, stops it. One made during
+// the run is checked too.
+func TestResealSafety(t *testing.T) {
+	ctx := context.Background()
+	rk := &recordingKMS{fakeKMS: newFakeKMS("k1", "k2")}
+	if _, err := Seal(ctx, rk, "k1", "named", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if got := rk.seen[len(rk.seen)-1]; got[ContextKey] != "named" || len(got) != 1 {
+		t.Fatalf("context %v", got)
+	}
+
+	b := &memBlobs{m: map[string][]byte{}}
+	b.m["service-secrets"] = legacySeal(t, rk, "k1", "service-secrets", []byte("identity"))
+	old := append([]byte(nil), b.m["service-secrets"]...)
+	rk.refuseContext = true
+	if _, err := Reseal(ctx, rk, "k1", b); err == nil || !bytes.Equal(b.m["service-secrets"], old) {
+		t.Fatalf("a new seal that doesn't open replaced the old one: %v", err)
+	}
+	rk.refuseContext = false
+
+	if _, err := Reseal(ctx, rk, "k2", b); err == nil || !bytes.Equal(b.m["service-secrets"], old) {
+		t.Fatalf("a record on another key: %v", err)
+	}
+
+	var s Sealed
+	_ = json.Unmarshal(legacySeal(t, rk, "k1", "x", []byte("p")), &s)
+	s.Ciphertext[0] ^= 1
+	b.m["tampered"], _ = json.Marshal(&s)
+	if _, err := Reseal(ctx, rk, "k1", b); err == nil {
+		t.Fatal("a legacy record that doesn't open passed")
+	}
+	delete(b.m, "tampered")
+
+	// A legacy record made during the run (after the first List) is seen
+	// by the check.
+	late := &lateBlobs{memBlobs: b, add: legacySeal(t, rk, "k1", "record-key.v9", []byte("late"))}
+	if _, err := Reseal(ctx, rk, "k1", late); err == nil {
+		t.Fatal("a legacy record made during the run passed the check")
+	}
+}
+
+// lateBlobs adds a record after its first List.
+type lateBlobs struct {
+	*memBlobs
+	add   []byte
+	lists int
+}
+
+func (l *lateBlobs) List(ctx context.Context) ([]string, error) {
+	l.lists++
+	if l.lists == 2 {
+		l.mu.Lock()
+		l.m["record-key.v9"] = l.add
+		l.mu.Unlock()
+	}
+	return l.memBlobs.List(ctx)
+}
+
+// A re-seal keeps a record's sum, so a table restore sees the same
+// secrets; other secrets differ; records without a sum compare by bytes.
+func TestSameSecrets(t *testing.T) {
+	ctx := context.Background()
+	k := newFakeKMS("k1")
+	a, _ := Seal(ctx, k, "k1", "service-secrets", []byte("identity"))
+	b, _ := Seal(ctx, k, "k1", "service-secrets", []byte("identity"))
+	c, _ := Seal(ctx, k, "k1", "service-secrets", []byte("another"))
+	ja, _ := json.Marshal(a)
+	jb, _ := json.Marshal(b)
+	jc, _ := json.Marshal(c)
+	if bytes.Equal(ja, jb) || !SameSecrets(ja, jb) || SameSecrets(ja, jc) {
+		t.Fatal("sums")
+	}
+	l := legacySeal(t, k, "k1", "service-secrets", []byte("identity"))
+	if SameSecrets(l, ja) || !SameSecrets(l, l) {
+		t.Fatal("a record without a sum compares by its bytes")
 	}
 }

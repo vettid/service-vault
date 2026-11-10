@@ -8,10 +8,12 @@
 package keystore
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,6 +48,21 @@ type Sealed struct {
 	// {ContextKey: name}. A record without it is from before (it opens
 	// until the CMK's policy requires the context; Reseal moves it).
 	Context bool `json:"ctx,omitempty"`
+	// Sum is the SHA-256 of the plaintext, which a re-seal keeps: a table
+	// restore tells the same deployment by it rather than by the sealed
+	// bytes (SameSecrets). The plaintexts are high-entropy keys, so the
+	// sum gives nothing of them away.
+	Sum []byte `json:"sum,omitempty"`
+}
+
+// SameSecrets reports whether two stored records hold the same secrets:
+// by their sums when both have one, else by their bytes.
+func SameSecrets(a, b []byte) bool {
+	var sa, sb Sealed
+	if json.Unmarshal(a, &sa) == nil && json.Unmarshal(b, &sb) == nil && len(sa.Sum) == sha256.Size && len(sb.Sum) == sha256.Size {
+		return bytes.Equal(sa.Sum, sb.Sum)
+	}
+	return bytes.Equal(a, b)
 }
 
 // encContext is a record's encryption context.
@@ -76,8 +93,9 @@ func Seal(ctx context.Context, kms KMS, keyID, name string, plaintext []byte) (*
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, err
 	}
+	sum := sha256.Sum256(plaintext)
 	return &Sealed{Version: sealedVersion, KeyID: keyID, WrappedKey: wrapped, Nonce: nonce,
-		Ciphertext: g.Seal(nil, nonce, plaintext, aad(name)), Context: true}, nil
+		Ciphertext: g.Seal(nil, nonce, plaintext, aad(name)), Context: true, Sum: sum[:]}, nil
 }
 
 // Open opens a record sealed by Seal under the same name: with its

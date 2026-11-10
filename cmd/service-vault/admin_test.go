@@ -100,7 +100,7 @@ func TestResealBlobs(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if err := resealBlobs(ctx, plainKMS{}, b, &out); err != nil {
+	if err := resealBlobs(ctx, plainKMS{}, "k", b, &out); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), keystore.SecretsName) || strings.Contains(out.String(), "pepper") {

@@ -39,8 +39,9 @@ func (f *fakeKMS) aead(id string) (cipher.AEAD, error) {
 	return cipher.NewGCM(b)
 }
 
-// ctxAAD binds an encryption context, as KMS does: the same context, or
-// none, unwraps.
+// ctxAAD binds an encryption context, as KMS does: a key wrapped with a
+// context unwraps only with the same one, and one wrapped with none only
+// with none.
 func ctxAAD(ec map[string]string) []byte {
 	if ec == nil {
 		return nil

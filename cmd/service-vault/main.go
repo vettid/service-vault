@@ -761,7 +761,8 @@ const adminUsage = "usage: service-vault admin bootstrap -email E | -connection 
 	"       service-vault admin reseal-blobs"
 
 // adminReseal moves every sealed blob of the keystore to its encryption
-// context (key protection, GC #7406 §7 step 2). It is owner-run, as a
+// context (key protection, GC #7406 §7: the code is step 1, running it
+// step 2). It is owner-run, as a
 // one-off task with the service stopped, in the same environment as
 // serve. It prints the names it moved and those already moved, never
 // what they hold.
@@ -785,15 +786,26 @@ func adminReseal(args []string, out io.Writer) error {
 		return err
 	}
 	tbl := &store.Table{Client: ac.ddb, Name: cfg.Table}
-	return resealBlobs(ctx, &keystore.AWSKMS{Client: ac.kms}, tbl.Blobs(), out)
+	// Only with the service stopped, as table restore asks.
+	at, ok, err := tbl.LastHeartbeat(ctx)
+	if err != nil {
+		return err
+	}
+	if ok && time.Since(at) < store.HeartbeatStale {
+		return fmt.Errorf("the service is running (heartbeat %s ago): stop it first", time.Since(at).Round(time.Second))
+	}
+	return resealBlobs(ctx, &keystore.AWSKMS{Client: ac.kms}, cfg.KMSKeyID, tbl.Blobs(), out)
 }
 
 // resealBlobs runs keystore.Reseal and reports it.
-func resealBlobs(ctx context.Context, kc keystore.KMS, blobs keystore.Blobs, out io.Writer) error {
-	rep, err := keystore.Reseal(ctx, kc, blobs)
+func resealBlobs(ctx context.Context, kc keystore.KMS, keyID string, blobs keystore.Blobs, out io.Writer) error {
+	rep, err := keystore.Reseal(ctx, kc, keyID, blobs)
 	if rep != nil {
 		fmt.Fprintf(out, "resealed %d: %s\nalready with their context %d: %s\n", len(rep.Resealed), strings.Join(rep.Resealed, " "),
 			len(rep.Already), strings.Join(rep.Already, " "))
+	}
+	if err != nil {
+		fmt.Fprintln(out, "INCOMPLETE: run it again once the error is fixed")
 	}
 	return err
 }
