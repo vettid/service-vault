@@ -105,6 +105,7 @@ type OpenProposal struct {
 
 	p       *vote.Proposal
 	version uint64 // as read from the record store (SaveProposal)
+	records *recordTree
 }
 
 // Tags returns every eligible tag, sorted.
@@ -117,15 +118,36 @@ func (o *OpenProposal) Tags() [][]byte {
 	return tags
 }
 
-// proofOf is a tag's record_proof (§8.5).
-func (o *OpenProposal) proofOf(tags [][]byte, tag []byte) (recordProof, error) {
-	for i, t := range tags {
-		if bytes.Equal(t, tag) {
-			path, err := vote.Proof(tags, i)
-			return recordProof{Index: i, TreeSize: int64(len(tags)), Path: nonNil(path)}, err
+// recordTree is a proposal's record tree over its sorted tags (§8.5),
+// built once: a proposal's members never change. It is built on first
+// use and isn't safe for a concurrent first use: a caller that sends in
+// parallel builds it before it starts.
+type recordTree struct {
+	tree  *vote.Tree
+	index map[string]int // tag -> leaf index
+}
+
+func (o *OpenProposal) recordTree() *recordTree {
+	if o.records == nil {
+		tags := o.Tags()
+		rt := &recordTree{tree: vote.NewTree(tags), index: make(map[string]int, len(tags))}
+		for i, t := range tags {
+			rt.index[string(t)] = i
 		}
+		o.records = rt
 	}
-	return recordProof{}, errors.New("ballot: tag not among the proposal's")
+	return o.records
+}
+
+// proofOf is a tag's record_proof (§8.5).
+func (o *OpenProposal) proofOf(tag []byte) (recordProof, error) {
+	rt := o.recordTree()
+	i, ok := rt.index[string(tag)]
+	if !ok {
+		return recordProof{}, errors.New("ballot: tag not among the proposal's")
+	}
+	path, err := rt.tree.Proof(i)
+	return recordProof{Index: i, TreeSize: int64(rt.tree.Size()), Path: nonNil(path)}, err
 }
 
 // Parsed returns the proposal document.
@@ -540,7 +562,7 @@ func (b *Box) status(ctx context.Context, r *peer.VoteRequest) (peer.VoteAnswer,
 	if err != nil {
 		return peer.VoteAnswer{}, err
 	}
-	proof, err := o.proofOf(o.Tags(), m.Tag)
+	proof, err := o.proofOf(m.Tag)
 	if err != nil {
 		return peer.VoteAnswer{}, err
 	}

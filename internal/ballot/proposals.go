@@ -297,7 +297,6 @@ func (m *Manager) Publish(ctx context.Context, id string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	tags := o.Tags()
 	conns := make([]string, 0, len(o.Members))
 	for c := range o.Members {
 		conns = append(conns, c)
@@ -306,7 +305,7 @@ func (m *Manager) Publish(ctx context.Context, id string) (int, error) {
 	sent := 0
 	for _, c := range conns {
 		mem := o.Members[c]
-		proof, err := o.proofOf(tags, mem.Tag)
+		proof, err := o.proofOf(mem.Tag)
 		if err != nil {
 			return sent, err
 		}
