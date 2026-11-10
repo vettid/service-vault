@@ -165,10 +165,11 @@ design: vettid/votes, docs/VOTES-SITE.md).
   Since the list only grows, it has no limit on the number of services
   or keys: each `name` is 1–100 bytes of UTF-8, and `services.json` is
   at most 4,194,304 bytes, which holds thousands of services. A vault
-  that is given a list over its cap, or one it can't otherwise take,
-  keeps the last list it verified and goes on with the services that
-  list names; that is not an error, and a later release can raise the
-  cap. (chosen; not in the spec)
+  that is given a list over its cap, or one it can't otherwise take
+  (one it can't parse included), keeps the last list it verified and
+  goes on with the services that list names, and audits it
+  (`vote.list_rejected`, with the reason); it is not otherwise an error,
+  and a later release can raise the cap. (chosen; not in the spec)
   - A vault accepts a proposal's `service` only if it is its own
     connection's identity key (current, or a past one learned through
     `identity.rotate`). The list only adds which anchor keys that
@@ -186,31 +187,41 @@ design: vettid/votes, docs/VOTES-SITE.md).
     under a retired key counts only if that time is **before**
     `retired_at`.
   - **The chain rules,** which every reader checks when it takes a
-    version (a version that breaks one doesn't chain, and nothing else
-    about `retired_at` stops a list from chaining):
+    version (a version that breaks one doesn't chain; about `retired_at`,
+    only the future bound below delays taking one, and nothing else
+    refuses it):
     1. **set once:** once an entry carries `retired_at`, every later
        version keeps it with the same value; it is never removed or
        changed. An entry may carry it from its first listing.
     2. **another live key:** in every version, a service with a retired
        anchor key also lists another anchor key, certified by one of its
        identity keys, without `retired_at`.
-  - **The reader's bounds** (the owner's (a) of 2026-11-10, #7485), which
-    a vault and an observer apply, by their own clocks, to a version that
-    newly sets a `retired_at` (one the version before lacked):
-    - **backdated:** a `retired_at` more than 300 s earlier than the time
-      the reader last took or confirmed the version before is not taken:
-      that version doesn't chain for that reader, which keeps its last
-      list and audits it (`vote.list_rejected`, reason
-      `retired_backdated`). A genuine retirement is set at publish time,
-      so it always passes, however long the reader was offline (its last
-      take is then old);
+  - **The reader's bounds** (the owner's a2 of 2026-11-10, #7504), by
+    the reader's own clock, on a version that newly sets a `retired_at`
+    (one the version before lacked). **A reader takes every list that
+    chains**; the bounds only delay taking one, or limit what applying it
+    cancels:
     - **future:** a `retired_at` more than 600 s after the reader's clock
       is not taken **yet**: the reader keeps its last list and tries
-      again at its next sync. That is not a refusal.
+      again at its next sync. That is not a refusal;
+    - **what it cancels (the backdating bound):** applying a retirement
+      rejects a document the reader already holds under that key only if
+      its bundle's time is at or after **max(`retired_at`, R − 300 s)**.
+      R is the time the reader last took or confirmed **the site's
+      current list** (`services.json`, or the app's confirmation that it
+      is unchanged), before this version: never the time it took a
+      version during catch-up. So a backdated value cancels at most what
+      the reader received since its last sync with the site (less
+      300 s), a genuine retirement always applies, and a wrong clock can
+      only narrow what is cancelled, never keep a reader from a list;
+    - **first list:** a reader that has never taken a list holds no
+      documents to protect: it takes its first list whole, with any
+      `retired_at` in it, and has no R until then;
+    - **documents that arrive later** are judged against `retired_at`
+      alone, by the receive-time rules below.
 
-    The site and `votesctl` refuse both outright (VOTES-SITE §4). An
-    observer that holds no time of its own for the version before (a
-    first run) applies the future bound only.
+    The site and `votesctl` refuse a backdated or a far-future value
+    outright (VOTES-SITE §4).
   - **The site's publishing condition, forward only,** which the site and
     `votesctl` apply and readers never do: a `retired_at` is set only
     **later than** the time of every bundle the site holds under that key,
@@ -240,18 +251,27 @@ design: vettid/votes, docs/VOTES-SITE.md).
   - **Rejected later: a vault rejects documents, not lists.** When it
     takes a list that sets `retired_at`, a vault checks again every
     document it holds under that key; one whose bundle's time is at or
-    after it is marked rejected, with an audit entry and a feed item, so
+    after max(`retired_at`, R − 300 s) (the backdating bound above) is
+    marked rejected, with an audit entry and a feed item, so
     that a vault holding a document only it was sent is told. A rejected
     proposal takes no more casts; a rejected extension is no longer in
     effect, so `closes_at` reverts to what the extensions still in effect
     give; ballots already cast, with their receipts, are kept as
     evidence. The vault's side of this, its audit name, feed item and
     state, is VAULT-MESSAGING's (the erratum in step 2 below).
+  - **Stockpiling:** a stolen anchor key could get RFC 3161 tokens
+    before its `retired_at` and enter them in Rekor later. A bundle under
+    a key with `retired_at` therefore counts only if its Rekor integrated
+    time `t_int` and its RFC 3161 time `t_tsa` satisfy −60 s ≤ `t_int` −
+    `t_tsa` ≤ 600 s: the site refuses one outside it (`bad_anchor`), an
+    observer fails it (§8.4), and a vault rejects it (as above). A
+    stockpiled token so serves at most 600 s past `retired_at`.
   - **Rollout:** a reader before 0.14.0 refuses an unknown member
     (§8.5), so it can't take a list with `retired_at` and keeps its last
     list, as above. The order: (1) the site's upload function,
     `votesctl` and the service's signer; (2) the vault release that reads
-    `retired_at`, with the VAULT-MESSAGING erratum; (3) a list naming the
+    `retired_at`, with the VAULT-MESSAGING erratum, and the Android app
+    release that hands it the lists; (3) a list naming the
     replacement key; (4) only once the **oldest supported vault release**
     (the oldest that member vaults may still run) reads `retired_at`, a
     list using it.
@@ -712,9 +732,11 @@ publishes its results has every member's check settle by itself.
 From votes.vettid.org alone:
 1. `results_sig` and every document's signature hold under the service's
    identity key; every bundle verifies under a listed anchor key, and is
-   timestamped before that key's `retired_at` if it has one (one that
-   isn't fails that document, not the list); the service list verifies,
-   each version chaining by §3.3's chain rules;
+   timestamped before that key's `retired_at` if it has one, within
+   §3.3's backdating bound and, under a key with `retired_at`, with −60 s
+   ≤ `t_int` − `t_tsa` ≤ 600 s (one that isn't fails that document, not
+   the list); the service list verifies, each version chaining by §3.3's
+   chain rules;
 2. `H(rows bytes)` is `rows_hash`; the tags are unique, number
    `eligible` and reach `record_root`; the rows reach `rows_root`;
 3. every ballot's `ballot_sig` verifies under its `vk` for
@@ -813,14 +835,15 @@ SubjectPublicKeyInfo; `?` marks a field present only where stated.
   could show different readers different results. Each reader's own
   checks still hold for what they were shown.
 - **The site alone** can withhold a document, not alter one.
-- **Retiring with a stolen site key** (0.14.0, the owner's (a) of
-  2026-11-10, #7485): whoever holds the site key can retire any anchor
-  key but a service's last live one, at "now" (within §3.3's reader
-  bounds). That stops the key's future documents until a new key is
-  listed. It cancels nothing a vault already holds, since a backdated
-  value is refused, but it could keep a stolen anchor key live by
-  retiring the new key instead. A countersignature by the service's
-  identity key waits for phase 2 of key protection.
+- **Retiring with a stolen site key** (0.14.0, the owner's a2 of
+  2026-11-10, #7504): whoever holds the site key can retire any anchor
+  key but a service's last live one. A backdated value cancels at most
+  what a vault received under that key since its last sync with the site
+  (less 300 s, §3.3); one who can also keep the vault from syncing can
+  stretch that window. A retirement at "now" stops the key's future
+  documents until a new key is listed, and could keep a stolen anchor key
+  live by retiring the new key instead. A countersignature by the
+  service's identity key waits for phase 2 of key protection.
 
 ## 10. Availability
 
@@ -962,10 +985,14 @@ item.
    `retired_at` (valid), equal to it and after it (not anchored), and one
    with a fractional second that truncates to `retired_at` (not
    anchored). The reader's bounds, with the reader's times given
-   directly: a `retired_at` 299 s before the last take (taken) and 301 s
-   before (refused, `retired_backdated`); 599 s ahead of the reader's
-   clock (taken) and 601 s ahead (not taken yet); and a vault offline for
-   weeks taking a genuine retirement (taken).
+   directly: a vault two versions behind across "list the new key", then
+   "retire the old", both taken in one catch-up (taken, and the
+   retirement applies); a backdated `retired_at` with a held document
+   anchored before R − 300 s (kept) and one anchored after it (rejected);
+   a `retired_at` 599 s ahead of the reader's clock (taken) and 601 s
+   ahead (not taken yet); a first list carrying `retired_at` (taken
+   whole); and `t_int` − `t_tsa` of −61, −60, 600 and 601 s under a
+   retired key.
 
 ## 12. Decisions for the owner
 
@@ -1006,9 +1033,11 @@ item.
   one may be retired (`retired_at` on its `anchor_keys[]` entry). Two
   chain rules (set once; another live key) that every reader checks, and
   the site's own condition (later than every bundle it holds under the
-  key), which readers don't; the reader's bounds (backdated by over
-  300 s: refused; over 600 s ahead: not yet), the owner's (a) of #7485,
-  with its residual in §9.2. A document whose bundle's RFC 3161 time,
+  key), which readers don't; the reader's bounds (the owner's a2 of
+  #7504): every chaining list is taken, over 600 s ahead not yet, and a
+  retirement cancels only held documents at or after max(`retired_at`,
+  R − 300 s), with its residual in §9.2; the stockpiling window; an
+  unparseable list is audited. A document whose bundle's RFC 3161 time,
   in whole seconds, is at or after it is refused by the site, failed by
   an observer and rejected by a vault, which takes the list. The rollout
   order. Key protection, phase 1 (GC #7406, the owner's (a) of #7385).
