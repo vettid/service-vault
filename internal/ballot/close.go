@@ -320,6 +320,6 @@ func (m *Manager) announce(o *OpenProposal, pr *PublishedResults) {
 		ProposalID  string `json:"proposal_id"`
 		ResultsHash []byte `json:"results_hash"`
 	}{p.ProposalID, sum(pr.Results)})
-	m.sendInBackground("closed/"+p.ProposalID, TypeClosed, sortedConns(o.Members),
+	m.sendInBackground(p.ProposalID, "closed/"+p.ProposalID, TypeClosed, sortedConns(o.Members),
 		func(string) (json.RawMessage, error) { return body, nil })
 }

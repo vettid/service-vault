@@ -447,6 +447,11 @@ func serve(args []string) error {
 	svc.Peer = p
 	var proposals api.Proposals
 	var anchorInfo *api.AnchorKey
+	// Member sends run under their own context: they go on through the
+	// HTTP drain at shutdown, which then waits for them (bounded).
+	sendsCtx, stopSends := context.WithCancel(context.Background())
+	defer stopSends()
+	waitSends := func() {}
 	if ballots != nil {
 		// Publishing (BALLOT-PROTOCOL §3.3) needs SV_VOTES_URL; without it,
 		// creating a proposal answers publication_not_configured.
@@ -468,8 +473,9 @@ func serve(args []string) error {
 			return err
 		}
 		anchorInfo = &api.AnchorKey{Key: spki, Cert: cert, IK: keys.IKPublic(), Sigstore: cfg.Sigstore}
-		mgr := &ballot.Manager{Store: ballots, Sign: signIK, IK: keys.IKPublic(), Roster: p, Sender: p, Background: ctx,
+		mgr := &ballot.Manager{Store: ballots, Sign: signIK, IK: keys.IKPublic(), Roster: p, Sender: p, Background: sendsCtx,
 			Catcher: p, Approvals: approvals, NewID: envelope.NewULID, Now: time.Now, Log: log}
+		waitSends = mgr.Wait
 		approvals.EligibleCount = func(context.Context) (int, error) { return len(p.Eligible()), nil }
 		approvals.ProposalTitle = func(ctx context.Context, id string) (string, bool, error) {
 			o, err := ballots.OpenProposal(ctx, id)
@@ -557,6 +563,14 @@ func serve(args []string) error {
 	sctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(sctx)
+	sendsDone := make(chan struct{})
+	go func() { waitSends(); close(sendsDone) }()
+	select {
+	case <-sendsDone:
+	case <-sctx.Done():
+		log.Warn("member sends stopped at shutdown: members not yet sent learn of them as BALLOT-PROTOCOL §4.2, §8.3 and §10 say")
+	}
+	stopSends()
 	if runErr == nil {
 		if err := <-peerErr; err != nil && !errors.Is(err, context.Canceled) {
 			runErr = fmt.Errorf("peer: %w", err)

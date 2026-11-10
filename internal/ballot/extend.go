@@ -246,7 +246,7 @@ func (m *Manager) Extend(ctx context.Context, id, approvalID string, in Extensio
 		ExtensionSig []byte          `json:"extension_sig"`
 		Bundle       json.RawMessage `json:"bundle"`
 	}{id, doc, sig, bundle})
-	m.sendInBackground(fmt.Sprintf("extended/%s/%d", id, e.N), TypeExtended, sortedConns(o.Members),
+	m.sendInBackground(id, fmt.Sprintf("extended/%s/%d", id, e.N), TypeExtended, sortedConns(o.Members),
 		func(string) (json.RawMessage, error) { return body, nil })
 	m.log().Info("vote extended", "proposal_id", id, "n", e.N, "closes_at", e.ClosesAt)
 	return e, nil

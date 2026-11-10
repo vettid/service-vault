@@ -50,9 +50,22 @@ type fakeSender struct {
 	down map[string]bool
 	// block, when set, holds every send until it is closed.
 	block chan struct{}
+	// cancelled counts the calls made with a context already done; hold,
+	// set before any send, holds the sends to a connection until closed.
+	cancelled int
+	hold      map[string]chan struct{}
 }
 
 func (s *fakeSender) SendMessage(ctx context.Context, conn, typ string, body json.RawMessage) (string, error) {
+	if ctx.Err() != nil {
+		s.mu.Lock()
+		s.cancelled++
+		s.mu.Unlock()
+		return "", ctx.Err()
+	}
+	if h := s.hold[conn]; h != nil {
+		<-h
+	}
 	if s.block != nil {
 		select {
 		case <-s.block:

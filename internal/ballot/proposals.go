@@ -91,9 +91,10 @@ type Manager struct {
 	NewID     func(time.Time) (string, error)
 	Now       func() time.Time
 	Log       *slog.Logger
-	// Background is the daemon's context, under which member sends run
-	// after the request that started them (sends.go); they stop when it
-	// ends. Nil: context.Background().
+	// Background is the context member sends run under, after the request
+	// that started them (sends.go); they stop when it ends. The daemon's
+	// lasts until its shutdown has waited for them. Nil:
+	// context.Background().
 	Background context.Context
 
 	// locks holds a proposal's lock (a chan struct{} of one) while it is
@@ -307,8 +308,7 @@ func (m *Manager) Publish(ctx context.Context, id string) (int, error) {
 		return 0, err
 	}
 	conns := sortedConns(o.Members)
-	o.recordTree() // built here: the sender reads it from another goroutine
-	m.sendInBackground("proposal/"+id, TypeProposal, conns, func(c string) (json.RawMessage, error) {
+	m.sendInBackground(id, "proposal/"+id, TypeProposal, conns, func(c string) (json.RawMessage, error) {
 		mem := o.Members[c]
 		proof, err := o.proofOf(mem.Tag)
 		if err != nil {
