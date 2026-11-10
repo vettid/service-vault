@@ -487,7 +487,10 @@ export class ServiceVaultStack extends cdk.Stack {
       if (!/^arn:aws[a-z-]*:lambda:[a-z0-9-]+:[0-9]{12}:function:[A-Za-z0-9_-]+$/.test(props.anchorSignerFunctionArn)) {
         throw new Error(`anchorSignerFunctionArn must be a function's unqualified ARN (got "${props.anchorSignerFunctionArn}")`);
       }
-      if (props.anchorSignerFunctionArn.split(':')[4] === props.env?.account) {
+      if (cdk.Token.isUnresolved(this.account)) {
+        throw new Error('anchorSignerFunctionArn needs env.account: the signer must be in another account');
+      }
+      if (props.anchorSignerFunctionArn.split(':')[4] === this.account) {
         throw new Error('anchorSignerFunctionArn must be in the signer account, not in this one');
       }
       taskDef.taskRole.addToPrincipalPolicy(new iam.PolicyStatement({

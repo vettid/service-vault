@@ -71,7 +71,10 @@ export interface AnchorSignerStackProps extends cdk.StackProps {
 
 /**
  * The bootstrap's SHA-256 inside a zip (stored or deflated): the minimal
- * reader synth needs, with no dependency.
+ * reader synth needs, with no dependency. The zip must hold exactly one
+ * `bootstrap`. Synth pins the owner's local copy of the signed zip; the
+ * runbook compares that copy's SHA-256 with the deployed object version,
+ * and `CodeSha256` after the deploy.
  */
 export function bootstrapSha256InZip(zip: Buffer): string {
   let eocd = -1;
@@ -81,6 +84,7 @@ export function bootstrapSha256InZip(zip: Buffer): string {
   if (eocd < 0) throw new Error('anchorSigner: the release is not a zip');
   const count = zip.readUInt16LE(eocd + 10);
   let p = zip.readUInt32LE(eocd + 16);
+  let found: string | undefined;
   for (let n = 0; n < count; n++) {
     if (zip.readUInt32LE(p) !== 0x02014b50) throw new Error('anchorSigner: the release zip is malformed');
     const method = zip.readUInt16LE(p + 10);
@@ -96,14 +100,20 @@ export function bootstrapSha256InZip(zip: Buffer): string {
       const data = zip.subarray(local + 30 + lnameLen + lextraLen, local + 30 + lnameLen + lextraLen + csize);
       const raw = method === 0 ? data : method === 8 ? zlib.inflateRawSync(data) : null;
       if (!raw) throw new Error(`anchorSigner: the release's bootstrap uses compression method ${method}`);
-      return crypto.createHash('sha256').update(raw).digest('hex');
+      if (found !== undefined) throw new Error('anchorSigner: the release zip has more than one bootstrap');
+      found = crypto.createHash('sha256').update(raw).digest('hex');
     }
     p += 46 + nameLen + extraLen + commentLen;
   }
-  throw new Error('anchorSigner: the release zip has no bootstrap');
+  if (found === undefined) throw new Error('anchorSigner: the release zip has no bootstrap');
+  return found;
 }
 
 /**
+ * Deployed from the owner's session only; its app entry point and the
+ * service stack's `anchorSignerFunctionArn` context are wired by the
+ * runbook card (P1.6, #7421), not here, so that nothing in bin/ deploys it.
+ *
  * AnchorSigner-<env>: the signer's own account (key protection, phase 1;
  * GC #7406 as amended for the owner's a on #7597 and #7633: #7606, #7611,
  * #7638, #7648), administered by the owner alone and deployed from the
@@ -141,6 +151,9 @@ export class AnchorSignerStack extends cdk.Stack {
     }
     if (!Number.isInteger(props.signatureValidityDays) || props.signatureValidityDays < 1 || props.signatureValidityDays > 3650) {
       throw new Error('signatureValidityDays must be an integer from 1 to 3650');
+    }
+    if (cdk.Token.isUnresolved(this.account) || cdk.Token.isUnresolved(this.region)) {
+      throw new Error('AnchorSigner needs env.account and env.region: the signer account is a fixed, standalone account');
     }
     const taskAccount = props.taskRoleArn.split(':')[4];
     if (taskAccount === this.account) {
@@ -259,12 +272,18 @@ export class AnchorSignerStack extends cdk.Stack {
       conditions: { StringLike: { 's3:prefix': ['v1/*'] } },
     }));
 
-    // Code signing: a profile only the owner's role may sign under, and a
-    // configuration that refuses anything else on deploy.
+    // Code signing: a profile, and a configuration that refuses anything
+    // not signed under it on deploy. The profile is retained: changing its
+    // validity replaces it, and every release must then be signed again
+    // under the new one. The permission below grants the owner's signing
+    // role StartSigningJob; it restricts nothing by itself (this account's
+    // only administrator is the owner). Verified on staging that Signer
+    // accepts a same-account role.
     this.profile = new signer.SigningProfile(this, 'Profile', {
       platform: signer.Platform.AWS_LAMBDA_SHA384_ECDSA,
       signatureValidity: cdk.Duration.days(props.signatureValidityDays),
     });
+    this.profile.applyRemovalPolicy(cdk.RemovalPolicy.RETAIN);
     new signer.CfnProfilePermission(this, 'ProfileSignOwner', {
       profileName: this.profile.signingProfileName, action: 'signer:StartSigningJob',
       principal: props.signingRoleArn, statementId: 'OwnerSigns',

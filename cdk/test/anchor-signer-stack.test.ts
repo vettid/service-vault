@@ -57,14 +57,28 @@ const render = (x: any): string => {
 };
 const t = synth({ release });
 const keyPolicy = () => Object.values<any>(t.findResources('AWS::KMS::Key'))[0].Properties.KeyPolicy.Statement;
-const roleStatements = (): any[] => Object.values<any>(t.findResources('AWS::IAM::Policy'))
-  .filter((p) => JSON.stringify(p.Properties.Roles).includes('Role')).flatMap((p) => p.Properties.PolicyDocument.Statement);
+const roleStatements = (): any[] => {
+  const roleIds = Object.entries<any>(t.findResources('AWS::IAM::Role'))
+    .filter(([, r]) => r.Properties.RoleName === 'vettid-anchor-signer-staging').map(([id]) => id);
+  expect(roleIds).toHaveLength(1);
+  return Object.values<any>(t.findResources('AWS::IAM::Policy'))
+    .filter((p) => p.Properties.Roles.some((r: any) => r.Ref === roleIds[0])).flatMap((p) => p.Properties.PolicyDocument.Statement);
+};
 
 test('the zip reader finds the bootstrap, stored or deflated', () => {
   expect(bootstrapSha256InZip(makeZip('bootstrap', binary, false))).toBe(SHA);
   expect(bootstrapSha256InZip(makeZip('bootstrap', binary, true))).toBe(SHA);
   expect(() => bootstrapSha256InZip(makeZip('other', binary, false))).toThrow(/no bootstrap/);
   expect(() => bootstrapSha256InZip(Buffer.from('not a zip at all, not at all'))).toThrow(/not a zip/);
+  const one = makeZip('bootstrap', binary, false);
+  // Two central-directory entries both named bootstrap.
+  const cd = one.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+  const eocd = one.length - 22;
+  const entry = one.subarray(cd, eocd);
+  const twice = Buffer.concat([one.subarray(0, eocd), entry, one.subarray(eocd)]);
+  twice.writeUInt16LE(2, twice.length - 22 + 8); twice.writeUInt16LE(2, twice.length - 22 + 10);
+  twice.writeUInt32LE(entry.length * 2, twice.length - 22 + 12);
+  expect(() => bootstrapSha256InZip(twice)).toThrow(/more than one/);
 });
 
 test('the first deploy: everything but the function', () => {
@@ -79,7 +93,8 @@ test('the first deploy: everything but the function', () => {
 
 test('the key: P-256 signing, retained, its alias; the policy exactly its four statements', () => {
   t.hasResource('AWS::KMS::Key', { Properties: { KeySpec: 'ECC_NIST_P256', KeyUsage: 'SIGN_VERIFY' }, DeletionPolicy: 'Retain' });
-  t.hasResourceProperties('AWS::KMS::Alias', { AliasName: 'alias/vettid-anchor-staging' });
+  t.hasResource('AWS::KMS::Key', { UpdateReplacePolicy: 'Retain' });
+  t.hasResource('AWS::KMS::Alias', { Properties: Match.objectLike({ AliasName: 'alias/vettid-anchor-staging' }), DeletionPolicy: 'Retain' });
   const st = keyPolicy();
   expect(st.map((s: any) => s.Sid).sort()).toEqual(['Administer', 'DenyDisableAndDelete', 'SignerPublicKey', 'SignerSign']);
   expect(JSON.stringify(st)).not.toContain(SERVICE_ACCT); // no principal of another account
@@ -88,6 +103,15 @@ test('the key: P-256 signing, retained, its alias; the policy exactly its four s
     `arn:aws:iam::${SIGNER_ACCT}:role/cdk-hnb659fds-cfn-exec-role-${SIGNER_ACCT}-us-east-1`].sort());
   const all = st.flatMap((s: any) => asList(s.Action));
   expect(all).not.toContain('kms:CreateGrant');
+  expect(asList(st.find((s: any) => s.Sid === 'Administer').Action).some((a: string) => /^kms:(Sign|\*|Create\*|Generate|Encrypt|Decrypt)/.test(a))).toBe(false);
+  for (const sid of ['SignerSign', 'SignerPublicKey']) {
+    const p = st.find((s: any) => s.Sid === sid).Principal.AWS;
+    expect(JSON.stringify(p)).toContain('Role');
+    expect(asList(p)).toHaveLength(1);
+  }
+  expect(st.find((s: any) => s.Sid === 'SignerPublicKey').Action).toBe('kms:GetPublicKey');
+  expect(asList(st.find((s: any) => s.Sid === 'SignerSign').Action)).toEqual(['kms:Sign']);
+  expect(asList(st.find((s: any) => s.Effect === 'Deny').Action).sort()).toEqual(['kms:DisableKey', 'kms:ScheduleKeyDeletion']);
   const sign = st.find((s: any) => s.Sid === 'SignerSign');
   expect(sign.Condition).toEqual({ StringEquals: { 'kms:SigningAlgorithm': 'ECDSA_SHA_256', 'kms:MessageType': 'DIGEST',
     'kms:RequestAlias': 'alias/vettid-anchor-staging' } });
@@ -124,6 +148,12 @@ test('the function: only the signed zip, under the code-signing config, no envir
   const f = fns[0].Properties;
   expect(f.FunctionName).toBe('vettid-anchor-signer-staging');
   expect(f.Code.S3Key).toBe('signed/anchor-signer-v1.zip');
+  expect(JSON.stringify(f.Code.S3Bucket)).toContain('Artifacts');
+  const cscs = Object.entries<any>(t.findResources('AWS::Lambda::CodeSigningConfig'));
+  expect(cscs).toHaveLength(1);
+  expect(JSON.stringify(f.CodeSigningConfigArn)).toContain(cscs[0][0]);
+  expect(cscs[0][1].Properties.CodeSigningPolicies.UntrustedArtifactOnDeployment).toBe('Enforce');
+  expect(JSON.stringify(cscs[0][1].Properties.AllowedPublishers)).toContain('ProfileVersionArn');
   expect(f.Code.S3ObjectVersion).toBe('v1version');
   expect(f.CodeSigningConfigArn).toBeDefined();
   expect(f.Environment).toBeUndefined();
@@ -137,12 +167,27 @@ test('the function: only the signed zip, under the code-signing config, no envir
   t.hasResourceProperties('AWS::Signer::ProfilePermission', { Principal: BREAK_GLASS, Action: 'signer:StartSigningJob' });
 });
 
+test('everything that holds state is retained', () => {
+  t.hasResource('AWS::DynamoDB::Table', { Properties: Match.objectLike({ TableName: 'vettid-anchor-claims-staging',
+    DeletionProtectionEnabled: true, PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true } }), DeletionPolicy: 'Retain' });
+  t.hasResource('AWS::Logs::LogGroup', { Properties: { LogGroupName: '/vettid/anchor/staging/journal', RetentionInDays: 365 }, DeletionPolicy: 'Retain' });
+  t.hasResource('AWS::Logs::LogStream', { Properties: Match.objectLike({ LogStreamName: 'signs' }), DeletionPolicy: 'Retain' });
+  t.hasResource('AWS::Signer::SigningProfile', { DeletionPolicy: 'Retain' });
+  const artifacts = Object.values<any>(t.findResources('AWS::S3::Bucket'))
+    .find((b) => b.Properties.BucketName === `vettid-anchor-signer-staging-${SIGNER_ACCT}`);
+  expect(artifacts.DeletionPolicy).toBe('Retain');
+  expect(artifacts.Properties.PublicAccessBlockConfiguration).toEqual({ BlockPublicAcls: true, BlockPublicPolicy: true,
+    IgnorePublicAcls: true, RestrictPublicBuckets: true });
+  expect(artifacts.Properties.VersioningConfiguration).toEqual({ Status: 'Enabled' });
+});
+
 test('refused: another binary, no object version, the task in this account, bad inputs', () => {
   expect(() => synth({ release: { ...release, bootstrapSha256: 'b'.repeat(64) } })).toThrow(/not the pinned/);
   expect(() => synth({ release: { ...release, objectVersion: '' } })).toThrow(/objectVersion/);
   expect(() => synth({ taskRoleArn: `arn:aws:iam::${SIGNER_ACCT}:role/x` })).toThrow(/service account/);
   expect(() => synth({ breakGlassRoleArn: 'nope' })).toThrow(/role ARN/);
   expect(() => synth({ signatureValidityDays: 0 })).toThrow(/signatureValidityDays/);
+  expect(() => new AnchorSignerStack(new cdk.App(), 'X', { ...base, env: undefined })).toThrow(/env.account/);
 });
 
 describe('the service vault side', () => {
@@ -163,6 +208,7 @@ describe('the service vault side', () => {
   test('refused: a signer in this account, or not a function ARN', () => {
     expect(() => new ServiceVaultStack(new cdk.App(), 'SV', { ...sv, anchorSignerFunctionArn: FN_ARN.replace(SIGNER_ACCT, SERVICE_ACCT) })).toThrow(/signer account/);
     expect(() => new ServiceVaultStack(new cdk.App(), 'SV', { ...sv, anchorSignerFunctionArn: 'nope' })).toThrow(/ARN/);
+    expect(() => new ServiceVaultStack(new cdk.App(), 'SV', { ...sv, env: undefined, anchorSignerFunctionArn: FN_ARN })).toThrow(/env.account/);
   });
   test('without it, nothing changes', () => {
     const s = Template.fromStack(new ServiceVaultStack(new cdk.App(), 'SV', sv));
