@@ -277,8 +277,8 @@ export class AnchorSignerStack extends cdk.Stack {
     // validity replaces it, and every release must then be signed again
     // under the new one. The permission below grants the owner's signing
     // role StartSigningJob; it restricts nothing by itself (this account's
-    // only administrator is the owner). Verified on staging that Signer
-    // accepts a same-account role.
+    // only administrator is the owner). To verify on staging (P1.6): Signer
+    // accepts a same-account role permission.
     this.profile = new signer.SigningProfile(this, 'Profile', {
       platform: signer.Platform.AWS_LAMBDA_SHA384_ECDSA,
       signatureValidity: cdk.Duration.days(props.signatureValidityDays),
