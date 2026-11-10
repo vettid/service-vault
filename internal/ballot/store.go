@@ -22,7 +22,7 @@ const (
 
 // Kinds lists the record kinds the ballot box stores, for a migration
 // that must touch them all (internal/sealstore).
-func Kinds() []string { return []string{KindProposal, KindBallot, KindResults} }
+func Kinds() []string { return []string{KindProposal, KindBallot, KindResults, KindChunk} }
 
 // Copy is the write-once store of accepted ballots outside the record
 // store's table (BALLOT-PROTOCOL §6 "Durability"): one item per tag,
@@ -99,6 +99,18 @@ func (s *RecordStore) OpenProposal(ctx context.Context, id string) (*OpenProposa
 	if err := json.Unmarshal(r.Data, &o); err != nil {
 		return nil, fmt.Errorf("ballot: stored proposal %s: %w", id, err)
 	}
+	if len(o.MemberChunks) > 0 {
+		if o.Members != nil {
+			return nil, fmt.Errorf("ballot: stored proposal %s: members both inline and in chunks", id)
+		}
+		data, err := getChunks(ctx, s.Records, id, o.MemberChunks)
+		if err != nil {
+			return nil, fmt.Errorf("ballot: stored proposal %s's members: %w", id, err)
+		}
+		if err := json.Unmarshal(data, &o.Members); err != nil {
+			return nil, fmt.Errorf("ballot: stored proposal %s's members: %w", id, err)
+		}
+	}
 	o.version = r.Version
 	return &o, nil
 }
@@ -112,7 +124,24 @@ func (s *RecordStore) SaveProposal(ctx context.Context, o *OpenProposal, create 
 	if err != nil {
 		return err
 	}
-	data, err := json.Marshal(o)
+	// The members go to chunks when the proposal is created (a new record,
+	// new chunks), before its
+	// record, and are never written again: later saves name the same
+	// chunks. A record from before chunks keeps its members inline.
+	if create {
+		md, err := json.Marshal(o.Members)
+		if err != nil {
+			return err
+		}
+		if o.MemberChunks, err = putChunks(ctx, s.Records, p.ProposalID, md); err != nil {
+			return err
+		}
+	}
+	stored := *o
+	if len(o.MemberChunks) > 0 {
+		stored.Members = nil
+	}
+	data, err := json.Marshal(&stored)
 	if err != nil {
 		return err
 	}

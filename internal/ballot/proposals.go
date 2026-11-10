@@ -52,11 +52,16 @@ var ErrUnknownProposal = errors.New("ballot: unknown proposal")
 
 // MaxEligible is the most eligible members this service lets a proposal
 // have (chosen; not in the spec), below the protocol's vote.MaxEligible.
-// A proposal's record (its members' tags and record secrets) and its results'
-// record (a row per member) are each one item in the store, which
-// DynamoDB caps at 400 KB: past this many members the results could not
-// be saved at the close, and so never published.
-const MaxEligible = 1000
+// A proposal's members and its results' rows are stored in chunks
+// (KindChunk), so DynamoDB's 400 KB item no longer bounds them; the
+// votes site's upload does: the results go up with every row in one
+// request, which its Lambda caps at 6 MB. A row is about 251 bytes with
+// the service's short choice ids (measured at this cap with the longest
+// one, abstain: TestMaxEligibleFitsOneItem), so 15,000 rows are about
+// 3.8 MB, 5.0 MB as base64 in the upload's JSON, leaving about 1 MB for
+// the results, their signature and the rest of the request. They take
+// 13 chunks of ChunkSize, and the members 8.
+const MaxEligible = 15000
 
 // ResendCover is how long before its close a held proposal must be
 // published for every member's vault to send its cast again in time: the
