@@ -184,20 +184,25 @@ func TestProposalMembersInChunks(t *testing.T) {
 		t.Errorf("a chunk missing: %v", err)
 	}
 
-	// Fewer members than the proposal names (none, or one lost), inline
-	// or in chunks: refused, never a vote with fewer voters.
-	for _, drop := range []bool{true, false} {
+	// Other members than the proposal names (none, one lost, one added),
+	// inline or in chunks: refused, never a vote with other voters.
+	for _, change := range []string{"none", "lost", "added"} {
 		short := *f.open
 		short.MemberChunks = nil
 		short.Members = map[string]Member{}
-		if !drop {
+		if change != "none" {
 			for k, v := range f.open.Members {
 				short.Members[k] = v
 			}
+		}
+		switch change {
+		case "lost":
 			for k := range short.Members {
 				delete(short.Members, k)
 				break
 			}
+		case "added":
+			short.Members["c-extra"] = f.open.Members["c0"]
 		}
 		st4 := peer.NewMemStore()
 		rs4 := &RecordStore{Records: st4, Copy: &MemCopy{}}

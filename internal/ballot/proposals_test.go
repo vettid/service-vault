@@ -892,12 +892,10 @@ func TestMaxEligibleFitsOneItem(t *testing.T) {
 		t.Fatal(err)
 	}
 	md, _ := json.Marshal(o.Members)
-	if per := len(md) / MaxEligible; per > maxMemberBytes {
-		t.Errorf("%d bytes a member, over maxMemberBytes %d", per, maxMemberBytes)
+	if len(md) > MaxEligible*maxMemberBytes || len(pr.Rows) > MaxEligible*maxRowBytes {
+		t.Errorf("members %d bytes, rows %d bytes: over %d and %d a member", len(md), len(pr.Rows), maxMemberBytes, maxRowBytes)
 	}
-	if per := len(pr.Rows) / MaxEligible; per > maxRowBytes {
-		t.Errorf("%d bytes a row, over maxRowBytes %d", per, maxRowBytes)
-	}
+	t.Logf("members %d bytes, rows %d bytes at %d members", len(md), len(pr.Rows), MaxEligible)
 	if len(pr.RowChunks) > maxRowChunks || len(o.MemberChunks) > maxMemberChunks {
 		t.Errorf("%d row chunks, %d member chunks", len(pr.RowChunks), len(o.MemberChunks))
 	}

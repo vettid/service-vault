@@ -53,11 +53,11 @@ var ErrUnknownProposal = errors.New("ballot: unknown proposal")
 // MaxEligible is the most eligible members this service lets a proposal
 // have (chosen; not in the spec), below the protocol's vote.MaxEligible.
 // A proposal's members and its results' rows are stored in chunks
-// (KindChunk), so DynamoDB's 400 KB item no longer bounds them. What
-// still does: Publish builds each member's proof from the whole tree and
-// sends to every member within the admin's request, and the results go
-// to the votes site with every row in one upload; both are to be scaled
-// before this is raised.
+// (KindChunk), so DynamoDB's 400 KB item no longer bounds them. It is a
+// chosen limit, kept until publishing (each member's proof built from
+// the whole tree, and the sends to every member, within the admin's
+// request) and the results' single upload to the votes site are scaled
+// for more.
 const MaxEligible = 1000
 
 // ResendCover is how long before its close a held proposal must be

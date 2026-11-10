@@ -25,7 +25,7 @@ const KindChunk = "vote_chunk"
 const ChunkSize = 300_000
 
 // The most bytes a member takes in a proposal's members, and a row in
-// the results' rows (chosen; not in the spec): measured at about 160 and
+// the results' rows (chosen; not in the spec): measured at about 140 and
 // 251 at MaxEligible with the largest inputs (TestMaxEligibleFitsOneItem
 // checks they stay under these).
 const (
