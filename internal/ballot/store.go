@@ -103,13 +103,22 @@ func (s *RecordStore) OpenProposal(ctx context.Context, id string) (*OpenProposa
 		if o.Members != nil {
 			return nil, fmt.Errorf("ballot: stored proposal %s: members both inline and in chunks", id)
 		}
-		data, err := getChunks(ctx, s.Records, id, o.MemberChunks)
+		data, err := getChunks(ctx, s.Records, id, o.MemberChunks, maxMemberChunks)
 		if err != nil {
 			return nil, fmt.Errorf("ballot: stored proposal %s's members: %w", id, err)
 		}
 		if err := json.Unmarshal(data, &o.Members); err != nil {
 			return nil, fmt.Errorf("ballot: stored proposal %s's members: %w", id, err)
 		}
+	}
+	// Never fewer (or more) members than the proposal names: a record
+	// that lost them is an error, not a vote no one may cast in.
+	p, err := o.Parsed()
+	if err != nil {
+		return nil, fmt.Errorf("ballot: stored proposal %s: %w", id, err)
+	}
+	if int64(len(o.Members)) != p.Eligible {
+		return nil, fmt.Errorf("ballot: stored proposal %s: %d members, %d eligible", id, len(o.Members), p.Eligible)
 	}
 	o.version = r.Version
 	return &o, nil
@@ -133,7 +142,7 @@ func (s *RecordStore) SaveProposal(ctx context.Context, o *OpenProposal, create 
 		if err != nil {
 			return err
 		}
-		if o.MemberChunks, err = putChunks(ctx, s.Records, p.ProposalID, md); err != nil {
+		if o.MemberChunks, err = putChunks(ctx, s.Records, p.ProposalID, md, maxMemberChunks); err != nil {
 			return err
 		}
 	}

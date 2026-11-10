@@ -24,10 +24,21 @@ const KindChunk = "vote_chunk"
 // the attribute names.
 const ChunkSize = 300_000
 
-// maxChunks bounds the chunks one value may name: the largest value is a
-// results record's rows at MaxEligible members (about 5.0 MB, see
-// MaxEligible), so a list longer than this is refused when read.
-const maxChunks = 24
+// The most bytes a member takes in a proposal's members, and a row in
+// the results' rows (chosen; not in the spec): measured at about 160 and
+// 251 at MaxEligible with the largest inputs (TestMaxEligibleFitsOneItem
+// checks they stay under these).
+const (
+	maxMemberBytes = 200
+	maxRowBytes    = 300
+)
+
+// The most chunks each value may name, from MaxEligible: a list longer
+// than this is refused when read, and a longer value is not written.
+const (
+	maxMemberChunks = (MaxEligible*maxMemberBytes+ChunkSize-1)/ChunkSize + 1
+	maxRowChunks    = (MaxEligible*maxRowBytes+ChunkSize-1)/ChunkSize + 1
+)
 
 // chunkRef names one chunk in the record that holds the value: its id,
 // and the SHA-256 of its bytes. The record is sealed, so the digest is
@@ -68,7 +79,7 @@ func ChunksOf(proposalID, chunkID string) bool {
 // copy of the table from any moment that holds the record holds its
 // chunks; the chunks of a record whose write then fails stay behind
 // unnamed, and are deleted with the proposal.
-func putChunks(ctx context.Context, recs peer.Store, proposalID string, data []byte) ([]chunkRef, error) {
+func putChunks(ctx context.Context, recs peer.Store, proposalID string, data []byte, maxChunks int) ([]chunkRef, error) {
 	n := (len(data) + ChunkSize - 1) / ChunkSize
 	if n > maxChunks {
 		return nil, fmt.Errorf("ballot: a value of %d bytes needs more than %d chunks", len(data), maxChunks)
@@ -93,7 +104,7 @@ func putChunks(ctx context.Context, recs peer.Store, proposalID string, data []b
 // checks each against its digest. A list longer than maxChunks, a chunk
 // of another proposal, a missing chunk or one with other bytes is an
 // error.
-func getChunks(ctx context.Context, recs peer.Store, proposalID string, refs []chunkRef) ([]byte, error) {
+func getChunks(ctx context.Context, recs peer.Store, proposalID string, refs []chunkRef, maxChunks int) ([]byte, error) {
 	if len(refs) > maxChunks {
 		return nil, fmt.Errorf("%w: %d chunks named, at most %d", ErrChunkBad, len(refs), maxChunks)
 	}

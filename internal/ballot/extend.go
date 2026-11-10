@@ -68,7 +68,7 @@ const ExtendMargin = CollectMargin
 // site and the members' vaults bound them (BALLOT-PROTOCOL §10.2). The
 // 24 h total alone does not bound their number (one may move the close
 // by a second), and each is kept in the proposal's record and its
-// results', so this also bounds those records' size (MaxEligible).
+// results', so this also bounds those records' size.
 const MaxExtensions = 24
 
 // ErrTooLate is an extension asked for once the close it would extend has

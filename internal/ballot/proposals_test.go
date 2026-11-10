@@ -791,8 +791,8 @@ func TestCloseFixesCountsOfAnOldPublishedRecord(t *testing.T) {
 // the seal, the keys and the attribute names, and the rows fit the votes
 // site's upload.
 func TestMaxEligibleFitsOneItem(t *testing.T) {
-	if testing.Short() || raceEnabled {
-		t.Skip("casts MaxEligible ballots (minutes; CI runs it without -race)")
+	if testing.Short() {
+		t.Skip("casts MaxEligible ballots")
 	}
 	const itemLimit = 400_000 - 16_000 // the seal, keys and attribute names
 	ctx := context.Background()
@@ -883,11 +883,23 @@ func TestMaxEligibleFitsOneItem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pr.RowChunks) > maxChunks {
-		t.Errorf("%d row chunks, over %d", len(pr.RowChunks), maxChunks)
-	}
 	if n := base64.StdEncoding.EncodedLen(len(pr.Rows)); n > maxRowsUpload {
 		t.Errorf("rows: %d bytes as base64, over the site's %d", n, maxRowsUpload)
+	}
+	// The per-member bounds the chunk lists are checked against.
+	o, err := m.Store.OpenProposal(ctx, c.ProposalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	md, _ := json.Marshal(o.Members)
+	if per := len(md) / MaxEligible; per > maxMemberBytes {
+		t.Errorf("%d bytes a member, over maxMemberBytes %d", per, maxMemberBytes)
+	}
+	if per := len(pr.Rows) / MaxEligible; per > maxRowBytes {
+		t.Errorf("%d bytes a row, over maxRowBytes %d", per, maxRowBytes)
+	}
+	if len(pr.RowChunks) > maxRowChunks || len(o.MemberChunks) > maxMemberChunks {
+		t.Errorf("%d row chunks, %d member chunks", len(pr.RowChunks), len(o.MemberChunks))
 	}
 	t.Logf("%d chunks; rows %d bytes in %d chunks at %d members", len(chunks), len(pr.Rows), len(pr.RowChunks), MaxEligible)
 }

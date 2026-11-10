@@ -265,7 +265,7 @@ func (m *Manager) saveResults(ctx context.Context, id string, pr *PublishedResul
 	// The rows go to chunks at the first save, before the record; later
 	// saves name the same chunks.
 	if create {
-		refs, err := putChunks(ctx, m.Store.Records, id, pr.Rows)
+		refs, err := putChunks(ctx, m.Store.Records, id, pr.Rows, maxRowChunks)
 		if err != nil {
 			return err
 		}
@@ -296,9 +296,13 @@ func (m *Manager) Results(ctx context.Context, id string) (*PublishedResults, er
 		if pr.Rows != nil {
 			return nil, fmt.Errorf("ballot: stored results %s: rows both inline and in chunks", id)
 		}
-		if pr.Rows, err = getChunks(ctx, m.Store.Records, id, pr.RowChunks); err != nil {
+		if pr.Rows, err = getChunks(ctx, m.Store.Records, id, pr.RowChunks, maxRowChunks); err != nil {
 			return nil, fmt.Errorf("ballot: stored results %s's rows: %w", id, err)
 		}
+	}
+	// Results always have a row per member (never none).
+	if len(pr.Rows) == 0 {
+		return nil, fmt.Errorf("ballot: stored results %s: no rows", id)
 	}
 	return &pr, nil
 }
