@@ -16,7 +16,6 @@ import * as sns from 'aws-cdk-lib/aws-sns';
 import * as subs from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
-import { AnchorSigner, AnchorSignerProps } from './anchor-signer';
 import { KEY_ADMIN_ACTIONS } from './kms-actions';
 
 /** The port the daemon's private API listens on (SV_LISTEN). */
@@ -197,11 +196,12 @@ export interface ServiceVaultStackProps extends cdk.StackProps {
    */
   readonly recordKeyVersion?: number;
   /**
-   * The AnchorSigner (key protection, phase 1, GC #7406): the anchor key in
-   * KMS and the function that alone signs with it. Left out, nothing of it
-   * is made, and the task anchors as before.
+   * The AnchorSigner's function ARN, in the signer's own account
+   * (AnchorSigner-<env>; key protection, phase 1, GC #7406 as amended for
+   * the owner's a on #7597): the task may invoke it, and nothing else of
+   * the signer account. Left out, the task anchors as before.
    */
-  readonly anchorSigner?: Omit<AnchorSignerProps, 'envName' | 'prefix' | 'taskRole'>;
+  readonly anchorSignerFunctionArn?: string;
 }
 
 /**
@@ -227,7 +227,6 @@ export class ServiceVaultStack extends cdk.Stack {
   readonly ballotsTable: dynamodb.Table;
   readonly key: kms.Key;
   readonly service: ecs.FargateService;
-  readonly anchorSigner?: AnchorSigner;
 
   constructor(scope: Construct, id: string, props: ServiceVaultStackProps) {
     super(scope, id, props);
@@ -484,10 +483,16 @@ export class ServiceVaultStack extends cdk.Stack {
         resources: ['*'],
       }),
     );
-    if (props.anchorSigner) {
-      this.anchorSigner = new AnchorSigner(this, 'AnchorSigner', {
-        ...props.anchorSigner, envName, prefix, taskRole: taskDef.taskRole,
-      });
+    if (props.anchorSignerFunctionArn !== undefined) {
+      if (!/^arn:aws[a-z-]*:lambda:[a-z0-9-]+:[0-9]{12}:function:[A-Za-z0-9_-]+$/.test(props.anchorSignerFunctionArn)) {
+        throw new Error(`anchorSignerFunctionArn must be a function's unqualified ARN (got "${props.anchorSignerFunctionArn}")`);
+      }
+      if (props.anchorSignerFunctionArn.split(':')[4] === props.env?.account) {
+        throw new Error('anchorSignerFunctionArn must be in the signer account, not in this one');
+      }
+      taskDef.taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
+        sid: 'InvokeAnchorSigner', actions: ['lambda:InvokeFunction'], resources: [props.anchorSignerFunctionArn],
+      }));
     }
     taskDef.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
@@ -627,12 +632,11 @@ export class ServiceVaultStack extends cdk.Stack {
       retention: logs.RetentionDays.ONE_YEAR,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
-    // The keystore key, and the anchor key when there is one: a change to
-    // either's policy, grants or state alarms (GC #7406 §4).
+    // The keystore key (the anchor key is in the signer's own account,
+    // whose alarms are its own: GC #7638 item 6).
     const watchedKeys = [this.key.keyArn];
-    if (this.anchorSigner) watchedKeys.push(this.anchorSigner.key.keyArn);
     new events.Rule(this, 'KeyChangeRule', {
-      description: 'KMS calls that change the service vault keystore or anchor key (key_change alarm)',
+      description: 'KMS calls that change the service vault keystore key (key_change alarm)',
       eventPattern: {
         source: ['aws.kms'],
         detailType: ['AWS API Call via CloudTrail'],
@@ -649,7 +653,7 @@ export class ServiceVaultStack extends cdk.Stack {
     }).metric({ statistic: 'Sum', period: cdk.Duration.minutes(5) });
     notify(new cloudwatch.Alarm(this, 'Alarm-key_change-alarm', {
       alarmName: `${prefix}-key_change`,
-      alarmDescription: 'The keystore or anchor KMS key was changed: a grant, its policy, disabled, or scheduled for deletion',
+      alarmDescription: 'The keystore KMS key was changed: a grant, its policy, disabled, or scheduled for deletion',
       metric: keyChanges,
       threshold: 1,
       evaluationPeriods: 1,
