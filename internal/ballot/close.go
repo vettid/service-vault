@@ -46,10 +46,13 @@ var (
 
 // PublishedResults is a vote's results as published.
 type PublishedResults struct {
-	Results []byte          `json:"results"`
-	Sig     []byte          `json:"results_sig"`
-	Rows    []byte          `json:"rows"`
-	Bundle  json.RawMessage `json:"bundle,omitempty"`
+	Results []byte `json:"results"`
+	Sig     []byte `json:"results_sig"`
+	// Rows are stored in chunks (KindChunk) named by RowChunks, written
+	// with the first save; a record from before chunks holds them inline.
+	Rows      []byte          `json:"rows,omitempty"`
+	RowChunks []chunkRef      `json:"row_chunks,omitempty"`
+	Bundle    json.RawMessage `json:"bundle,omitempty"`
 	// IndexStale is set while the site has the results but answered that
 	// its index isn't updated: the identical upload is repeated at each
 	// Close until it is (BALLOT-PROTOCOL §3.3).
@@ -259,7 +262,24 @@ func checkStored(p *vote.Proposal, closesAt int64, ph, tag []byte, r *BallotReco
 }
 
 func (m *Manager) saveResults(ctx context.Context, id string, pr *PublishedResults, create bool) error {
-	data, err := json.Marshal(pr)
+	// Results always have a row per member; none is never saved.
+	if len(pr.Rows) == 0 {
+		return fmt.Errorf("ballot: results of %s without rows", id)
+	}
+	// The rows go to chunks at the first save, before the record; later
+	// saves name the same chunks.
+	if create {
+		refs, err := putChunks(ctx, m.Store.Records, id, pr.Rows, maxRowChunks)
+		if err != nil {
+			return err
+		}
+		pr.RowChunks = refs
+	}
+	stored := *pr
+	if len(pr.RowChunks) > 0 {
+		stored.Rows = nil
+	}
+	data, err := json.Marshal(&stored)
 	if err != nil {
 		return err
 	}
@@ -275,6 +295,18 @@ func (m *Manager) Results(ctx context.Context, id string) (*PublishedResults, er
 	var pr PublishedResults
 	if err := json.Unmarshal(data, &pr); err != nil {
 		return nil, fmt.Errorf("ballot: stored results %s: %w", id, err)
+	}
+	if len(pr.RowChunks) > 0 {
+		if pr.Rows != nil {
+			return nil, fmt.Errorf("ballot: stored results %s: rows both inline and in chunks", id)
+		}
+		if pr.Rows, err = getChunks(ctx, m.Store.Records, id, pr.RowChunks, maxRowChunks); err != nil {
+			return nil, fmt.Errorf("ballot: stored results %s's rows: %w", id, err)
+		}
+	}
+	// Results always have a row per member (never none).
+	if len(pr.Rows) == 0 {
+		return nil, fmt.Errorf("ballot: stored results %s: no rows", id)
 	}
 	return &pr, nil
 }

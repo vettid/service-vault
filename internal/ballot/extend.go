@@ -68,7 +68,7 @@ const ExtendMargin = CollectMargin
 // site and the members' vaults bound them (BALLOT-PROTOCOL §10.2). The
 // 24 h total alone does not bound their number (one may move the close
 // by a second), and each is kept in the proposal's record and its
-// results', so this also bounds those records' size (MaxEligible).
+// results', so this also bounds those records' size.
 const MaxExtensions = 24
 
 // ErrTooLate is an extension asked for once the close it would extend has
@@ -257,7 +257,11 @@ func (m *Manager) Extend(ctx context.Context, id, approvalID string, in Extensio
 
 // RebuildAll puts back, for every proposal still running, the ballots the
 // write-once copy holds and the table lost (after a restore of the
-// table), and returns how many it put back.
+// table), and returns how many it put back. It does not check the
+// proposals' member chunks: after a restore, open every running proposal
+// (a cast or vote.status does); one whose chunk is missing can't be
+// read, and nothing outside the table can repair it (the restore must be
+// redone from a copy that holds it).
 func (m *Manager) RebuildAll(ctx context.Context) (int, error) {
 	recs, err := m.Store.Records.Load(ctx, KindProposal)
 	if err != nil {

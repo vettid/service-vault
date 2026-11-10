@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -785,9 +786,10 @@ func TestCloseFixesCountsOfAnOldPublishedRecord(t *testing.T) {
 // At MaxEligible members, everyone voting, with the largest inputs the
 // service takes (the longest title, text and labels, 16 choices, 26-byte
 // connection ids, MaxExtensions extensions and a 10 KB anchor bundle),
-// the proposal's record and the results' record each still fit one
-// DynamoDB item (400 KB), with room for the seal, the keys and the
-// attribute names.
+// every item stored (the proposal's record, the results' record and each
+// of their chunks) still fits one DynamoDB item (400 KB), with room for
+// the seal, the keys and the attribute names, and the rows fit the votes
+// site's upload.
 func TestMaxEligibleFitsOneItem(t *testing.T) {
 	if testing.Short() {
 		t.Skip("casts MaxEligible ballots")
@@ -868,7 +870,42 @@ func TestMaxEligibleFitsOneItem(t *testing.T) {
 		}
 		t.Logf("%s record: %d bytes at %d members", kind, len(data), MaxEligible)
 	}
+	chunks, err := m.Store.Records.Load(ctx, KindChunk)
+	if err != nil || len(chunks) == 0 {
+		t.Fatalf("chunks: %d, %v", len(chunks), err)
+	}
+	for _, r := range chunks {
+		if len(r.Data) > itemLimit {
+			t.Errorf("chunk %s: %d bytes, over %d", r.ID, len(r.Data), itemLimit)
+		}
+	}
+	pr, err := m.Results(ctx, c.ProposalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := base64.StdEncoding.EncodedLen(len(pr.Rows)); n > maxRowsUpload {
+		t.Errorf("rows: %d bytes as base64, over the site's %d", n, maxRowsUpload)
+	}
+	// The per-member bounds the chunk lists are checked against.
+	o, err := m.Store.OpenProposal(ctx, c.ProposalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	md, _ := json.Marshal(o.Members)
+	if len(md) > MaxEligible*maxMemberBytes || len(pr.Rows) > MaxEligible*maxRowBytes {
+		t.Errorf("members %d bytes, rows %d bytes: over %d and %d a member", len(md), len(pr.Rows), maxMemberBytes, maxRowBytes)
+	}
+	t.Logf("members %d bytes, rows %d bytes at %d members", len(md), len(pr.Rows), MaxEligible)
+	if len(pr.RowChunks) > maxRowChunks || len(o.MemberChunks) > maxMemberChunks {
+		t.Errorf("%d row chunks, %d member chunks", len(pr.RowChunks), len(o.MemberChunks))
+	}
+	t.Logf("%d chunks; rows %d bytes in %d chunks at %d members", len(chunks), len(pr.Rows), len(pr.RowChunks), MaxEligible)
 }
+
+// maxRowsUpload is the most rows, as base64, the votes site takes in one
+// upload: its Lambda request holds 6 MB, less the results, their
+// signature and the rest of the request.
+const maxRowsUpload = 5_500_000
 
 // A proposal held but not published (its bundle lost, after a restore) is
 // not counted: its members' requests go unanswered meanwhile, so a count

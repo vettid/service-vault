@@ -82,8 +82,12 @@ type OpenProposal struct {
 	Bundle json.RawMessage `json:"bundle,omitempty"`
 	// ClosesAt is the close in force, after any extensions.
 	ClosesAt int64 `json:"closes_at"`
-	// Members are the eligible connections, by connection id.
-	Members map[string]Member `json:"members"`
+	// Members are the eligible connections, by connection id. They are
+	// stored in chunks (KindChunk) named by MemberChunks, written once
+	// when the proposal is created; a record from before chunks holds
+	// them inline instead.
+	Members      map[string]Member `json:"members,omitempty"`
+	MemberChunks []chunkRef        `json:"member_chunks,omitempty"`
 	// Extensions are the published extensions, in order (§10.2).
 	Extensions []vote.Signed `json:"extensions,omitempty"`
 	// Pending is an extension signed and stored, and published or about to
