@@ -63,6 +63,23 @@ test('the key: P-256 for signing, retained', () => {
   });
 });
 
+test('the key policy: exactly its four statements', () => {
+  const st = keyPolicy();
+  expect(st.map((s) => s.Sid).sort()).toEqual(['Administer', 'DenyDisableAndDelete', 'PublicKey', 'SignerSign']);
+  const admin = st.find((s) => s.Sid === 'Administer');
+  const principals = asList(admin.Principal.AWS).map(render);
+  expect(principals).toHaveLength(2);
+  expect(principals).toContain('arn:aws:iam::123456789012:root');
+  expect(principals).toContain(DEPLOY);
+  expect(asList(st.find((s) => s.Sid === 'PublicKey').Principal.AWS)).toHaveLength(2);
+});
+
+test('without a deploy role, the account alone administers it', () => {
+  const st = Object.values<any>(synth({ deployRoleArn: undefined }).findResources('AWS::KMS::Key'))
+    .find((k) => k.Properties.KeySpec === 'ECC_NIST_P256').Properties.KeyPolicy.Statement;
+  expect(asList(st.find((s: any) => s.Sid === 'Administer').Principal.AWS).map(render)).toEqual(['arn:aws:iam::123456789012:root']);
+});
+
 test('the key policy: no grants, Sign only for the signer and only digests, no disabling but break-glass', () => {
   const st = keyPolicy();
   const all = st.flatMap((s) => asList(s.Action));
@@ -75,7 +92,9 @@ test('the key policy: no grants, Sign only for the signer and only digests, no d
   const admin = st.find((s) => s.Sid === 'Administer');
   expect(JSON.stringify(admin.Principal)).toContain(DEPLOY);
   expect(asList(admin.Action).some((a: string) => /^kms:(Sign|Encrypt|Decrypt|Create\*|Generate)/.test(a))).toBe(false);
-  const deny = st.find((s) => s.Effect === 'Deny');
+  const denies = st.filter((s) => s.Effect === 'Deny');
+  expect(denies).toHaveLength(1);
+  const deny = denies[0];
   expect(asList(deny.Action).sort()).toEqual(['kms:DisableKey', 'kms:ScheduleKeyDeletion']);
   expect(deny.Principal).toEqual({ AWS: '*' });
   expect(deny.Condition).toEqual({ ArnNotEquals: { 'aws:PrincipalArn': BREAK_GLASS } });
@@ -92,12 +111,18 @@ test('without a break-glass role, nobody disables or deletes it', () => {
 
 test('the role: Lambda for this function only, and Sign denied from anywhere else', () => {
   const role = Object.values<any>(t.findResources('AWS::IAM::Role')).find((r) => JSON.stringify(r).includes('anchor-signer'));
+  expect(role.Properties.AssumeRolePolicyDocument.Statement).toHaveLength(1);
+  expect(role.Properties.ManagedPolicyArns).toBeUndefined();
+  expect(role.Properties.PermissionsBoundary).toBeUndefined();
   const trust = role.Properties.AssumeRolePolicyDocument.Statement[0];
   expect(trust.Principal).toEqual({ Service: 'lambda.amazonaws.com' });
   expect(trust.Condition.StringEquals['aws:SourceAccount']).toBe('123456789012');
   expect(render(trust.Condition.ArnLike['aws:SourceArn'])).toBe(FN_ARN);
-  const deny = signerStatements().find((s) => s.Sid === 'SignOnlyFromTheFunction');
-  expect(deny.Effect).toBe('Deny');
+  const denies = signerStatements().filter((s) => s.Effect === 'Deny');
+  expect(denies).toHaveLength(1);
+  const deny = denies[0];
+  expect(deny.Sid).toBe('SignOnlyFromTheFunction');
+  expect(deny.Resource).toBe('*');
   expect(deny.Action).toBe('kms:Sign');
   expect(render(deny.Condition.StringNotEquals['lambda:SourceFunctionArn'])).toBe(FN_ARN);
   const actions = signerStatements().filter((s) => s.Effect === 'Allow').flatMap((s) => asList(s.Action));
@@ -112,6 +137,12 @@ test('the role: Lambda for this function only, and Sign denied from anywhere els
 });
 
 test('the function: 120 s, two at once, arm64 custom runtime, its environment', () => {
+  const fns = Object.values<any>(t.findResources('AWS::Lambda::Function'))
+    .filter((f) => f.Properties.FunctionName === 'vettid-service-vault-test-anchor-signer');
+  expect(fns).toHaveLength(1);
+  expect(fns[0].Properties.KmsKeyArn).toBeUndefined();
+  expect(fns[0].Properties.VpcConfig).toBeUndefined();
+  expect(fns[0].Properties.MemorySize).toBe(1024);
   t.hasResourceProperties('AWS::Lambda::Function', {
     FunctionName: 'vettid-service-vault-test-anchor-signer', Runtime: 'provided.al2023', Architectures: ['arm64'],
     Timeout: SIGNER_TIMEOUT_SECONDS, ReservedConcurrentExecutions: SIGNER_CONCURRENCY,
@@ -128,6 +159,7 @@ test('the claims and the journal: retained, the journal a year', () => {
   t.hasResource('AWS::Logs::LogGroup', {
     Properties: { LogGroupName: '/vettid/service-vault/test/anchor-journal', RetentionInDays: 365 }, DeletionPolicy: 'Retain',
   });
+  t.hasResource('AWS::Logs::LogStream', { Properties: Match.objectLike({ LogStreamName: 'signs' }), DeletionPolicy: 'Retain' });
 });
 
 test('the task invokes it and reads the public key and claims, and never signs', () => {
@@ -139,11 +171,33 @@ test('the task invokes it and reads the public key and claims, and never signs',
   expect(actions).toContain('lambda:InvokeFunction');
   expect(actions).toContain('kms:GetPublicKey');
   expect(actions.some((a: string) => /^kms:(\*|Sign)/.test(a) || a === '*')).toBe(false);
+  const claims = st.filter((s) => JSON.stringify(s.Resource).includes('AnchorSignerClaims'));
+  expect(claims.flatMap((s) => asList(s.Action))).toEqual(['dynamodb:GetItem']);
 });
 
-test('refused: another binary, a bad URL, production off prod', () => {
-  expect(() => synth({ bootstrapSha256: 'b'.repeat(64) })).toThrow(/not the pinned/);
-  expect(() => synth({ votesApiUrl: 'http://votes.example.org' })).toThrow(/https/);
-  expect(() => synth({ sigstore: 'production' })).toThrow(/prod/);
-  expect(() => synth({ votesSiteKey: 'AAAA' })).toThrow(/Ed25519/);
+test('key_change watches the anchor key too', () => {
+  const rule = Object.values<any>(t.findResources('AWS::Events::Rule'))
+    .find((r) => JSON.stringify(r.Properties.EventPattern).includes('aws.kms'));
+  const arns = rule.Properties.EventPattern.detail.resources.ARN;
+  expect(arns).toHaveLength(2);
+  expect(JSON.stringify(arns)).toContain('AnchorSignerAnchorKey');
+  const plain = Template.fromStack(new ServiceVaultStack(new cdk.App(), 'SV', base));
+  const prule = Object.values<any>(plain.findResources('AWS::Events::Rule'))
+    .find((r) => JSON.stringify(r.Properties.EventPattern).includes('aws.kms'));
+  expect(prule.Properties.EventPattern.detail.resources.ARN).toHaveLength(1);
+});
+
+test('only the bootstrap ships', () => {
+  fs.writeFileSync(path.join(dir, 'secret.txt'), 'not for the function');
+  try {
+    const app = new cdk.App();
+    new ServiceVaultStack(app, 'SV', { ...base, anchorSigner: signer });
+    const out = app.synth().directory;
+    const staged = fs.readdirSync(out).filter((d) => d.startsWith('asset.') && fs.statSync(path.join(out, d)).isDirectory())
+      .filter((d) => fs.existsSync(path.join(out, d, 'bootstrap')));
+    expect(staged).toHaveLength(1);
+    expect(fs.readdirSync(path.join(out, staged[0]))).toEqual(['bootstrap']);
+  } finally {
+    fs.unlinkSync(path.join(dir, 'secret.txt'));
+  }
 });

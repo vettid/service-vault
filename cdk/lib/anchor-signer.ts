@@ -42,7 +42,11 @@ export interface AnchorSignerProps {
   readonly taskRole: iam.IRole;
   /** The role that deploys this stack: it administers the anchor key with the account root. */
   readonly deployRoleArn?: string;
-  /** The owner's break-glass role: the only principal that may disable the anchor key or schedule its deletion. */
+  /**
+   * The owner's break-glass role: the only principal that may disable the
+   * anchor key or schedule its deletion. The full role ARN, path included
+   * (an IAM Identity Center role carries one), as aws:PrincipalArn names it.
+   */
   readonly breakGlassRoleArn?: string;
 }
 
@@ -142,11 +146,12 @@ export class AnchorSigner extends Construct {
     // The binding of record (GC #7406 §4): the key policy grants the role
     // directly, so only an explicit Deny in the role's own policy can tie
     // kms:Sign to this function.
+    // On every key, so that it holds for any key the role is ever granted.
     this.role.addToPrincipalPolicy(new iam.PolicyStatement({
       sid: 'SignOnlyFromTheFunction',
       effect: iam.Effect.DENY,
       actions: ['kms:Sign'],
-      resources: [this.key.keyArn],
+      resources: ['*'],
       conditions: { StringNotEquals: { 'lambda:SourceFunctionArn': fnArn } },
     }));
     this.role.addToPrincipalPolicy(new iam.PolicyStatement({
@@ -207,10 +212,14 @@ export class AnchorSigner extends Construct {
       runtime: lambda.Runtime.PROVIDED_AL2023,
       architecture: lambda.Architecture.ARM_64,
       handler: 'bootstrap',
-      code: lambda.Code.fromAsset(props.codeDir),
+      // The pinned bootstrap and nothing else from the directory.
+      code: lambda.Code.fromAsset(props.codeDir, { exclude: ['**', '!bootstrap'] }),
       role: this.role,
       timeout: cdk.Duration.seconds(SIGNER_TIMEOUT_SECONDS),
-      memorySize: 256,
+      // Checking results for 15,000 members (vote.Check over the rows) in
+      // the site hop's time; a timing test through the signer comes with
+      // the next PR and gates the switch (runbook step 4).
+      memorySize: 1024,
       reservedConcurrentExecutions: SIGNER_CONCURRENCY,
       logGroup: fnLogs,
       environment: {

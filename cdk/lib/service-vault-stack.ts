@@ -627,12 +627,16 @@ export class ServiceVaultStack extends cdk.Stack {
       retention: logs.RetentionDays.ONE_YEAR,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
+    // The keystore key, and the anchor key when there is one: a change to
+    // either's policy, grants or state alarms (GC #7406 §4).
+    const watchedKeys = [this.key.keyArn];
+    if (this.anchorSigner) watchedKeys.push(this.anchorSigner.key.keyArn);
     new events.Rule(this, 'KeyChangeRule', {
-      description: 'KMS calls that change the service vault keystore key (key_change alarm)',
+      description: 'KMS calls that change the service vault keystore or anchor key (key_change alarm)',
       eventPattern: {
         source: ['aws.kms'],
         detailType: ['AWS API Call via CloudTrail'],
-        detail: { eventName: KEY_CHANGE_EVENTS, resources: { ARN: [this.key.keyArn] } },
+        detail: { eventName: KEY_CHANGE_EVENTS, resources: { ARN: watchedKeys } },
       },
       targets: [new eventTargets.CloudWatchLogGroup(keyEvents)],
     });
@@ -645,7 +649,7 @@ export class ServiceVaultStack extends cdk.Stack {
     }).metric({ statistic: 'Sum', period: cdk.Duration.minutes(5) });
     notify(new cloudwatch.Alarm(this, 'Alarm-key_change-alarm', {
       alarmName: `${prefix}-key_change`,
-      alarmDescription: 'The keystore KMS key was changed: a grant, its policy, disabled, or scheduled for deletion',
+      alarmDescription: 'The keystore or anchor KMS key was changed: a grant, its policy, disabled, or scheduled for deletion',
       metric: keyChanges,
       threshold: 1,
       evaluationPeriods: 1,
