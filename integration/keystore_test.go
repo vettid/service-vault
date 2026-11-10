@@ -12,8 +12,14 @@ package integration
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -80,6 +86,72 @@ func TestKeystoreOnKMSAndDynamoDB(t *testing.T) {
 	b, _ := peer.KeysFromSeeds(again.Peer)
 	if a.Mailbox() != b.Mailbox() || !bytes.Equal(first.EmailPepper, again.EmailPepper) {
 		t.Fatal("identity changed across restart")
+	}
+
+	// The record is sealed with its encryption context, which KMS holds it
+	// to: dropped, it doesn't open (key protection, GC #7406 §7).
+	raw, err := tbl.Blobs().Get(ctx, keystore.SecretsName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sealed keystore.Sealed
+	if err := json.Unmarshal(raw, &sealed); err != nil || !sealed.Context {
+		t.Fatalf("sealed without its context: %v", err)
+	}
+	dropped := sealed
+	dropped.Context = false
+	if _, err := keystore.Open(ctx, k, keystore.SecretsName, &dropped); err == nil {
+		t.Fatal("opened without its encryption context")
+	}
+
+	// List names it; Replace puts only over the exact old bytes.
+	if names, err := tbl.Blobs().List(ctx); err != nil || !slices.Contains(names, keystore.SecretsName) {
+		t.Fatalf("List: %v %v", names, err)
+	}
+	if err := tbl.Blobs().Replace(ctx, keystore.SecretsName, []byte("not it"), []byte("x")); !errors.Is(err, keystore.ErrChanged) {
+		t.Fatalf("Replace over other bytes: %v", err)
+	}
+	if err := tbl.Blobs().Replace(ctx, "none-such", raw, []byte("x")); !errors.Is(err, keystore.ErrNotFound) {
+		t.Fatalf("Replace of a missing record: %v", err)
+	}
+	if err := tbl.Blobs().Replace(ctx, keystore.SecretsName, raw, []byte("moved")); err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+	// The same Replace again (a retry whose first answer was lost)
+	// succeeds, since the record holds its bytes now.
+	if err := tbl.Blobs().Replace(ctx, keystore.SecretsName, raw, []byte("moved")); err != nil {
+		t.Fatalf("a retried Replace: %v", err)
+	}
+	if err := tbl.Blobs().Replace(ctx, keystore.SecretsName, []byte("moved"), raw); err != nil {
+		t.Fatalf("Replace back: %v", err)
+	}
+	if err := tbl.Blobs().Replace(ctx, keystore.SecretsName, raw, raw); err != nil {
+		t.Fatalf("Replace over its own bytes: %v", err)
+	}
+	// A legacy item (its data key wrapped with no context, as before P1.1)
+	// is re-sealed through real KMS, and then opens with its context.
+	dk, wrapped, err := k.GenerateDataKey(ctx, keyID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blk, _ := aes.NewCipher(dk)
+	g, _ := cipher.NewGCM(blk)
+	nonce := make([]byte, g.NonceSize())
+	_, _ = rand.Read(nonce)
+	legacy, _ := json.Marshal(&keystore.Sealed{Version: 1, KeyID: keyID, WrappedKey: wrapped, Nonce: nonce,
+		Ciphertext: g.Seal(nil, nonce, []byte("legacy"), []byte("vettid/service-vault/keystore/v1\x00legacy-item"))})
+	if err := tbl.Blobs().Create(ctx, "legacy-item", legacy); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := keystore.Reseal(ctx, k, keyID, tbl.Blobs())
+	if err != nil || len(rep.Resealed) != 1 || rep.Resealed[0] != "legacy-item" {
+		t.Fatalf("Reseal: %+v %v", rep, err)
+	}
+	moved, _ := tbl.Blobs().Get(ctx, "legacy-item")
+	var ms keystore.Sealed
+	_ = json.Unmarshal(moved, &ms)
+	if pt, err := keystore.Open(ctx, k, "legacy-item", &ms); err != nil || !ms.Context || string(pt) != "legacy" {
+		t.Fatalf("the re-sealed legacy item: %q %v", pt, err)
 	}
 
 	// A second create of the same name is refused.

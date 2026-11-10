@@ -265,6 +265,24 @@ sealed copy of a record, or delete one. The KMS key policy lets the
 account administer the key but not grant itself its use: there is no
 `CreateGrant`.
 
+Each keystore item's data key is bound to a KMS encryption context,
+`{"blob": <item name>}`, so that the key's policy can allow `Decrypt` only
+for the items it names (key protection, phase 1). Items sealed before
+contexts still open without one. `service-vault admin reseal-blobs`, run
+by the operator as a one-off task in the same environment as `serve`
+(the service stopped), moves every item to its context: each is sealed
+again and put only over its exact old bytes, never deleted first, and
+then each is opened with its context. The anchor-key item is left as it
+is, without a context, for deletion, so that no copy of it can be opened
+once the policy is in place. It prints the items' names, never their
+contents, and a run again picks up where one stopped. After it, a table
+or backup from before can't be restored into this deployment (its keys
+can't be opened once the policy is in place): the re-seal is the last
+point to roll back to a release before it. The policy that requires the
+context (its allow-list covers record-key.v* and ballot-copy-key, and
+never matches anchor-key), and the deletion of the anchor-key item, are
+later steps, each on the owner's go.
+
 An unsealed record is refused and fails the start. Only the operator
 turns on accepting them, for the one deploy that upgrades a deployment
 from before sealing. Nothing in the table can turn it on, whether by

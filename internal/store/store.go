@@ -4,8 +4,10 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -73,6 +75,55 @@ func (b blobs) Create(ctx context.Context, name string, data []byte) error {
 		return keystore.ErrExists
 	}
 	return err
+}
+
+func (b blobs) Replace(ctx context.Context, name string, old, data []byte) error {
+	item := key("blob#"+name, skOne)
+	item[attrData] = &types.AttributeValueMemberB{Value: data}
+	_, err := b.t.Client.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName:                 aws.String(b.t.Name),
+		Item:                      item,
+		ConditionExpression:       aws.String("attribute_exists(#pk) AND #d = :old"),
+		ExpressionAttributeNames:  map[string]string{"#pk": attrPK, "#d": attrData},
+		ExpressionAttributeValues: map[string]types.AttributeValue{":old": &types.AttributeValueMemberB{Value: old}},
+	})
+	var cf *types.ConditionalCheckFailedException
+	if errors.As(err, &cf) {
+		now, gerr := b.Get(ctx, name)
+		switch {
+		case errors.Is(gerr, keystore.ErrNotFound):
+			return keystore.ErrNotFound
+		case gerr == nil && bytes.Equal(now, data):
+			// A retry of a put that went through, whose answer was lost.
+			return nil
+		}
+		return keystore.ErrChanged
+	}
+	return err
+}
+
+func (b blobs) List(ctx context.Context) ([]string, error) {
+	p := dynamodb.NewScanPaginator(b.t.Client, &dynamodb.ScanInput{
+		TableName:                 aws.String(b.t.Name),
+		ConsistentRead:            aws.Bool(true),
+		ProjectionExpression:      aws.String("#pk"),
+		FilterExpression:          aws.String("begins_with(#pk, :p)"),
+		ExpressionAttributeNames:  map[string]string{"#pk": attrPK},
+		ExpressionAttributeValues: map[string]types.AttributeValue{":p": &types.AttributeValueMemberS{Value: "blob#"}},
+	})
+	var out []string
+	for p.HasMorePages() {
+		page, err := p.NextPage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range page.Items {
+			if v, ok := item[attrPK].(*types.AttributeValueMemberS); ok {
+				out = append(out, strings.TrimPrefix(v.Value, "blob#"))
+			}
+		}
+	}
+	return out, nil
 }
 
 func (b blobs) Delete(ctx context.Context, name string) error {

@@ -39,7 +39,18 @@ func (f *fakeKMS) aead(id string) (cipher.AEAD, error) {
 	return cipher.NewGCM(b)
 }
 
-func (f *fakeKMS) GenerateDataKey(_ context.Context, id string) ([]byte, []byte, error) {
+// ctxAAD binds an encryption context, as KMS does: a key wrapped with a
+// context unwraps only with the same one, and one wrapped with none only
+// with none.
+func ctxAAD(ec map[string]string) []byte {
+	if ec == nil {
+		return nil
+	}
+	b, _ := json.Marshal(ec) // sorted keys
+	return b
+}
+
+func (f *fakeKMS) GenerateDataKey(_ context.Context, id string, ec map[string]string) ([]byte, []byte, error) {
 	g, err := f.aead(id)
 	if err != nil {
 		return nil, nil, err
@@ -48,10 +59,10 @@ func (f *fakeKMS) GenerateDataKey(_ context.Context, id string) ([]byte, []byte,
 	rand.Read(dk)
 	n := make([]byte, g.NonceSize())
 	rand.Read(n)
-	return dk, append(n, g.Seal(nil, n, dk, nil)...), nil
+	return dk, append(n, g.Seal(nil, n, dk, ctxAAD(ec))...), nil
 }
 
-func (f *fakeKMS) Decrypt(_ context.Context, id string, w []byte) ([]byte, error) {
+func (f *fakeKMS) Decrypt(_ context.Context, id string, w []byte, ec map[string]string) ([]byte, error) {
 	g, err := f.aead(id)
 	if err != nil {
 		return nil, err
@@ -59,7 +70,7 @@ func (f *fakeKMS) Decrypt(_ context.Context, id string, w []byte) ([]byte, error
 	if len(w) < g.NonceSize() {
 		return nil, errors.New("fake kms: short")
 	}
-	return g.Open(nil, w[:g.NonceSize()], w[g.NonceSize():], nil)
+	return g.Open(nil, w[:g.NonceSize()], w[g.NonceSize():], ctxAAD(ec))
 }
 
 type memBlobs struct {
@@ -90,6 +101,30 @@ func (b *memBlobs) Create(_ context.Context, name string, data []byte) error {
 	return nil
 }
 
+func (b *memBlobs) Replace(_ context.Context, name string, old, data []byte) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	v, ok := b.m[name]
+	switch {
+	case !ok:
+		return ErrNotFound
+	case !bytes.Equal(v, old):
+		return ErrChanged
+	}
+	b.m[name] = data
+	return nil
+}
+
+func (b *memBlobs) List(context.Context) ([]string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]string, 0, len(b.m))
+	for k := range b.m {
+		out = append(out, k)
+	}
+	return out, nil
+}
+
 func (b *memBlobs) Delete(_ context.Context, name string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -111,8 +146,10 @@ func TestSealOpen(t *testing.T) {
 	if bytes.Contains(s.Ciphertext, []byte("secret")) {
 		t.Fatal("plaintext visible in ciphertext")
 	}
-	if _, err := Open(ctx, k, "other", s); err != ErrOpen {
-		t.Fatalf("other name: %v", err)
+	// Under another name: its encryption context differs, so KMS refuses
+	// to unwrap the key (and the AAD would refuse it too).
+	if _, err := Open(ctx, k, "other", s); err == nil {
+		t.Fatal("opened under another name")
 	}
 	bad := *s
 	bad.Ciphertext = append([]byte(nil), s.Ciphertext...)
