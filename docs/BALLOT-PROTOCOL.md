@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.13.10 (2026-11-06)
+**Status:** 0.14.0 (2026-11-10), draft
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -176,6 +176,31 @@ design: vettid/votes, docs/VOTES-SITE.md).
 - **The anchor key:** each service has one long-lived ECDSA P-256 key,
   sealed in its keystore, certified by its identity key:
   `anchor_cert = Sign(service IK, "vettid/vote/1/anchor-key\x00", H(anchor_key SPKI DER))`.
+- **Retiring an anchor key** (0.14.0; key protection, owner's (a) of
+  2026-11-10): an `anchor_keys[]` entry may carry `retired_at` (Unix
+  seconds), from which the key anchors nothing more. The list's rules:
+  - **set once:** `retired_at` appears in some version, and every later
+    version keeps it with the same value; it is never removed, moved or
+    added to an entry that had one;
+  - **another live key:** an entry may be retired only while the same
+    service lists another anchor key without `retired_at`;
+  - **forward only (the site):** the site refuses a list that sets
+    `retired_at` earlier than the RFC 3161 time of a bundle it already
+    holds under that key, so retiring cancels nothing already published.
+
+  A document whose bundle's RFC 3161 time is at or after its anchor key's
+  `retired_at` is not anchored: the site refuses it (§3.3 "The site
+  checks"), an observer fails it (§8.4), and a member's vault rejects it
+  (§8.3). A document timestamped earlier stays valid. A vault takes a
+  list that sets `retired_at` like any list that chains; a version that
+  breaks one of the rules above doesn't chain. **A vault rejects
+  documents, not lists:** one it already holds whose bundle time is at or
+  after the key's `retired_at` is marked rejected, with an audit entry
+  and a feed item, so that a vault holding a document only it was sent is
+  told. **Readers before 0.14.0** take only the members they know, so a
+  list with `retired_at` is one they can't take (they keep their last
+  list, as above): the site publishes `retired_at` only once the oldest
+  vault release it supports reads it.
 - **Documents,** uploaded in this order:
   1. the proposal, before it is sent to any member;
   2. any extensions, before the `closes_at` they extend (§10.2);
@@ -186,7 +211,8 @@ design: vettid/votes, docs/VOTES-SITE.md).
   goes up with the document and with the message that carries it to
   vaults (§8.5 "Rekor profile").
 - **The site checks** the service is listed, the signatures, the exact
-  JCS bytes, the bundle under a listed anchor key, and the order above.
+  JCS bytes, the bundle under a listed anchor key timestamped before that
+  key's `retired_at` if it has one, and the order above.
 - **Write-once:** each document has one path; the site accepts the same
   bytes again, refuses different bytes, and never changes or removes a
   document.
@@ -606,8 +632,9 @@ publishes its results has every member's check settle by itself.
    (§8.4), and hands the vault `results.json`, the bundle, the vault's
    own row and its inclusion proof to `rows_root`.
 2. **The vault** checks `results_sig` and the bundle; that the proposal
-   and extensions in `results.json` are the ones it received; and its
-   row's proof.
+   and extensions in `results.json` are the ones it received; that no
+   bundle's RFC 3161 time is at or after its anchor key's `retired_at`
+   (§3.3); and its row's proof.
 3. **Its row:**
    - it holds a receipt: the row carries exactly that ballot;
    - it never cast: the row is empty;
@@ -625,8 +652,9 @@ publishes its results has every member's check settle by itself.
 
 From votes.vettid.org alone:
 1. `results_sig` and every document's signature hold under the service's
-   identity key; every bundle verifies under a listed anchor key; the
-   service list verifies;
+   identity key; every bundle verifies under a listed anchor key, and is
+   timestamped before that key's `retired_at` if it has one; the service
+   list verifies, each version chaining by §3.3's rules;
 2. `H(rows bytes)` is `rows_hash`; the tags are unique, number
    `eligible` and reach `record_root`; the rows reach `rows_root`;
 3. every ballot's `ballot_sig` verifies under its `vk` for
@@ -657,7 +685,7 @@ SubjectPublicKeyInfo; `?` marks a field present only where stated.
   `tally` naming every choice.
 - **`record_proof`, row proofs:** `{index: int, tree_size: int, path: [hash]}`,
   the audit path from the leaf up.
-- **Service list:** `{v: 1, version: int, previous: hash, services: [{service_id: string, name: string, iks: [b64], anchor_keys: [{key: spki, anchor_cert: sig, ik: b64}]}]}`,
+- **Service list:** `{v: 1, version: int, previous: hash, services: [{service_id: string, name: string, iks: [b64], anchor_keys: [{key: spki, anchor_cert: sig, ik: b64, retired_at?: int}]}]}`,
   `service_id` the lower-case hex of `H(first ik)[0:16]`, `previous`
   all-zero for the first version. Published with its signature as
   `services.json` and `services.json.sig`.
@@ -883,6 +911,15 @@ item.
 
 ## Changes
 
+- **0.14.0 (2026-11-10), draft:** §3.3, §8.3, §8.4, §8.5: an anchor key
+  may be retired (`retired_at` on its `anchor_keys[]` entry), set once,
+  only while another of the service's anchor keys is live, and never
+  earlier than a bundle the site holds under it. A document timestamped
+  at or after it is refused by the site, failed by an observer and
+  rejected by a vault, which takes the list and marks documents rather
+  than refusing it. Key protection, phase 1 (GC #7406, the owner's (a)
+  of #7385). The documents and the vectors don't change; the service
+  list's schema gains one optional member.
 - **0.13.10 (2026-11-06):** §11 item 4: twelve more Ed25519 vectors:
   mixed-order keys (one valid, one whose equation holds only times 8),
   `R` of small order with the equation holding, and non-canonical
