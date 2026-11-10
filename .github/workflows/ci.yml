@@ -26,6 +26,8 @@ jobs:
         run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
       - name: go test -race
         run: go test -race -count=1 ./...
+      - name: the size and timing test at MaxEligible (left out under -race)
+        run: go test -count=1 -run 'TestMaxEligibleFitsOneItem' ./internal/ballot/
       - name: build
         run: CGO_ENABLED=0 go build -trimpath -o /dev/null ./cmd/service-vault
 

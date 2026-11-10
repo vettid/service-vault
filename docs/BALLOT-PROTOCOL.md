@@ -133,10 +133,10 @@ receives.
   `record_root` is the RFC 6962 root (§8.2) over the tags, sorted, and
   `eligible` their number: at most 100,000 in a proposal document, as a
   member's vault bounds it (VAULT-MESSAGING §10.19.4 step 2). This service
-  allows at most 1,000: a proposal's record and its results' record are
-  each one item in its store, which DynamoDB caps at 400 KB, and past
-  about 1,000 members the results could not be saved at the close. It
-  refuses to create a bigger proposal. **(chosen; not in the spec.)**
+  allows at most 15,000: its members and its results' rows are stored in
+  chunks, and the rows go to the votes site in one upload, which past
+  about 16,000 members they would no longer fit. It refuses to create a
+  bigger proposal. **(chosen; not in the spec.)**
 - **Delivery:** each member receives, in `vote.proposal` (§4.1), their
   `record_secret` and an inclusion proof of their tag. The vault checks
   the proof at once against `record_root` (RFC 9162 §2.1.3.2).

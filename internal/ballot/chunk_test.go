@@ -204,8 +204,8 @@ func TestProposalMembersInChunks(t *testing.T) {
 		t.Errorf("a member chunk swapped: %v", err)
 	}
 	foreign, _ := putChunks(ctx, st5, "another-proposal", []byte("x"), 8)
-	three, _ := putChunks(ctx, st5, f.p.ProposalID, bigValue(3*ChunkSize), 8)
-	for name, refs := range map[string][]chunkRef{"foreign": foreign, "over the bound": three} {
+	over, _ := putChunks(ctx, st5, f.p.ProposalID, bigValue((maxMemberChunks+1)*ChunkSize), maxMemberChunks+1)
+	for name, refs := range map[string][]chunkRef{"foreign": foreign, "over the bound": over} {
 		r := rec
 		r.MemberChunks = refs
 		data, _ := json.Marshal(&r)
@@ -331,8 +331,8 @@ func TestResultsRowsInChunks(t *testing.T) {
 		t.Errorf("results with a chunk missing: %v", err)
 	}
 	// Row chunks over their bound, each intact: refused.
-	three, _ := putChunks(ctx, st, "p5", bigValue(3*ChunkSize), 8)
-	over, _ := json.Marshal(map[string]any{"results": []byte(`{}`), "results_sig": []byte("s"), "row_chunks": three})
+	overRefs, _ := putChunks(ctx, st, "p5", bigValue((maxRowChunks+1)*ChunkSize), maxRowChunks+1)
+	over, _ := json.Marshal(map[string]any{"results": []byte(`{}`), "results_sig": []byte("s"), "row_chunks": overRefs})
 	if err := st.Apply(ctx, []peer.Change{{Kind: KindResults, ID: "p5", Data: over}}); err != nil {
 		t.Fatal(err)
 	}
