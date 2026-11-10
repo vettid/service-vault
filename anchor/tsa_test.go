@@ -15,7 +15,7 @@ type vector struct {
 
 func loadVector(t *testing.T) vector {
 	t.Helper()
-	raw, err := os.ReadFile("../../vote/testdata/anchor-vector.json")
+	raw, err := os.ReadFile("../vote/testdata/anchor-vector.json")
 	if err != nil {
 		t.Fatal(err)
 	}

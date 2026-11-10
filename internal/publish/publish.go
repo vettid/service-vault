@@ -19,7 +19,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/vettid/service-vault/internal/anchor"
+	"github.com/vettid/service-vault/anchor"
 	"github.com/vettid/service-vault/internal/ballot"
 	"github.com/vettid/service-vault/internal/peer"
 )
