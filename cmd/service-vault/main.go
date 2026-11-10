@@ -452,6 +452,7 @@ func serve(args []string) error {
 	sendsCtx, stopSends := context.WithCancel(context.Background())
 	defer stopSends()
 	waitSends := func() {}
+	stopQueueing := func() {}
 	if ballots != nil {
 		// Publishing (BALLOT-PROTOCOL §3.3) needs SV_VOTES_URL; without it,
 		// creating a proposal answers publication_not_configured.
@@ -475,7 +476,7 @@ func serve(args []string) error {
 		anchorInfo = &api.AnchorKey{Key: spki, Cert: cert, IK: keys.IKPublic(), Sigstore: cfg.Sigstore}
 		mgr := &ballot.Manager{Store: ballots, Sign: signIK, IK: keys.IKPublic(), Roster: p, Sender: p, Background: sendsCtx,
 			Catcher: p, Approvals: approvals, NewID: envelope.NewULID, Now: time.Now, Log: log}
-		waitSends = mgr.Wait
+		waitSends, stopQueueing = mgr.Wait, mgr.StopSends
 		approvals.EligibleCount = func(context.Context) (int, error) { return len(p.Eligible()), nil }
 		approvals.ProposalTitle = func(ctx context.Context, id string) (string, bool, error) {
 			o, err := ballots.OpenProposal(ctx, id)
@@ -563,11 +564,14 @@ func serve(args []string) error {
 	sctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(sctx)
+	// The member sends: nothing more is queued, and those running get at
+	// most sendsGrace, so that the heartbeat is still cleared below.
+	stopQueueing()
 	sendsDone := make(chan struct{})
 	go func() { waitSends(); close(sendsDone) }()
 	select {
 	case <-sendsDone:
-	case <-sctx.Done():
+	case <-time.After(sendsGrace):
 		log.Warn("member sends stopped at shutdown: members not yet sent learn of them as BALLOT-PROTOCOL §4.2, §8.3 and §10 say")
 	}
 	stopSends()
@@ -576,7 +580,9 @@ func serve(args []string) error {
 			runErr = fmt.Errorf("peer: %w", err)
 		}
 	}
-	if err := tbl.ClearHeartbeat(sctx); err != nil {
+	hctx, hcancel := context.WithTimeout(context.Background(), heartbeatWriteTimeout)
+	defer hcancel()
+	if err := tbl.ClearHeartbeat(hctx); err != nil {
 		log.Warn("clear heartbeat", "err", err.Error())
 	}
 	log.Info("stopped")
@@ -593,6 +599,8 @@ func serve(args []string) error {
 const (
 	heartbeatStopAfter    = store.HeartbeatStale / 2
 	heartbeatWriteTimeout = 10 * time.Second
+	// sendsGrace is how long a shutdown waits for member sends to end.
+	sendsGrace = 10 * time.Second
 )
 
 // firstHeartbeat writes the first heartbeat, stamped now, under

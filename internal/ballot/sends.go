@@ -39,6 +39,7 @@ type sends struct {
 	mu     sync.Mutex
 	queues map[string][]*sendJob
 	keys   map[string]bool
+	closed bool // StopSends: nothing more is queued
 	wg     sync.WaitGroup
 }
 
@@ -62,6 +63,10 @@ func (m *Manager) sendInBackground(proposalID, key, typ string, conns []string, 
 	defer m.sends.mu.Unlock()
 	if m.sends.queues == nil {
 		m.sends.queues, m.sends.keys = map[string][]*sendJob{}, map[string]bool{}
+	}
+	if m.sends.closed {
+		m.log().Warn(typ+" not queued: the service is stopping", "send", key)
+		return false
 	}
 	if m.sends.keys[key] {
 		m.log().Info(typ+" already being sent", "send", key)
@@ -135,5 +140,13 @@ func (m *Manager) runJob(job *sendJob) {
 }
 
 // Wait waits for every background send to end (tests, and the daemon's
-// shutdown).
+// shutdown, after StopSends).
 func (m *Manager) Wait() { m.sends.wg.Wait() }
+
+// StopSends queues nothing more (a send asked for after it is logged and
+// dropped), so that Wait can't race a new sender at shutdown.
+func (m *Manager) StopSends() {
+	m.sends.mu.Lock()
+	m.sends.closed = true
+	m.sends.mu.Unlock()
+}

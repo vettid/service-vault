@@ -119,6 +119,28 @@ func TestSendsOrderPerProposal(t *testing.T) {
 			t.Fatalf("send %d: %s, want %s", i, s.sent[i].typ, w)
 		}
 	}
+	// One runner per proposal: its second message waits for the first,
+	// whatever member each goes to.
+	m3, s3, _ := newManager(t)
+	h := make(chan struct{})
+	s3.hold = map[string]chan struct{}{"a": h}
+	m3.sendInBackground("p1", "proposal/p1", TypeProposal, []string{"a"}, body)
+	m3.sendInBackground("p1", "extended/p1/1", TypeExtended, []string{"b"}, body)
+	time.Sleep(100 * time.Millisecond)
+	s3.mu.Lock()
+	early := len(s3.sent)
+	s3.mu.Unlock()
+	close(h)
+	m3.Wait()
+	if early != 0 || len(s3.sent) != 2 || s3.sent[0].typ != TypeProposal {
+		t.Fatalf("the second message went first: %d early, %+v", early, s3.sent)
+	}
+	// After StopSends nothing is queued.
+	m3.StopSends()
+	if m3.sendInBackground("p1", "closed/p1", TypeClosed, []string{"a"}, body) {
+		t.Fatal("queued after StopSends")
+	}
+
 	// Another proposal isn't held behind p1's.
 	m2, s2, _ := newManager(t)
 	held := make(chan struct{})
