@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/vettid/service-vault/internal/peer"
+	"github.com/vettid/service-vault/vote"
 )
 
 // Record kinds in the service vault's record store (the peer's, sealed:
@@ -66,6 +67,8 @@ type CopyItem struct {
 type RecordStore struct {
 	Records peer.Store
 	Copy    Copy
+
+	members membersCache
 }
 
 var _ BoxStore = (*RecordStore)(nil)
@@ -103,12 +106,18 @@ func (s *RecordStore) OpenProposal(ctx context.Context, id string) (*OpenProposa
 		if o.Members != nil {
 			return nil, fmt.Errorf("ballot: stored proposal %s: members both inline and in chunks", id)
 		}
-		data, err := getChunks(ctx, s.Records, id, o.MemberChunks, maxMemberChunks)
-		if err != nil {
-			return nil, fmt.Errorf("ballot: stored proposal %s's members: %w", id, err)
-		}
-		if err := json.Unmarshal(data, &o.Members); err != nil {
-			return nil, fmt.Errorf("ballot: stored proposal %s's members: %w", id, err)
+		key := membersKey(id, o.MemberChunks)
+		if cached := s.members.get(key); cached != nil {
+			o.Members = cached
+		} else {
+			data, err := getChunks(ctx, s.Records, id, o.MemberChunks, maxMemberChunks)
+			if err != nil {
+				return nil, fmt.Errorf("ballot: stored proposal %s's members: %w", id, err)
+			}
+			if err := json.Unmarshal(data, &o.Members); err != nil {
+				return nil, fmt.Errorf("ballot: stored proposal %s's members: %w", id, err)
+			}
+			s.members.put(key, o.Members)
 		}
 	}
 	// Never fewer (or more) members than the proposal names: a record
@@ -122,6 +131,24 @@ func (s *RecordStore) OpenProposal(ctx context.Context, id string) (*OpenProposa
 	}
 	o.version = r.Version
 	return &o, nil
+}
+
+// ProposalDocument reads a proposal's document alone, without its
+// members (an approval's title), or nil for an unknown id.
+func (s *RecordStore) ProposalDocument(ctx context.Context, id string) (*vote.Proposal, error) {
+	g, ok := s.Records.(peer.RecordGetter)
+	if !ok {
+		return nil, errors.New("ballot: the record store returns no versions")
+	}
+	r, ok, err := g.GetRecord(ctx, KindProposal, id)
+	if err != nil || !ok {
+		return nil, err
+	}
+	var o OpenProposal
+	if err := json.Unmarshal(r.Data, &o); err != nil {
+		return nil, fmt.Errorf("ballot: stored proposal %s: %w", id, err)
+	}
+	return o.Parsed()
 }
 
 // SaveProposal writes a proposal's record: created with IfAbsent, or
