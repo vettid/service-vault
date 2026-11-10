@@ -52,8 +52,23 @@ func TestMembersCache(t *testing.T) {
 		t.Fatal("cached members differ")
 	}
 	delete(o1.Members, "c0")
+	delete(o2.Members, "c1") // a hit's copy
 	if o3, _ := rs.OpenProposal(ctx, id); len(o3.Members) != len(f.open.Members) {
 		t.Fatal("a caller's change reached the cache")
+	}
+
+	// Another proposal's record naming these chunks misses (the proposal
+	// id is in the key) and is refused (ChunksOf), not served from the
+	// cache.
+	raw0, _, _ := st.Get(ctx, KindProposal, id)
+	var rec0 map[string]json.RawMessage
+	_ = json.Unmarshal(raw0, &rec0)
+	other := "01JBQZ0000000000000000000B"
+	if err := st.Apply(ctx, []peer.Change{{Kind: KindProposal, ID: other, Data: raw0}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rs.OpenProposal(ctx, other); err == nil {
+		t.Fatal("another proposal's chunks served")
 	}
 
 	// The record names a chunk with another sum: a miss, read and refused.
@@ -82,12 +97,14 @@ func TestMembersCache(t *testing.T) {
 		t.Fatalf("unknown proposal: %v %v", p, err)
 	}
 
-	// Bounded: the oldest is dropped.
+	// Bounded: the least recently used is dropped; a get keeps one.
 	var c membersCache
-	for i := 0; i <= membersCached; i++ {
+	for i := 0; i < membersCached; i++ {
 		c.put(fmt.Sprint(i), map[string]Member{"c": {}})
 	}
-	if c.get("0") != nil || c.get(fmt.Sprint(membersCached)) == nil || len(c.byKey) != membersCached {
+	c.get("0")
+	c.put("new", map[string]Member{"c": {}})
+	if c.get("0") == nil || c.get("1") != nil || c.get("new") == nil || len(c.byKey) != membersCached {
 		t.Fatalf("bound: %d kept", len(c.byKey))
 	}
 }

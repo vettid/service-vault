@@ -136,8 +136,8 @@ func TestMaxEligibleFitsOneItem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := base64.StdEncoding.EncodedLen(len(pr.Rows)); n > maxRowsUpload {
-		t.Errorf("rows: %d bytes as base64, over the site's %d", n, maxRowsUpload)
+	if n := base64.StdEncoding.EncodedLen(len(pr.Rows)); n > siteRowsUpload {
+		t.Errorf("rows: %d bytes as base64, over the site's %d", n, siteRowsUpload)
 	}
 	// The per-member bounds the chunk lists are checked against.
 	o, err := m.Store.OpenProposal(ctx, c.ProposalID)
@@ -154,10 +154,3 @@ func TestMaxEligibleFitsOneItem(t *testing.T) {
 	}
 	t.Logf("%d chunks; rows %d bytes in %d chunks at %d members", len(chunks), len(pr.Rows), len(pr.RowChunks), MaxEligible)
 }
-
-// maxRowsUpload is the most rows, as base64, the results' upload can carry
-// whatever the rest of it: the votes site takes 6,225,920 bytes (its
-// MaxUpload, measured on staging, #7325; Lambda's 6 MB request, less
-// room), less the largest results (512 KB) and bundle (64 KB) as base64,
-// and the JSON around them.
-const maxRowsUpload = 6_225_920 - 699_052 - 87_384 - 4_096

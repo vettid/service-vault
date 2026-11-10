@@ -61,7 +61,8 @@ var ErrUnknownProposal = errors.New("ballot: unknown proposal")
 //   - the sends go out in the background (sends.go), not in the request;
 //   - the rows, 5.0 MB as base64, fit the results' single upload to the
 //     votes site (6,225,920 bytes, less at most 512 KB of results and a
-//     64 KB bundle, as base64: maxRowsUpload);
+//     64 KB bundle, as base64: siteRowsUpload), and so would rows of
+//     maxRowBytes;
 //   - create answers in tens of milliseconds and close in about 1.5 s
 //     of the API's 30 s, with fakes for the site and the peer.
 //

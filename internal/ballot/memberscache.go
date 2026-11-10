@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"maps"
+	"slices"
 	"sync"
 )
 
@@ -33,12 +34,12 @@ func membersKey(proposalID string, refs []chunkRef) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// membersCache keeps the decoded members of the proposals opened last.
+// membersCache keeps the decoded members of the proposals used last.
 // Each caller gets its own copy of the map, so that no two proposals read
-// share one.
+// share one (a Member's byte slices are shared, and never written).
 type membersCache struct {
 	mu    sync.Mutex
-	order []string // oldest first
+	order []string // least recently used first
 	byKey map[string]map[string]Member
 }
 
@@ -48,6 +49,10 @@ func (c *membersCache) get(key string) map[string]Member {
 	m, ok := c.byKey[key]
 	if !ok {
 		return nil
+	}
+	// Most recently used last: a proposal in use stays.
+	if i := slices.Index(c.order, key); i >= 0 {
+		c.order = append(append(c.order[:i:i], c.order[i+1:]...), key)
 	}
 	return maps.Clone(m)
 }

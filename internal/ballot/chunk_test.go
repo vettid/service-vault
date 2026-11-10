@@ -3,6 +3,7 @@ package ballot
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -104,6 +105,9 @@ func TestChunkBounds(t *testing.T) {
 	}
 	if (maxMemberChunks-2)*ChunkSize >= MaxEligible*maxMemberBytes || (maxRowChunks-2)*ChunkSize >= MaxEligible*maxRowBytes {
 		t.Fatalf("bounds %d and %d chunks looser than the cap needs", maxMemberChunks, maxRowChunks)
+	}
+	if n := base64.StdEncoding.EncodedLen(MaxEligible * maxRowBytes); n > siteRowsUpload {
+		t.Fatalf("MaxEligible rows of maxRowBytes are %d bytes as base64, over the site's %d", n, siteRowsUpload)
 	}
 }
 

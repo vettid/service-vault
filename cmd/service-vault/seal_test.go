@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"slices"
 	"strings"
 	"testing"
 
@@ -418,5 +419,15 @@ func TestBallotCopyKeyCheckOverOlderCopy(t *testing.T) {
 	}
 	if _, ok, _ := cp.Get(ctx, copyKeyCheckID, []byte{0}); !ok {
 		t.Fatal("no check after the right key")
+	}
+}
+
+// Every kind the record store holds is resealed at a key change, the
+// vote chunks (#6946) among them.
+func TestRecordKindsResealed(t *testing.T) {
+	for _, k := range []string{ballot.KindChunk, ballot.KindProposal, ballot.KindResults} {
+		if !slices.Contains(recordKinds(), k) {
+			t.Errorf("%s not resealed", k)
+		}
 	}
 }

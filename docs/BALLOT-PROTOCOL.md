@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.13.10 (2026-11-06)
+**Status:** 0.13.11 (2026-11-10)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -883,6 +883,10 @@ item.
 
 ## Changes
 
+- **0.13.11 (2026-11-10):** §3.2: this service allows 15,000 eligible
+  members (was 1,000): its members and results' rows are stored in chunks,
+  and the bound is now the results' single upload to the votes site. A
+  chosen limit; no change to the messages, the documents or the vectors.
 - **0.13.10 (2026-11-06):** §11 item 4: twelve more Ed25519 vectors:
   mixed-order keys (one valid, one whose equation holds only times 8),
   `R` of small order with the equation holding, and non-canonical

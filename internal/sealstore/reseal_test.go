@@ -28,7 +28,7 @@ func (p *countingPager) Page(ctx context.Context, kind, after string, limit int)
 // is full.
 func TestResealPaged(t *testing.T) {
 	ctx := context.Background()
-	for _, n := range []int{0, 1, ResealPage, 2*ResealPage + 3} {
+	for n, pages := range map[int]int{0: 1, 1: 1, ResealPage: 2, 2*ResealPage + 3: 3} {
 		mem := peer.NewMemStore()
 		v1 := newStore(t, mem, false)
 		for i := 0; i < n; i++ {
@@ -55,8 +55,8 @@ func TestResealPaged(t *testing.T) {
 				t.Fatalf("n=%d: %s not resealed", n, r.ID)
 			}
 		}
-		if pager.largest > ResealPage || (n > ResealPage && pager.pages < n/ResealPage) {
-			t.Fatalf("n=%d: pages of up to %d, %d pages", n, pager.largest, pager.pages)
+		if pager.largest > ResealPage || pager.pages != pages {
+			t.Fatalf("n=%d: pages of up to %d, %d pages, want %d", n, pager.largest, pager.pages, pages)
 		}
 	}
 }
