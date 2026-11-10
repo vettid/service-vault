@@ -12,8 +12,11 @@ package integration
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -80,6 +83,39 @@ func TestKeystoreOnKMSAndDynamoDB(t *testing.T) {
 	b, _ := peer.KeysFromSeeds(again.Peer)
 	if a.Mailbox() != b.Mailbox() || !bytes.Equal(first.EmailPepper, again.EmailPepper) {
 		t.Fatal("identity changed across restart")
+	}
+
+	// The record is sealed with its encryption context, which KMS holds it
+	// to: dropped, it doesn't open (key protection, GC #7406 §7).
+	raw, err := tbl.Blobs().Get(ctx, keystore.SecretsName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sealed keystore.Sealed
+	if err := json.Unmarshal(raw, &sealed); err != nil || !sealed.Context {
+		t.Fatalf("sealed without its context: %v", err)
+	}
+	dropped := sealed
+	dropped.Context = false
+	if _, err := keystore.Open(ctx, k, keystore.SecretsName, &dropped); err == nil {
+		t.Fatal("opened without its encryption context")
+	}
+
+	// List names it; Replace puts only over the exact old bytes.
+	if names, err := tbl.Blobs().List(ctx); err != nil || !slices.Contains(names, keystore.SecretsName) {
+		t.Fatalf("List: %v %v", names, err)
+	}
+	if err := tbl.Blobs().Replace(ctx, keystore.SecretsName, []byte("not it"), []byte("x")); !errors.Is(err, keystore.ErrChanged) {
+		t.Fatalf("Replace over other bytes: %v", err)
+	}
+	if err := tbl.Blobs().Replace(ctx, "none-such", raw, []byte("x")); !errors.Is(err, keystore.ErrNotFound) {
+		t.Fatalf("Replace of a missing record: %v", err)
+	}
+	if err := tbl.Blobs().Replace(ctx, keystore.SecretsName, raw, raw); err != nil {
+		t.Fatalf("Replace over its own bytes: %v", err)
+	}
+	if rep, err := keystore.Reseal(ctx, k, tbl.Blobs()); err != nil || len(rep.Already) == 0 || len(rep.Resealed) != 0 {
+		t.Fatalf("Reseal: %+v %v", rep, err)
 	}
 
 	// A second create of the same name is refused.

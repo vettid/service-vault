@@ -713,6 +713,9 @@ var errNoSecrets = errors.New("the service vault has no keys yet: run serve firs
 // compute the email's index key) and refuses while the set is not empty.
 // The running daemon picks the armed bootstrap up within seconds.
 func admin(args []string, out io.Writer) error {
+	if len(args) > 0 && args[0] == "reseal-blobs" {
+		return adminReseal(args[1:], out)
+	}
 	if len(args) == 0 || args[0] != "bootstrap" {
 		return errors.New(adminUsage)
 	}
@@ -754,7 +757,46 @@ func admin(args []string, out io.Writer) error {
 	return armBootstrap(ctx, kc, cfg.KMSKeyID, tbl.Blobs(), records, *addr, out)
 }
 
-const adminUsage = "usage: service-vault admin bootstrap -email E | -connection ID [-fingerprint 16HEX]"
+const adminUsage = "usage: service-vault admin bootstrap -email E | -connection ID [-fingerprint 16HEX]\n" +
+	"       service-vault admin reseal-blobs"
+
+// adminReseal moves every sealed blob of the keystore to its encryption
+// context (key protection, GC #7406 §7 step 2). It is owner-run, as a
+// one-off task with the service stopped, in the same environment as
+// serve. It prints the names it moved and those already moved, never
+// what they hold.
+func adminReseal(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("admin reseal-blobs", flag.ContinueOnError)
+	awsEndpoint := fs.String("dev-aws-endpoint", "", "local development only: send KMS and DynamoDB calls to this URL (LocalStack)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return errors.New(adminUsage)
+	}
+	cfg, err := configFromEnv(os.Getenv)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	ac, err := newAWSClients(ctx, *awsEndpoint)
+	if err != nil {
+		return err
+	}
+	tbl := &store.Table{Client: ac.ddb, Name: cfg.Table}
+	return resealBlobs(ctx, &keystore.AWSKMS{Client: ac.kms}, tbl.Blobs(), out)
+}
+
+// resealBlobs runs keystore.Reseal and reports it.
+func resealBlobs(ctx context.Context, kc keystore.KMS, blobs keystore.Blobs, out io.Writer) error {
+	rep, err := keystore.Reseal(ctx, kc, blobs)
+	if rep != nil {
+		fmt.Fprintf(out, "resealed %d: %s\nalready with their context %d: %s\n", len(rep.Resealed), strings.Join(rep.Resealed, " "),
+			len(rep.Already), strings.Join(rep.Already, " "))
+	}
+	return err
+}
 
 // confirmBootstrap shows the connection waiting to become the first admin,
 // or, given its identity key's fingerprint, confirms it. The operator
