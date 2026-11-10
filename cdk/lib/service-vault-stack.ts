@@ -16,6 +16,7 @@ import * as sns from 'aws-cdk-lib/aws-sns';
 import * as subs from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
+import { AnchorSigner, AnchorSignerProps } from './anchor-signer';
 
 /** The port the daemon's private API listens on (SV_LISTEN). */
 export const API_PORT = 8080;
@@ -205,6 +206,12 @@ export interface ServiceVaultStackProps extends cdk.StackProps {
    * key"); later deploys may leave it out.
    */
   readonly recordKeyVersion?: number;
+  /**
+   * The AnchorSigner (key protection, phase 1, GC #7406): the anchor key in
+   * KMS and the function that alone signs with it. Left out, nothing of it
+   * is made, and the task anchors as before.
+   */
+  readonly anchorSigner?: Omit<AnchorSignerProps, 'envName' | 'prefix' | 'taskRole'>;
 }
 
 /**
@@ -230,6 +237,7 @@ export class ServiceVaultStack extends cdk.Stack {
   readonly ballotsTable: dynamodb.Table;
   readonly key: kms.Key;
   readonly service: ecs.FargateService;
+  readonly anchorSigner?: AnchorSigner;
 
   constructor(scope: Construct, id: string, props: ServiceVaultStackProps) {
     super(scope, id, props);
@@ -486,6 +494,11 @@ export class ServiceVaultStack extends cdk.Stack {
         resources: ['*'],
       }),
     );
+    if (props.anchorSigner) {
+      this.anchorSigner = new AnchorSigner(this, 'AnchorSigner', {
+        ...props.anchorSigner, envName, prefix, taskRole: taskDef.taskRole,
+      });
+    }
     taskDef.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: 'PublishTlsPin',
