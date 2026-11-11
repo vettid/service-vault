@@ -340,3 +340,24 @@ func TestSendsNotAfter(t *testing.T) {
 		t.Fatalf("vote.closed not after %v, want %v", s.notAfter, want)
 	}
 }
+
+// vote.extended's deposits stop being worth making at the new close plus
+// what further extensions may add; ClosedSendLife is a week.
+func TestSendsNotAfterExtended(t *testing.T) {
+	if ClosedSendLife != 7*24*time.Hour {
+		t.Fatalf("ClosedSendLife %v", ClosedSendLife)
+	}
+	ctx := context.Background()
+	m, s, a, pid, x := extendFixture(t)
+	approveExtension(t, a, "a", pid, x)
+	if _, err := m.Extend(ctx, pid, "a", x); err != nil {
+		t.Fatal(err)
+	}
+	m.Wait()
+	if len(s.sent) == 0 || s.sent[len(s.sent)-1].typ != TypeExtended {
+		t.Fatalf("sent %v", s.sent)
+	}
+	if want := time.Unix(x.ClosesAt, 0).Add(24 * time.Hour); !s.notAfter.Equal(want) {
+		t.Fatalf("vote.extended not after %v, want %v", s.notAfter, want)
+	}
+}

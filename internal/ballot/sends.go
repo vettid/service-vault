@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/vettid/service-vault/internal/peer"
+	"github.com/vettid/service-vault/vote"
 )
 
 // Member sends (BALLOT-PROTOCOL §4.1): vote.proposal, vote.extended and
@@ -39,7 +40,7 @@ const SendTimeout = 30 * time.Second
 // §10.2: 24 h in all); a vote.closed for ClosedSendLife. The peer drops a
 // deposit not made by then, so it no longer counts toward its bound.
 const (
-	extensionsMax  = 24 * time.Hour
+	extensionsMax  = vote.MaxExtension * time.Second
 	ClosedSendLife = 7 * 24 * time.Hour
 )
 
@@ -53,9 +54,9 @@ func voteSendUntil(closesAt int64) time.Time {
 // the peer, its proposal's later sends and its key (a retry). A relay that
 // refuses at once doesn't fail a send: the message is queued and saved,
 // and goes out later, until the outbox is full (peer.ErrOutboxFull, which
-// counts). A connection
-// gone (peer.ErrNotFound) or a member's outbox full (peer.ErrBusy) is
-// about that member only: it fails that send without counting. The
+// counts). A connection gone (peer.ErrNotFound), a member's outbox full,
+// or a member whose deposits wait for its next token (both peer.ErrBusy)
+// is about that member only: it fails that send without counting. The
 // members not sent learn of it as above.
 const MaxFailuresInARow = 20
 
