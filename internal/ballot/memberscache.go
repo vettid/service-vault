@@ -45,12 +45,30 @@ func membersKey(proposalID string, refs []chunkRef) string {
 type membersCache struct {
 	mu    sync.Mutex
 	order []string // least recently used first
-	byKey map[string]map[string]Member
+	byKey map[string]*membersEntry
 }
 
-func (c *membersCache) get(key string) map[string]Member {
+// membersEntry is one proposal's cached members, and its record tree,
+// built once from them on first use and shared by every caller after (a
+// vote.status needs a proof; at 15,000 members the tree is about 30,000
+// hashes). The tree is never changed once built, and its proofs are
+// copies (vote.Tree).
+type membersEntry struct {
+	members  map[string]Member
+	treeOnce sync.Once
+	tree     *recordTree
+}
+
+// recordTree returns the entry's record tree, building it the first time.
+func (e *membersEntry) recordTree() *recordTree {
+	e.treeOnce.Do(func() { e.tree = newRecordTree(tagsOf(e.members)) })
+	return e.tree
+}
+
+// get returns a copy of key's members and its entry, or nil.
+func (c *membersCache) get(key string) (map[string]Member, *membersEntry) {
 	c.mu.Lock()
-	m, ok := c.byKey[key]
+	e, ok := c.byKey[key]
 	if ok {
 		// Most recently used last: a proposal in use stays.
 		if i := slices.Index(c.order, key); i >= 0 {
@@ -59,24 +77,28 @@ func (c *membersCache) get(key string) map[string]Member {
 	}
 	c.mu.Unlock()
 	if !ok {
-		return nil
+		return nil, nil
 	}
-	return maps.Clone(m)
+	return maps.Clone(e.members), e
 }
 
-func (c *membersCache) put(key string, m map[string]Member) {
+// put keeps a copy of m under key, and returns key's entry (the one kept
+// before, if another caller put it first).
+func (c *membersCache) put(key string, m map[string]Member) *membersEntry {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.byKey == nil {
-		c.byKey = map[string]map[string]Member{}
+		c.byKey = map[string]*membersEntry{}
 	}
-	if _, ok := c.byKey[key]; ok {
-		return
+	if e, ok := c.byKey[key]; ok {
+		return e
 	}
-	c.byKey[key] = maps.Clone(m)
+	e := &membersEntry{members: maps.Clone(m)}
+	c.byKey[key] = e
 	c.order = append(c.order, key)
 	if len(c.order) > membersCached {
 		delete(c.byKey, c.order[0])
 		c.order = c.order[1:]
 	}
+	return e
 }

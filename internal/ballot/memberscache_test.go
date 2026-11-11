@@ -102,9 +102,65 @@ func TestMembersCache(t *testing.T) {
 	for i := 0; i < membersCached; i++ {
 		c.put(fmt.Sprint(i), map[string]Member{"c": {}})
 	}
-	c.get("0")
+	_, _ = c.get("0")
 	c.put("new", map[string]Member{"c": {}})
-	if c.get("0") == nil || c.get("1") != nil || c.get("new") == nil || len(c.byKey) != membersCached {
+	has := func(k string) bool { m, _ := c.get(k); return m != nil }
+	if !has("0") || has("1") || !has("new") || len(c.byKey) != membersCached {
 		t.Fatalf("bound: %d kept", len(c.byKey))
+	}
+}
+
+// The cache key covers the proposal, each chunk's id and each sum, each
+// field with its length: moving a byte across a field boundary, or
+// changing any field, gives another key.
+func TestMembersKey(t *testing.T) {
+	ref := func(id, sum string) chunkRef { return chunkRef{ID: id, Sum: []byte(sum)} }
+	k := membersKey("p", []chunkRef{ref("ab", "c")})
+	for name, other := range map[string]string{
+		"id across":     membersKey("p", []chunkRef{ref("a", "bc")}),
+		"proposal":      membersKey("q", []chunkRef{ref("ab", "c")}),
+		"proposal into": membersKey("pa", []chunkRef{ref("b", "c")}),
+		"chunk id":      membersKey("p", []chunkRef{ref("ax", "c")}),
+		"sum":           membersKey("p", []chunkRef{ref("ab", "d")}),
+		"another chunk": membersKey("p", []chunkRef{ref("ab", "c"), ref("", "")}),
+		"split in two":  membersKey("p", []chunkRef{ref("a", ""), ref("b", "c")}),
+	} {
+		if other == k {
+			t.Errorf("%s: same key", name)
+		}
+	}
+	if membersKey("p", []chunkRef{ref("ab", "c")}) != k {
+		t.Error("the same input, another key")
+	}
+}
+
+// Opened through the cache, a proposal's record tree is built once and
+// shared, and gives the same proofs as one built afresh.
+func TestMembersCacheSharesTheTree(t *testing.T) {
+	ctx := context.Background()
+	m, _, _ := newManager(t)
+	c, err := m.Create(ctx, "apv", input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Wait()
+	o1, err := m.Store.OpenProposal(ctx, c.ProposalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(o1.MemberChunks) == 0 {
+		t.Skip("members inline: no cache")
+	}
+	o2, _ := m.Store.OpenProposal(ctx, c.ProposalID)
+	if o1.recordTree() != o2.recordTree() {
+		t.Fatal("the tree built again")
+	}
+	fresh := &OpenProposal{Members: o1.Members}
+	for _, mem := range o1.Members {
+		a, err1 := o2.proofOf(mem.Tag)
+		b, err2 := fresh.proofOf(mem.Tag)
+		if err1 != nil || err2 != nil || a.Index != b.Index || a.TreeSize != b.TreeSize || fmt.Sprint(a.Path) != fmt.Sprint(b.Path) {
+			t.Fatalf("proofs differ: %+v %+v %v %v", a, b, err1, err2)
+		}
 	}
 }

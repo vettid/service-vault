@@ -969,7 +969,7 @@ item.
 
 ## Changes
 
-- **0.13.13 (2026-11-11):** (service-vault #140, with the owner's
+- **0.13.13 (2026-11-11):** (service-vault #140, for the owner's
   approval) §3.2: this service allows 15,000 eligible members (was
   1,000): its members and results' rows are stored in chunks, and the
   bound is now the results' single upload to the votes site. A chosen

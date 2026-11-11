@@ -106,12 +106,16 @@ type OpenProposal struct {
 	p       *vote.Proposal
 	version uint64 // as read from the record store (SaveProposal)
 	records *recordTree
+	shared  *membersEntry // the members cache's entry, when read through it
 }
 
 // Tags returns every eligible tag, sorted.
-func (o *OpenProposal) Tags() [][]byte {
-	tags := make([][]byte, 0, len(o.Members))
-	for _, m := range o.Members {
+func (o *OpenProposal) Tags() [][]byte { return tagsOf(o.Members) }
+
+// tagsOf returns the members' tags, sorted.
+func tagsOf(members map[string]Member) [][]byte {
+	tags := make([][]byte, 0, len(members))
+	for _, m := range members {
 		tags = append(tags, m.Tag)
 	}
 	sortTags(tags)
@@ -119,9 +123,10 @@ func (o *OpenProposal) Tags() [][]byte {
 }
 
 // recordTree is a proposal's record tree over its sorted tags (§8.5),
-// built once: a proposal's members never change. It is built on first
-// use and isn't safe for a concurrent first use: a caller that sends in
-// parallel builds it before it starts.
+// built once: a proposal's members never change. Read through the members
+// cache, the proposal shares the cache entry's tree. Otherwise it is
+// built on first use and isn't safe for a concurrent first use: a caller
+// that sends in parallel builds it before it starts.
 type recordTree struct {
 	tree  *vote.Tree
 	index map[string]int // tag -> leaf index
@@ -129,14 +134,21 @@ type recordTree struct {
 
 func (o *OpenProposal) recordTree() *recordTree {
 	if o.records == nil {
-		tags := o.Tags()
-		rt := &recordTree{tree: vote.NewTree(tags), index: make(map[string]int, len(tags))}
-		for i, t := range tags {
-			rt.index[string(t)] = i
+		if o.shared != nil {
+			o.records = o.shared.recordTree()
+		} else {
+			o.records = newRecordTree(o.Tags())
 		}
-		o.records = rt
 	}
 	return o.records
+}
+
+func newRecordTree(tags [][]byte) *recordTree {
+	rt := &recordTree{tree: vote.NewTree(tags), index: make(map[string]int, len(tags))}
+	for i, t := range tags {
+		rt.index[string(t)] = i
+	}
+	return rt
 }
 
 // proofOf is a tag's record_proof (§8.5).

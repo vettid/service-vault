@@ -107,8 +107,8 @@ func (s *RecordStore) OpenProposal(ctx context.Context, id string) (*OpenProposa
 			return nil, fmt.Errorf("ballot: stored proposal %s: members both inline and in chunks", id)
 		}
 		key := membersKey(id, o.MemberChunks)
-		if cached := s.members.get(key); cached != nil {
-			o.Members = cached
+		if cached, e := s.members.get(key); cached != nil {
+			o.Members, o.shared = cached, e
 		} else {
 			data, err := getChunks(ctx, s.Records, id, o.MemberChunks, maxMemberChunks)
 			if err != nil {
@@ -117,7 +117,7 @@ func (s *RecordStore) OpenProposal(ctx context.Context, id string) (*OpenProposa
 			if err := json.Unmarshal(data, &o.Members); err != nil {
 				return nil, fmt.Errorf("ballot: stored proposal %s's members: %w", id, err)
 			}
-			s.members.put(key, o.Members)
+			o.shared = s.members.put(key, o.Members)
 		}
 	}
 	// Never fewer (or more) members than the proposal names: a record

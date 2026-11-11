@@ -40,8 +40,11 @@ const (
 // bytes (its MaxUpload, measured on staging, GC #7325; Lambda's 6 MB
 // request, less room), less the largest results (512 KB, sent as base64:
 // 699,052), the largest bundle (64 KB, sent as JSON as it is) and the
-// JSON around them (the publish package checks the whole body). The site
-// is another repository: a change to its limit has to change this.
+// JSON around them (the publish package checks the whole body). The
+// bundle's 64 KB is the site's own check (maxBundle), on the bytes as
+// sent: this service doesn't bound the bundle it gets back from the
+// anchor, and json.Marshal may lengthen one (service-vault #141). The
+// site is another repository: a change to its limit has to change this.
 const SiteRowsUpload = 6_225_920 - 699_052 - 65_536 - 4_096
 
 // The most chunks each value may name, from MaxEligible: a list longer
