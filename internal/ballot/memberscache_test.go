@@ -164,3 +164,21 @@ func TestMembersCacheSharesTheTree(t *testing.T) {
 		}
 	}
 }
+
+// A second put under a key returns the entry kept first, with its
+// members (not the second map), so callers share one record tree.
+func TestMembersCachePutKeepsTheFirst(t *testing.T) {
+	var c membersCache
+	first := c.put("k", map[string]Member{"a": {}})
+	second := c.put("k", map[string]Member{"b": {}})
+	if first == nil || second != first {
+		t.Fatal("another entry")
+	}
+	m, e := c.get("k")
+	if e != first || len(m) != 1 {
+		t.Fatalf("got %v", m)
+	}
+	if _, ok := m["a"]; !ok {
+		t.Fatal("the second put's members kept")
+	}
+}
