@@ -490,11 +490,9 @@ func serve(args []string) error {
 			mgr.Timestamp = func(bundle json.RawMessage, doc []byte) (int64, error) {
 				return anchor.TimestampTime(cfg.Sigstore, bundle, doc)
 			}
-			mgr.AuthorityTime = func(ctx context.Context) (int64, error) {
-				return anchor.AuthorityTime(ctx, anc, cfg.Sigstore)
-			}
+			mgr.AuthorityTime = authorityTime(anc, cfg.Sigstore)
 			mgr.Publisher = &publish.Publisher{URL: cfg.VotesURL, Anchor: anc, Client: anchor.Client(time.Minute), Records: records,
-				Timestamp: mgr.Timestamp, Log: log}
+				Timestamp: mgr.Timestamp, AuthorityTime: mgr.AuthorityTime, Log: log}
 		}
 		if rebuild {
 			// The table was restored: ballots it lost are in the copy (§6).
@@ -924,6 +922,13 @@ func healthcheck(listen string) error {
 		return fmt.Errorf("status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// authorityTime is the ballot manager's and the publisher's AuthorityTime:
+// the timestamp authority's verified time (BALLOT-PROTOCOL §7, 0.13.12),
+// never this clock's.
+func authorityTime(anc *anchor.Anchorer, instance string) func(context.Context) (int64, error) {
+	return func(ctx context.Context) (int64, error) { return anchor.AuthorityTime(ctx, anc, instance) }
 }
 
 // recordKinds is every kind the service vault stores.

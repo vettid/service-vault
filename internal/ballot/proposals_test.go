@@ -343,12 +343,18 @@ func (p *fakePublisher) PublishResults(_ context.Context, id string, results, si
 	return Receipt{Bundle: json.RawMessage(`{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}`), IndexStale: p.resultsStale}, nil
 }
 
-type fakeCatcher struct {
-	caught    bool
-	unhandled int64
+func (p *fakePublisher) RepublishResults(ctx context.Context, id string, results, sig, rows []byte, _ json.RawMessage, notBefore int64) (Receipt, error) {
+	return p.PublishResults(ctx, id, results, sig, rows, notBefore)
 }
 
-func (c *fakeCatcher) Caught(context.Context, time.Time, time.Time, time.Time) (bool, int64, error) {
+type fakeCatcher struct {
+	caught     bool
+	unhandled  int64
+	emptyAfter []time.Time // per call
+}
+
+func (c *fakeCatcher) Caught(_ context.Context, _, emptyAfter, _, _ time.Time) (bool, int64, error) {
+	c.emptyAfter = append(c.emptyAfter, emptyAfter)
 	return c.caught, c.unhandled, nil
 }
 
@@ -1033,5 +1039,97 @@ func TestCloseWithoutTheAuthority(t *testing.T) {
 	}
 	if o, _ := m2.Store.OpenProposal(ctx, c2.ProposalID); o.Published {
 		t.Fatal("counted with no probe")
+	}
+}
+
+// The probe's rules (§7, 0.13.12): the close itself is the boundary; a
+// passing probe holds for that close across collecting retries, and the
+// empty-collect evidence must follow it plus the margin; a wait is void
+// when the clock went back, and none lasts over ProbeMaxWait; a cancelled
+// request is not a failure.
+func TestAuthorityProbeRules(t *testing.T) {
+	ctx := context.Background()
+	m, _, _ := newManager(t)
+	ct := &fakeCatcher{}
+	m.Catcher = ct
+	c, err := m.Create(ctx, "apv", input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := input()
+	clock := time.Unix(in.ClosesAt, 0).Add(2 * CollectMargin)
+	m.Now = func() time.Time { return clock }
+	authority, probes := in.ClosesAt-1, 0
+	var probeErr error
+	m.AuthorityTime = func(ctx context.Context) (int64, error) {
+		probes++
+		if probeErr != nil {
+			return 0, probeErr
+		}
+		return authority, ctx.Err()
+	}
+	if _, err := m.Close(ctx, c.ProposalID); !errors.Is(err, ErrAuthorityEarly) || probes != 1 {
+		t.Fatalf("one second before the close: %v, %d probes", err, probes)
+	}
+	// The clock went back: the wait is void.
+	clock = clock.Add(-30 * time.Second) // still past the close + margin
+	if _, err := m.Close(ctx, c.ProposalID); !errors.Is(err, ErrAuthorityEarly) || probes != 2 {
+		t.Fatalf("after the clock went back: %v, %d probes", err, probes)
+	}
+	// A wait never lasts over ProbeMaxWait, whatever the estimate.
+	clock, authority = time.Unix(in.ClosesAt, 0).Add(2*CollectMargin), in.ClosesAt-6*3600
+	if _, err := m.Close(ctx, c.ProposalID); !errors.Is(err, ErrAuthorityEarly) || probes != 3 {
+		t.Fatalf("a far-behind authority: %v, %d probes", err, probes)
+	}
+	clock = clock.Add(ProbeMaxWait - time.Second)
+	if _, err := m.Close(ctx, c.ProposalID); !errors.Is(err, ErrAuthorityEarly) || probes != 3 {
+		t.Fatalf("within the cap: %v, %d probes", err, probes)
+	}
+	clock = clock.Add(time.Second)
+	// A cancelled request: not counted as a failure (no floor after it).
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := m.authorityPast(cctx, c.ProposalID, in.ClosesAt); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cancelled probe: %v", err)
+	}
+	// At the close itself it passes, at once (no failure floor after the
+	// cancel); the relay isn't caught up yet, and the passing probe holds
+	// for the retries (not probed again).
+	authority, before := in.ClosesAt, probes
+	if _, err := m.Close(ctx, c.ProposalID); !errors.Is(err, ErrNotCaught) || probes != before+1 {
+		t.Fatalf("at the close: %v, %d probes", err, probes-before)
+	}
+	probedAt := clock
+	clock = clock.Add(time.Minute)
+	if _, err := m.Close(ctx, c.ProposalID); !errors.Is(err, ErrNotCaught) || probes != before+1 {
+		t.Fatalf("a retry probed again: %v, %d probes", err, probes-before)
+	}
+	for i, at := range ct.emptyAfter {
+		if !at.Equal(probedAt.Add(CollectMargin)) {
+			t.Fatalf("Caught %d: emptyAfter %v, want the probe %v plus the margin", i, at, probedAt)
+		}
+	}
+	if o, _ := m.Store.OpenProposal(ctx, c.ProposalID); o.Published {
+		t.Fatal("the counts were fixed before the relay was caught up")
+	}
+}
+
+// The probe is judged against the close in force: past the original close
+// but before the extended one, the vote is still collecting.
+func TestAuthorityProbeExtendedClose(t *testing.T) {
+	ctx := context.Background()
+	e := newExtEnv(t)
+	if _, err := e.m.Extend(ctx, e.id, "apv", e.req(7200)); err != nil {
+		t.Fatal(err)
+	}
+	*e.clock = time.Unix(e.in.ClosesAt+7200, 0).Add(2 * CollectMargin)
+	e.m.AuthorityTime = func(context.Context) (int64, error) { return e.in.ClosesAt + 3600, nil }
+	if _, err := e.m.Close(ctx, e.id); !errors.Is(err, ErrAuthorityEarly) {
+		t.Fatalf("between the closes: %v", err)
+	}
+	e.m.probes.Delete(e.id)
+	e.m.AuthorityTime = func(context.Context) (int64, error) { return e.in.ClosesAt + 7200, nil }
+	if _, err := e.m.Close(ctx, e.id); err != nil {
+		t.Fatalf("at the extended close: %v", err)
 	}
 }

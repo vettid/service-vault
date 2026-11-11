@@ -3,17 +3,23 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"maps"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/vettid/service-vault/anchor"
 	"github.com/vettid/service-vault/internal/ballot"
 	"github.com/vettid/service-vault/internal/keystore"
 	"github.com/vettid/service-vault/internal/peer"
@@ -461,5 +467,20 @@ func TestRecordKindsCoverPublish(t *testing.T) {
 	}
 	if found < 2 {
 		t.Fatalf("found %d record kinds in the publisher", found)
+	}
+}
+
+// The wired AuthorityTime asks the timestamp authority and is refused
+// with it: an authority that fails gives an error, never a local time.
+func TestAuthorityTimeWiring(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusBadGateway) }))
+	defer srv.Close()
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	anc, err := anchor.NewWith(key, anchor.Endpoints{TSA: srv.URL}, srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := authorityTime(anc, anchor.Staging)(context.Background()); err == nil {
+		t.Fatalf("a failing authority gave %d", got)
 	}
 }

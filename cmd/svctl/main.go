@@ -99,9 +99,9 @@ commands:
                                    the same for an extension of the proposal's close
   proposal status|publish|close|results ID
                                    a proposal's status; retry its publication; count and
-                                   publish its results (stamped_early: the service's clock
-                                   is ahead of the timestamp authority's; retry later);
-                                   print them
+                                   publish its results (collecting, timestamp_unavailable,
+                                   stamped_early: retry later; the last two say to check
+                                   the clocks or the timestamp authority); print them
   health                           check GET /health
 
 environment:

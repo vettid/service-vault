@@ -1,11 +1,22 @@
 package anchor
 
 import (
+	"bytes"
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/digitorus/timestamp"
 )
 
 type vector struct {
@@ -179,5 +190,66 @@ func TestVerifyTimestamp(t *testing.T) {
 	}
 	if _, err := VerifyTimestamp(Production, resp, sig); err == nil {
 		t.Error("a staging stamp verified against production's chain")
+	}
+}
+
+// The count's probe end to end against a stand-in authority that answers
+// the staging vector's stamp: the request's imprint is SHA-256 of the
+// nonce, and the time returned is the stamp's, verified (not the local
+// clock). The nonce is 32 fresh random bytes.
+func TestAuthorityTime(t *testing.T) {
+	v := loadVector(t)
+	var b struct {
+		VerificationMaterial struct {
+			TimestampVerificationData struct {
+				Timestamps []struct {
+					SignedTimestamp []byte `json:"signedTimestamp"`
+				} `json:"rfc3161Timestamps"`
+			} `json:"timestampVerificationData"`
+		} `json:"verificationMaterial"`
+		MessageSignature struct {
+			Signature []byte `json:"signature"`
+		} `json:"messageSignature"`
+	}
+	if err := json.Unmarshal(v.Bundle, &b); err != nil {
+		t.Fatal(err)
+	}
+	resp, sig := b.VerificationMaterial.TimestampVerificationData.Timestamps[0].SignedTimestamp, b.MessageSignature.Signature
+	want, _ := TimestampTime(Staging, v.Bundle, []byte(v.Proposal))
+	var imprints [][]byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		req, err := timestamp.ParseRequest(body)
+		if err != nil {
+			w.WriteHeader(400)
+			return
+		}
+		imprints = append(imprints, req.HashedMessage)
+		w.Header().Set("Content-Type", "application/timestamp-reply")
+		_, _ = w.Write(resp)
+	}))
+	defer srv.Close()
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	a, err := NewWith(key, Endpoints{TSA: srv.URL}, srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := newNonce
+	defer func() { newNonce = saved }()
+	newNonce = func() ([]byte, error) { return sig, nil } // the bytes the vector's stamp is over
+	got, err := AuthorityTime(context.Background(), a, Staging)
+	h := sha256.Sum256(sig)
+	if err != nil || got != want || len(imprints) != 1 || !bytes.Equal(imprints[0], h[:]) {
+		t.Fatalf("%d, %v; want %d", got, err, want)
+	}
+	// Another nonce: the stamp isn't over it, refused.
+	newNonce = saved
+	if _, err := AuthorityTime(context.Background(), a, Staging); err == nil {
+		t.Fatal("a stamp over other bytes was taken")
+	}
+	n1, _ := newNonce()
+	n2, _ := newNonce()
+	if len(n1) != 32 || bytes.Equal(n1, n2) || bytes.Equal(n1, make([]byte, 32)) {
+		t.Fatal("the nonce is not 32 fresh random bytes")
 	}
 }

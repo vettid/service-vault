@@ -68,6 +68,10 @@ type Publisher struct {
 	Log *slog.Logger
 	// Now is the clock; nil is time.Now.
 	Now func() time.Time
+	// AuthorityTime asks the timestamp authority for the time, verified
+	// (anchor.AuthorityTime): after an early results stamp it decides when
+	// to anchor again (no log entry). Nil: an estimate from the early stamp.
+	AuthorityTime func(ctx context.Context) (int64, error)
 
 	mu      sync.Mutex
 	bundles map[[32]byte]json.RawMessage // anchored this run, by document
@@ -104,6 +108,27 @@ func (p *Publisher) PublishResults(ctx context.Context, id string, results, sig,
 		return ballot.Receipt{}, errors.New("publish: results without the close they must be stamped at or after")
 	}
 	return p.publish(ctx, id, "results", results, sig, rows, notBefore)
+}
+
+// RepublishResults implements ballot.ResultsPublisher: the identical
+// upload again of results the site holds (its index stale), with the
+// bundle uploaded first. It is checked again; one that is early or
+// doesn't verify is kept, never dropped (the site holds it), with its
+// alarm, and not uploaded.
+func (p *Publisher) RepublishResults(ctx context.Context, id string, results, sig, rows []byte, bundle json.RawMessage, notBefore int64) (ballot.Receipt, error) {
+	if notBefore <= 0 || p.Timestamp == nil {
+		return ballot.Receipt{}, errors.New("publish: results again without their timestamp check")
+	}
+	t, err := p.Timestamp(bundle, results)
+	if err != nil {
+		p.log().Error("the published results' bundle doesn't verify", "alarm", "results_bundle_unverified", "proposal_id", id, "err", err.Error())
+		return ballot.Receipt{}, fmt.Errorf("publish: the results' timestamp: %w", err)
+	}
+	if t < notBefore {
+		p.log().Error("the published results were timestamped before the close", "alarm", "results_stamped_early", "proposal_id", id, "timestamp", t, "closes_at", notBefore)
+		return ballot.Receipt{}, ballot.ErrStampedEarly
+	}
+	return p.upload(ctx, id, "results", results, sig, rows, bundle)
 }
 
 func (p *Publisher) now() time.Time {
@@ -300,8 +325,11 @@ func (p *Publisher) stampedBundle(ctx context.Context, id string, doc []byte, no
 		}
 		anchored := false
 		if bundle == nil {
-			if w != nil && w.TSA+(p.now().Unix()-w.Seen) < notBefore {
-				return nil, ballot.ErrStampedEarly // too soon to anchor again
+			if early, err := p.tooSoon(ctx, id, doc, w, notBefore); err != nil || early {
+				if err == nil {
+					err = ballot.ErrStampedEarly // too soon to anchor again
+				}
+				return nil, err
 			}
 			if bundle, anchored, err = p.bundleNew(ctx, doc); err != nil {
 				return nil, err
@@ -332,6 +360,11 @@ func (p *Publisher) stampedBundle(ctx context.Context, id string, doc []byte, no
 			return nil, fmt.Errorf("publish: the results' timestamp: %w", err)
 		}
 		if t >= notBefore {
+			if w != nil { // done waiting: the wait goes (best effort)
+				if err := p.dropWait(ctx, doc); err != nil {
+					p.log().Warn("publish: the stamp wait not dropped", "proposal_id", id, "err", err.Error())
+				}
+			}
 			return bundle, nil
 		}
 		now := p.now().Unix()
@@ -359,6 +392,58 @@ func (p *Publisher) stampedBundle(ctx context.Context, id string, doc []byte, no
 			return nil, ballot.ErrStampedEarly
 		}
 	}
+}
+
+// tooSoon reports whether, after an early stamp (w), a new anchor would
+// still be early. With AuthorityTime, a fresh probe decides (no log
+// entry); its answer updates w. Without, the estimate from w and this
+// clock since does, void if this clock went back and never longer than
+// ballot.ProbeMaxWait, so a corrected clock never starves the results.
+func (p *Publisher) tooSoon(ctx context.Context, id string, doc []byte, w *stampWait, notBefore int64) (bool, error) {
+	if w == nil {
+		return false, nil
+	}
+	now := p.now().Unix()
+	if p.AuthorityTime != nil {
+		t, err := p.AuthorityTime(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return false, ctx.Err()
+			}
+			p.log().Error("the timestamp authority's time is unavailable: the results are not anchored again", "alarm", "tsa_unavailable", "proposal_id", id, "err", err.Error())
+			return false, fmt.Errorf("%w: %v", ballot.ErrAuthorityTime, err)
+		}
+		if t >= notBefore {
+			return false, nil
+		}
+		w.TSA, w.Seen = t, p.now().Unix()
+		if err := p.saveWait(ctx, doc, w); err != nil {
+			return false, err
+		}
+		p.log().Info("the timestamp authority isn't past the close yet: the results are not anchored again", "proposal_id", id, "authority_time", t, "closes_at", notBefore)
+		return true, nil
+	}
+	since := now - w.Seen
+	if since < 0 || since >= int64(ballot.ProbeMaxWait/time.Second) {
+		return false, nil
+	}
+	if w.TSA+since < notBefore {
+		p.log().Info("the timestamp authority can't be past the close yet: the results are not anchored again", "proposal_id", id, "closes_at", notBefore)
+		return true, nil
+	}
+	return false, nil
+}
+
+// dropWait deletes doc's stamp wait.
+func (p *Publisher) dropWait(ctx context.Context, doc []byte) error {
+	key := sha256.Sum256(doc)
+	if p.Records == nil {
+		p.mu.Lock()
+		delete(p.waits, key)
+		p.mu.Unlock()
+		return nil
+	}
+	return p.Records.Apply(ctx, []peer.Change{{Kind: KindStampWait, ID: hex.EncodeToString(key[:])}})
 }
 
 func containsSig(list [][]byte, sig []byte) bool {
@@ -402,6 +487,11 @@ func (p *Publisher) publish(ctx context.Context, id, name string, doc, sig, rows
 	if err != nil {
 		return ballot.Receipt{}, err
 	}
+	return p.upload(ctx, id, name, doc, sig, rows, bundle)
+}
+
+// upload posts doc with its signature, bundle and rows to the site.
+func (p *Publisher) upload(ctx context.Context, id, name string, doc, sig, rows []byte, bundle json.RawMessage) (ballot.Receipt, error) {
 	body, err := json.Marshal(struct {
 		Doc    []byte          `json:"doc"`
 		Sig    []byte          `json:"sig"`

@@ -287,6 +287,73 @@ func TestPublishResultsStamp(t *testing.T) {
 		}
 	})
 
+	// With AuthorityTime, a fresh probe (no log entry) decides when to
+	// anchor again after an early stamp, so a clock corrected meanwhile
+	// can't starve the results; the wait goes once they are published.
+	t.Run("a fresh probe after an early stamp", func(t *testing.T) {
+		a := &stampAnchor{times: []int64{closes - 3600, closes}}
+		e := newEnv(t, a)
+		authority, probes := closes-10, 0
+		e.p.AuthorityTime = func(context.Context) (int64, error) { probes++; return authority, nil }
+		if _, err := publish(e); !errors.Is(err, ballot.ErrStampedEarly) || a.n != 1 || probes != 0 {
+			t.Fatalf("%d anchors, %d probes, %v", a.n, probes, err)
+		}
+		if _, err := publish(e); !errors.Is(err, ballot.ErrStampedEarly) || a.n != 1 || probes != 1 {
+			t.Fatalf("the probe says early: %d anchors, %d probes, %v", a.n, probes, err)
+		}
+		authority = closes // the estimate (an hour off) would still wait
+		if _, err := publish(e); err != nil || a.n != 2 || probes != 2 || len(*e.up) != 1 {
+			t.Fatalf("the probe says on time: %d anchors, %d probes, %d uploads, %v", a.n, probes, len(*e.up), err)
+		}
+		if w, _ := e.p.loadWait(ctx, res); w != nil {
+			t.Fatalf("the wait was kept after publishing: %+v", w)
+		}
+	})
+
+	// Without a probe, the estimate's wait is void if the clock went back,
+	// and never lasts over ballot.ProbeMaxWait.
+	t.Run("the estimate's limits", func(t *testing.T) {
+		a := &stampAnchor{times: []int64{closes - 3600, closes - 3600, closes}}
+		e := newEnv(t, a)
+		if _, err := publish(e); !errors.Is(err, ballot.ErrStampedEarly) || a.n != 1 {
+			t.Fatal(err)
+		}
+		e.clock = e.clock.Add(-time.Second) // went back
+		if _, err := publish(e); !errors.Is(err, ballot.ErrStampedEarly) || a.n != 2 {
+			t.Fatalf("after the clock went back: %d anchors, %v", a.n, err)
+		}
+		e.clock = e.clock.Add(ballot.ProbeMaxWait - time.Second)
+		if _, err := publish(e); !errors.Is(err, ballot.ErrStampedEarly) || a.n != 2 {
+			t.Fatalf("within the cap: %d anchors, %v", a.n, err)
+		}
+		e.clock = e.clock.Add(time.Second)
+		if _, err := publish(e); err != nil || a.n != 3 {
+			t.Fatalf("at the cap: %d anchors, %v", a.n, err)
+		}
+	})
+
+	// The identical upload again (a stale site index) sends the bundle
+	// uploaded first; one that is early or doesn't verify is kept, alarmed,
+	// and not uploaded (the site holds it).
+	t.Run("results again", func(t *testing.T) {
+		e := newEnv(t, &stampAnchor{})
+		onTime, _ := (&stampAnchor{times: []int64{closes}}).Anchor(ctx, res)
+		if _, err := e.p.RepublishResults(ctx, id, res, []byte("s"), []byte("rows"), onTime, closes); err != nil || len(*e.up) != 1 || string((*e.up)[0]) != string(onTime) {
+			t.Fatalf("%d uploads, %v", len(*e.up), err)
+		}
+		early, _ := (&stampAnchor{times: []int64{closes - 1}}).Anchor(ctx, res)
+		key := sha256.Sum256(res)
+		if err := e.store.Apply(ctx, []peer.Change{{Kind: KindBundle, ID: hex.EncodeToString(key[:]), Data: early}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.p.RepublishResults(ctx, id, res, []byte("s"), []byte("rows"), early, closes); !errors.Is(err, ballot.ErrStampedEarly) || len(*e.up) != 1 || stored(e.store) == nil {
+			t.Fatalf("an early bundle again: %d uploads, kept %v, %v", len(*e.up), stored(e.store) != nil, err)
+		}
+		if _, err := e.p.RepublishResults(ctx, id, res, []byte("s"), []byte("rows"), onTime, 0); err == nil {
+			t.Fatal("results again without a close")
+		}
+	})
+
 	// An anchor signature dropped once is never taken again, across calls.
 	t.Run("same anchor signature again", func(t *testing.T) {
 		one := []byte{9}

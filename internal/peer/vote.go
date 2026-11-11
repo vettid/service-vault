@@ -162,7 +162,14 @@ func (p *Peer) SendMessage(ctx context.Context, connID, typ string, body json.Ra
 // lease marker) hold it false until one visibility timeout after it last
 // leased messages, and the evidence must come from a collect started
 // after.
-func (p *Peer) Caught(ctx context.Context, t, from, until time.Time) (caught bool, unhandled int64, err error) {
+//
+// t is in relay time for a handled message (its msg_ms), but an empty
+// collect is timed by this process's clock, which may run fast: that
+// evidence counts only from a collect that started at or after
+// emptyAfter, a time on this clock known to follow the real close (the
+// passing timestamp-authority probe plus the margin, BALLOT-PROTOCOL §7,
+// 0.13.12).
+func (p *Peer) Caught(ctx context.Context, t, emptyAfter, from, until time.Time) (caught bool, unhandled int64, err error) {
 	marks, err := p.cfg.Store.Load(ctx, kindLease)
 	if err != nil {
 		return false, 0, err
@@ -232,7 +239,8 @@ func (p *Peer) Caught(ctx context.Context, t, from, until time.Time) (caught boo
 	if held {
 		return false, unhandled, nil
 	}
-	caught = p.lastMsgMS >= tms && !p.lastMsgAt.Before(since) || !p.emptyAt.Before(t) && !p.emptyAt.Before(since)
+	caught = p.lastMsgMS >= tms && !p.lastMsgAt.Before(since) ||
+		!p.emptyAt.Before(t) && !p.emptyAt.Before(emptyAfter) && !p.emptyAt.Before(since)
 	return caught, unhandled, nil
 }
 

@@ -43,6 +43,10 @@ func (f *fakeProposals) Close(_ context.Context, id string) (*ballot.ResultsSumm
 		return nil, ballot.ErrNotCaught
 	case "early":
 		return nil, ballot.ErrStampedEarly
+	case "tsa-early":
+		return nil, ballot.ErrAuthorityEarly
+	case "tsa-down":
+		return nil, ballot.ErrAuthorityTime
 	case "nope":
 		return nil, ballot.ErrUnknownProposal
 	}
@@ -155,11 +159,11 @@ func TestProposalRoutes(t *testing.T) {
 	if rec, _ := do(t, h, "GET", "/v1/proposals/01JBQZ0000000000000000000B", apiKey, ""); rec.Code != 404 {
 		t.Fatalf("%d", rec.Code)
 	}
-	for id, want := range map[string]int{"done": 200, "open": 409, "busy": 503, "early": 503, "nope": 404} {
+	for id, want := range map[string]int{"done": 200, "open": 409, "busy": 503, "early": 503, "tsa-early": 503, "tsa-down": 503, "nope": 404} {
 		if rec, m := do(t, h, "POST", "/v1/proposals/"+id+"/close", apiKey, ""); rec.Code != want {
 			t.Errorf("close %s: %d %v", id, rec.Code, m)
-		} else if id == "early" && m["error"] != "stamped_early" {
-			t.Errorf("close early: %v", m)
+		} else if code := map[string]string{"early": "stamped_early", "busy": "collecting", "tsa-early": "collecting", "tsa-down": "timestamp_unavailable"}[id]; code != "" && m["error"] != code {
+			t.Errorf("close %s: %v, want %s", id, m, code)
 		}
 	}
 	fp.err = nil

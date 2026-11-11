@@ -32,8 +32,11 @@ const CollectMargin = time.Minute
 // been handled (peer.Peer.Caught).
 type Catcher interface {
 	// Caught also returns how many messages with a relay time in
-	// [from, until) it stopped waiting for (counts.unhandled, §7).
-	Caught(ctx context.Context, t, from, until time.Time) (caught bool, unhandled int64, err error)
+	// [from, until) it stopped waiting for (counts.unhandled, §7). An
+	// empty collect counts as evidence only from one started at or after
+	// emptyAfter (this service's clock, after the authority-confirmed
+	// close, §7 0.13.12).
+	Caught(ctx context.Context, t, emptyAfter, from, until time.Time) (caught bool, unhandled int64, err error)
 }
 
 // ResultsPublisher anchors and publishes the results (§3.3), and returns
@@ -43,6 +46,10 @@ type Catcher interface {
 // ErrStampedEarly when it has none.
 type ResultsPublisher interface {
 	PublishResults(ctx context.Context, proposalID string, results, sig, rows []byte, notBefore int64) (Receipt, error)
+	// RepublishResults uploads again results the site holds (its index
+	// stale) with the bundle uploaded first, checked again; an early or
+	// unverifiable one is kept and not uploaded.
+	RepublishResults(ctx context.Context, proposalID string, results, sig, rows []byte, bundle json.RawMessage, notBefore int64) (Receipt, error)
 }
 
 // Errors from Close.
@@ -60,51 +67,75 @@ var (
 	ErrAuthorityTime = errors.New("ballot: the timestamp authority's time is unavailable: not counted")
 )
 
-// probeWait is an authority time seen before a close, and this service's
-// clock then; or (failed) the time of a probe that failed.
+// probeWait is the last probe of a proposal's close: a passing one (ok,
+// for closes), an authority time before the close (tsa), or a failure;
+// seen is this service's clock when it came back.
 type probeWait struct {
-	tsa, seen int64
-	failed    bool
+	closes, tsa, seen int64
+	ok, failed        bool
 }
 
 // ProbeRetry is the least time between two probes when the last failed;
 // the caller backs off further (BALLOT-PROTOCOL §7, 0.13.12).
 const ProbeRetry = 10 * time.Second
 
-// authorityPast reports, as nil, that the timestamp authority's time is at
-// or after closesAt (§7, 0.13.12): the count may start. Before it, the
-// vote is still collecting (ErrAuthorityEarly), and the next probe waits
-// until the authority's time, judged from that one and this service's
-// clock since, can have reached closesAt. A probe that fails is
-// ErrAuthorityTime.
-func (m *Manager) authorityPast(ctx context.Context, id string, closesAt int64) error {
-	if m.AuthorityTime == nil {
-		return ErrAuthorityTime
-	}
+// ProbeMaxWait bounds the rationing: however the estimate reads, a probe
+// is made again after it, so a clock corrected meanwhile never starves
+// the close (§7, 0.13.12).
+const ProbeMaxWait = 5 * time.Minute
+
+// authorityPast returns, with nil, a time on this service's clock at which
+// the timestamp authority's time was at or after closesAt (§7, 0.13.12):
+// the count may start, and an empty collect started after it (plus the
+// margin) is evidence. Before it, the vote is still collecting
+// (ErrAuthorityEarly); a probe that fails, or none, is ErrAuthorityTime.
+// Probes are rationed: a passing one holds for that closesAt (authority
+// time only moves forward); after one before the close the next waits
+// until the authority's time, judged from it and this clock since, can
+// have reached closesAt; after a failure, ProbeRetry. A wait is void if
+// this clock went back, and none lasts over ProbeMaxWait. It runs under
+// the proposal's lock, so a slow authority holds that lock up to the
+// client's timeout (a minute or so).
+func (m *Manager) authorityPast(ctx context.Context, id string, closesAt int64) (time.Time, error) {
 	now := m.Now().Unix()
 	if v, ok := m.probes.Load(id); ok {
-		switch w := v.(probeWait); {
-		case w.failed && now-w.seen < int64(ProbeRetry/time.Second):
-			return ErrAuthorityTime
-		case !w.failed && w.tsa+(now-w.seen) < closesAt:
-			return ErrAuthorityEarly
+		w, since := v.(probeWait), now-v.(probeWait).seen
+		switch {
+		case since < 0:
+			// This clock went back: what was judged by it is void.
+		case w.ok && w.closes == closesAt:
+			return time.Unix(w.seen, 0), nil
+		case w.failed && since < int64(ProbeRetry/time.Second):
+			m.log().Info("the timestamp authority's time: retried too soon after a failure", "proposal_id", id)
+			return time.Time{}, ErrAuthorityTime
+		case !w.ok && !w.failed && w.tsa+since < closesAt && since < int64(ProbeMaxWait/time.Second):
+			m.log().Info("the timestamp authority can't be past the close yet: not probed", "proposal_id", id, "closes_at", closesAt)
+			return time.Time{}, ErrAuthorityEarly
 		}
+	}
+	if m.AuthorityTime == nil {
+		m.log().Error("no timestamp authority to ask: the vote is not counted", "alarm", "tsa_unavailable", "proposal_id", id)
+		return time.Time{}, ErrAuthorityTime
 	}
 	t, err := m.AuthorityTime(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return time.Time{}, ctx.Err() // the request ended: not the authority's failure
+		}
 		// The floor runs from when the failure came back.
 		m.probes.Store(id, probeWait{seen: m.Now().Unix(), failed: true})
 		m.log().Error("the timestamp authority's time is unavailable: the vote is not counted", "alarm", "tsa_unavailable", "proposal_id", id, "err", err.Error())
-		return fmt.Errorf("%w: %v", ErrAuthorityTime, err)
+		return time.Time{}, fmt.Errorf("%w: %v", ErrAuthorityTime, err)
 	}
+	seen := m.Now()
 	if t < closesAt {
-		m.probes.Store(id, probeWait{tsa: t, seen: now})
+		m.probes.Store(id, probeWait{closes: closesAt, tsa: t, seen: seen.Unix()})
 		m.log().Error("the vote's close passed by this service's clock but not by the timestamp authority's: still collecting", "alarm", "count_clock_ahead",
-			"proposal_id", id, "authority_time", t, "closes_at", closesAt, "skew_seconds", now-t)
-		return ErrAuthorityEarly
+			"proposal_id", id, "authority_time", t, "closes_at", closesAt, "skew_seconds", seen.Unix()-t)
+		return time.Time{}, ErrAuthorityEarly
 	}
-	m.probes.Delete(id)
-	return nil
+	m.probes.Store(id, probeWait{closes: closesAt, seen: seen.Unix(), ok: true})
+	return seen, nil
 }
 
 // PublishedResults is a vote's results as published.
@@ -189,14 +220,19 @@ func (m *Manager) Close(ctx context.Context, id string) (*ResultsSummary, error)
 			// The service's clock alone never starts the count: the
 			// timestamp authority's time must be past the close too (§7,
 			// 0.13.12), or a fast clock would refuse in-window casts.
+			// An empty collect is timed by this clock too, so it counts as
+			// evidence only after the passing probe plus the margin.
+			emptyAfter := end
 			if !o.Published {
-				if err := m.authorityPast(ctx, id, o.ClosesAt); err != nil {
+				at, err := m.authorityPast(ctx, id, o.ClosesAt)
+				if err != nil {
 					return nil, err
 				}
+				emptyAfter = at.Add(CollectMargin)
 			}
 			// unhandled counts the window's messages: one in the last
 			// minute would be a late cast.
-			caught, unhandled, err := m.Catcher.Caught(ctx, end, time.Unix(p.OpensAt, 0), time.Unix(o.ClosesAt, 0))
+			caught, unhandled, err := m.Catcher.Caught(ctx, end, emptyAfter, time.Unix(p.OpensAt, 0), time.Unix(o.ClosesAt, 0))
 			if err != nil {
 				return nil, err
 			}
@@ -227,7 +263,7 @@ func (m *Manager) Close(ctx context.Context, id string) (*ResultsSummary, error)
 		// The site has the results; its index missed them. The identical
 		// upload again reruns the index update. Its bundle was checked
 		// before the first upload, and is checked again.
-		switch rc, err := rp.PublishResults(ctx, id, pr.Results, pr.Sig, pr.Rows, o.ClosesAt); {
+		switch rc, err := rp.RepublishResults(ctx, id, pr.Results, pr.Sig, pr.Rows, pr.Bundle, o.ClosesAt); {
 		case err != nil:
 			m.log().Warn("site index still not updated for the results", "proposal_id", id, "err", err.Error())
 		case !rc.IndexStale:

@@ -121,8 +121,8 @@ func VerifyTimestamp(instance string, resp, data []byte) (int64, error) {
 // random value and returns its verified time (BALLOT-PROTOCOL §7, 0.13.12:
 // the count waits for it). A stamp only: no transparency-log entry.
 func AuthorityTime(ctx context.Context, a *Anchorer, instance string) (int64, error) {
-	nonce := make([]byte, 32)
-	if _, err := rand.Read(nonce); err != nil {
+	nonce, err := newNonce()
+	if err != nil {
 		return 0, err
 	}
 	resp, err := a.Timestamp(ctx, nonce)
@@ -130,6 +130,13 @@ func AuthorityTime(ctx context.Context, a *Anchorer, instance string) (int64, er
 		return 0, err
 	}
 	return VerifyTimestamp(instance, resp, nonce)
+}
+
+// newNonce is the probe's 32 fresh random bytes (a variable for tests).
+var newNonce = func() ([]byte, error) {
+	b := make([]byte, 32)
+	_, err := rand.Read(b)
+	return b, err
 }
 
 func verifyResp(pins []tsaPin, resp, data []byte) (int64, error) {

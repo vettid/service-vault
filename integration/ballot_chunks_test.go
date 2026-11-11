@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -26,6 +27,10 @@ func (closingSite) PublishResults(context.Context, string, []byte, []byte, []byt
 	return ballot.Receipt{Bundle: ballottest.Bundle(now, now)}, nil
 }
 
+func (closingSite) RepublishResults(_ context.Context, _ string, _, _, _ []byte, bundle json.RawMessage, _ int64) (ballot.Receipt, error) {
+	return ballot.Receipt{Bundle: bundle}, nil
+}
+
 func (closingSite) Extension(context.Context, string, int64) (*ballot.SiteExtension, error) {
 	return nil, nil
 }
@@ -37,7 +42,7 @@ func (approveAll) Consume(context.Context, string, string, []byte, ballot.Use) e
 
 type caught struct{}
 
-func (caught) Caught(context.Context, time.Time, time.Time, time.Time) (bool, int64, error) {
+func (caught) Caught(context.Context, time.Time, time.Time, time.Time, time.Time) (bool, int64, error) {
 	return true, 0, nil
 }
 
