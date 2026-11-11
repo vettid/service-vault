@@ -248,22 +248,36 @@ func TestPublishResultsStamp(t *testing.T) {
 		if _, err := old.bundle(ctx, res); err != nil {
 			t.Fatal(err)
 		}
-		a := &stampAnchor{times: []int64{closes}, sameSig: true}
+		a := &stampAnchor{times: []int64{closes, closes}, sameSig: true}
 		p := &Publisher{URL: srv.URL, Anchor: a, Client: srv.Client(), Records: store, Timestamp: ballottest.Time}
-		if _, err := p.PublishResults(ctx, id, res, []byte("s"), []byte("rows"), closes); err == nil || len(*up) != 0 {
-			t.Fatalf("published under the same anchor signature: %v", err)
+		if _, err := p.PublishResults(ctx, id, res, []byte("s"), []byte("rows"), closes); err == nil || len(*up) != 0 || stored(store) != nil {
+			t.Fatalf("published or kept under the same anchor signature: %v", err)
+		}
+		// Not kept, so the next call doesn't take it as a kept bundle: it
+		// anchors anew (and publishes that one).
+		if _, err := p.PublishResults(ctx, id, res, []byte("s"), []byte("rows"), closes); err != nil || a.n != 2 || len(*up) != 1 {
+			t.Fatalf("next call: %d anchors, %d uploads, %v", a.n, len(*up), err)
 		}
 	})
 
-	// A kept bundle that doesn't verify is never uploaded, and kept.
+	// A bundle that doesn't verify is never uploaded. One kept from
+	// before stays kept (the site may hold it); one this call anchored is
+	// dropped.
 	t.Run("unverifiable bundle", func(t *testing.T) {
 		srv, up := stampSite(t)
 		store := peer.NewMemStore()
-		a := &stampAnchor{times: []int64{closes}}
+		a := &stampAnchor{times: []int64{closes, closes}}
 		bad := func(json.RawMessage, []byte) (int64, error) { return 0, errors.New("untrusted") }
 		p := &Publisher{URL: srv.URL, Anchor: a, Client: srv.Client(), Records: store, Timestamp: bad}
-		if _, err := p.PublishResults(ctx, id, res, []byte("s"), []byte("rows"), closes); err == nil || errors.Is(err, ballot.ErrStampedEarly) || len(*up) != 0 || stored(store) == nil {
-			t.Fatalf("%d uploads, %v", len(*up), err)
+		if _, err := p.PublishResults(ctx, id, res, []byte("s"), []byte("rows"), closes); err == nil || errors.Is(err, ballot.ErrStampedEarly) || len(*up) != 0 || stored(store) != nil {
+			t.Fatalf("anchored now: %d uploads, %v", len(*up), err)
+		}
+		if _, err := (&Publisher{Anchor: a, Records: store}).bundle(ctx, res); err != nil {
+			t.Fatal(err)
+		}
+		p = &Publisher{URL: srv.URL, Anchor: a, Client: srv.Client(), Records: store, Timestamp: bad}
+		if _, err := p.PublishResults(ctx, id, res, []byte("s"), []byte("rows"), closes); err == nil || len(*up) != 0 || stored(store) == nil || a.n != 2 {
+			t.Fatalf("kept: %d anchors, %d uploads, %v", a.n, len(*up), err)
 		}
 	})
 

@@ -196,13 +196,24 @@ func (p *Publisher) stampedBundle(ctx context.Context, id string, doc []byte, no
 			return nil, err
 		}
 		if !kept && len(dropped) > 0 && bytes.Equal(anchorSig(bundle), dropped) {
+			// Not kept either: a later call must not take it as a kept one.
+			if err := p.forget(ctx, doc); err != nil {
+				return nil, err
+			}
 			return nil, errors.New("publish: anchoring the results again gave the same anchor signature")
 		}
 		t, err := p.Timestamp(bundle, doc)
 		if err != nil {
-			// Never uploaded unchecked; kept, as it may be what the site
-			// holds.
+			// Never uploaded unchecked. One kept from before stays kept, as
+			// it may be what the site holds; one anchored by this call was
+			// never uploaded, so it is dropped and the next call anchors
+			// again.
 			p.log().Error("the results' bundle doesn't verify", "alarm", "results_bundle_unverified", "proposal_id", id, "anchored", anchored, "err", err.Error())
+			if anchored {
+				if ferr := p.forget(ctx, doc); ferr != nil {
+					return nil, ferr
+				}
+			}
 			return nil, fmt.Errorf("publish: the results' timestamp: %w", err)
 		}
 		if t >= notBefore {
