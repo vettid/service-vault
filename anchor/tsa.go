@@ -2,6 +2,8 @@ package anchor
 
 import (
 	"bytes"
+	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
 	"embed"
@@ -103,6 +105,58 @@ func TimestampTime(instance string, bundle json.RawMessage, doc []byte) (int64, 
 	return timestampTime(pins, bundle, doc)
 }
 
+// VerifyTimestamp returns the RFC 3161 genTime (Unix seconds) of resp, a
+// TimeStampResp over data, checked as TimestampTime checks a bundle's: an
+// authority of the instance's pinned trusted root, chained to it, and
+// inside its validFor. It refuses on any failure.
+func VerifyTimestamp(instance string, resp, data []byte) (int64, error) {
+	pins, err := pinnedTSAs(instance)
+	if err != nil {
+		return 0, err
+	}
+	return verifyResp(pins, resp, data)
+}
+
+// AuthorityTime asks a's timestamp authority for a stamp over a fresh
+// random value and returns its verified time (BALLOT-PROTOCOL §7, 0.13.12:
+// the count waits for it). A stamp only: no transparency-log entry.
+func AuthorityTime(ctx context.Context, a *Anchorer, instance string) (int64, error) {
+	nonce, err := newNonce()
+	if err != nil {
+		return 0, err
+	}
+	resp, err := a.Timestamp(ctx, nonce)
+	if err != nil {
+		return 0, err
+	}
+	return VerifyTimestamp(instance, resp, nonce)
+}
+
+// newNonce is the probe's 32 fresh random bytes (a variable for tests).
+var newNonce = func() ([]byte, error) {
+	b := make([]byte, 32)
+	_, err := rand.Read(b)
+	return b, err
+}
+
+func verifyResp(pins []tsaPin, resp, data []byte) (int64, error) {
+	var errs []error
+	for _, p := range pins {
+		t, err := tsaverify.VerifyTimestampResponse(resp, bytes.NewReader(data),
+			tsaverify.VerifyOpts{Roots: []*x509.Certificate{p.root}, Intermediates: p.intermediates, TSACertificate: p.leaf})
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if !p.covers(t.Time) {
+			errs = append(errs, errors.New("the timestamp is outside the authority's validity period"))
+			continue
+		}
+		return t.Time.Unix(), nil
+	}
+	return 0, fmt.Errorf("anchor: the timestamp doesn't verify: %w", errors.Join(errs...))
+}
+
 func timestampTime(pins []tsaPin, bundle json.RawMessage, doc []byte) (int64, error) {
 	var b struct {
 		VerificationMaterial struct {
@@ -127,19 +181,5 @@ func timestampTime(pins []tsaPin, bundle json.RawMessage, doc []byte) (int64, er
 	if len(ts) != 1 || len(b.MessageSignature.Signature) == 0 || !bytes.Equal(b.MessageSignature.MessageDigest.Digest, d[:]) {
 		return 0, errors.New("anchor: the bundle is not one timestamped signature over the document")
 	}
-	var errs []error
-	for _, p := range pins {
-		t, err := tsaverify.VerifyTimestampResponse(ts[0].SignedTimestamp, bytes.NewReader(b.MessageSignature.Signature),
-			tsaverify.VerifyOpts{Roots: []*x509.Certificate{p.root}, Intermediates: p.intermediates, TSACertificate: p.leaf})
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		if !p.covers(t.Time) {
-			errs = append(errs, errors.New("the timestamp is outside the authority's validity period"))
-			continue
-		}
-		return t.Time.Unix(), nil
-	}
-	return 0, fmt.Errorf("anchor: the timestamp doesn't verify: %w", errors.Join(errs...))
+	return verifyResp(pins, ts[0].SignedTimestamp, b.MessageSignature.Signature)
 }

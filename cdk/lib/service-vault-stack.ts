@@ -93,8 +93,18 @@ export const ALARMS = {
   ballots_off: 'Ballots are off: the ballot copy\'s key is missing or not the one its ballots are under; restore the keystore item ballot-copy-key from a backup of the table (README "Rotating the record key")',
   /** A vote request or a close for a proposal held but not published (internal/ballot/box.go, close.go): members get no answer and it can't close until it is published. */
   vote_unpublished: 'Members sent vote requests for a proposal the service holds but has not published (after a restore or a lost publication), or its close was refused: they get no answer until it is published (POST /v1/proposals/{id}/publish): publish at once, and extend the vote too if its close is less than about 70 minutes away (README "vote_unpublished")',
+  /** The vote's close passed by the service's clock but not the timestamp authority's (internal/ballot/close.go): not counted yet. */
+  count_clock_ahead: 'A vote\'s close has passed by the service\'s clock but not by the timestamp authority\'s: the service\'s clock is ahead. The vote is not counted (still collecting) until the authority\'s time passes the close; check both clocks (README "count_clock_ahead")',
+  /** The timestamp authority's time couldn't be had or verified before a count (internal/ballot/close.go): the vote is not counted. */
+  tsa_unavailable: 'Before counting a vote, the service could not get or verify the timestamp authority\'s time: the vote is not counted until it can (README "count_clock_ahead"); look at the ERROR line for why',
+  /** The results' bundle was timestamped before the close (internal/publish/publish.go): not published; the clock is ahead of the timestamp authority's. */
+  results_stamped_early: 'A vote\'s results were timestamped before their close: the service\'s clock is more than a minute ahead of the timestamp authority\'s. They are not published; check both clocks (the task\'s and the authority\'s), then close again (POST /v1/proposals/{id}/close) (README "results_stamped_early")',
+  /** The results' bundle failed its timestamp check (internal/publish/publish.go): not published. */
+  results_bundle_unverified: 'A vote\'s results bundle failed its timestamp check (TSA signature, trusted root or validity): the results are not published; look at the ERROR line, then close again (README "results_bundle_unverified")',
   /** A stored ballot failed the count's re-check and was left out (internal/ballot/close.go): the results may differ from what members were told. */
   ballot_not_counted: 'A stored ballot was not counted: it failed the count\'s re-check (tag, credential signature or time); look at the ERROR line for the proposal and tag',
+  /** An admin's governance key can't be pinned yet: the peer doesn't know the admin's connection (internal/approval/approval.go, a WARN, at most hourly per admin). Until it can, that admin's governance approvals don't count. */
+  gov_migration_waiting: 'An admin\'s governance key is not pinned yet because the service doesn\'t know that admin\'s connection: their governance approvals (admin set, re-pin, proposals, extensions, contract templates) don\'t count until it does (README "gov_migration_waiting")',
   /** A removed connection left fewer admins than the threshold (internal/approval/approval.go): no approval can pass. */
   admins_short: 'An admin connection was removed and fewer admins than the threshold remain: no approval can pass until the operator recovers the set (README "Recovering admins")',
 } as const;
