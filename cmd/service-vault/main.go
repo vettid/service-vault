@@ -49,7 +49,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/suite"
 
-	"github.com/vettid/service-vault/internal/anchor"
+	"github.com/vettid/service-vault/anchor"
 	"github.com/vettid/service-vault/internal/api"
 	"github.com/vettid/service-vault/internal/approval"
 	"github.com/vettid/service-vault/internal/ballot"
@@ -494,7 +494,8 @@ func serve(args []string) error {
 			mgr.Timestamp = func(bundle json.RawMessage, doc []byte) (int64, error) {
 				return anchor.TimestampTime(cfg.Sigstore, bundle, doc)
 			}
-			mgr.Publisher = &publish.Publisher{URL: cfg.VotesURL, Anchor: anc, Client: anchor.Client(time.Minute), Records: records, Log: log}
+			mgr.AuthorityTime = authorityTime(anc, cfg.Sigstore)
+			mgr.Publisher = votesPublisher(cfg.VotesURL, anc, records, mgr, log)
 		}
 		if rebuild {
 			// The table was restored: ballots it lost are in the copy (§6).
@@ -753,6 +754,9 @@ var errNoSecrets = errors.New("the service vault has no keys yet: run serve firs
 // compute the email's index key) and refuses while the set is not empty.
 // The running daemon picks the armed bootstrap up within seconds.
 func admin(args []string, out io.Writer) error {
+	if len(args) > 0 && args[0] == "reseal-blobs" {
+		return adminReseal(args[1:], out)
+	}
 	if len(args) == 0 || args[0] != "bootstrap" {
 		return errors.New(adminUsage)
 	}
@@ -794,7 +798,65 @@ func admin(args []string, out io.Writer) error {
 	return armBootstrap(ctx, kc, cfg.KMSKeyID, tbl.Blobs(), records, *addr, out)
 }
 
-const adminUsage = "usage: service-vault admin bootstrap -email E | -connection ID [-fingerprint 16HEX]"
+const adminUsage = "usage: service-vault admin bootstrap -email E | -connection ID [-fingerprint 16HEX]\n" +
+	"       service-vault admin reseal-blobs"
+
+// adminReseal moves every sealed blob of the keystore to its encryption
+// context (key protection, GC #7406 §7: the code is step 1, running it
+// step 2). It is owner-run, as a
+// one-off task with the service stopped, in the same environment as
+// serve. It prints the names it moved and those already moved, never
+// what they hold.
+func adminReseal(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("admin reseal-blobs", flag.ContinueOnError)
+	awsEndpoint := fs.String("dev-aws-endpoint", "", "local development only: send KMS and DynamoDB calls to this URL (LocalStack)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return errors.New(adminUsage)
+	}
+	cfg, err := configFromEnv(os.Getenv)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	ac, err := newAWSClients(ctx, *awsEndpoint)
+	if err != nil {
+		return incomplete(out, err)
+	}
+	tbl := &store.Table{Client: ac.ddb, Name: cfg.Table}
+	// Only with the service stopped, as table restore asks.
+	at, ok, err := tbl.LastHeartbeat(ctx)
+	if err != nil {
+		return incomplete(out, err)
+	}
+	if ok && time.Since(at) < store.HeartbeatStale {
+		return incomplete(out, fmt.Errorf("the service is running (heartbeat %s ago): stop it first", time.Since(at).Round(time.Second)))
+	}
+	return resealBlobs(ctx, &keystore.AWSKMS{Client: ac.kms}, cfg.KMSKeyID, tbl.Blobs(), out)
+}
+
+// incomplete says the re-seal isn't done, and returns err.
+func incomplete(out io.Writer, err error) error {
+	fmt.Fprintln(out, "INCOMPLETE: run it again once the error is fixed")
+	return err
+}
+
+// resealBlobs runs keystore.Reseal and reports it.
+func resealBlobs(ctx context.Context, kc keystore.KMS, keyID string, blobs keystore.Blobs, out io.Writer) error {
+	rep, err := keystore.Reseal(ctx, kc, keyID, blobs)
+	if rep != nil {
+		fmt.Fprintf(out, "resealed %d: %s\nalready with their context %d: %s\nleft for deletion %d: %s\n",
+			len(rep.Resealed), strings.Join(rep.Resealed, " "), len(rep.Already), strings.Join(rep.Already, " "),
+			len(rep.Left), strings.Join(rep.Left, " "))
+	}
+	if err != nil {
+		return incomplete(out, err)
+	}
+	return nil
+}
 
 // confirmBootstrap shows the connection waiting to become the first admin,
 // or, given its identity key's fingerprint, confirms it. The operator
@@ -901,9 +963,23 @@ func healthcheck(listen string) error {
 	return nil
 }
 
+// authorityTime is the ballot manager's and the publisher's AuthorityTime:
+// the timestamp authority's verified time (BALLOT-PROTOCOL §7, 0.13.12),
+// never this clock's.
+func authorityTime(anc *anchor.Anchorer, instance string) func(context.Context) (int64, error) {
+	return func(ctx context.Context) (int64, error) { return anchor.AuthorityTime(ctx, anc, instance) }
+}
+
+// votesPublisher is the ballot manager's publisher: its results checked by
+// the manager's Timestamp, its re-anchors waiting on its AuthorityTime.
+func votesPublisher(url string, anc *anchor.Anchorer, records peer.Store, mgr *ballot.Manager, log *slog.Logger) *publish.Publisher {
+	return &publish.Publisher{URL: url, Anchor: anc, Client: anchor.Client(time.Minute), Records: records,
+		Timestamp: mgr.Timestamp, AuthorityTime: mgr.AuthorityTime, Log: log}
+}
+
 // recordKinds is every kind the service vault stores.
 func recordKinds() []string {
-	return slices.Concat(peer.Kinds(), service.Kinds(), approval.Kinds(), ballot.Kinds(), []string{publish.KindBundle})
+	return slices.Concat(peer.Kinds(), service.Kinds(), approval.Kinds(), ballot.Kinds(), publish.Kinds())
 }
 
 // errKeysLost: a key is missing from a table that holds records. A new

@@ -133,6 +133,9 @@ func (p *Peer) SendMessage(ctx context.Context, connID, typ string, body json.Ra
 	if c == nil || c.State != StateActive {
 		return "", ErrNotFound
 	}
+	if n, size := p.outboxLoad(); n >= sendOutboxLimit.n || size >= sendOutboxLimit.bytes {
+		return "", ErrOutboxFull
+	}
 	now := p.now()
 	id := p.sendTo(c, typ, body, now)
 	if id == "" {
@@ -145,6 +148,34 @@ func (p *Peer) SendMessage(ctx context.Context, connID, typ string, body json.Ra
 		return "", err
 	}
 	return id, nil
+}
+
+// MaxSendOutbox and MaxSendOutboxBytes bound the outbox SendMessage adds
+// to (chosen; not in the spec). A relay that refuses deposits at once
+// doesn't fail a send: the message stays in the outbox, sealed, in
+// memory and in the store, and a restart loads it back. One vote's sends
+// to 15,000 members during an outage would otherwise hold about 200 MB
+// against the task's 512 MiB (#6946). Past either bound SendMessage
+// answers ErrOutboxFull, and the vote's send gives up after
+// ballot.MaxFailuresInARow of them; members not sent learn of the vote
+// as BALLOT-PROTOCOL §4.2 says. The other messages (responses, sign-in
+// and approval challenges) are bounded per connection only
+// (MaxOutboxPerConn), so a vote's sends can't crowd them out.
+const (
+	MaxSendOutbox      = 8192
+	MaxSendOutboxBytes = 64 << 20
+)
+
+// sendOutboxLimit is the bounds in force (tests lower them).
+var sendOutboxLimit = struct{ n, bytes int }{MaxSendOutbox, MaxSendOutboxBytes}
+
+// outboxLoad is the outbox's entries and their payload bytes.
+func (p *Peer) outboxLoad() (n, size int) {
+	for _, e := range p.outbox {
+		n++
+		size += len(e.Payload)
+	}
+	return n, size
 }
 
 // Caught reports whether every message the relay received before t has
@@ -162,7 +193,14 @@ func (p *Peer) SendMessage(ctx context.Context, connID, typ string, body json.Ra
 // lease marker) hold it false until one visibility timeout after it last
 // leased messages, and the evidence must come from a collect started
 // after.
-func (p *Peer) Caught(ctx context.Context, t, from, until time.Time) (caught bool, unhandled int64, err error) {
+//
+// t is in relay time for a handled message (its msg_ms), but an empty
+// collect is timed by this process's clock, which may run fast: that
+// evidence counts only from a collect that started at or after
+// emptyAfter, a time on this clock known to follow the real close (the
+// passing timestamp-authority probe plus the margin, BALLOT-PROTOCOL §7,
+// 0.13.12).
+func (p *Peer) Caught(ctx context.Context, t, emptyAfter, from, until time.Time) (caught bool, unhandled int64, err error) {
 	marks, err := p.cfg.Store.Load(ctx, kindLease)
 	if err != nil {
 		return false, 0, err
@@ -183,6 +221,9 @@ func (p *Peer) Caught(ctx context.Context, t, from, until time.Time) (caught boo
 		if err := json.Unmarshal(r.Data, &mark); err != nil {
 			return false, 0, fmt.Errorf("peer: lease marker: %w", err)
 		}
+		// Another process's lease marker is compared by wall time: that
+		// relies on one task running at a time (the stack's desiredCount 1,
+		// maxHealthyPercent 100), so two tasks' clocks never meet here.
 		if end := mark.At.Add(p.visibility() + leaseMargin); end.After(since) {
 			since = end
 		}
@@ -232,7 +273,12 @@ func (p *Peer) Caught(ctx context.Context, t, from, until time.Time) (caught boo
 	if held {
 		return false, unhandled, nil
 	}
-	caught = p.lastMsgMS >= tms && !p.lastMsgAt.Before(since) || !p.emptyAt.Before(t) && !p.emptyAt.Before(since)
+	// These must stay time.Time Before comparisons: emptyAt (Step's start)
+	// and emptyAfter (the probe's time) carry this process's monotonic
+	// reading, which a wall-clock step doesn't move (BALLOT-PROTOCOL §7,
+	// 0.13.12). Never compare them by Unix time or after Round(0).
+	caught = p.lastMsgMS >= tms && !p.lastMsgAt.Before(since) ||
+		!p.emptyAt.Before(t) && !p.emptyAt.Before(emptyAfter) && !p.emptyAt.Before(since)
 	return caught, unhandled, nil
 }
 

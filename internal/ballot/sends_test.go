@@ -39,7 +39,8 @@ func TestSendsInBackground(t *testing.T) {
 		t.Fatal("Publish waited for the sends")
 	}
 	cancel() // the request ends
-	if n, err := m.Publish(context.Background(), c.ProposalID); err != nil || n != 3 {
+	// Already being sent: nothing more is, and the answer says so.
+	if n, err := m.Publish(context.Background(), c.ProposalID); err != nil || n != 0 {
 		t.Fatalf("Publish again: %d, %v", n, err)
 	}
 	close(s.block)
@@ -224,5 +225,96 @@ func TestSendsMemberErrorsDontGiveUp(t *testing.T) {
 	}})
 	if want := n - (2*MaxFailuresInARow + 10); len(s.sent) != want {
 		t.Fatalf("sent %d, want %d (the members after the gone and busy ones)", len(s.sent), want)
+	}
+}
+
+// A relay that refuses deposits at once, at 15,000 members: the peer's
+// outbox fills to its bound and then answers peer.ErrOutboxFull, which
+// counts toward giving up, so the job stops MaxFailuresInARow sends past
+// the bound instead of filling memory.
+func TestSendsStopAtAFullOutbox(t *testing.T) {
+	m, _, _ := newManager(t)
+	const bound = 100
+	out := &boundedOutbox{bound: bound}
+	m.Sender = out
+	conns := make([]string, MaxEligible)
+	for i := range conns {
+		conns[i] = fmt.Sprintf("m%05d", i)
+	}
+	m.runJob(&sendJob{key: "k", typ: TypeProposal, conns: conns, body: func(string) (json.RawMessage, error) {
+		return json.RawMessage(`{}`), nil
+	}})
+	if out.queued != bound || out.calls != bound+MaxFailuresInARow {
+		t.Fatalf("queued %d, %d calls; want %d and %d", out.queued, out.calls, bound, bound+MaxFailuresInARow)
+	}
+}
+
+// boundedOutbox is a peer whose relay refuses every deposit at once: each
+// send is queued, as the peer does, until bound are, then refused.
+type boundedOutbox struct {
+	bound, queued, calls int
+}
+
+func (b *boundedOutbox) SendMessage(_ context.Context, _, _ string, _ json.RawMessage) (string, error) {
+	b.calls++
+	if b.queued >= b.bound {
+		return "", peer.ErrOutboxFull
+	}
+	b.queued++
+	return "id", nil
+}
+
+// Each member's send gets SendTimeout, and no more: 30 s, the time a
+// relay deposit may take before the drain gives up on it.
+func TestSendTimeoutPerSend(t *testing.T) {
+	if SendTimeout != 30*time.Second {
+		t.Fatalf("SendTimeout %v", SendTimeout)
+	}
+	m, s, _ := newManager(t)
+	m.runJob(&sendJob{key: "k", typ: TypeProposal, conns: []string{"a"}, body: func(string) (json.RawMessage, error) {
+		return json.RawMessage(`{}`), nil
+	}})
+	if s.left <= SendTimeout-5*time.Second || s.left > SendTimeout {
+		t.Fatalf("a send had %v, want SendTimeout (%v)", s.left, SendTimeout)
+	}
+}
+
+// A Publish once the results are published sends nothing (members are
+// sent vote.closed); one while the service is stopping answers that
+// nothing is being sent.
+func TestPublishSendsNothingAfterResultsOrStop(t *testing.T) {
+	ctx := context.Background()
+	m, s, _ := newManager(t)
+	c, err := m.Create(ctx, "apv", input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Wait()
+	before := len(s.sent)
+	if err := m.Store.Records.Apply(ctx, []peer.Change{{Kind: KindResults, ID: c.ProposalID, Data: []byte(`{}`)}}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := m.Publish(ctx, c.ProposalID); err != nil || n != 0 {
+		t.Fatalf("after the results: %d, %v", n, err)
+	}
+	m.Wait()
+	if len(s.sent) != before {
+		t.Fatalf("sent %d after the results", len(s.sent)-before)
+	}
+
+	m2, s2, _ := newManager(t)
+	c2, err := m2.Create(ctx, "apv", input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2.Wait()
+	before = len(s2.sent)
+	m2.StopSends()
+	if n, err := m2.Publish(ctx, c2.ProposalID); err != nil || n != 0 {
+		t.Fatalf("while stopping: %d, %v", n, err)
+	}
+	m2.Wait()
+	if len(s2.sent) != before {
+		t.Fatal("sent while stopping")
 	}
 }

@@ -16,6 +16,7 @@ import * as sns from 'aws-cdk-lib/aws-sns';
 import * as subs from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
+import { KEY_ADMIN_ACTIONS } from './kms-actions';
 
 /** The port the daemon's private API listens on (SV_LISTEN). */
 export const API_PORT = 8080;
@@ -56,18 +57,7 @@ export const KEY_CHANGE_EVENTS = [
   'CreateAlias', 'DeleteAlias', 'UpdateAlias', 'TagResource', 'UntagResource', 'ImportKeyMaterial', 'ReplicateKey',
 ];
 
-/**
- * What the account may do with the keystore key: administer it, never
- * encrypt or decrypt with it. PutKeyPolicy stays, so the policy can be
- * corrected without AWS support.
- */
-export const KEY_ADMIN_ACTIONS = [
-  // CreateAlias only: kms:Create* would include CreateGrant, with which
-  // any principal the account allows it could grant itself Decrypt.
-  'kms:CreateAlias', 'kms:Describe*', 'kms:Enable*', 'kms:List*', 'kms:Put*', 'kms:Update*',
-  'kms:Revoke*', 'kms:Disable*', 'kms:Get*', 'kms:Delete*', 'kms:TagResource', 'kms:UntagResource',
-  'kms:ScheduleKeyDeletion', 'kms:CancelKeyDeletion', 'kms:RotateKeyOnDemand',
-];
+export { KEY_ADMIN_ACTIONS } from './kms-actions';
 
 /**
  * Where the stack publishes what its API client's stack needs, in SSM
@@ -103,8 +93,18 @@ export const ALARMS = {
   ballots_off: 'Ballots are off: the ballot copy\'s key is missing or not the one its ballots are under; restore the keystore item ballot-copy-key from a backup of the table (README "Rotating the record key")',
   /** A vote request or a close for a proposal held but not published (internal/ballot/box.go, close.go): members get no answer and it can't close until it is published. */
   vote_unpublished: 'Members sent vote requests for a proposal the service holds but has not published (after a restore or a lost publication), or its close was refused: they get no answer until it is published (POST /v1/proposals/{id}/publish): publish at once, and extend the vote too if its close is less than about 70 minutes away (README "vote_unpublished")',
+  /** The vote's close passed by the service's clock but not the timestamp authority's (internal/ballot/close.go): not counted yet. */
+  count_clock_ahead: 'A vote\'s close has passed by the service\'s clock but not by the timestamp authority\'s: the service\'s clock is ahead. The vote is not counted (still collecting) until the authority\'s time passes the close; check both clocks (README "count_clock_ahead")',
+  /** The timestamp authority's time couldn't be had or verified before a count (internal/ballot/close.go): the vote is not counted. */
+  tsa_unavailable: 'Before counting a vote, the service could not get or verify the timestamp authority\'s time: the vote is not counted until it can (README "count_clock_ahead"); look at the ERROR line for why',
+  /** The results' bundle was timestamped before the close (internal/publish/publish.go): not published; the clock is ahead of the timestamp authority's. */
+  results_stamped_early: 'A vote\'s results were timestamped before their close: the service\'s clock is more than a minute ahead of the timestamp authority\'s. They are not published; check both clocks (the task\'s and the authority\'s), then close again (POST /v1/proposals/{id}/close) (README "results_stamped_early")',
+  /** The results' bundle failed its timestamp check (internal/publish/publish.go): not published. */
+  results_bundle_unverified: 'A vote\'s results bundle failed its timestamp check (TSA signature, trusted root or validity): the results are not published; look at the ERROR line, then close again (README "results_bundle_unverified")',
   /** A stored ballot failed the count's re-check and was left out (internal/ballot/close.go): the results may differ from what members were told. */
   ballot_not_counted: 'A stored ballot was not counted: it failed the count\'s re-check (tag, credential signature or time); look at the ERROR line for the proposal and tag',
+  /** An admin's governance key can't be pinned yet: the peer doesn't know the admin's connection (internal/approval/approval.go, a WARN, at most hourly per admin). Until it can, that admin's governance approvals don't count. */
+  gov_migration_waiting: 'An admin\'s governance key is not pinned yet because the service doesn\'t know that admin\'s connection: their governance approvals (admin set, re-pin, proposals, extensions, contract templates) don\'t count until it does (README "gov_migration_waiting")',
   /** A removed connection left fewer admins than the threshold (internal/approval/approval.go): no approval can pass. */
   admins_short: 'An admin connection was removed and fewer admins than the threshold remain: no approval can pass until the operator recovers the set (README "Recovering admins")',
 } as const;
@@ -205,6 +205,13 @@ export interface ServiceVaultStackProps extends cdk.StackProps {
    * key"); later deploys may leave it out.
    */
   readonly recordKeyVersion?: number;
+  /**
+   * The AnchorSigner's function ARN, in the signer's own account
+   * (AnchorSigner-<env>; key protection, phase 1, GC #7406 as amended for
+   * the owner's a on #7597): the task may invoke it, and nothing else of
+   * the signer account. Left out, the task anchors as before.
+   */
+  readonly anchorSignerFunctionArn?: string;
 }
 
 /**
@@ -486,6 +493,20 @@ export class ServiceVaultStack extends cdk.Stack {
         resources: ['*'],
       }),
     );
+    if (props.anchorSignerFunctionArn !== undefined) {
+      if (!/^arn:aws[a-z-]*:lambda:[a-z0-9-]+:[0-9]{12}:function:[A-Za-z0-9_-]+$/.test(props.anchorSignerFunctionArn)) {
+        throw new Error(`anchorSignerFunctionArn must be a function's unqualified ARN (got "${props.anchorSignerFunctionArn}")`);
+      }
+      if (cdk.Token.isUnresolved(this.account)) {
+        throw new Error('anchorSignerFunctionArn needs env.account: the signer must be in another account');
+      }
+      if (props.anchorSignerFunctionArn.split(':')[4] === this.account) {
+        throw new Error('anchorSignerFunctionArn must be in the signer account, not in this one');
+      }
+      taskDef.taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
+        sid: 'InvokeAnchorSigner', actions: ['lambda:InvokeFunction'], resources: [props.anchorSignerFunctionArn],
+      }));
+    }
     taskDef.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: 'PublishTlsPin',
@@ -624,12 +645,15 @@ export class ServiceVaultStack extends cdk.Stack {
       retention: logs.RetentionDays.ONE_YEAR,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
+    // The keystore key (the anchor key is in the signer's own account,
+    // whose alarms are its own: GC #7638 item 6).
+    const watchedKeys = [this.key.keyArn];
     new events.Rule(this, 'KeyChangeRule', {
       description: 'KMS calls that change the service vault keystore key (key_change alarm)',
       eventPattern: {
         source: ['aws.kms'],
         detailType: ['AWS API Call via CloudTrail'],
-        detail: { eventName: KEY_CHANGE_EVENTS, resources: { ARN: [this.key.keyArn] } },
+        detail: { eventName: KEY_CHANGE_EVENTS, resources: { ARN: watchedKeys } },
       },
       targets: [new eventTargets.CloudWatchLogGroup(keyEvents)],
     });

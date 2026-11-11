@@ -54,9 +54,32 @@ var Instances = map[string]Endpoints{
 	Staging:    {Rekor: "https://rekor.sigstage.dev", TSA: "https://timestamp.sigstage.dev/api/v1/timestamp"},
 }
 
+// DigestSigner signs a SHA-256 digest with an anchor key (ECDSA P-256,
+// ASN.1 DER): the key in memory (LocalSigner), or a KMS key the signer
+// function alone may use (key protection, GC #7406). It fails closed: on
+// any error it returns no signature, never a partial or a guessed one.
+// Each call is a sign of its own (a KMS Sign, journaled), never a cached
+// answer. Public is read once, when the Anchorer is made.
+type DigestSigner interface {
+	Public() *ecdsa.PublicKey
+	SignDigest(ctx context.Context, digest []byte) ([]byte, error)
+}
+
+// LocalSigner is a DigestSigner over a key in memory.
+type LocalSigner struct{ Key *ecdsa.PrivateKey }
+
+// Public implements DigestSigner.
+func (l LocalSigner) Public() *ecdsa.PublicKey { return &l.Key.PublicKey }
+
+// SignDigest implements DigestSigner.
+func (l LocalSigner) SignDigest(_ context.Context, digest []byte) ([]byte, error) {
+	return ecdsa.SignASN1(rand.Reader, l.Key, digest)
+}
+
 // Anchorer anchors documents under one key.
 type Anchorer struct {
-	key    *ecdsa.PrivateKey
+	signer DigestSigner
+	pub    *ecdsa.PublicKey // the key at construction, which every signature must verify under
 	spki   []byte
 	ep     Endpoints
 	client *http.Client
@@ -64,11 +87,16 @@ type Anchorer struct {
 
 // New returns an Anchorer for key on a Sigstore instance.
 func New(instance string, key *ecdsa.PrivateKey) (*Anchorer, error) {
+	return NewSigner(instance, LocalSigner{key})
+}
+
+// NewSigner returns an Anchorer signing with s on a Sigstore instance.
+func NewSigner(instance string, s DigestSigner) (*Anchorer, error) {
 	ep, ok := Instances[instance]
 	if !ok {
 		return nil, fmt.Errorf("anchor: unknown Sigstore instance %q", instance)
 	}
-	return NewWith(key, ep, Client(30*time.Second))
+	return NewWithSigner(s, ep, Client(30*time.Second))
 }
 
 // Client is an HTTP client that follows no redirect: a 3xx is an answer,
@@ -83,14 +111,21 @@ func Client(timeout time.Duration) *http.Client {
 
 // NewWith returns an Anchorer on given endpoints (tests).
 func NewWith(key *ecdsa.PrivateKey, ep Endpoints, client *http.Client) (*Anchorer, error) {
-	if key.Curve != elliptic.P256() {
+	return NewWithSigner(LocalSigner{key}, ep, client)
+}
+
+// NewWithSigner returns an Anchorer signing with s on given endpoints.
+func NewWithSigner(s DigestSigner, ep Endpoints, client *http.Client) (*Anchorer, error) {
+	pub := s.Public()
+	if pub == nil || pub.Curve != elliptic.P256() {
 		return nil, errors.New("anchor: the key is not P-256")
 	}
-	spki, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	spki, err := x509.MarshalPKIXPublicKey(pub)
 	if err != nil {
 		return nil, err
 	}
-	return &Anchorer{key: key, spki: spki, ep: ep, client: client}, nil
+	fixed := *pub
+	return &Anchorer{signer: s, pub: &fixed, spki: spki, ep: ep, client: client}, nil
 }
 
 // PublicKeyDER is the anchor key's SubjectPublicKeyInfo.
@@ -105,29 +140,111 @@ func Hint(spki []byte) string {
 
 // Anchor signs doc, timestamps the signature, enters it in Rekor, checks
 // the entry against what was sent and its inclusion proof, and returns
-// the Sigstore bundle as JSON.
+// the Sigstore bundle as JSON. It is Sign, Timestamp, Enter and Bundle in
+// turn; a caller that keeps each step's result between attempts (the
+// signer function's claim, GC #7406 §1) calls them one by one, so that a
+// retry resumes rather than signing or timestamping again.
 func (a *Anchorer) Anchor(ctx context.Context, doc []byte) (json.RawMessage, error) {
-	digest := sha256.Sum256(doc)
-	sig, err := ecdsa.SignASN1(rand.Reader, a.key, digest[:])
+	digest, sig, err := a.Sign(ctx, doc)
 	if err != nil {
 		return nil, err
 	}
-	ts, err := a.timestamp(ctx, sig)
+	ts, err := a.Timestamp(ctx, sig)
 	if err != nil {
 		return nil, err
 	}
-	e, err := a.enter(ctx, digest[:], sig)
+	e, err := a.Enter(ctx, digest, sig)
 	if err != nil {
 		return nil, err
+	}
+	return a.Bundle(digest, sig, ts, e)
+}
+
+// Sign returns doc's SHA-256 and the signer's signature over it, checked
+// against the anchor key as it was when the Anchorer was made (not as the
+// signer names it now) before it is used: a signer that answers with
+// anything else is an error.
+func (a *Anchorer) Sign(ctx context.Context, doc []byte) (digest, sig []byte, err error) {
+	d := sha256.Sum256(doc)
+	sig, err = a.signer.SignDigest(ctx, d[:])
+	if err != nil {
+		return nil, nil, fmt.Errorf("anchor: sign: %w", err)
+	}
+	if !ecdsa.VerifyASN1(a.pub, d[:], sig) {
+		return nil, nil, errors.New("anchor: the signer's signature doesn't verify under the anchor key")
+	}
+	return d[:], sig, nil
+}
+
+// Timestamp asks the timestamp authority to stamp sig and returns its
+// TimeStampResp, which the bundle carries as it came.
+func (a *Anchorer) Timestamp(ctx context.Context, sig []byte) ([]byte, error) {
+	return a.timestamp(ctx, sig)
+}
+
+// Enter enters the signature in Rekor (or fetches the entry Rekor has,
+// a retry), checks it, and returns it in the bundle's form, as JSON to
+// keep.
+func (a *Anchorer) Enter(ctx context.Context, digest, sig []byte) (json.RawMessage, error) {
+	e, err := a.enter(ctx, digest, sig)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(e)
+}
+
+// ErrSignAgain is Bundle's refusal of a timestamp and an entry too far
+// apart in time: they can't make a bundle, and the document has to be
+// signed again (a new signature, timestamp and entry).
+var ErrSignAgain = errors.New("anchor: the timestamp and the Rekor entry are too far apart in time: sign again")
+
+// The window a bundle's Rekor integrated time may fall in, after its
+// RFC 3161 time (BALLOT-PROTOCOL §8.5 "Rekor profile"; GC #7501): a
+// retry never pairs one attempt's timestamp with a much later entry.
+const (
+	minEntryAfterTSA = -60 * time.Second
+	maxEntryAfterTSA = 600 * time.Second
+)
+
+// Bundle assembles the Sigstore bundle from the steps' results, which may
+// have been kept between attempts: the token must be the authority's for
+// sig, the entry Rekor's for digest and sig under this key, and the
+// entry integrated −60 s to 600 s after the token's time (ErrSignAgain
+// otherwise).
+func (a *Anchorer) Bundle(digest, sig, ts []byte, entry json.RawMessage) (json.RawMessage, error) {
+	var e tlogEntry
+	if err := json.Unmarshal(entry, &e); err != nil {
+		return nil, fmt.Errorf("anchor: the kept entry: %w", err)
+	}
+	tok, err := timestamp.ParseResponse(ts)
+	h := sha256.Sum256(sig)
+	if err != nil || tok.HashAlgorithm != crypto.SHA256 || !bytes.Equal(tok.HashedMessage, h[:]) {
+		return nil, errors.New("anchor: the kept timestamp isn't one for this signature")
+	}
+	var body hashedrekord
+	if err := json.Unmarshal(e.CanonicalizedBody, &body); err != nil || body.Kind != "hashedrekord" ||
+		body.Spec.Data.Hash.Algorithm != "sha256" || body.Spec.Data.Hash.Value != hex.EncodeToString(digest) ||
+		!bytes.Equal(body.Spec.Signature.Content, sig) {
+		return nil, errors.New("anchor: the kept entry isn't one for this digest and signature")
+	}
+	if blk, _ := pem.Decode(body.Spec.Signature.PublicKey.Content); blk == nil || !bytes.Equal(blk.Bytes, a.spki) {
+		return nil, errors.New("anchor: the kept entry names another key")
+	}
+	it, err := strconv.ParseInt(e.IntegratedTime, 10, 64)
+	if err != nil {
+		return nil, errors.New("anchor: the kept entry has no integrated time")
+	}
+	if d := time.Unix(it, 0).Sub(tok.Time); d < minEntryAfterTSA || d > maxEntryAfterTSA {
+		return nil, ErrSignAgain
 	}
 	b := bundleJSON{
 		MediaType: "application/vnd.dev.sigstore.bundle.v0.3+json",
 		VerificationMaterial: verificationMaterial{
 			PublicKey:                 publicKeyID{Hint: Hint(a.spki)},
-			TlogEntries:               []tlogEntry{*e},
+			TlogEntries:               []tlogEntry{e},
 			TimestampVerificationData: timestampData{RFC3161Timestamps: []signedTimestamp{{SignedTimestamp: ts}}},
 		},
-		MessageSignature: messageSignature{MessageDigest: messageDigest{Algorithm: "SHA2_256", Digest: digest[:]}, Signature: sig},
+		MessageSignature: messageSignature{MessageDigest: messageDigest{Algorithm: "SHA2_256", Digest: digest}, Signature: sig},
 	}
 	return json.Marshal(b)
 }

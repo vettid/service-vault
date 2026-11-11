@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -21,9 +22,13 @@ import (
 
 type closingSite struct{ site }
 
-func (closingSite) PublishResults(context.Context, string, []byte, []byte, []byte) (ballot.Receipt, error) {
+func (closingSite) PublishResults(context.Context, string, []byte, []byte, []byte, int64) (ballot.Receipt, error) {
 	now := time.Now().Unix()
 	return ballot.Receipt{Bundle: ballottest.Bundle(now, now)}, nil
+}
+
+func (closingSite) RepublishResults(_ context.Context, _ string, _, _, _ []byte, bundle json.RawMessage, _ int64) (ballot.Receipt, error) {
+	return ballot.Receipt{Bundle: bundle}, nil
 }
 
 func (closingSite) Extension(context.Context, string, int64) (*ballot.SiteExtension, error) {
@@ -37,7 +42,7 @@ func (approveAll) Consume(context.Context, string, string, []byte, ballot.Use) e
 
 type caught struct{}
 
-func (caught) Caught(context.Context, time.Time, time.Time, time.Time) (bool, int64, error) {
+func (caught) Caught(context.Context, time.Time, time.Time, time.Time, time.Time) (bool, int64, error) {
 	return true, 0, nil
 }
 
@@ -66,7 +71,8 @@ func TestBallotChunksAtCapOnDynamoDB(t *testing.T) {
 	m := &ballot.Manager{Store: &ballot.RecordStore{Records: st, Copy: &ballot.MemCopy{}}, IK: ik.Public().(ed25519.PublicKey),
 		Sign:   func(label string, msg []byte) ([]byte, error) { return suite.Sign(ik, label, msg) },
 		Roster: r, Sender: sink{}, Publisher: closingSite{}, Catcher: caught{}, Approvals: approveAll{}, NewID: envelope.NewULID,
-		Now: func() time.Time { return now }, Timestamp: ballottest.Time}
+		Now: func() time.Time { return now }, Timestamp: ballottest.Time,
+		AuthorityTime: func(context.Context) (int64, error) { return now.Unix(), nil }}
 	opens := now.Add(time.Hour).Unix()
 	in := ballot.ProposalInput{Title: "Adopt the 2027 budget", Choices: []ballot.ChoiceInput{{Label: "Yes"}, {Label: "No"}},
 		Quorum: vote.Quorum{MinBallots: 0}, OpensAt: opens, ClosesAt: opens + 86400, OutageRule: ballot.DefaultOutageRule}

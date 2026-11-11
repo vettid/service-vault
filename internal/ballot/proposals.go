@@ -98,9 +98,14 @@ type Manager struct {
 	// (anchor.TimestampTime). It decides whether an extension came before
 	// the close it extends; nil decides nothing in effect (fail closed).
 	Timestamp func(bundle json.RawMessage, doc []byte) (int64, error)
-	NewID     func(time.Time) (string, error)
-	Now       func() time.Time
-	Log       *slog.Logger
+	// AuthorityTime asks the timestamp authority for the time, verified
+	// (anchor.AuthorityTime): a vote is counted only once it is at or
+	// after the close in force (BALLOT-PROTOCOL §7, 0.13.12). Nil counts
+	// nothing (fail closed).
+	AuthorityTime func(ctx context.Context) (int64, error)
+	NewID         func(time.Time) (string, error)
+	Now           func() time.Time
+	Log           *slog.Logger
 	// Background is the context member sends run under, after the request
 	// that started them (sends.go); they stop when it ends. The daemon's
 	// lasts until its shutdown has waited for them. Nil:
@@ -112,7 +117,10 @@ type Manager struct {
 	// the whole record, so one mustn't save a copy read before another's
 	// save. One task runs the service vault, so a process lock suffices.
 	locks sync.Map
-	sends sends
+	// probes holds, by proposal, an authority time before the close
+	// (probeWait): no probe until the authority's time can have reached it.
+	probes sync.Map
+	sends  sends
 }
 
 // ErrNoTimestamps is a service vault with no way to verify the time of an
@@ -299,6 +307,15 @@ func (m *Manager) Publish(ctx context.Context, id string) (int, error) {
 	if o == nil {
 		return 0, ErrUnknownProposal
 	}
+	// Once the results are published, members are sent vote.closed: a
+	// vote.proposal sent after it would only tell them of a vote that is
+	// over.
+	if _, done, err := m.Store.Records.Get(ctx, KindResults, id); err != nil {
+		return 0, err
+	} else if done {
+		m.log().Info("vote.proposal not sent: the results are published", "proposal_id", id)
+		return 0, nil
+	}
 	if o.Bundle == nil {
 		// Published late (members' requests went unanswered meanwhile):
 		// their vaults send a cast again hourly and stop at the close, so
@@ -334,9 +351,12 @@ func (m *Manager) Publish(ctx context.Context, id string) (int, error) {
 			return 0, fmt.Errorf("ballot: publish %s: a member's body: %w", id, err)
 		}
 	}
-	m.sendInBackground(id, "proposal/"+id, TypeProposal, conns, body)
-	m.log().Info("proposal published", "proposal_id", id, "eligible", p.Eligible, "sending", len(conns))
-	return len(conns), nil
+	sending := 0
+	if m.sendInBackground(id, "proposal/"+id, TypeProposal, conns, body) {
+		sending = len(conns)
+	}
+	m.log().Info("proposal published", "proposal_id", id, "eligible", p.Eligible, "sending", sending)
+	return sending, nil
 }
 
 // proposalBody is vote.proposal's body (§4.1).

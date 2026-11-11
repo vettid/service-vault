@@ -115,6 +115,50 @@ destination.
   at any time, also after the close. A member vault restored meanwhile
   may show the vote as being checked until the member opens it again or
   checks it in the app.
+- `count_clock_ahead`: a vote's close has passed by the service's clock
+  but not by the timestamp authority's (BALLOT-PROTOCOL §7, 0.13.12:
+  just before counting, the service asks the authority for the time, a
+  stamp with no transparency-log entry). The vote is not counted yet:
+  the close answers 503 `collecting`, and no cast is refused `late` for
+  it. Probes are rationed: a passing one holds for that close; after one
+  before the close, none until the authority's time, judged from it, can
+  have reached the close, but never more than 5 minutes later. The waits
+  are timed on the process's monotonic clock, so stepping the task's
+  wall clock neither lengthens nor cuts them, and a corrected clock never
+  starves the close. Each probe has its own 5 s timeout. Check both clocks, as for
+  `results_stamped_early`. A probe that fails (the authority unreachable,
+  or a stamp that doesn't verify) counts nothing either: the close
+  answers 503 `timestamp_unavailable` and raises `tsa_unavailable`,
+  whose ERROR line says why; probes after a failure are at least 10 s
+  apart.
+- `results_stamped_early`: a vote's results came back from the timestamp
+  authority stamped before their close, so the service's clock is more
+  than a minute ahead of the authority's (BALLOT-PROTOCOL §8.3 step 2:
+  every member vault would fail them; `skew_seconds` on the line is the
+  difference seen). They are not published, and the close answers 503
+  `stamped_early`. Check both clocks: the task's (Fargate takes it from
+  the Amazon Time Sync Service; compare with `date -u` on a trusted host)
+  and the authority's (the stamp's time on the line). Then close again.
+  Each anchor is a permanent public entry in the transparency log, so
+  they are rationed: at most one per close, and none until a probe of the
+  authority's time (no log entry, at least 10 s apart) is at or after the
+  close (`rec#vote_stamp_wait` keeps the early stamp); a close before
+  then answers `stamped_early` at once. Member vaults keep checking for
+  7 days, so a late publication is still judged.
+- `results_bundle_unverified`: a vote's results bundle failed its
+  timestamp check (the authority's signature, the pinned trusted root, or
+  its validity period); the results are not published. One anchored by
+  that close is dropped, so the next close anchors again; one kept from
+  an earlier close stays, as the site may hold it, and blocks the
+  results until it is dealt with. The ERROR line names the proposal and
+  the error. First check whether votes.vettid.org has the results
+  (`GET /v1/p/<proposal id>/results.json`): if it does, keep the bundle
+  and fix the check (often a release whose pinned trusted root is out of
+  date). If it doesn't, delete the kept bundle, item pk
+  `rec#vote_bundle`, sk the hex SHA-256 of the results document
+  (`aws dynamodb delete-item --table-name T --key
+  '{"pk":{"S":"rec#vote_bundle"},"sk":{"S":"<hex>"}}'`), and close
+  again.
 - `ballot_not_counted`: a stored ballot failed the count's re-check
   (tag, credential signature or time) and was left out; the ERROR line
   names the proposal and the tag.
@@ -125,6 +169,14 @@ destination.
   from a backup of the table. After a table restore with votes off, the
   ballots the restore lost are put back from the copy at the first start
   with votes on (marker `run#ballots_rebuild`).
+- `gov_migration_waiting`: an admin's governance key (see "Governance
+  key" under "Admin approvals") can't be pinned yet, because the service
+  doesn't know that admin's connection (logged at most once an hour per
+  admin, `connection_id` on the line). Until it can, that admin's
+  governance approvals (`admin_set.*`, `admin.repin`, `proposal.create`,
+  `vote.extend`, `contract_template.change`) are recorded but don't count.
+  Check that the connection is active and reachable (a reconnect after a
+  restore, a suspended connection); if it is gone, repair the admin set.
 - `admins_short`: an admin's connection was removed (severed, or
   replaced by a new connection) and fewer admins than m remain, so no
   approval can pass (see "Recovering admins" under "Admin approvals").
@@ -264,6 +316,24 @@ connection. One thing a table writer can still do: put back an older
 sealed copy of a record, or delete one. The KMS key policy lets the
 account administer the key but not grant itself its use: there is no
 `CreateGrant`.
+
+Each keystore item's data key is bound to a KMS encryption context,
+`{"blob": <item name>}`, so that the key's policy can allow `Decrypt` only
+for the items it names (key protection, phase 1). Items sealed before
+contexts still open without one. `service-vault admin reseal-blobs`, run
+by the operator as a one-off task in the same environment as `serve`
+(the service stopped), moves every item to its context: each is sealed
+again and put only over its exact old bytes, never deleted first, and
+then each is opened with its context. The anchor-key item is left as it
+is, without a context, for deletion, so that no copy of it can be opened
+once the policy is in place. It prints the items' names, never their
+contents, and a run again picks up where one stopped. After it, a table
+or backup from before can't be restored into this deployment (its keys
+can't be opened once the policy is in place): the re-seal is the last
+point to roll back to a release before it. The policy that requires the
+context (its allow-list covers record-key.v* and ballot-copy-key, and
+never matches anchor-key), and the deletion of the anchor-key item, are
+later steps, each on the owner's go.
 
 An unsealed record is refused and fails the start. Only the operator
 turns on accepting them, for the one deploy that upgrades a deployment
@@ -511,9 +581,9 @@ billed.
 | `GET /v1/audit?since=&limit=` | `{entries: [...], next?}`: the audit log after entry `since`, oldest first, `limit` 1–100 (default 100); pass `next` as `since` for the next page |
 | `POST /v1/proposals` `{approval_id, title, text, choices, quorum, binding, removed_may_vote, opens_at, closes_at, outage_rule}` | Needs `approval_id`: the admins' `proposal.create` approval of exactly this input (see "Admin approvals"); it is checked and used up once (`approval_required` 400 without one; `approval_not_found`, `approval_not_approved`, `approval_wrong_action`, `approval_mismatch`, `approval_expired` 403; `approval_used` 409). `201 {proposal_id, proposal_hash, eligible, unsigned, sending}`: the proposal is made from the active connections at this moment whose vault advertised the vote feature (BALLOT-PROTOCOL §3.2), published, and sent to each in the background (BALLOT-PROTOCOL §3): `sending` is how many it is being sent to, and a member a send misses asks with `vote.status`; choices are `{label}` only: the service assigns the ids `c1`, `c2`, … and always adds `abstain`; `text` is empty or the title, `quorum.text` empty, `outage_rule` empty or the default (see "Admin approvals"). `unsigned` is how many of the `eligible` connections have no pinned credential key: their member has never signed in on the connection, and their vault refuses `vote.cast` with `not_signed_in` until they do (VAULT-MESSAGING §10.19.5); members sign in to the service themselves (on a test deployment only, `POST /v1/signins/unsigned`, `svctl signin -unsigned`). `invalid_proposal` (400) for one outside the bounds of BALLOT-PROTOCOL §3.1 (member vaults refuse those) or with no such connection; `too_many_eligible` (400, with `max_eligible`: 15000) when the roster has more than 15,000 eligible members, before the approval is used (requesting the `proposal.create` approval already answers `too_many_eligible` then, before the admins are asked) (a chosen limit, bounded by the results' single upload to the votes site; BALLOT-PROTOCOL §3.2); `publication_not_configured` (503) until publication is configured; `503 {error: not_published, proposal_id}` when it was kept but its publication failed (retry with `/publish`). Served with `SV_BALLOTS_TABLE` |
 | `GET /v1/proposals/{id}` | `{proposal_id, proposal, proposal_hash, eligible, opens_at, closes_at, published}`: nothing that counts ballots before the results |
-| `POST /v1/proposals/{id}/publish` | `{sending}`: publishes a proposal whose publication failed, and sends it again to each eligible member in the background (`sending` is how many; called again while those sends run, it doesn't send twice). A proposal not published is no member's: a cast on it is `not_eligible`, `vote.status` `unknown_proposal`. `not_found` (404) |
+| `POST /v1/proposals/{id}/publish` | `{sending}`: publishes a proposal whose publication failed, and sends it again to each eligible member in the background (`sending` is how many; 0 when those sends are still running, as it doesn't send twice, when the service is stopping, or once the results are published, when members are sent `vote.closed` instead). A proposal not published is no member's: a cast on it is `not_eligible`, `vote.status` `unknown_proposal`. `not_found` (404) |
 | `POST /v1/proposals/{id}/extend` `{approval_id, closes_at, outage: {from, to, source}}` | Needs `approval_id`: the admins' `vote.extend` approval of exactly this extension of this proposal, used up once (the same errors as creating). The extension (BALLOT-PROTOCOL §10.2), published and sent to each member in the background: for a relay outage of over an hour within the window that is over (its `to` not after now), by its length rounded up to the hour, 24 h in all at most; an outage still going on near the close is extended in parts (§10.2). `invalid_extension` (400), `outage_not_over` (422) for an outage still going on, `too_late` (409) once the close has passed. Requesting the `vote.extend` approval itself answers `outage_not_over` (422) for an outage still going on. A vote has at most 24 extensions (`invalid_extension` past that) |
-| `POST /v1/proposals/{id}/close` | Needs only the API key: it publishes what the closed vote counted and decides nothing (it is refused before `closes_at` + 1 minute). `{proposal_id, results_hash, tally, counts}`: counts the vote and publishes the results (BALLOT-PROTOCOL §7), or reports them if already published. `not_closed` (409) before `closes_at` + 1 minute; `collecting` (503) until the relay's messages from before then are all handled: retry |
+| `POST /v1/proposals/{id}/close` | Needs only the API key: it publishes what the closed vote counted and decides nothing (it is refused before `closes_at` + 1 minute). `{proposal_id, results_hash, tally, counts}`: counts the vote and publishes the results (BALLOT-PROTOCOL §7), or reports them if already published. `not_closed` (409) before `closes_at` + 1 minute; `collecting` (503) until the relay's messages from before then are all handled: retry; `stamped_early` (503) while the results come back from the timestamp authority stamped before the close (the service's clock is ahead: see the alarm `results_stamped_early`). A retry is safe: it anchors nothing until the authority's time can have reached the close, so retry with backoff, and fix the clock. `collecting` is also the answer while the timestamp authority's time is before the close (0.13.12: the service's clock alone never starts the count), and `timestamp_unavailable` (503) when the authority's time can't be had or verified: retry |
 | `GET /v1/proposals/{id}/results` | `{results, results_sig, rows, bundle}` once published |
 | `GET /v1/anchor-key` | `{anchor_key, anchor_cert, service_ik, sigstore}`: the service's anchor key (DER SubjectPublicKeyInfo), certified by its identity key, for registering the service on votes.vettid.org (BALLOT-PROTOCOL §3.3) |
 | `GET /health` | `{status: "ok"}` (no key) |

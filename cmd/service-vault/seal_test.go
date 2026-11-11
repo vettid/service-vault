@@ -3,20 +3,30 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"maps"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/vettid/service-vault/anchor"
 	"github.com/vettid/service-vault/internal/ballot"
 	"github.com/vettid/service-vault/internal/keystore"
 	"github.com/vettid/service-vault/internal/peer"
+	"github.com/vettid/service-vault/internal/publish"
 	"github.com/vettid/service-vault/internal/sealstore"
 )
 
@@ -421,6 +431,77 @@ func TestBallotCopyKeyCheckOverOlderCopy(t *testing.T) {
 	}
 	if _, ok, _ := cp.Get(ctx, copyKeyCheckID, []byte{0}); !ok {
 		t.Fatal("no check after the right key")
+	}
+}
+
+// Every record kind the publisher declares (a Kind… string constant, in
+// any form, in internal/publish) is resealed with the record key
+// (recordKinds): a kind left out would become unreadable after a rotation.
+func TestRecordKindsCoverPublish(t *testing.T) {
+	have := map[string]bool{}
+	for _, k := range recordKinds() {
+		have[k] = true
+	}
+	for _, k := range []string{publish.KindBundle, publish.KindStampWait} {
+		if !have[k] {
+			t.Errorf("record kind %q is not resealed", k)
+		}
+	}
+	files, err := filepath.Glob("../../internal/publish/*.go")
+	if err != nil || len(files) == 0 {
+		t.Fatal("no publisher sources", err)
+	}
+	decl := regexp.MustCompile(`(?m)^\s*(?:const\s+)?(Kind[A-Za-z]+)\s*(?:string\s*)?=\s*"([a-z_]+)"`)
+	found := 0
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range decl.FindAllStringSubmatch(string(src), -1) {
+			found++
+			if !have[m[2]] {
+				t.Errorf("%s (%q) is not resealed", m[1], m[2])
+			}
+		}
+	}
+	if found < 2 {
+		t.Fatalf("found %d record kinds in the publisher", found)
+	}
+}
+
+// The wired AuthorityTime asks the timestamp authority and is refused
+// with it: an authority that fails gives an error, never a local time.
+func TestAuthorityTimeWiring(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusBadGateway) }))
+	defer srv.Close()
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	anc, err := anchor.NewWith(key, anchor.Endpoints{TSA: srv.URL}, srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := authorityTime(anc, anchor.Staging)(context.Background()); err == nil {
+		t.Fatalf("a failing authority gave %d", got)
+	}
+}
+
+// The publisher is wired with the manager's timestamp check and its
+// authority probe.
+func TestVotesPublisherWiring(t *testing.T) {
+	mgr := &ballot.Manager{Timestamp: func(json.RawMessage, []byte) (int64, error) { return 7, nil },
+		AuthorityTime: func(context.Context) (int64, error) { return 8, nil }}
+	p := votesPublisher("https://votes.example", nil, peer.NewMemStore(), mgr, slog.Default())
+	if p.Timestamp == nil || p.AuthorityTime == nil || p.Records == nil {
+		t.Fatalf("%+v", p)
+	}
+	if v, _ := p.Timestamp(nil, nil); v != 7 {
+		t.Fatal("another Timestamp")
+	}
+	if v, _ := p.AuthorityTime(context.Background()); v != 8 {
+		t.Fatal("another AuthorityTime")
 	}
 }
 
