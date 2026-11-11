@@ -2,7 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import { AnchorSignerStack, AnchorSignerStackProps } from '../lib/anchor-signer-stack';
 import {
-  COUNT_EVALUATION_PERIODS, FORWARD_HEARTBEAT_MINUTES, JOURNAL_COPY_FAILED, ROUTINE_WRITES, SIGNER_ALARMS, SIGNS_PER_HOUR,
+  COUNT_EVALUATION_PERIODS, FORWARD_HEARTBEAT_MINUTES, JOURNAL_COPY_FAILED, ROUTINE_WRITES, RULE_TARGET_FAILED, SIGNER_ALARMS, SIGNS_PER_HOUR,
   TRAIL_QUIET_MINUTES, WATCHED_SOURCES, signerAuditNames, trailFilters,
 } from '../lib/anchor-signer-alarms';
 import { FORWARD_QUIET_MINUTES } from '../lib/signer-audit-stack';
@@ -54,11 +54,22 @@ describe('targets and the topic', () => {
     expect(policies).toHaveLength(1);
     const st = policies[0].Properties.PolicyDocument.Statement;
     expect(st.map((x: any) => x.Sid).sort()).toEqual(['AlarmsOfThisAccount', 'RulesOfThisAccount']);
+    // The rules publish through a role of their own, not a conditioned service principal.
     const ev = st.find((x: any) => x.Sid === 'RulesOfThisAccount');
-    expect(ev.Principal).toEqual({ Service: 'events.amazonaws.com' });
+    expect(s(ev.Principal)).toContain('TopicPublishRole');
     expect(ev.Action).toBe('sns:Publish');
-    expect(ev.Condition.StringEquals).toEqual({ 'aws:SourceAccount': SIGNER_ACCT });
-    expect(s(ev.Condition.ArnLike['aws:SourceArn'])).toContain(`:events:us-east-1:${SIGNER_ACCT}:rule/*`);
+    expect(ev.Condition).toBeUndefined();
+    const role = Object.entries<any>(t.findResources('AWS::IAM::Role')).find(([id]) => id.startsWith('TopicPublishRole'))![1];
+    expect(role.Properties.AssumeRolePolicyDocument.Statement[0].Principal).toEqual({ Service: 'events.amazonaws.com' });
+    expect(role.Properties.AssumeRolePolicyDocument.Statement[0].Condition).toEqual({ StringEquals: { 'aws:SourceAccount': SIGNER_ACCT } });
+    const rp = Object.values<any>(t.findResources('AWS::IAM::Policy')).filter((p) => s(p.Properties.Roles).includes('TopicPublishRole'))
+      .flatMap((p) => p.Properties.PolicyDocument.Statement);
+    expect(rp).toHaveLength(1);
+    expect(rp[0].Action).toBe('sns:Publish');
+    for (const r of rules(t)) {
+      const topic = r.Properties.Targets.find((x: any) => s(x.Arn).includes(topicId()));
+      if (topic) expect(s(topic.RoleArn)).toContain('TopicPublishRole');
+    }
     const cw = st.find((x: any) => x.Sid === 'AlarmsOfThisAccount');
     expect(cw.Principal).toEqual({ Service: 'cloudwatch.amazonaws.com' });
     expect(cw.Action).toBe('sns:Publish');
@@ -183,7 +194,7 @@ describe('the trail and the copies', () => {
   test('the journal\'s copy failing to deliver alarms', () => {
     const a = alarm('journal_copy_failed');
     expect(a.Threshold).toBe(1);
-    expect(JOURNAL_COPY_FAILED).toBe('IF(records > 0 AND FILL(ok, 1) < 1, 1, 0)');
+    expect(JOURNAL_COPY_FAILED).toBe('IF(ok < 1, 1, 0)');
     expect(a.Metrics.find((m: any) => m.Expression).Expression).toBe(JOURNAL_COPY_FAILED);
     expect(s(a.Metrics)).toContain('DeliveryToS3.Success');
     expect(s(a.AlarmActions)).toContain(topicId());
@@ -205,7 +216,7 @@ describe('rules', () => {
     expect(WATCHED_SOURCES).toEqual(['lambda', 'signer', 'kms', 'dynamodb', 'logs', 'sns', 'events', 'monitoring', 'guardduty', 's3',
       'firehose', 'cloudtrail', 'cloudformation', 'tagging', 'rolesanywhere', 'account'].map((x) => `${x}.amazonaws.com`));
     expect(ROUTINE_WRITES).toEqual({
-      'logs.amazonaws.com': ['CreateLogStream'], 'events.amazonaws.com': ['PutEvents'], 'kms.amazonaws.com': ['Sign', 'Verify', 'GetPublicKey'],
+      'logs.amazonaws.com': ['CreateLogStream', 'CreateLogGroup'], 'events.amazonaws.com': ['PutEvents'], 'kms.amazonaws.com': ['Sign', 'Verify', 'GetPublicKey'],
     });
   });
 
@@ -240,7 +251,7 @@ describe('alarms', () => {
     expect(filters.iam_change).toBe('{ ($.eventSource = "iam.amazonaws.com") && ($.readOnly IS FALSE) }');
     expect(filters.claims_delete).toBe('{ ($.eventCategory = "Data") && ($.eventSource = "dynamodb.amazonaws.com") && ($.eventName = "DeleteItem") }');
     expect(filters.claims_write_other).toBe(`{ ($.eventCategory = "Data") && ($.eventSource = "dynamodb.amazonaws.com") && (($.userIdentity.type != "AssumedRole") || ($.userIdentity.sessionContext.sessionIssuer.arn != "${signerRoleArn}")) }`);
-    expect(filters.invoke_other).toBe('{ ($.eventCategory = "Data") && ($.eventSource = "lambda.amazonaws.com") && (($.userIdentity.accountId != "123456789012") || ($.errorCode EXISTS)) }');
+    expect(filters.invoke_other).toBe('{ ($.eventCategory = "Data") && ($.eventSource = "lambda.amazonaws.com") && (($.userIdentity.accountId != "123456789012") || ($.userIdentity.accountId NOT EXISTS) || (($.errorCode = "*") && ($.errorCode != "TooManyRequestsException"))) }');
     expect(filters.break_glass).toBe(`{ (($.eventName = "AssumeRole") && ($.requestParameters.roleArn = "${BREAK_GLASS}")) || ($.userIdentity.sessionContext.sessionIssuer.arn = "${BREAK_GLASS}") }`);
     const fs = Object.values<any>(t.findResources('AWS::Logs::MetricFilter')).filter((x) => s(x.Properties.LogGroupName).includes('TrailLogs'));
     for (const [name, pattern] of Object.entries(filters)) {
@@ -312,6 +323,9 @@ test('no other function in the signer account: without a release, none at all (n
 
 test('a rule failing to deliver to its target alarms (any rule)', () => {
   const a = alarm('rule_target_failed');
-  expect(s(a.Metrics)).toContain('FailedInvocations');
+  // A Metrics Insights query: an alarm can't use SEARCH.
+  expect(RULE_TARGET_FAILED).toBe('SELECT SUM(FailedInvocations) FROM SCHEMA("AWS/Events", RuleName)');
+  expect(a.Metrics.find((m: any) => m.Expression).Expression).toBe(RULE_TARGET_FAILED);
+  expect(s(a.Metrics)).not.toContain('SEARCH(');
   expect(s(a.AlarmActions)).toContain(topicId());
 });

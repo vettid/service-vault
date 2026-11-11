@@ -37,9 +37,7 @@ test("the bucket policy: the signer's replication role may only replicate in; no
   // By the account and aws:PrincipalArn (the role doesn't exist when this deploys).
   for (const a of allows) {
     expect(s(a.Principal)).toContain(`:iam::${SIGNER}:root`);
-    expect(Object.keys(a.Condition)).toEqual(['ArnEquals']);
-    expect(Object.keys(a.Condition.ArnEquals)).toEqual(['aws:PrincipalArn']);
-    expect(s(a.Condition.ArnEquals['aws:PrincipalArn'])).toContain(replicationRole.replace(/^arn:aws/, ''));
+    expect(a.Condition).toEqual({ ArnEquals: { 'aws:PrincipalArn': { 'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, `:iam::${SIGNER}:role/${names.replicationRole}`]] } } });
   }
   expect(allows.find((a: any) => a.Sid === 'SignerChecksVersioning').Action.sort()).toEqual(['s3:GetBucketVersioning', 's3:ListBucket']);
   expect(allows.map((a: any) => a.Sid).sort()).toEqual(['SignerChecksVersioning', 'SignerReplicates']);
@@ -81,9 +79,7 @@ test("the alarm bus: only the signer account's forwarding role puts on it; every
   const st = policies[0].Properties.Statement;
   expect(st.Action).toBe('events:PutEvents');
   expect(s(st.Principal)).toContain(`:iam::${SIGNER}:root`);
-  expect(Object.keys(st.Condition)).toEqual(['ArnEquals']);
-  expect(Object.keys(st.Condition.ArnEquals)).toEqual(['aws:PrincipalArn']);
-  expect(s(st.Condition.ArnEquals['aws:PrincipalArn'])).toContain(`:iam::${SIGNER}:role/${names.forwardRole}`);
+  expect(st.Condition).toEqual({ ArnEquals: { 'aws:PrincipalArn': { 'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, `:iam::${SIGNER}:role/${names.forwardRole}`]] } } });
   const onBus = Object.values<any>(t.findResources('AWS::Events::Rule')).filter((r) => r.Properties.EventBusName).map((r) => r.Properties);
   expect(onBus).toHaveLength(2);
   const alarms = onBus.find((r) => r.Description.includes('alarms'));
@@ -121,9 +117,12 @@ test("the topic's policy: this account's rules and alarms only; every alarm and 
   expect(cw.Condition.StringEquals).toEqual({ 'aws:SourceAccount': MGMT });
   expect(s(cw.Condition.ArnLike['aws:SourceArn'])).toContain(`:alarm:vettid-signer-audit-staging-*`);
   const ev = st.find((x: any) => x.Sid === 'RulesOfThisAccount');
-  expect(ev.Principal).toEqual({ Service: 'events.amazonaws.com' });
-  expect(ev.Condition.StringEquals).toEqual({ 'aws:SourceAccount': MGMT });
-  expect(s(ev.Condition.ArnLike['aws:SourceArn'])).toContain(`:events:us-east-1:${MGMT}:rule/*`);
+  expect(s(ev.Principal)).toContain('TopicPublishRole');
+  expect(ev.Condition).toBeUndefined();
+  const bus = Object.values<any>(t.findResources('AWS::Events::Rule')).find((r) => r.Properties.Description.includes('alarms')).Properties;
+  expect(s(bus.Targets[0].RoleArn)).toContain('TopicPublishRole');
+  const q = Object.values<any>(t.findResources('AWS::CloudWatch::Alarm')).find((x) => x.Properties.AlarmName.endsWith('-rule_target_failed')).Properties;
+  expect(s(q.Metrics)).toContain('SELECT SUM(FailedInvocations) FROM SCHEMA');
   expect(cw.Action).toBe('sns:Publish');
   for (const a of Object.values<any>(t.findResources('AWS::CloudWatch::Alarm'))) expect(s(a.Properties.AlarmActions)).toContain('AlarmTopic');
 });

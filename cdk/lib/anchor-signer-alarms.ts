@@ -46,7 +46,7 @@ export const WATCHED_SOURCES = ['lambda', 'signer', 'kms', 'dynamodb', 'logs', '
  * anchor key's use (its own rules watch it).
  */
 export const ROUTINE_WRITES: Record<string, string[]> = {
-  'logs.amazonaws.com': ['CreateLogStream'],
+  'logs.amazonaws.com': ['CreateLogStream', 'CreateLogGroup'],
   'events.amazonaws.com': ['PutEvents'],
   'kms.amazonaws.com': ['Sign', 'Verify', 'GetPublicKey'],
 };
@@ -71,7 +71,10 @@ export const TRAIL_QUIET_MINUTES = 30;
 export const COUNT_EVALUATION_PERIODS = 3;
 
 /** The journal copy's delivery failing: records came in and delivery didn't succeed (a missing success datapoint counts as none failed). */
-export const JOURNAL_COPY_FAILED = 'IF(records > 0 AND FILL(ok, 1) < 1, 1, 0)';
+export const JOURNAL_COPY_FAILED = 'IF(ok < 1, 1, 0)';
+
+/** Any rule's FailedInvocations, as a Metrics Insights query (alarms can't use SEARCH). */
+export const RULE_TARGET_FAILED = 'SELECT SUM(FailedInvocations) FROM SCHEMA("AWS/Events", RuleName)';
 
 /**
  * Alarms on the trail's log group, which receives every region's events:
@@ -99,7 +102,9 @@ export const trailFilters = (p: { breakGlassRoleArn: string; signerRoleArn: stri
   // service's, or one refused: a cross-account caller's record may carry
   // no session issuer, so it's keyed on the account (the function's
   // resource policy admits the task role alone).
-  invoke_other: `{ ($.eventCategory = "Data") && ($.eventSource = "lambda.amazonaws.com") && (($.userIdentity.accountId != "${p.taskAccount}") || ($.errorCode EXISTS)) }`,
+  // A service-triggered invoke (an event source mapping) carries no
+  // accountId: that's caught too. Throttles (concurrency 2) aren't refusals.
+  invoke_other: `{ ($.eventCategory = "Data") && ($.eventSource = "lambda.amazonaws.com") && (($.userIdentity.accountId != "${p.taskAccount}") || ($.userIdentity.accountId NOT EXISTS) || (($.errorCode = "*") && ($.errorCode != "TooManyRequestsException"))) }`,
 });
 
 export interface SignerAlarmsProps {
@@ -156,15 +161,20 @@ export function addSignerAlarms(stack: cdk.Stack, props: SignerAlarmsProps): voi
   });
   forward.addToPrincipalPolicy(new iam.PolicyStatement({ sid: 'PutOnTheBus', actions: ['events:PutEvents'], resources: [busArn] }));
 
-  // The topic's policy, written out: EventBridge rules and CloudWatch
-  // alarms of this account only (a topic policy replaces the default, so
-  // without the CloudWatch statement no alarm could publish).
+  // The topic's policy, written out: the rules publish through a role of
+  // their own (no conditioned service principal, whose condition keys
+  // EventBridge may not send), and this account's CloudWatch alarms by
+  // prefix (a topic policy replaces the default, so without that statement
+  // no alarm could publish).
   const rules: events.Rule[] = [];
+  const publish = new iam.Role(stack, 'TopicPublishRole', {
+    description: 'VettID anchor signer: the account\'s rules publish to its alarm topic',
+    assumedBy: new iam.ServicePrincipal('events.amazonaws.com', { conditions: { StringEquals: { 'aws:SourceAccount': stack.account } } }),
+  });
+  publish.addToPrincipalPolicy(new iam.PolicyStatement({ sid: 'PublishAlarms', actions: ['sns:Publish'], resources: [props.topic.topicArn] }));
   props.topic.addToResourcePolicy(new iam.PolicyStatement({
-    sid: 'RulesOfThisAccount', principals: [new iam.ServicePrincipal('events.amazonaws.com')], actions: ['sns:Publish'],
-    resources: [props.topic.topicArn], conditions: {
-      StringEquals: { 'aws:SourceAccount': stack.account }, ArnLike: { 'aws:SourceArn': arn('events', 'rule/*') },
-    },
+    sid: 'RulesOfThisAccount', principals: [new iam.ArnPrincipal(publish.roleArn)], actions: ['sns:Publish'],
+    resources: [props.topic.topicArn],
   }));
   props.topic.addToResourcePolicy(new iam.PolicyStatement({
     sid: 'AlarmsOfThisAccount', principals: [new iam.ServicePrincipal('cloudwatch.amazonaws.com')], actions: ['sns:Publish'],
@@ -179,7 +189,7 @@ export function addSignerAlarms(stack: cdk.Stack, props: SignerAlarmsProps): voi
     const r = new events.Rule(stack, id, { description, eventPattern: opts.pattern, schedule: opts.schedule });
     const cfn = r.node.defaultChild as events.CfnRule;
     cfn.targets = [
-      ...(toTopic ? [{ id: 'Topic', arn: props.topic.topicArn }] : []),
+      ...(toTopic ? [{ id: 'Topic', arn: props.topic.topicArn, roleArn: publish.roleArn }] : []),
       { id: 'Outside', arn: busArn, roleArn: forward.roleArn },
     ];
     // Read-only management events (Sign, GetPublicKey) reach a rule only
@@ -408,16 +418,14 @@ export function addSignerAlarms(stack: cdk.Stack, props: SignerAlarmsProps): voi
   countAlarm('journal_copy_failed', 'The journal\'s copy failed to reach the audit bucket', new cloudwatch.MathExpression({
     expression: JOURNAL_COPY_FAILED, period: cdk.Duration.minutes(5),
     usingMetrics: {
-      records: new cloudwatch.Metric({ namespace: 'AWS/Firehose', metricName: 'IncomingRecords', dimensionsMap: { DeliveryStreamName: names.journalCopy }, statistic: 'Sum' }),
       ok: new cloudwatch.Metric({ namespace: 'AWS/Firehose', metricName: 'DeliveryToS3.Success', dimensionsMap: { DeliveryStreamName: names.journalCopy }, statistic: 'Average' }),
     },
   }), 1);
 
-  // A rule's target failing (the topic's policy, the bus's), any rule.
+  // A rule's target failing (the topic, the bus), any rule: a Metrics
+  // Insights query (an alarm can't use SEARCH).
   countAlarm('rule_target_failed', 'An EventBridge rule could not deliver to its target (the topic or the management account\'s bus)',
-    new cloudwatch.MathExpression({
-      expression: `SUM(SEARCH('{AWS/Events,RuleName} MetricName="FailedInvocations"', 'Sum', 300))`, period: cdk.Duration.minutes(5),
-    }), 1);
+    new cloudwatch.MathExpression({ expression: RULE_TARGET_FAILED, period: cdk.Duration.minutes(5) }), 1);
 
   // The trail's log group must keep receiving (the account's read events
   // are steady): if its delivery breaks, every filter above goes quiet.
