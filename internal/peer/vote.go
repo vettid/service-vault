@@ -173,10 +173,14 @@ func (p *Peer) SendMessage(ctx context.Context, connID, typ string, body json.Ra
 // as BALLOT-PROTOCOL §4.2 says.
 //
 // Only SendMessage's own deposits that are still due count: not one
-// parked until the member's next token (AwaitToken; SendMessage queues
-// nothing more for that member meanwhile), nor one past its notAfter
-// (the drain drops it). So members whose vaults are gone can't switch the
-// sends off for everyone. The other messages (responses, token refreshes,
+// parked until the member's next token (AwaitToken), nor one past its
+// notAfter (the drain drops it). So members whose vaults are gone can't
+// switch the sends off for everyone. Meanwhile a member awaiting a token
+// gets ErrBusy for later vote messages, and learns of the vote as
+// BALLOT-PROTOCOL §4.2 says (a trade-off: a gone member's are never
+// queued). Two cases still count until their notAfter, bounded by it:
+// vote deposits queued behind a parked one (only the head is parked),
+// and a member refused quota_exceeded for its own mailbox's quota. The other messages (responses, token refreshes,
 // sign-in and approval challenges) count neither, and are bounded per
 // connection only (MaxOutboxPerConn), so a vote's sends can't crowd them
 // out of the outbox. They can wait behind them, though: after an outage,
