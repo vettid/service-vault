@@ -34,8 +34,11 @@ test('the locked copy: Object Lock in compliance mode for a year, versioned, buc
 test("the bucket policy: the signer's replication role may only replicate in; nobody in the signer account deletes", () => {
   const stmts = Object.values<any>(t.findResources('AWS::S3::BucketPolicy'))[0].Properties.PolicyDocument.Statement;
   const allows = stmts.filter((st: any) => st.Effect === 'Allow');
+  // By the account and aws:PrincipalArn (the role doesn't exist when this deploys).
   for (const a of allows) {
-    expect(s(a.Principal)).toContain(replicationRole.replace(/^arn:aws/, ''));
+    expect(s(a.Principal)).toContain(`:iam::${SIGNER}:root`);
+    expect(s(a.Condition)).toContain('aws:PrincipalArn');
+    expect(s(a.Condition)).toContain(replicationRole.replace(/^arn:aws/, ''));
   }
   expect(allows.map((a: any) => a.Sid).sort()).toEqual(['SignerChecksVersioning', 'SignerReplicates']);
   const rep = allows.find((a: any) => a.Sid === 'SignerReplicates');
@@ -76,7 +79,9 @@ test("the alarm bus: only the signer account's forwarding role puts on it; every
   expect(policies).toHaveLength(1);
   const st = policies[0].Properties.Statement;
   expect(st.Action).toBe('events:PutEvents');
-  expect(s(st.Principal)).toContain(`:iam::${SIGNER}:role/${names.forwardRole}`);
+  expect(s(st.Principal)).toContain(`:iam::${SIGNER}:root`);
+  expect(s(st.Condition)).toContain('aws:PrincipalArn');
+  expect(s(st.Condition)).toContain(`:iam::${SIGNER}:role/${names.forwardRole}`);
   const onBus = Object.values<any>(t.findResources('AWS::Events::Rule')).filter((r) => r.Properties.EventBusName).map((r) => r.Properties);
   expect(onBus).toHaveLength(2);
   const alarms = onBus.find((r) => r.Description.includes('alarms'));
@@ -104,4 +109,40 @@ test('refuses: no account, the signer account as itself, a bad address', () => {
   expect(() => new SignerAuditStack(new cdk.App(), 'X', { ...base, signerAccount: MGMT })).toThrow(/signerAccount/);
   expect(() => new SignerAuditStack(new cdk.App(), 'X', { ...base, signerAccount: '1234' })).toThrow(/signerAccount/);
   expect(() => new SignerAuditStack(new cdk.App(), 'X', { ...base, alarmEmail: 'owner' })).toThrow(/alarmEmail/);
+});
+
+test("the topic's policy: this account's rules and alarms only; every alarm and the bus rule reach it", () => {
+  const st = Object.values<any>(t.findResources('AWS::SNS::TopicPolicy'))[0].Properties.PolicyDocument.Statement;
+  expect(st.map((x: any) => x.Sid).sort()).toEqual(['AlarmsOfThisAccount', 'RulesOfThisAccount']);
+  const cw = st.find((x: any) => x.Sid === 'AlarmsOfThisAccount');
+  expect(cw.Principal).toEqual({ Service: 'cloudwatch.amazonaws.com' });
+  expect(cw.Condition.StringEquals).toEqual({ 'aws:SourceAccount': MGMT });
+  expect(s(cw.Condition.ArnLike['aws:SourceArn'])).toContain(`:alarm:vettid-signer-audit-staging-*`);
+  const ev = st.find((x: any) => x.Sid === 'RulesOfThisAccount');
+  expect(ev.Condition).toEqual({ StringEquals: { 'aws:SourceAccount': MGMT } });
+  for (const a of Object.values<any>(t.findResources('AWS::CloudWatch::Alarm'))) expect(s(a.Properties.AlarmActions)).toContain('AlarmTopic');
+});
+
+test('log groups as targets: their ARN without ":*"', () => {
+  for (const r of Object.values<any>(t.findResources('AWS::Events::Rule'))) {
+    for (const tg of r.Properties.Targets) {
+      if (s(tg.Arn).includes(':logs:')) expect(s(tg.Arn)).not.toContain(':*');
+    }
+  }
+});
+
+test('pinned: the staleness hours, the Deny on bucket and objects, the log policies bound to their rules', () => {
+  expect(AUDIT_STALE_HOURS).toBe(2);
+  const st = Object.values<any>(t.findResources('AWS::S3::BucketPolicy'))[0].Properties.PolicyDocument.Statement;
+  const deny = st.find((x: any) => x.Sid === 'SignerNeverDeletes');
+  expect(deny.Resource).toHaveLength(2);
+  expect(s(deny.Resource[0])).toContain('LockedCopy');
+  expect(s(deny.Resource[1])).toContain('/*');
+  const policies = Object.values<any>(t.findResources('AWS::Logs::ResourcePolicy'));
+  expect(policies).toHaveLength(2);
+  for (const p of policies) {
+    const doc = JSON.parse(p.Properties.PolicyDocument['Fn::Join'] ? p.Properties.PolicyDocument['Fn::Join'][1].map((v: any) => typeof v === 'string' ? v : 'X').join('') : p.Properties.PolicyDocument);
+    expect(doc.Statement[0].Principal).toEqual({ Service: 'events.amazonaws.com' });
+    expect(Object.keys(doc.Statement[0].Condition.ArnEquals)).toEqual(['aws:SourceArn']);
+  }
 });

@@ -308,6 +308,7 @@ describe('data', () => {
       StringLike: { 'kms:EncryptionContext:blob': [...KEYSTORE_BLOBS] },
       'ForAllValues:StringEquals': { 'kms:EncryptionContextKeys': ['blob'] },
     });
+    expect([...KEYSTORE_CONTEXT_ACTIONS]).toEqual(['kms:Decrypt', 'kms:GenerateDataKey*', 'kms:Encrypt', 'kms:ReEncrypt*']);
     const denies = stmts.filter((x: any) => x.Effect === 'Deny');
     expect(denies).toHaveLength(3);
     for (const d of denies) {

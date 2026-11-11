@@ -361,7 +361,8 @@ export class AnchorSignerStack extends cdk.Stack {
     // Its alarms, trail and GuardDuty (P1.3): with them, before anything signs.
     addSignerAlarms(this, {
       envName, topic: this.topic, keyArn: this.key.keyArn, signerRoleName: names.roleName,
-      breakGlassRoleArn: props.breakGlassRoleArn, claimsTableArn: this.claims.tableArn, journal: this.journal, functionLogs: fnLogs,
+      breakGlassRoleArn: props.breakGlassRoleArn, taskRoleArn: props.taskRoleArn, functionName: names.functionName,
+      claimsTableArn: this.claims.tableArn, journal: this.journal, functionLogs: fnLogs,
       auditAccount: props.auditAccount, auditRegion: props.auditRegion,
     });
     new cdk.CfnOutput(this, 'SignerRoleArn', { value: this.role.roleArn });

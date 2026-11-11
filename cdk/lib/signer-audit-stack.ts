@@ -2,7 +2,6 @@ import * as cdk from 'aws-cdk-lib';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cwactions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as events from 'aws-cdk-lib/aws-events';
-import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
@@ -74,6 +73,9 @@ export class SignerAuditStack extends cdk.Stack {
       throw new Error(`alarmEmail must be an address (got "${props.alarmEmail}")`);
     }
     const names = signerAuditNames(envName);
+    // A log group as an EventBridge target: its ARN without the ":*".
+    const logGroupArn = (g: logs.LogGroup) => this.formatArn({ service: 'logs', resource: 'log-group', resourceName: g.logGroupName,
+      arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME });
     const replicationRole = `arn:${this.partition}:iam::${props.signerAccount}:role/${names.replicationRole}`;
 
     this.topic = new sns.Topic(this, 'AlarmTopic', { displayName: `VettID signer audit (${envName})` });
@@ -94,13 +96,17 @@ export class SignerAuditStack extends cdk.Stack {
     // eventBridgeEnabled adds a custom-resource Lambda to this account.
     (this.bucket.node.defaultChild as s3.CfnBucket).notificationConfiguration = { eventBridgeConfiguration: { eventBridgeEnabled: true } };
     // The signer account's replication role: replicas in, nothing else.
+    // Named by the account and aws:PrincipalArn, not as a principal: this
+    // stack deploys before the role exists, and S3 refuses a principal
+    // that doesn't.
+    const theRole = (roleArn: string) => ({ ArnEquals: { 'aws:PrincipalArn': roleArn } });
     this.bucket.addToResourcePolicy(new iam.PolicyStatement({
-      sid: 'SignerReplicates', principals: [new iam.ArnPrincipal(replicationRole)],
-      actions: ['s3:ReplicateObject'], resources: [this.bucket.arnForObjects('*')],
+      sid: 'SignerReplicates', principals: [new iam.AccountPrincipal(props.signerAccount)],
+      actions: ['s3:ReplicateObject'], resources: [this.bucket.arnForObjects('*')], conditions: theRole(replicationRole),
     }));
     this.bucket.addToResourcePolicy(new iam.PolicyStatement({
-      sid: 'SignerChecksVersioning', principals: [new iam.ArnPrincipal(replicationRole)],
-      actions: ['s3:GetBucketVersioning', 's3:ListBucket'], resources: [this.bucket.bucketArn],
+      sid: 'SignerChecksVersioning', principals: [new iam.AccountPrincipal(props.signerAccount)],
+      actions: ['s3:GetBucketVersioning', 's3:ListBucket'], resources: [this.bucket.bucketArn], conditions: theRole(replicationRole),
     }));
     // No principal of the signer account deletes, or replicates a delete,
     // whatever its own policies say.
@@ -125,7 +131,7 @@ export class SignerAuditStack extends cdk.Stack {
         object: { key: [{ prefix: `${AUDIT_DIGEST_PREFIX}${props.signerAccount}/CloudTrail-Digest/` }] },
       } },
     });
-    (arrivedRule.node.defaultChild as events.CfnRule).targets = [{ id: 'Target0', arn: arrivals.logGroupArn }];
+    (arrivedRule.node.defaultChild as events.CfnRule).targets = [{ id: 'Target0', arn: logGroupArn(arrivals) }];
     new logs.ResourcePolicy(this, 'ArrivalsPolicy', {
       resourcePolicyName: `vettid-signer-audit-${envName}-arrivals`,
       policyStatements: [new iam.PolicyStatement({
@@ -152,19 +158,34 @@ export class SignerAuditStack extends cdk.Stack {
     const forwardRole = `arn:${this.partition}:iam::${props.signerAccount}:role/${names.forwardRole}`;
     const bus = new events.EventBus(this, 'AlarmBus', { eventBusName: names.bus });
     bus.addToResourcePolicy(new iam.PolicyStatement({
-      sid: 'SignerForwards', principals: [new iam.ArnPrincipal(forwardRole)], actions: ['events:PutEvents'], resources: [bus.eventBusArn],
+      sid: 'SignerForwards', principals: [new iam.AccountPrincipal(props.signerAccount)], actions: ['events:PutEvents'],
+      resources: [bus.eventBusArn], conditions: theRole(forwardRole),
     }));
-    new events.Rule(this, 'SignerAlarms', {
+    const signerAlarms = new events.Rule(this, 'SignerAlarms', {
       description: `The signer account's alarms (${envName}), forwarded from it`,
       eventBus: bus,
       // Everything but its heartbeat, which is watched below.
       eventPattern: { account: [props.signerAccount], detailType: [{ 'anything-but': ['Scheduled Event'] }] as any },
-      targets: [new targets.SnsTopic(this.topic)],
     });
+    (signerAlarms.node.defaultChild as events.CfnRule).targets = [{ id: 'Topic', arn: this.topic.topicArn }];
+    // The topic's policy, written out: this account's rules and alarms
+    // only (a topic policy replaces the default, so without the
+    // CloudWatch statement no alarm could publish).
+    this.topic.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'RulesOfThisAccount', principals: [new iam.ServicePrincipal('events.amazonaws.com')], actions: ['sns:Publish'],
+      resources: [this.topic.topicArn], conditions: { StringEquals: { 'aws:SourceAccount': this.account } },
+    }));
+    this.topic.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'AlarmsOfThisAccount', principals: [new iam.ServicePrincipal('cloudwatch.amazonaws.com')], actions: ['sns:Publish'],
+      resources: [this.topic.topicArn], conditions: {
+        StringEquals: { 'aws:SourceAccount': this.account },
+        ArnLike: { 'aws:SourceArn': `arn:${this.partition}:cloudwatch:${this.region}:${this.account}:alarm:vettid-signer-audit-${envName}-*` },
+      },
+    }));
     // The forwarding's heartbeat: logged as it arrives; none for
-    // FORWARD_QUIET_MINUTES alarms, missing data breaching. A forwarding
-    // role denied or recreated, the bus policy changed, or the signer's
-    // rules removed: each stops it, and each is seen here.
+    // FORWARD_QUIET_MINUTES alarms, missing data breaching. The forwarding
+    // role denied, the bus policy changed, or the signer's heartbeat rule
+    // removed: each stops it, and each is seen here.
     const heartbeats = new logs.LogGroup(this, 'Heartbeats', {
       retention: logs.RetentionDays.ONE_MONTH, removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
@@ -173,7 +194,7 @@ export class SignerAuditStack extends cdk.Stack {
       eventBus: bus,
       eventPattern: { account: [props.signerAccount], source: ['aws.events'], detailType: ['Scheduled Event'] },
     });
-    (heartbeatRule.node.defaultChild as events.CfnRule).targets = [{ id: 'Target0', arn: heartbeats.logGroupArn }];
+    (heartbeatRule.node.defaultChild as events.CfnRule).targets = [{ id: 'Target0', arn: logGroupArn(heartbeats) }];
     new logs.ResourcePolicy(this, 'HeartbeatsPolicy', {
       resourcePolicyName: `vettid-signer-audit-${envName}-heartbeats`,
       policyStatements: [new iam.PolicyStatement({

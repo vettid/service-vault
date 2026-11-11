@@ -208,7 +208,10 @@ export interface ServiceVaultStackProps extends cdk.StackProps {
    * `{"blob": <a known name>}`, `anchor-key` not among them, for every
    * principal (explicit denies). Set only at the runbook's step 7 (P1.6),
    * after the re-seal and the deletion of `anchor-key`: before that, it
-   * would lock out every blob not yet re-sealed. Default off.
+   * would lock out every blob not yet re-sealed. And only once the task
+   * runs P1.4's code: the daemon before it loads (or creates) `anchor-key`
+   * at start (cmd/service-vault), which the policy refuses, so it
+   * wouldn't start. Default off.
    */
   readonly keystoreContextRequired?: boolean;
 }
