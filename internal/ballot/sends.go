@@ -17,16 +17,21 @@ import (
 // members, sending in series takes longer than a request may (#6946).
 //
 // A proposal's sends run one message at a time, in the order they were
-// started (so no member is sent vote.extended before vote.proposal), each
-// to its members in connection order; different proposals' sends run side
-// by side. The peer serialises sends anyway, so sending one message to
+// started, each to its members in connection order; different proposals'
+// sends run side by side. The order is the order sent, not delivered: no
+// member is sent vote.extended before vote.proposal, but a vote.proposal
+// that failed and is sent again later (a /publish) can reach a member
+// after the vote.extended sent meanwhile. The peer serialises sends anyway, so sending one message to
 // several members at once would buy nothing. A member a send misses
 // still learns of it: of a proposal, from the site's index, asking with
 // vote.status (§10.1, §4.2); of an extension, from the index (§10.2); of
 // the close, at its fixed time (§8.3).
 
-// SendTimeout bounds one member's send once the peer takes it (the wait
-// for the peer's lock is not bounded by it).
+// SendTimeout bounds one member's send once the peer takes it. The wait
+// for the peer's lock is not bounded by it: a relay that hangs holds the
+// lock for up to SendTimeout a send, so a request that needs the peer
+// meanwhile (a close collecting) can run past the API's 30 s and answer
+// retry.
 const SendTimeout = 30 * time.Second
 
 // MaxFailuresInARow stops a job after that many sends in a row have
@@ -34,7 +39,8 @@ const SendTimeout = 30 * time.Second
 // drain runs out SendTimeout) or the store failing, while the job holds
 // the peer, its proposal's later sends and its key (a retry). A relay that
 // refuses at once doesn't fail a send: the message is queued and saved,
-// and goes out later. A connection
+// and goes out later, until the outbox is full (peer.ErrOutboxFull, which
+// counts). A connection
 // gone (peer.ErrNotFound) or a member's outbox full (peer.ErrBusy) is
 // about that member only: it fails that send without counting. The
 // members not sent learn of it as above.
@@ -75,8 +81,9 @@ func sortedConns(members map[string]Member) []string {
 // sendInBackground queues typ to each of conns, with the body body gives
 // for it, behind the proposal's earlier sends, under the Manager's
 // Background context. A send already queued or running under key isn't
-// queued again: it returns false. Each body is built as it is sent, so
-// the bodies aren't all held at once.
+// queued again, nor is anything once StopSends was called: it returns
+// false, and the caller answers that nothing is being sent. Each body is
+// built as it is sent, so the bodies aren't all held at once.
 func (m *Manager) sendInBackground(proposalID, key, typ string, conns []string, body func(conn string) (json.RawMessage, error)) bool {
 	m.sends.mu.Lock()
 	defer m.sends.mu.Unlock()

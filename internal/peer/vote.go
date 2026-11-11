@@ -133,6 +133,9 @@ func (p *Peer) SendMessage(ctx context.Context, connID, typ string, body json.Ra
 	if c == nil || c.State != StateActive {
 		return "", ErrNotFound
 	}
+	if n, size := p.outboxLoad(); n >= sendOutboxLimit.n || size >= sendOutboxLimit.bytes {
+		return "", ErrOutboxFull
+	}
 	now := p.now()
 	id := p.sendTo(c, typ, body, now)
 	if id == "" {
@@ -145,6 +148,34 @@ func (p *Peer) SendMessage(ctx context.Context, connID, typ string, body json.Ra
 		return "", err
 	}
 	return id, nil
+}
+
+// MaxSendOutbox and MaxSendOutboxBytes bound the outbox SendMessage adds
+// to (chosen; not in the spec). A relay that refuses deposits at once
+// doesn't fail a send: the message stays in the outbox, sealed, in
+// memory and in the store, and a restart loads it back. One vote's sends
+// to 15,000 members during an outage would otherwise hold about 200 MB
+// against the task's 512 MiB (#6946). Past either bound SendMessage
+// answers ErrOutboxFull, and the vote's send gives up after
+// ballot.MaxFailuresInARow of them; members not sent learn of the vote
+// as BALLOT-PROTOCOL §4.2 says. The other messages (responses, sign-in
+// and approval challenges) are bounded per connection only
+// (MaxOutboxPerConn), so a vote's sends can't crowd them out.
+const (
+	MaxSendOutbox      = 8192
+	MaxSendOutboxBytes = 64 << 20
+)
+
+// sendOutboxLimit is the bounds in force (tests lower them).
+var sendOutboxLimit = struct{ n, bytes int }{MaxSendOutbox, MaxSendOutboxBytes}
+
+// outboxLoad is the outbox's entries and their payload bytes.
+func (p *Peer) outboxLoad() (n, size int) {
+	for _, e := range p.outbox {
+		n++
+		size += len(e.Payload)
+	}
+	return n, size
 }
 
 // Caught reports whether every message the relay received before t has

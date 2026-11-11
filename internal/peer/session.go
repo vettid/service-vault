@@ -335,6 +335,11 @@ var ErrNotFound = errors.New("peer: not found")
 // MaxOutboxPerConn of them are waiting.
 var ErrBusy = errors.New("peer: connection busy")
 
+// ErrOutboxFull is SendMessage refused because the whole outbox is at
+// MaxSendOutbox entries or MaxSendOutboxBytes of payload: the relay is
+// not taking deposits from this service (an outage), not one member.
+var ErrOutboxFull = errors.New("peer: outbox full")
+
 // Remove ends a connection from the service's side (§7.4): the member's
 // vault gets connection.removed, best effort.
 func (p *Peer) Remove(ctx context.Context, connID string) error {

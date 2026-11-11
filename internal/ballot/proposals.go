@@ -297,6 +297,15 @@ func (m *Manager) Publish(ctx context.Context, id string) (int, error) {
 	if o == nil {
 		return 0, ErrUnknownProposal
 	}
+	// Once the results are published, members are sent vote.closed: a
+	// vote.proposal sent after it would only tell them of a vote that is
+	// over.
+	if _, done, err := m.Store.Records.Get(ctx, KindResults, id); err != nil {
+		return 0, err
+	} else if done {
+		m.log().Info("vote.proposal not sent: the results are published", "proposal_id", id)
+		return 0, nil
+	}
 	if o.Bundle == nil {
 		// Published late (members' requests went unanswered meanwhile):
 		// their vaults send a cast again hourly and stop at the close, so
@@ -332,9 +341,12 @@ func (m *Manager) Publish(ctx context.Context, id string) (int, error) {
 			return 0, fmt.Errorf("ballot: publish %s: a member's body: %w", id, err)
 		}
 	}
-	m.sendInBackground(id, "proposal/"+id, TypeProposal, conns, body)
-	m.log().Info("proposal published", "proposal_id", id, "eligible", p.Eligible, "sending", len(conns))
-	return len(conns), nil
+	sending := 0
+	if m.sendInBackground(id, "proposal/"+id, TypeProposal, conns, body) {
+		sending = len(conns)
+	}
+	m.log().Info("proposal published", "proposal_id", id, "eligible", p.Eligible, "sending", sending)
+	return sending, nil
 }
 
 // proposalBody is vote.proposal's body (§4.1).

@@ -928,3 +928,60 @@ func TestEmptyAtIsMonotonic(t *testing.T) {
 		t.Fatalf("emptyAt without a monotonic reading: %v", f.p.emptyAt)
 	}
 }
+
+// SendMessage stops adding to an outbox the relay isn't taking from, by
+// entries and by bytes, with ErrOutboxFull; once the relay takes them,
+// sends go again.
+func TestSendMessageOutboxBound(t *testing.T) {
+	ctx := context.Background()
+	for _, bound := range []string{"entries", "bytes"} {
+		f := newFixture(t)
+		var cids []string
+		for i := 0; i < 4; i++ {
+			cids = append(cids, f.connect(f.member(byte(10+i)), fmt.Sprintf("t%d", i)))
+		}
+		f.pump()
+		down := true
+		f.failDeposit = func(string, string) error {
+			if down {
+				return errUnavailable
+			}
+			return nil
+		}
+		body := json.RawMessage(`{"proposal":"` + strings.Repeat("x", 1000) + `"}`)
+		old := sendOutboxLimit
+		n, _ := f.p.outboxLoad()
+		if bound == "entries" {
+			sendOutboxLimit.n = n + 5
+		} else {
+			_, size := f.p.outboxLoad()
+			sendOutboxLimit.bytes = size + 5*1000 // about 5 sealed bodies
+		}
+		t.Cleanup(func() { sendOutboxLimit = old })
+		queued, full := 0, 0
+		for i := 0; i < 40; i++ {
+			_, err := f.p.SendMessage(ctx, cids[i%len(cids)], "vote.proposal", body)
+			switch {
+			case err == nil:
+				queued++
+			case errors.Is(err, ErrOutboxFull):
+				full++
+			default:
+				t.Fatalf("%s: send %d: %v", bound, i, err)
+			}
+		}
+		if queued == 0 || queued > 5 || full != 40-queued {
+			t.Fatalf("%s: queued %d, full %d", bound, queued, full)
+		}
+		if got, _ := f.p.outboxLoad(); got > n+5 {
+			t.Fatalf("%s: outbox %d entries", bound, got)
+		}
+		down = false
+		f.clk.Advance(time.Minute) // past the deposits' retry backoff
+		f.pump()
+		if _, err := f.p.SendMessage(ctx, cids[0], "vote.proposal", body); err != nil {
+			t.Fatalf("%s: after the relay is back: %v", bound, err)
+		}
+		sendOutboxLimit = old
+	}
+}

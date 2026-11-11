@@ -57,6 +57,8 @@ type fakeSender struct {
 	// failWith, set before any send, fails the sends to a connection
 	// with that error (the relay down, say).
 	failWith map[string]error
+	// left is how long the last send's context had before its deadline.
+	left time.Duration
 }
 
 func (s *fakeSender) SendMessage(ctx context.Context, conn, typ string, body json.RawMessage) (string, error) {
@@ -78,6 +80,11 @@ func (s *fakeSender) SendMessage(ctx context.Context, conn, typ string, body jso
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if d, ok := ctx.Deadline(); ok {
+		s.left = time.Until(d)
+	} else {
+		s.left = -1
+	}
 	if s.down[conn] {
 		return "", peer.ErrNotFound
 	}
