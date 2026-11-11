@@ -37,6 +37,7 @@ type fakeSigstore struct {
 	tsaKey   *ecdsa.PrivateKey
 	tsaMode  string
 	location string // the 409's Location, when set
+	skew     int64  // seconds the entry is integrated after now
 }
 
 func (f *fakeSigstore) handler(t *testing.T) http.Handler {
@@ -44,7 +45,7 @@ func (f *fakeSigstore) handler(t *testing.T) http.Handler {
 	entry := func() []byte {
 		leaf := vote.LeafHash(f.entered)
 		out, _ := json.Marshal(map[string]any{"24296fb24b8ad77a": map[string]any{
-			"body": base64.StdEncoding.EncodeToString(f.entered), "integratedTime": 1793520000, "logID": "c0d23d6ad406973f", "logIndex": 7,
+			"body": base64.StdEncoding.EncodeToString(f.entered), "integratedTime": time.Now().Unix() + f.skew, "logID": "c0d23d6ad406973f", "logIndex": 7,
 			"verification": map[string]any{"signedEntryTimestamp": []byte("set"),
 				"inclusionProof": map[string]any{"checkpoint": "rekor.sigstage.dev - 1\n1\n…\n", "hashes": []string{}, "logIndex": 0,
 					"rootHash": hex.EncodeToString(leaf), "treeSize": 1}}}})

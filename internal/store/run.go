@@ -1,8 +1,8 @@
 package store
 
 import (
-	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -133,6 +133,13 @@ func checkRestoreWindow(past []Restore, point, now time.Time) error {
 	return nil
 }
 
+// hasSum is whether a stored record carries its plaintext's sum (it was
+// sealed or re-sealed with its context, key protection P1.1).
+func hasSum(raw []byte) bool {
+	var s keystore.Sealed
+	return json.Unmarshal(raw, &s) == nil && len(s.Sum) == sha256.Size
+}
+
 // CheckTarget is CheckRestore's check of the tables' contents: src holds
 // a service vault's keys, t the same ones (or none, or other ones with
 // otherKeys), and t has no recent heartbeat.
@@ -146,7 +153,13 @@ func (t *Table) CheckTarget(ctx context.Context, src string, otherKeys bool, now
 	case errors.Is(err, keystore.ErrNotFound):
 	case err != nil:
 		return err
-	case !bytes.Equal(srcKeys, dstKeys) && !otherKeys:
+	case keystore.SameSecrets(srcKeys, dstKeys):
+	case !hasSum(srcKeys) && hasSum(dstKeys):
+		// The source is from before the re-seal: after the cutover its
+		// keys can't be opened by anyone (GC #7406 §7, the owner's b on
+		// #7455), so -other-keys doesn't make it usable.
+		return fmt.Errorf("store: %s is from before the re-seal (its keys carry no sum) and %s is after it: a table from before can't be opened once the cutover is done; restore from a backup taken after the re-seal", src, t.Name)
+	case !otherKeys:
 		return fmt.Errorf("store: %s holds other keys than %s: not the same deployment (-other-keys replaces them)", t.Name, src)
 	}
 	at, ok, err := t.LastHeartbeat(ctx)
