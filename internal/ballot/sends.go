@@ -30,9 +30,11 @@ import (
 const SendTimeout = 30 * time.Second
 
 // MaxFailuresInARow stops a job after that many sends in a row have
-// failed for a reason that isn't the member's own: the relay is down or
-// hanging, and each failure can take SendTimeout while the job holds the
-// peer, its proposal's later sends and its key (a retry). A connection
+// failed for a reason that isn't the member's own: the relay hanging (the
+// drain runs out SendTimeout) or the store failing, while the job holds
+// the peer, its proposal's later sends and its key (a retry). A relay that
+// refuses at once doesn't fail a send: the message is queued and saved,
+// and goes out later. A connection
 // gone (peer.ErrNotFound) or a member's outbox full (peer.ErrBusy) is
 // about that member only: it fails that send without counting. The
 // members not sent learn of it as above.

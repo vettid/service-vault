@@ -171,7 +171,7 @@ func TestSendsOrderPerProposal(t *testing.T) {
 	}
 }
 
-// A job whose sends keep failing (the relay down or hanging) stops after
+// A job whose sends keep failing (the relay hanging, the store failing) stops after
 // MaxFailuresInARow in a row, rather than holding the peer and its
 // proposal's later sends for every member; a success resets the count.
 func TestSendsGiveUpAfterFailuresInARow(t *testing.T) {
