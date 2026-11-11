@@ -51,14 +51,32 @@ var ErrNoPublisher = errors.New("ballot: proposals can't be published here")
 var ErrUnknownProposal = errors.New("ballot: unknown proposal")
 
 // MaxEligible is the most eligible members this service lets a proposal
-// have (chosen; not in the spec), below the protocol's vote.MaxEligible.
-// A proposal's members and its results' rows are stored in chunks
-// (KindChunk), so DynamoDB's 400 KB item no longer bounds them. It is a
-// chosen limit, kept until publishing (each member's proof built from
-// the whole tree, and the sends to every member, within the admin's
-// request) and the results' single upload to the votes site are scaled
-// for more.
+// have (chosen; not in the spec; BALLOT-PROTOCOL §3.2), below the
+// protocol's vote.MaxEligible (100,000). It stays 1,000 until a staging
+// run at PlannedMaxEligible passes (the owner's choice, GC #8336), then
+// is raised to it.
 const MaxEligible = 1000
+
+// PlannedMaxEligible is the cap this service is built and tested for:
+// verified to fit, and MaxEligible is raised to it after the staging run.
+// The stored values' bounds (chunk.go) already allow it. At 15,000
+// (#6946, TestMaxEligibleFitsOneItem):
+//   - the members (about 140 bytes each, 2.1 MB) and the results' rows
+//     (about 251 bytes each, 3.8 MB) are stored in chunks (KindChunk) of
+//     ChunkSize, 8 and 13 of them, so DynamoDB's 400 KB item doesn't
+//     bound them;
+//   - every member's record proof comes from one tree (about 14 ms);
+//   - the sends go out in the background (sends.go), not in the request;
+//   - the rows, 5.0 MB as base64, fit the results' single upload to the
+//     votes site (6,225,920 bytes, less at most 512 KB of results as
+//     base64 and a 64 KB bundle: SiteRowsUpload), and so would rows of
+//     maxRowBytes;
+//   - create answers in tens of milliseconds and close in about 1.5 s
+//     of the API's 30 s, with fakes for the site and the peer.
+//
+// The upload is the binding bound: past about 16,000 members the rows no
+// longer fit it, and the results would need to go up in parts.
+const PlannedMaxEligible = 15000
 
 // ResendCover is how long before its close a held proposal must be
 // published for every member's vault to send its cast again in time: the
@@ -111,6 +129,17 @@ type Manager struct {
 	// (probeWait): no probe until the authority's time can have reached it.
 	probes sync.Map
 	sends  sends
+	// eligibleCap, when set (tests, at most PlannedMaxEligible), is the cap
+	// in place of MaxEligible.
+	eligibleCap int
+}
+
+// maxEligible is the cap Create applies.
+func (m *Manager) maxEligible() int {
+	if m.eligibleCap > 0 {
+		return min(m.eligibleCap, PlannedMaxEligible)
+	}
+	return MaxEligible
 }
 
 // ErrNoTimestamps is a service vault with no way to verify the time of an
@@ -221,7 +250,7 @@ func (m *Manager) Create(ctx context.Context, approvalID string, in ProposalInpu
 		// (§3.1), and none would get it.
 		return nil, &ErrInput{errors.New("ballot: no eligible members")}
 	}
-	if len(conns) > MaxEligible {
+	if len(conns) > m.maxEligible() {
 		return nil, fmt.Errorf("%w: the roster has %d", ErrTooManyEligible, len(conns))
 	}
 	sort.Strings(conns)

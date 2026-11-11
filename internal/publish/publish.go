@@ -499,6 +499,17 @@ func anchorSig(bundle json.RawMessage) []byte {
 	return b.MessageSignature.Signature
 }
 
+// uploadBody is the JSON the votes site takes: doc, sig and rows as
+// base64, the bundle as it is.
+func uploadBody(doc, sig []byte, bundle json.RawMessage, rows []byte) ([]byte, error) {
+	return json.Marshal(struct {
+		Doc    []byte          `json:"doc"`
+		Sig    []byte          `json:"sig"`
+		Bundle json.RawMessage `json:"bundle"`
+		Rows   []byte          `json:"rows,omitempty"`
+	}{doc, sig, bundle, rows})
+}
+
 // publish anchors doc (once: a retry, even after a restart, sends the
 // same bundle, which the site wants, §4 "Write-once") and uploads it.
 // With notBefore, only a bundle timestamped at or after it is uploaded
@@ -519,12 +530,7 @@ func (p *Publisher) publish(ctx context.Context, id, name string, doc, sig, rows
 
 // upload posts doc with its signature, bundle and rows to the site.
 func (p *Publisher) upload(ctx context.Context, id, name string, doc, sig, rows []byte, bundle json.RawMessage) (ballot.Receipt, error) {
-	body, err := json.Marshal(struct {
-		Doc    []byte          `json:"doc"`
-		Sig    []byte          `json:"sig"`
-		Bundle json.RawMessage `json:"bundle"`
-		Rows   []byte          `json:"rows,omitempty"`
-	}{doc, sig, bundle, rows})
+	body, err := uploadBody(doc, sig, bundle, rows)
 	if err != nil {
 		return ballot.Receipt{}, err
 	}

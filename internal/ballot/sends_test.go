@@ -237,7 +237,7 @@ func TestSendsStopAtAFullOutbox(t *testing.T) {
 	const bound = 100
 	out := &boundedOutbox{bound: bound}
 	m.Sender = out
-	conns := make([]string, MaxEligible)
+	conns := make([]string, PlannedMaxEligible)
 	for i := range conns {
 		conns[i] = fmt.Sprintf("m%05d", i)
 	}

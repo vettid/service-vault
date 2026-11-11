@@ -479,12 +479,9 @@ func serve(args []string) error {
 		waitSends, stopQueueing = mgr.Wait, mgr.StopSends
 		approvals.EligibleCount = func(context.Context) (int, error) { return len(p.Eligible()), nil }
 		approvals.ProposalTitle = func(ctx context.Context, id string) (string, bool, error) {
-			o, err := ballots.OpenProposal(ctx, id)
-			if err != nil || o == nil {
-				return "", false, err
-			}
-			pr, err := o.Parsed()
-			if err != nil {
+			// The document alone: the members aren't read for a title.
+			pr, err := ballots.ProposalDocument(ctx, id)
+			if err != nil || pr == nil {
 				return "", false, err
 			}
 			return pr.Title, true, nil

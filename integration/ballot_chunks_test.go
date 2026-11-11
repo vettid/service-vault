@@ -46,7 +46,7 @@ func (caught) Caught(context.Context, time.Time, time.Time, time.Time, time.Time
 	return true, 0, nil
 }
 
-// At ballot.MaxEligible members, on DynamoDB with sealed records: the
+// At ballot.PlannedMaxEligible members, on DynamoDB with sealed records: the
 // proposal's members and the results' rows (a row per member, voted or
 // not) are stored in chunks, every item within DynamoDB's 400 KB, and
 // read back whole; with a chunk deleted, the proposal can't be read.
@@ -62,7 +62,7 @@ func TestBallotChunksAtCapOnDynamoDB(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := make(roster, ballot.MaxEligible)
+	r := make(roster, ballot.PlannedMaxEligible)
 	for i := range r {
 		r[i] = fmt.Sprintf("01JBQZ%020d", i) // a ULID's length
 	}
@@ -73,6 +73,7 @@ func TestBallotChunksAtCapOnDynamoDB(t *testing.T) {
 		Roster: r, Sender: sink{}, Publisher: closingSite{}, Catcher: caught{}, Approvals: approveAll{}, NewID: envelope.NewULID,
 		Now: func() time.Time { return now }, Timestamp: ballottest.Time,
 		AuthorityTime: func(context.Context) (int64, error) { return now.Unix(), nil }}
+	m.SetEligibleCapForTest(ballot.PlannedMaxEligible)
 	opens := now.Add(time.Hour).Unix()
 	in := ballot.ProposalInput{Title: "Adopt the 2027 budget", Choices: []ballot.ChoiceInput{{Label: "Yes"}, {Label: "No"}},
 		Quorum: vote.Quorum{MinBallots: 0}, OpensAt: opens, ClosesAt: opens + 86400, OutageRule: ballot.DefaultOutageRule}
@@ -81,7 +82,7 @@ func TestBallotChunksAtCapOnDynamoDB(t *testing.T) {
 		t.Fatal(err)
 	}
 	o, err := m.Store.OpenProposal(ctx, c.ProposalID)
-	if err != nil || o == nil || len(o.Members) != ballot.MaxEligible || len(o.MemberChunks) == 0 {
+	if err != nil || o == nil || len(o.Members) != ballot.PlannedMaxEligible || len(o.MemberChunks) == 0 {
 		t.Fatalf("proposal: %v (%d members)", err, len(o.Members))
 	}
 
@@ -111,11 +112,17 @@ func TestBallotChunksAtCapOnDynamoDB(t *testing.T) {
 	t.Logf("%d members in %d chunks, %d bytes of rows in %d chunks", len(o.Members), len(o.MemberChunks), len(pr.Rows), len(pr.RowChunks))
 
 	// A chunk lost: the proposal is an error, never a proposal without
-	// members.
+	// members. The members a process has already read and checked stay
+	// in its cache (they never change); a fresh process, as a restore's
+	// start is, reads the chunks again.
 	if err := tbl.Peer().Apply(ctx, []peer.Change{{Kind: ballot.KindChunk, ID: o.MemberChunks[0].ID}}); err != nil {
 		t.Fatal(err)
 	}
-	if o, err := m.Store.OpenProposal(ctx, c.ProposalID); o != nil || !errors.Is(err, ballot.ErrChunkMissing) {
+	if o, err := m.Store.OpenProposal(ctx, c.ProposalID); err != nil || len(o.Members) != ballot.PlannedMaxEligible {
+		t.Fatalf("cached members, with a chunk deleted: %v", err)
+	}
+	fresh := &ballot.RecordStore{Records: st, Copy: &ballot.MemCopy{}}
+	if o, err := fresh.OpenProposal(ctx, c.ProposalID); o != nil || !errors.Is(err, ballot.ErrChunkMissing) {
 		t.Fatalf("with a chunk deleted: %v", err)
 	}
 }
