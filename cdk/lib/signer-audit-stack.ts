@@ -2,6 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cwactions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as events from 'aws-cdk-lib/aws-events';
+import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
@@ -13,8 +14,11 @@ import { signerAuditNames } from './anchor-signer-alarms';
 /** The locked copy is kept this long, in compliance mode (#7646). */
 export const AUDIT_RETENTION_DAYS = 365;
 
-/** With nothing new arriving for this many hours, the copy is stale and alarms (#7653). */
+/** With no trail digest arriving for this many hours, the copy is stale and alarms (#7653). */
 export const AUDIT_STALE_HOURS = 2;
+
+/** Where the signer's trail writes (its s3KeyPrefix "trail"), before <account>/CloudTrail-Digest/. */
+export const AUDIT_DIGEST_PREFIX = 'trail/AWSLogs/';
 
 export interface SignerAuditStackProps extends cdk.StackProps {
   readonly envName: string;
@@ -33,10 +37,16 @@ export interface SignerAuditStackProps extends cdk.StackProps {
  *    trail and its journal's copy) replicates. Only the signer account's
  *    replication role may write, and only replicas: no delete, no delete
  *    markers, no reads;
- *  - a staleness watch: every object that arrives is logged here, and no
- *    arrival for AUDIT_STALE_HOURS alarms to the owner. With nothing
- *    arriving (the trail stopped, replication broken, this watch broken
- *    itself) the alarm fires: it fails loud, never quiet.
+ *  - a staleness watch on the trail's digest files, which CloudTrail
+ *    writes every hour even when nothing happens: none arriving for
+ *    AUDIT_STALE_HOURS alarms to the owner. With none arriving (the trail
+ *    stopped or changed, replication broken, this watch broken itself) the
+ *    alarm fires: it fails loud, never quiet. Other objects (the journal's
+ *    copy, or filler written elsewhere) don't feed it;
+ *  - the alarm bus: the signer account's alarm rules and alarm state
+ *    changes are forwarded here by its forwarding role alone, and each
+ *    reaches the owner on this account's topic, so that quieting the
+ *    path inside the signer account is still seen from here.
  *
  * Deployed from the owner's session, before AnchorSigner-<env> (whose
  * replication needs the bucket). Nothing in bin/ deploys it (P1.6 wires it).
@@ -87,7 +97,7 @@ export class SignerAuditStack extends cdk.Stack {
     }));
     this.bucket.addToResourcePolicy(new iam.PolicyStatement({
       sid: 'SignerChecksVersioning', principals: [new iam.ArnPrincipal(replicationRole)],
-      actions: ['s3:GetBucketVersioning', 's3:List*'], resources: [this.bucket.bucketArn],
+      actions: ['s3:GetBucketVersioning', 's3:ListBucket'], resources: [this.bucket.bucketArn],
     }));
     // No principal of the signer account deletes, or replicates a delete,
     // whatever its own policies say.
@@ -106,8 +116,11 @@ export class SignerAuditStack extends cdk.Stack {
     // The target and its log resource policy are written out, as in
     // service-vault-stack, so that no custom-resource Lambda is added here.
     const arrivedRule = new events.Rule(this, 'Arrived', {
-      description: `An object arrived in the signer's locked copy (${envName})`,
-      eventPattern: { source: ['aws.s3'], detailType: ['Object Created'], detail: { bucket: { name: [this.bucket.bucketName] } } },
+      description: `A trail digest file arrived in the signer's locked copy (${envName})`,
+      eventPattern: { source: ['aws.s3'], detailType: ['Object Created'], detail: {
+        bucket: { name: [this.bucket.bucketName] },
+        object: { key: [{ prefix: `${AUDIT_DIGEST_PREFIX}${props.signerAccount}/CloudTrail-Digest/` }] },
+      } },
     });
     (arrivedRule.node.defaultChild as events.CfnRule).targets = [{ id: 'Target0', arn: arrivals.logGroupArn }];
     new logs.ResourcePolicy(this, 'ArrivalsPolicy', {
@@ -125,12 +138,27 @@ export class SignerAuditStack extends cdk.Stack {
     }).metric({ statistic: 'Sum', period: cdk.Duration.hours(1) });
     new cloudwatch.Alarm(this, 'Stale', {
       alarmName: `vettid-signer-audit-${envName}-stale`,
-      alarmDescription: `Nothing reached the signer's locked copy for ${AUDIT_STALE_HOURS} hours: the signer account's trail, its journal copy or replication has stopped (or this watch has)`,
+      alarmDescription: `No trail digest reached the signer's locked copy for ${AUDIT_STALE_HOURS} hours: the signer account's trail or replication has stopped or changed (or this watch has). Expected until AnchorSigner-${envName} is deployed.`,
       metric: arrived, threshold: 1, evaluationPeriods: AUDIT_STALE_HOURS,
       comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.BREACHING,
     }).addAlarmAction(new cwactions.SnsAction(this.topic));
 
+    // The alarm bus: only the signer account's forwarding role puts on it,
+    // and everything from that account reaches the owner.
+    const forwardRole = `arn:${this.partition}:iam::${props.signerAccount}:role/${names.forwardRole}`;
+    const bus = new events.EventBus(this, 'AlarmBus', { eventBusName: names.bus });
+    bus.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'SignerForwards', principals: [new iam.ArnPrincipal(forwardRole)], actions: ['events:PutEvents'], resources: [bus.eventBusArn],
+    }));
+    new events.Rule(this, 'SignerAlarms', {
+      description: `The signer account's alarms (${envName}), forwarded from it`,
+      eventBus: bus,
+      eventPattern: { account: [props.signerAccount] },
+      targets: [new targets.SnsTopic(this.topic)],
+    });
+
     new cdk.CfnOutput(this, 'LockedCopyBucket', { value: this.bucket.bucketName });
+    new cdk.CfnOutput(this, 'AlarmBusArn', { value: bus.eventBusArn });
   }
 }

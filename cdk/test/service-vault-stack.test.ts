@@ -330,6 +330,10 @@ describe('data', () => {
     expect(constOf(ks, 'SecretsName')).toBe('service-secrets');
     expect(constOf(ks, 'BallotCopyKeyName')).toBe('ballot-copy-key');
     expect(constOf(ks, 'AnchorKeyName')).toBe('anchor-key');
+    // The context key the policy names is the one the keystore sends.
+    const keystore = go('internal/keystore/keystore.go');
+    expect(constOf(keystore, 'ContextKey')).toBe('blob');
+    expect(keystore).toContain('map[string]string{ContextKey: name}');
     expect(constOf(ss, 'KeyName')).toBe('record-key');
     expect(ss).toContain('return KeyName + ".v" + strconv.FormatUint(uint64(version), 10)');
     expect([...KEYSTORE_BLOBS]).toEqual(['service-secrets', 'ballot-copy-key', 'record-key', 'record-key.v*']);

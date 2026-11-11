@@ -68,6 +68,8 @@ export interface AnchorSignerStackProps extends cdk.StackProps {
    * and watches that they keep arriving. Deployed there first.
    */
   readonly auditAccount: string;
+  /** SignerAudit-<env>'s region, for its alarm bus (default: this stack's). */
+  readonly auditRegion?: string;
   /** How long a signature stays valid for deploys (checked at deploy only; rollback is possible only within it). */
   readonly signatureValidityDays: number;
   /** The signed release to run; left out (the first deploy), no function is made. */
@@ -359,8 +361,8 @@ export class AnchorSignerStack extends cdk.Stack {
     // Its alarms, trail and GuardDuty (P1.3): with them, before anything signs.
     addSignerAlarms(this, {
       envName, topic: this.topic, keyArn: this.key.keyArn, signerRoleName: names.roleName,
-      breakGlassRoleArn: props.breakGlassRoleArn, claimsTable: names.claimsTable, journal: this.journal, functionLogs: fnLogs,
-      auditAccount: props.auditAccount,
+      breakGlassRoleArn: props.breakGlassRoleArn, claimsTableArn: this.claims.tableArn, journal: this.journal, functionLogs: fnLogs,
+      auditAccount: props.auditAccount, auditRegion: props.auditRegion,
     });
     new cdk.CfnOutput(this, 'SignerRoleArn', { value: this.role.roleArn });
     new cdk.CfnOutput(this, 'KeyAliasArn', { value: aliasArn });

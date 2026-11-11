@@ -1,7 +1,7 @@
 import * as cdk from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import { AnchorSignerStack, AnchorSignerStackProps } from '../lib/anchor-signer-stack';
-import { AUDIT_CHANGES, SIGNER_ALARMS, SIGNS_PER_HOUR, signerAuditNames } from '../lib/anchor-signer-alarms';
+import { ALARM_PATH_CHANGES, AUDIT_CHANGES, SIGNER_ALARMS, SIGNS_PER_HOUR, signerAuditNames, trailFilters } from '../lib/anchor-signer-alarms';
 
 const SIGNER_ACCT = '444455556666';
 const AUDIT_ACCT = '777788889999';
@@ -20,19 +20,36 @@ const ruleFor = (tpl: Template, source: string, name?: string) => rules(tpl).fil
 });
 const s = (x: unknown) => JSON.stringify(x);
 
-test('every rule reaches the account topic', () => {
+test('every rule reaches the account topic and the management account\'s bus (alarm state changes: the bus only)', () => {
   const topic = Object.keys(t.findResources('AWS::SNS::Topic'));
   expect(topic).toHaveLength(1);
+  const bus = `:events:us-east-1:${AUDIT_ACCT}:event-bus/${signerAuditNames('staging').bus}`;
   for (const r of rules(t)) {
+    expect(s(r.Properties.Targets)).toContain(bus);
+    if (r.Properties.EventPattern['detail-type']?.[0] === 'CloudWatch Alarm State Change') continue;
     expect(s(r.Properties.Targets)).toContain(topic[0]);
+  }
+  const out = rules(t).filter((r) => r.Properties.EventPattern['detail-type']?.[0] === 'CloudWatch Alarm State Change');
+  expect(out).toHaveLength(1);
+  expect(out[0].Properties.EventPattern.detail).toEqual({ alarmName: [{ prefix: 'vettid-anchor-signer-staging-' }], state: { value: ['ALARM'] } });
+});
+
+test('the forwarding role: EventBridge of this account only, PutEvents on that bus only', () => {
+  const role = Object.values<any>(t.findResources('AWS::IAM::Role')).find((r) => r.Properties.RoleName === signerAuditNames('staging').forwardRole);
+  expect(role.Properties.AssumeRolePolicyDocument.Statement[0].Principal).toEqual({ Service: 'events.amazonaws.com' });
+  expect(role.Properties.AssumeRolePolicyDocument.Statement[0].Condition).toEqual({ StringEquals: { 'aws:SourceAccount': SIGNER_ACCT } });
+  const stmts = Object.values<any>(t.findResources('AWS::IAM::Policy')).filter((p) => s(p.Properties.Roles).includes('AlarmForwardRole'))
+    .flatMap((p) => p.Properties.PolicyDocument.Statement);
+  expect(stmts.length).toBeGreaterThanOrEqual(1); // ours, and the target's own grant of the same
+  for (const st of stmts) {
+    expect(st.Action).toBe('events:PutEvents');
+    expect(s(st.Resource)).toContain(`:events:us-east-1:${AUDIT_ACCT}:event-bus/${signerAuditNames('staging').bus}`);
   }
 });
 
-test('the trail: every region, global events, file validation, read and write, into trail/', () => {
+test('the trail: every region, global events, file validation, into trail/', () => {
   t.hasResourceProperties('AWS::CloudTrail::Trail', { IsMultiRegionTrail: true, IncludeGlobalServiceEvents: true,
     EnableLogFileValidation: true, IsLogging: true, S3KeyPrefix: 'trail' });
-  const trail = Object.values<any>(t.findResources('AWS::CloudTrail::Trail'))[0].Properties;
-  expect(s(trail.EventSelectors ?? [{ ReadWriteType: 'All' }])).toContain('All');
   expect(ruleFor(t, 'aws.cloudtrail', 'StopLogging')).toHaveLength(1);
 });
 
@@ -59,7 +76,8 @@ test('the replication role: S3 of this account only, reads the source, may only 
   const trust = role.Properties.AssumeRolePolicyDocument.Statement;
   expect(trust).toHaveLength(1);
   expect(trust[0].Principal).toEqual({ Service: 's3.amazonaws.com' });
-  expect(trust[0].Condition).toEqual({ StringEquals: { 'aws:SourceAccount': SIGNER_ACCT } });
+  expect(trust[0].Condition.StringEquals).toEqual({ 'aws:SourceAccount': SIGNER_ACCT });
+  expect(s(trust[0].Condition.ArnLike['aws:SourceArn'])).toContain(`:s3:::${signerAuditNames('staging').sourceBucket(SIGNER_ACCT)}`);
   const policies = Object.values<any>(t.findResources('AWS::IAM::Policy'))
     .filter((p) => s(p.Properties.Roles).includes('AuditReplicationRole'));
   const stmts = policies.flatMap((p) => p.Properties.PolicyDocument.Statement);
@@ -89,7 +107,8 @@ test('a change to the copy path alarms: replication, bucket policy, versioning, 
   const r = rules(t).filter((x) => s(x.Properties.EventPattern.source) === s(['aws.s3', 'aws.firehose']));
   expect(r).toHaveLength(1);
   expect(r[0].Properties.EventPattern.detail.eventName).toEqual([...AUDIT_CHANGES]);
-  for (const n of ['PutBucketReplication', 'DeleteBucketReplication', 'PutBucketPolicy', 'PutBucketVersioning', 'DeleteDeliveryStream']) {
+  for (const n of ['PutBucketReplication', 'DeleteBucketReplication', 'PutBucketPolicy', 'PutBucketVersioning', 'DeleteDeliveryStream',
+    'PutBucketEncryption', 'DeleteBucketEncryption', 'PutObjectLockConfiguration', 'PutBucketPublicAccessBlock', 'DeleteBucketPublicAccessBlock']) {
     expect(AUDIT_CHANGES).toContain(n);
   }
   expect(ruleFor(t, 'aws.logs', 'DeleteSubscriptionFilter')).toHaveLength(1);
@@ -127,7 +146,8 @@ test('another principal: callers that are not role sessions, and role sessions o
 
 test('the function, the profile, the claims and the journal', () => {
   for (const n of ['UpdateFunctionCode', 'UpdateFunctionConfiguration', 'PutFunctionCodeSigningConfig', 'AddPermission',
-    'PutResourcePolicy', 'PutFunctionConcurrency', 'PublishLayerVersion']) {
+    'PutResourcePolicy', 'PutFunctionConcurrency', 'PublishLayerVersion', 'CreateEventSourceMapping', 'UpdateEventSourceMapping',
+    'DeleteAlias', 'PutFunctionEventInvokeConfig', 'PutProvisionedConcurrencyConfig', 'PutFunctionRecursionConfig', 'UpdateFunctionUrlConfig']) {
     expect(ruleFor(t, 'aws.lambda', n)).toHaveLength(1);
   }
   expect(ruleFor(t, 'aws.signer', 'RevokeSignature')).toHaveLength(1);
@@ -137,16 +157,52 @@ test('the function, the profile, the claims and the journal', () => {
   expect(s(ruleFor(t, 'aws.lambda')[0].Properties.EventPattern)).toContain('"prefix":"UpdateFunctionCode"');
 });
 
-test('us-east-1: the role, break-glass and root sign-in; elsewhere a warning instead', () => {
-  expect(ruleFor(t, 'aws.iam', 'PutRolePolicy')).toHaveLength(1);
-  expect(s(ruleFor(t, 'aws.sts', 'AssumeRole')[0].Properties.EventPattern)).toContain('break-glass');
-  expect(rules(t).filter((r) => r.Properties.EventPattern.source?.[0] === 'aws.signin')).toHaveLength(1);
+test('the trail: management events and the claim table\'s writes (advanced selectors), copied to a log group', () => {
+  const trail = Object.values<any>(t.findResources('AWS::CloudTrail::Trail'))[0].Properties;
+  expect(trail.EventSelectors).toBeUndefined(); // advanced selectors only: the two can't be mixed
+  const sel = trail.AdvancedEventSelectors;
+  expect(sel).toHaveLength(2);
+  expect(sel[0].FieldSelectors).toEqual([{ Field: 'eventCategory', Equals: ['Management'] }]);
+  const data = sel[1].FieldSelectors;
+  expect(data).toContainEqual({ Field: 'eventCategory', Equals: ['Data'] });
+  expect(data).toContainEqual({ Field: 'resources.type', Equals: ['AWS::DynamoDB::Table'] });
+  expect(data).toContainEqual({ Field: 'readOnly', Equals: ['false'] });
+  expect(s(data.find((f: any) => f.Field === 'resources.ARN').Equals)).toContain('Claims');
+  expect(s(trail.CloudWatchLogsLogGroupArn)).toContain('TrailLogs');
+});
+
+test('any region: break-glass use, root use, IAM writes, claim writes and deletes, from the trail\'s log group', () => {
+  const f = trailFilters(base.breakGlassRoleArn, 'vettid-anchor-signer-staging');
+  const filters = Object.values<any>(t.findResources('AWS::Logs::MetricFilter')).filter((x) => s(x.Properties.LogGroupName).includes('TrailLogs'));
+  for (const [name, pattern] of Object.entries(f)) {
+    const m = filters.find((x) => x.Properties.MetricTransformations[0].MetricName === name);
+    expect(m).toBeDefined();
+    expect(m.Properties.FilterPattern).toBe(pattern);
+    t.hasResourceProperties('AWS::CloudWatch::Alarm', { AlarmName: `vettid-anchor-signer-staging-${name}`, Threshold: 1 });
+  }
+  expect(f.break_glass).toContain(`$.requestParameters.roleArn = "${base.breakGlassRoleArn}"`);
+  expect(f.break_glass).toContain(`$.userIdentity.sessionContext.sessionIssuer.arn = "${base.breakGlassRoleArn}"`);
+  expect(f.root_use).toContain('$.userIdentity.type = "Root"');
+  expect(f.claims_write_other).toContain('sessionIssuer.userName != "vettid-anchor-signer-staging"');
+  // The same in every region: no region-only rules, and no warning.
   const app = new cdk.App();
   const west = new AnchorSignerStack(app, 'AS', { ...base, env: { account: SIGNER_ACCT, region: 'us-west-2' } });
   const tw = Template.fromStack(west);
-  expect(ruleFor(tw, 'aws.iam')).toHaveLength(0);
-  const warnings = app.synth().getStackArtifact(west.artifactId).messages.filter((m) => m.level === 'warning');
-  expect(warnings.some((w) => String(w.entry.data).includes('us-east-1'))).toBe(true);
+  expect(Object.values<any>(tw.findResources('AWS::Logs::MetricFilter')).filter((x) => s(x.Properties.LogGroupName).includes('TrailLogs'))).toHaveLength(6);
+  expect(rules(tw).filter((r) => ['aws.iam', 'aws.sts', 'aws.signin'].includes(r.Properties.EventPattern.source?.[0]))).toHaveLength(0);
+  expect(app.synth().getStackArtifact(west.artifactId).messages.filter((m) => m.level === 'warning')).toHaveLength(0);
+});
+
+test('the alarm path itself: rules, targets, the topic, alarms, metric filters and GuardDuty changes alarm', () => {
+  for (const [eventSource, eventNames] of Object.entries(ALARM_PATH_CHANGES)) {
+    const r = rules(t).filter((x) => s(x.Properties.EventPattern.detail?.eventSource) === s([eventSource]));
+    expect(r).toHaveLength(1);
+    expect(r[0].Properties.EventPattern.detail.eventName).toEqual(eventNames);
+  }
+  for (const n of ['DisableRule', 'RemoveTargets', 'DeleteTopic', 'Unsubscribe', 'DeleteAlarms', 'DisableAlarmActions', 'DeleteDetector', 'CreateFilter']) {
+    expect(s(ALARM_PATH_CHANGES)).toContain(`"${n}"`);
+  }
+  expect(ruleFor(t, 'aws.logs', 'DeleteMetricFilter')).toHaveLength(1);
 });
 
 test("the signer's own alarms, and more than 20 signs an hour", () => {
@@ -154,9 +210,15 @@ test("the signer's own alarms, and more than 20 signs an hour", () => {
   for (const name of SIGNER_ALARMS) {
     expect(alarms.some((a) => a.Properties.AlarmName === `vettid-anchor-signer-staging-${name}` && a.Properties.Threshold === 1)).toBe(true);
   }
-  const signs = alarms.find((a) => a.Properties.AlarmName === 'vettid-anchor-signer-staging-signs_per_hour');
-  expect(signs.Properties.Threshold).toBe(SIGNS_PER_HOUR + 1);
-  expect(signs.Properties.Period).toBe(3600);
+  for (const n of ['signs_per_hour', 'kms_signs_per_hour']) {
+    const a = alarms.find((x) => x.Properties.AlarmName === `vettid-anchor-signer-staging-${n}`);
+    expect(a.Properties.Threshold).toBe(SIGNS_PER_HOUR + 1);
+    expect(a.Properties.Period).toBe(3600);
+  }
+  // KMS's own count, from the trail: one the signer's code can't leave out.
+  const kms = Object.values<any>(t.findResources('AWS::Logs::MetricFilter')).find((f) => f.Properties.MetricTransformations[0].MetricName === 'kms_signs');
+  expect(kms.Properties.FilterPattern).toBe('{ ($.eventSource = "kms.amazonaws.com") && ($.eventName = "Sign") }');
+  expect(s(kms.Properties.LogGroupName)).toContain('TrailLogs');
   const filters = Object.values<any>(t.findResources('AWS::Logs::MetricFilter'));
   expect(filters.some((f) => f.Properties.FilterPattern.includes('$.kind') && f.Properties.FilterPattern.includes('sign'))).toBe(true);
 });

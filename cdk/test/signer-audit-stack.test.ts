@@ -52,10 +52,11 @@ test("the bucket policy: the signer's replication role may only replicate in; no
 });
 
 test(`the staleness watch: every arrival logged, none for ${AUDIT_STALE_HOURS} hours alarms (missing data breaches)`, () => {
-  const rule = Object.values<any>(t.findResources('AWS::Events::Rule'))[0].Properties;
-  expect(rule.EventPattern.source).toEqual(['aws.s3']);
+  const rule = Object.values<any>(t.findResources('AWS::Events::Rule')).find((r) => r.Properties.EventPattern.source?.[0] === 'aws.s3').Properties;
   expect(rule.EventPattern['detail-type']).toEqual(['Object Created']);
   expect(s(rule.EventPattern.detail.bucket.name)).toContain('LockedCopy');
+  // Only the trail's hourly digests feed it: the journal's copy or filler elsewhere can't keep it quiet.
+  expect(rule.EventPattern.detail.object.key).toEqual([{ prefix: `trail/AWSLogs/${SIGNER}/CloudTrail-Digest/` }]);
   const alarm = Object.values<any>(t.findResources('AWS::CloudWatch::Alarm'))[0].Properties;
   expect(alarm.AlarmName).toBe('vettid-signer-audit-staging-stale');
   expect(alarm.ComparisonOperator).toBe('LessThanThreshold');
@@ -65,6 +66,20 @@ test(`the staleness watch: every arrival logged, none for ${AUDIT_STALE_HOURS} h
   expect(alarm.TreatMissingData).toBe('breaching');
   expect(s(alarm.AlarmActions)).toContain('AlarmTopic');
   t.hasResourceProperties('AWS::SNS::Subscription', { Protocol: 'email', Endpoint: 'owner@example.org' });
+});
+
+test("the alarm bus: only the signer account's forwarding role puts on it; everything from that account reaches the owner", () => {
+  const bus = Object.values<any>(t.findResources('AWS::Events::EventBus'));
+  expect(bus).toHaveLength(1);
+  expect(bus[0].Properties.Name).toBe(names.bus);
+  const policies = Object.values<any>(t.findResources('AWS::Events::EventBusPolicy'));
+  expect(policies).toHaveLength(1);
+  const st = policies[0].Properties.Statement;
+  expect(st.Action).toBe('events:PutEvents');
+  expect(s(st.Principal)).toContain(`:iam::${SIGNER}:role/${names.forwardRole}`);
+  const rule = Object.values<any>(t.findResources('AWS::Events::Rule')).find((r) => r.Properties.EventBusName).Properties;
+  expect(rule.EventPattern).toEqual({ account: [SIGNER] });
+  expect(s(rule.Targets)).toContain('AlarmTopic');
 });
 
 test('the names match the signer side', () => {
