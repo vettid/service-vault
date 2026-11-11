@@ -925,8 +925,8 @@ item.
   labels that are the same once folded (format characters removed, NFC,
   simple case folding, which agrees with the service's `ToLower` rule on
   printable ASCII and the Latin-1 letters). §8.3 step 2 and §8.4 item 6: the results' timestamp is at or
-  after the `closes_at` in force (the service's 1-minute margin is the
-  timestamp authority's allowance); the service checks the bundle's time
+  after the `closes_at` in force (the service's 1-minute margin also
+  serves as the timestamp authority's allowance); the service checks the bundle's time
   before upload and anchors again if it is early (code follow-up). §9.1:
   `cast_sig` is transferable and links a member's ballots and sign-ins for
   whoever is shown it. No change to the messages or documents.
