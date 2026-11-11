@@ -782,7 +782,9 @@ func (c *Client) PublishProposal(ctx context.Context, id string) (json.RawMessag
 
 // CloseProposal counts, publishes and announces a proposal's results,
 // once it has closed and the relay's messages are in (else an *APIError:
-// not_closed, collecting).
+// not_closed, collecting, or stamped_early when the results' timestamp is
+// before the close: the service's clock is off, and a later call anchors
+// them again). The service retries none of these by itself: call again.
 func (c *Client) CloseProposal(ctx context.Context, id string) (json.RawMessage, error) {
 	return c.proposalCall(ctx, http.MethodPost, id, "/close")
 }

@@ -115,6 +115,20 @@ destination.
   at any time, also after the close. A member vault restored meanwhile
   may show the vote as being checked until the member opens it again or
   checks it in the app.
+- `results_stamped_early`: a vote's results came back from the timestamp
+  authority stamped before their close, so the service's clock is more
+  than a minute ahead of the authority's (BALLOT-PROTOCOL §8.3 step 2:
+  every member vault would fail them). They are not published, and the
+  close answers 503 `stamped_early`. Fix the clock (NTP), then close
+  again: each close anchors the results at most once more, and nothing
+  retries by itself. Member vaults keep checking for 7 days, so a late
+  publication is still judged.
+- `results_bundle_unverified`: a vote's results bundle failed its
+  timestamp check (the authority's signature, the pinned trusted root, or
+  its validity period); the results are not published. One anchored by
+  that close is dropped, so the next close anchors again; one kept from
+  an earlier close stays, as the site may hold it. The ERROR line names
+  the proposal and the error.
 - `ballot_not_counted`: a stored ballot failed the count's re-check
   (tag, credential signature or time) and was left out; the ERROR line
   names the proposal and the tag.
