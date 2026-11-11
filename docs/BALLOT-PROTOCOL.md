@@ -573,14 +573,26 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
   `closes_at` moves later, the close is still collecting and probes
   again. Until then nothing is counted, `published` and the counts are
   not fixed (§6), and no cast is refused `late` for it.
+  - **The evidence that every ballot is in** can't lean on the service's
+    clock either: it is a handled message whose relay time (`msg_ms`) is
+    at least `closes_at` + 1 min (above), or an empty collect that started
+    at or after the passing probe plus 1 min, by the service's clock (an
+    empty collect before it may be before the real close).
   - A probe that fails (the authority unreachable, a stamp that doesn't
     verify) counts nothing either; the service never falls back to its
-    own clock. A failed probe is retried with backoff, as a failed close
-    is.
-  - Probes are rationed: after a stamp whose `genTime` is before the
-    close, the next is made no sooner than the service's clock at that
-    probe plus (`closes_at` − `genTime`). A re-anchor of early results
-    (§8.3 step 2) waits the same way, from the early bundle's time.
+    own clock. The caller retries the close with backoff, as any failed
+    close; the service probes again no sooner than 10 s after a failure.
+    A request cancelled by its caller is not a failure.
+  - Probes are rationed. A passing probe holds for that `closes_at` (the
+    authority's time only moves forward); a `closes_at` moved later by an
+    extension is probed again. After a stamp whose `genTime` is before the
+    close, the next probe is made no sooner than the service's clock at
+    that probe plus (`closes_at` − `genTime`), but never later than
+    5 minutes after it, and at once if the service's clock has gone back
+    since (a corrected clock never starves the close).
+  - A re-anchor of early results (§8.3 step 2) waits on a fresh probe in
+    the same way: none is made until a probe's time is at or after the
+    close (a probe makes no transparency-log entry; a re-anchor does).
   - An authority that is unreachable or behind delays the count but
     can't make it early; the service raises an alarm while a close waits
     on it, as when Rekor is down (§10.1).
@@ -653,7 +665,10 @@ publishes its results has every member's check settle by itself.
    bundle cache keyed by hash, and the new anchor needs a fresh anchor
    signature, the ECDSA one (`results_sig` is deterministic, and the same
    anchor signature would only find the transparency log's existing
-   entry); anchors are rationed as the probes are (§7). The vault also
+   entry); a re-anchor waits for a probe at or after the close (§7). When
+  the site already holds the results (their index to be redone), an early
+  or unverifiable bundle is kept, with an alarm, and not uploaded again.
+  The vault also
    checks that the proposal
    and extensions in `results.json` are the ones it received; and its
    row's proof.
@@ -952,9 +967,12 @@ item.
   gets a stamp (no transparency-log entry) and counts only once its time
   is at or after the `closes_at` in force; until then, and when the probe
   fails, the vote is still collecting and no cast is refused `late` for
-  it. Probes and re-anchors are rationed. §8.3 step 2: the re-anchor of
-  early results stays, as the backstop. §10.1: the authority down or
-  behind. No change to the messages, the
+  it. The evidence that every ballot is in is relay time, or an empty
+  collect after the passing probe. Probes are rationed (a pass held, a
+  wait void when the clock goes back and at most 5 minutes, 10 s after a
+  failure); a re-anchor waits for a probe at or after the close. §8.3
+  step 2: the re-anchor of early results stays, as the backstop. §10.1:
+  the authority down or behind. No change to the messages, the
   documents, the vectors or what a member's vault checks.
 - **0.13.11 (2026-11-11):** (GC #1344, Ballot P1; VAULT-MESSAGING 0.88.12)
   §2: vote labels end in `0x00`, unlike VMS labels; why they are
