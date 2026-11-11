@@ -29,14 +29,27 @@ export const signerAuditNames = (envName: string) => ({
 
 /**
  * The services whose every management write alarms (by CloudTrail
- * eventSource, readOnly false): in this account, administered by the owner
- * alone, a write is a deploy or an intrusion, never routine. Data-plane
- * calls (the signer's own claim writes, journal lines, invokes) are not
- * management events and don't match. IAM and STS are read from the
- * trail's log group instead (any region).
+ * eventSource, readOnly false, eventCategory Management): in this account,
+ * administered by the owner alone, a write is a deploy or an intrusion,
+ * never routine. The trail's data events (the signer's claim writes and
+ * invokes) also reach EventBridge as writes, so the category is required:
+ * without it every sign alarms. IAM and STS are read from the trail's log
+ * group instead (any region); these rules see this region only.
  */
 export const WATCHED_SOURCES = ['lambda', 'signer', 'kms', 'dynamodb', 'logs', 'sns', 'events', 'monitoring',
-  'guardduty', 's3', 'firehose', 'cloudtrail'].map((s) => `${s}.amazonaws.com`);
+  'guardduty', 's3', 'firehose', 'cloudtrail', 'cloudformation', 'tagging', 'rolesanywhere', 'account']
+  .map((s) => `${s}.amazonaws.com`);
+
+/**
+ * Routine management writes, left out: a Lambda cold start's log stream
+ * (the signer's and CloudTrail's own), the forwarding's PutEvents, and the
+ * anchor key's use (its own rules watch it).
+ */
+export const ROUTINE_WRITES: Record<string, string[]> = {
+  'logs.amazonaws.com': ['CreateLogStream'],
+  'events.amazonaws.com': ['PutEvents'],
+  'kms.amazonaws.com': ['Sign', 'Verify', 'GetPublicKey'],
+};
 
 /** The signer's own alarm codes (its log's `alarm` field). */
 export const SIGNER_ALARMS = ['claim_conflict', 'claim_stuck', 'journal_failed', 'key_not_listed', 'key_mismatch'] as const;
@@ -57,13 +70,16 @@ export const TRAIL_QUIET_MINUTES = 30;
  */
 export const COUNT_EVALUATION_PERIODS = 3;
 
+/** The journal copy's delivery failing: records came in and delivery didn't succeed (a missing success datapoint counts as none failed). */
+export const JOURNAL_COPY_FAILED = 'IF(records > 0 AND FILL(ok, 1) < 1, 1, 0)';
+
 /**
  * Alarms on the trail's log group, which receives every region's events:
  * IAM, STS and sign-in events reach EventBridge only in their region, so
  * these can't be EventBridge rules in one region. Each is a CloudWatch
  * Logs JSON filter.
  */
-export const trailFilters = (p: { breakGlassRoleArn: string; signerRoleArn: string; taskRoleArn: string }) => ({
+export const trailFilters = (p: { breakGlassRoleArn: string; signerRoleArn: string; taskAccount: string }) => ({
   // Every use of the break-glass role: its AssumeRole (any region, any
   // route) and every call its sessions make.
   break_glass: `{ (($.eventName = "AssumeRole") && ($.requestParameters.roleArn = "${p.breakGlassRoleArn}")) || ($.userIdentity.sessionContext.sessionIssuer.arn = "${p.breakGlassRoleArn}") }`,
@@ -79,8 +95,11 @@ export const trailFilters = (p: { breakGlassRoleArn: string; signerRoleArn: stri
   claims_write_other: `{ ($.eventCategory = "Data") && ($.eventSource = "dynamodb.amazonaws.com") && (($.userIdentity.type != "AssumedRole") || ($.userIdentity.sessionContext.sessionIssuer.arn != "${p.signerRoleArn}")) }`,
   // A delete in the claim table, by anyone (the signer is never allowed one).
   claims_delete: '{ ($.eventCategory = "Data") && ($.eventSource = "dynamodb.amazonaws.com") && ($.eventName = "DeleteItem") }',
-  // An invoke of the signer (a data event) by anyone but the service task.
-  invoke_other: `{ ($.eventCategory = "Data") && ($.eventSource = "lambda.amazonaws.com") && (($.userIdentity.type != "AssumedRole") || ($.userIdentity.sessionContext.sessionIssuer.arn != "${p.taskRoleArn}")) }`,
+  // An invoke of the signer (a data event) from any account but the
+  // service's, or one refused: a cross-account caller's record may carry
+  // no session issuer, so it's keyed on the account (the function's
+  // resource policy admits the task role alone).
+  invoke_other: `{ ($.eventCategory = "Data") && ($.eventSource = "lambda.amazonaws.com") && (($.userIdentity.accountId != "${p.taskAccount}") || ($.errorCode EXISTS)) }`,
 });
 
 export interface SignerAlarmsProps {
@@ -143,7 +162,9 @@ export function addSignerAlarms(stack: cdk.Stack, props: SignerAlarmsProps): voi
   const rules: events.Rule[] = [];
   props.topic.addToResourcePolicy(new iam.PolicyStatement({
     sid: 'RulesOfThisAccount', principals: [new iam.ServicePrincipal('events.amazonaws.com')], actions: ['sns:Publish'],
-    resources: [props.topic.topicArn], conditions: { StringEquals: { 'aws:SourceAccount': stack.account } },
+    resources: [props.topic.topicArn], conditions: {
+      StringEquals: { 'aws:SourceAccount': stack.account }, ArnLike: { 'aws:SourceArn': arn('events', 'rule/*') },
+    },
   }));
   props.topic.addToResourcePolicy(new iam.PolicyStatement({
     sid: 'AlarmsOfThisAccount', principals: [new iam.ServicePrincipal('cloudwatch.amazonaws.com')], actions: ['sns:Publish'],
@@ -307,8 +328,11 @@ export function addSignerAlarms(stack: cdk.Stack, props: SignerAlarmsProps): voi
   // the Firehose, the trail.
   for (const source of WATCHED_SOURCES) {
     const id = source.split('.')[0];
-    notify(`Write-${id}`, `A write in the signer account (${source})`,
-      { detailType: ['AWS API Call via CloudTrail'], detail: { eventSource: [source], readOnly: [false] } });
+    const routine = ROUTINE_WRITES[source];
+    notify(`Write-${id}`, `A write in the signer account (${source})`, { detailType: ['AWS API Call via CloudTrail'], detail: {
+      eventSource: [source], readOnly: [false], eventCategory: ['Management'],
+      ...(routine ? { eventName: [{ 'anything-but': routine }] } : {}),
+    } });
   }
 
   // Alarms: this account's topic, and each state change into ALARM
@@ -348,7 +372,7 @@ export function addSignerAlarms(stack: cdk.Stack, props: SignerAlarmsProps): voi
     countAlarm(name, `The signer logged ${name}`, m, 1);
   }
   // From the trail's log group, every region.
-  const filters = trailFilters({ breakGlassRoleArn: props.breakGlassRoleArn, signerRoleArn, taskRoleArn: props.taskRoleArn });
+  const filters = trailFilters({ breakGlassRoleArn: props.breakGlassRoleArn, signerRoleArn, taskAccount: props.taskRoleArn.split(':')[4] });
   const describe: Record<keyof typeof filters, string> = {
     break_glass: 'The break-glass role was assumed or used (any region)',
     entry: 'A role was assumed by other than an AWS service, or someone signed in (any region): an admin entering the signer account',
@@ -356,7 +380,7 @@ export function addSignerAlarms(stack: cdk.Stack, props: SignerAlarmsProps): voi
     iam_change: 'An IAM write in the signer account (roles, policies, users)',
     claims_write_other: 'The claim table was written by someone other than the signer',
     claims_delete: 'An item of the claim table was deleted',
-    invoke_other: 'The signer was invoked by someone other than the service vault task',
+    invoke_other: 'The signer was invoked from another account than the service\'s, or an invoke was refused',
   };
   for (const [name, pattern] of Object.entries(filters) as [keyof typeof filters, string][]) {
     const m = new logs.MetricFilter(stack, `Trail-${name}`, {
@@ -382,12 +406,18 @@ export function addSignerAlarms(stack: cdk.Stack, props: SignerAlarmsProps): voi
 
   // The journal's copy failing to deliver (no data: nothing to deliver).
   countAlarm('journal_copy_failed', 'The journal\'s copy failed to reach the audit bucket', new cloudwatch.MathExpression({
-    expression: 'IF(records > 0 AND ok < 1, 1, 0)', period: cdk.Duration.minutes(5),
+    expression: JOURNAL_COPY_FAILED, period: cdk.Duration.minutes(5),
     usingMetrics: {
       records: new cloudwatch.Metric({ namespace: 'AWS/Firehose', metricName: 'IncomingRecords', dimensionsMap: { DeliveryStreamName: names.journalCopy }, statistic: 'Sum' }),
       ok: new cloudwatch.Metric({ namespace: 'AWS/Firehose', metricName: 'DeliveryToS3.Success', dimensionsMap: { DeliveryStreamName: names.journalCopy }, statistic: 'Average' }),
     },
   }), 1);
+
+  // A rule's target failing (the topic's policy, the bus's), any rule.
+  countAlarm('rule_target_failed', 'An EventBridge rule could not deliver to its target (the topic or the management account\'s bus)',
+    new cloudwatch.MathExpression({
+      expression: `SUM(SEARCH('{AWS/Events,RuleName} MetricName="FailedInvocations"', 'Sum', 300))`, period: cdk.Duration.minutes(5),
+    }), 1);
 
   // The trail's log group must keep receiving (the account's read events
   // are steady): if its delivery breaks, every filter above goes quiet.

@@ -173,7 +173,10 @@ export class SignerAuditStack extends cdk.Stack {
     // CloudWatch statement no alarm could publish).
     this.topic.addToResourcePolicy(new iam.PolicyStatement({
       sid: 'RulesOfThisAccount', principals: [new iam.ServicePrincipal('events.amazonaws.com')], actions: ['sns:Publish'],
-      resources: [this.topic.topicArn], conditions: { StringEquals: { 'aws:SourceAccount': this.account } },
+      resources: [this.topic.topicArn], conditions: {
+        StringEquals: { 'aws:SourceAccount': this.account },
+        ArnLike: { 'aws:SourceArn': `arn:${this.partition}:events:${this.region}:${this.account}:rule/*` },
+      },
     }));
     this.topic.addToResourcePolicy(new iam.PolicyStatement({
       sid: 'AlarmsOfThisAccount', principals: [new iam.ServicePrincipal('cloudwatch.amazonaws.com')], actions: ['sns:Publish'],

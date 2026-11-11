@@ -37,9 +37,11 @@ test("the bucket policy: the signer's replication role may only replicate in; no
   // By the account and aws:PrincipalArn (the role doesn't exist when this deploys).
   for (const a of allows) {
     expect(s(a.Principal)).toContain(`:iam::${SIGNER}:root`);
-    expect(s(a.Condition)).toContain('aws:PrincipalArn');
-    expect(s(a.Condition)).toContain(replicationRole.replace(/^arn:aws/, ''));
+    expect(Object.keys(a.Condition)).toEqual(['ArnEquals']);
+    expect(Object.keys(a.Condition.ArnEquals)).toEqual(['aws:PrincipalArn']);
+    expect(s(a.Condition.ArnEquals['aws:PrincipalArn'])).toContain(replicationRole.replace(/^arn:aws/, ''));
   }
+  expect(allows.find((a: any) => a.Sid === 'SignerChecksVersioning').Action.sort()).toEqual(['s3:GetBucketVersioning', 's3:ListBucket']);
   expect(allows.map((a: any) => a.Sid).sort()).toEqual(['SignerChecksVersioning', 'SignerReplicates']);
   const rep = allows.find((a: any) => a.Sid === 'SignerReplicates');
   expect(rep.Action).toBe('s3:ReplicateObject');
@@ -47,9 +49,8 @@ test("the bucket policy: the signer's replication role may only replicate in; no
   expect(deny.Effect).toBe('Deny');
   expect(deny.Principal).toEqual({ AWS: '*' });
   expect(deny.Condition).toEqual({ StringEquals: { 'aws:PrincipalAccount': SIGNER } });
-  for (const a of ['s3:ReplicateDelete', 's3:DeleteObjectVersion', 's3:PutObjectRetention', 's3:BypassGovernanceRetention', 's3:PutBucketObjectLockConfiguration']) {
-    expect(deny.Action).toContain(a);
-  }
+  expect([...deny.Action].sort()).toEqual(['s3:BypassGovernanceRetention', 's3:DeleteObject', 's3:DeleteObjectVersion',
+    's3:PutBucketObjectLockConfiguration', 's3:PutObjectLegalHold', 's3:PutObjectRetention', 's3:ReplicateDelete']);
   // TLS only (enforceSSL).
   expect(stmts.some((st: any) => st.Effect === 'Deny' && s(st.Condition).includes('aws:SecureTransport'))).toBe(true);
 });
@@ -80,8 +81,9 @@ test("the alarm bus: only the signer account's forwarding role puts on it; every
   const st = policies[0].Properties.Statement;
   expect(st.Action).toBe('events:PutEvents');
   expect(s(st.Principal)).toContain(`:iam::${SIGNER}:root`);
-  expect(s(st.Condition)).toContain('aws:PrincipalArn');
-  expect(s(st.Condition)).toContain(`:iam::${SIGNER}:role/${names.forwardRole}`);
+  expect(Object.keys(st.Condition)).toEqual(['ArnEquals']);
+  expect(Object.keys(st.Condition.ArnEquals)).toEqual(['aws:PrincipalArn']);
+  expect(s(st.Condition.ArnEquals['aws:PrincipalArn'])).toContain(`:iam::${SIGNER}:role/${names.forwardRole}`);
   const onBus = Object.values<any>(t.findResources('AWS::Events::Rule')).filter((r) => r.Properties.EventBusName).map((r) => r.Properties);
   expect(onBus).toHaveLength(2);
   const alarms = onBus.find((r) => r.Description.includes('alarms'));
@@ -119,16 +121,24 @@ test("the topic's policy: this account's rules and alarms only; every alarm and 
   expect(cw.Condition.StringEquals).toEqual({ 'aws:SourceAccount': MGMT });
   expect(s(cw.Condition.ArnLike['aws:SourceArn'])).toContain(`:alarm:vettid-signer-audit-staging-*`);
   const ev = st.find((x: any) => x.Sid === 'RulesOfThisAccount');
-  expect(ev.Condition).toEqual({ StringEquals: { 'aws:SourceAccount': MGMT } });
+  expect(ev.Principal).toEqual({ Service: 'events.amazonaws.com' });
+  expect(ev.Condition.StringEquals).toEqual({ 'aws:SourceAccount': MGMT });
+  expect(s(ev.Condition.ArnLike['aws:SourceArn'])).toContain(`:events:us-east-1:${MGMT}:rule/*`);
+  expect(cw.Action).toBe('sns:Publish');
   for (const a of Object.values<any>(t.findResources('AWS::CloudWatch::Alarm'))) expect(s(a.Properties.AlarmActions)).toContain('AlarmTopic');
 });
 
 test('log groups as targets: their ARN without ":*"', () => {
+  let n = 0;
   for (const r of Object.values<any>(t.findResources('AWS::Events::Rule'))) {
     for (const tg of r.Properties.Targets) {
-      if (s(tg.Arn).includes(':logs:')) expect(s(tg.Arn)).not.toContain(':*');
+      if (s(tg.Arn).includes(':log-group:')) {
+        n++;
+        expect(s(tg.Arn)).not.toContain(':*');
+      }
     }
   }
+  expect(n).toBe(2);
 });
 
 test('pinned: the staleness hours, the Deny on bucket and objects, the log policies bound to their rules', () => {
@@ -140,9 +150,12 @@ test('pinned: the staleness hours, the Deny on bucket and objects, the log polic
   expect(s(deny.Resource[1])).toContain('/*');
   const policies = Object.values<any>(t.findResources('AWS::Logs::ResourcePolicy'));
   expect(policies).toHaveLength(2);
-  for (const p of policies) {
+  for (const [p, ruleId] of [[policies.find((x) => s(x).includes('arrivals')), 'Arrived'], [policies.find((x) => s(x).includes('heartbeats')), 'SignerHeartbeat']] as [any, string][]) {
+    expect(p).toBeDefined();
     const doc = JSON.parse(p.Properties.PolicyDocument['Fn::Join'] ? p.Properties.PolicyDocument['Fn::Join'][1].map((v: any) => typeof v === 'string' ? v : 'X').join('') : p.Properties.PolicyDocument);
     expect(doc.Statement[0].Principal).toEqual({ Service: 'events.amazonaws.com' });
     expect(Object.keys(doc.Statement[0].Condition.ArnEquals)).toEqual(['aws:SourceArn']);
+    // Bound to its own rule.
+    expect(s(p.Properties.PolicyDocument)).toContain(ruleId);
   }
 });

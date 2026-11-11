@@ -2,9 +2,10 @@ import * as cdk from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import { AnchorSignerStack, AnchorSignerStackProps } from '../lib/anchor-signer-stack';
 import {
-  COUNT_EVALUATION_PERIODS, FORWARD_HEARTBEAT_MINUTES, SIGNER_ALARMS, SIGNS_PER_HOUR, TRAIL_QUIET_MINUTES, WATCHED_SOURCES,
-  signerAuditNames, trailFilters,
+  COUNT_EVALUATION_PERIODS, FORWARD_HEARTBEAT_MINUTES, JOURNAL_COPY_FAILED, ROUTINE_WRITES, SIGNER_ALARMS, SIGNS_PER_HOUR,
+  TRAIL_QUIET_MINUTES, WATCHED_SOURCES, signerAuditNames, trailFilters,
 } from '../lib/anchor-signer-alarms';
+import { FORWARD_QUIET_MINUTES } from '../lib/signer-audit-stack';
 
 const SIGNER_ACCT = '444455556666';
 const AUDIT_ACCT = '777788889999';
@@ -34,7 +35,7 @@ const alarm = (name: string) => alarms().find((a) => a.AlarmName === `vettid-anc
 const topicId = () => Object.keys(t.findResources('AWS::SNS::Topic'))[0];
 const BUS = `:events:us-east-1:${AUDIT_ACCT}:event-bus/${names.bus}`;
 const signerRoleArn = `arn:aws:iam::${SIGNER_ACCT}:role/vettid-anchor-signer-staging`;
-const filters = trailFilters({ breakGlassRoleArn: BREAK_GLASS, signerRoleArn, taskRoleArn: TASK_ROLE });
+const filters = trailFilters({ breakGlassRoleArn: BREAK_GLASS, signerRoleArn, taskAccount: '123456789012' });
 
 describe('targets and the topic', () => {
   test('every rule reaches the topic and the bus; alarm state changes and the heartbeat, the bus only', () => {
@@ -56,9 +57,11 @@ describe('targets and the topic', () => {
     const ev = st.find((x: any) => x.Sid === 'RulesOfThisAccount');
     expect(ev.Principal).toEqual({ Service: 'events.amazonaws.com' });
     expect(ev.Action).toBe('sns:Publish');
-    expect(ev.Condition).toEqual({ StringEquals: { 'aws:SourceAccount': SIGNER_ACCT } });
+    expect(ev.Condition.StringEquals).toEqual({ 'aws:SourceAccount': SIGNER_ACCT });
+    expect(s(ev.Condition.ArnLike['aws:SourceArn'])).toContain(`:events:us-east-1:${SIGNER_ACCT}:rule/*`);
     const cw = st.find((x: any) => x.Sid === 'AlarmsOfThisAccount');
     expect(cw.Principal).toEqual({ Service: 'cloudwatch.amazonaws.com' });
+    expect(cw.Action).toBe('sns:Publish');
     expect(cw.Condition.StringEquals).toEqual({ 'aws:SourceAccount': SIGNER_ACCT });
     expect(s(cw.Condition.ArnLike['aws:SourceArn'])).toContain(`:cloudwatch:us-east-1:${SIGNER_ACCT}:alarm:vettid-anchor-signer-staging-*`);
   });
@@ -74,7 +77,9 @@ describe('targets and the topic', () => {
     expect(s(st[0].Resource)).toContain(BUS);
   });
 
-  test('the heartbeat: every 5 minutes, through the forwarding role, to the bus', () => {
+  test('the heartbeat: every 5 minutes, through the forwarding role, to the bus; the audit side waits for 3 missed', () => {
+    expect(FORWARD_HEARTBEAT_MINUTES).toBe(5);
+    expect(FORWARD_QUIET_MINUTES).toBe(3 * FORWARD_HEARTBEAT_MINUTES);
     const beat = allRules(t).filter((r) => r.Properties.ScheduleExpression);
     expect(beat).toHaveLength(1);
     expect(beat[0].Properties.ScheduleExpression).toBe(`rate(${FORWARD_HEARTBEAT_MINUTES} minutes)`);
@@ -107,6 +112,11 @@ describe('the trail and the copies', () => {
     expect(s(sel[1].FieldSelectors)).toContain('Claims');
     expect(sel[2].FieldSelectors).toContainEqual({ Field: 'resources.type', Equals: ['AWS::Lambda::Function'] });
     expect(s(sel[2].FieldSelectors)).toContain(`:lambda:us-east-1:${SIGNER_ACCT}:function:vettid-anchor-signer-staging`);
+    // The operators: the claim table by Equals; the function by StartsWith
+    // (qualified ARNs too); invokes read or write (no readOnly field).
+    expect(Object.keys(sel[1].FieldSelectors.find((f: any) => f.Field === 'resources.ARN')).sort()).toEqual(['Equals', 'Field']);
+    expect(Object.keys(sel[2].FieldSelectors.find((f: any) => f.Field === 'resources.ARN')).sort()).toEqual(['Field', 'StartsWith']);
+    expect(sel[2].FieldSelectors.find((f: any) => f.Field === 'readOnly')).toBeUndefined();
   });
 
   test("the trail's log role: CloudTrail, for this trail of this account only", () => {
@@ -162,7 +172,8 @@ describe('the trail and the copies', () => {
     expect(st.flatMap((x) => [x.Action].flat()).sort()).toEqual(
       ['s3:AbortMultipartUpload', 's3:GetBucketLocation', 's3:ListBucket', 's3:ListBucketMultipartUploads', 's3:PutObject']);
     const put = st.find((x) => [x.Action].flat().includes('s3:PutObject'));
-    expect(s(put.Resource)).toContain('/journal/*');
+    expect(put.Resource.map(render)).toEqual([`arn:aws:s3:::${names.sourceBucket(SIGNER_ACCT)}/journal/*`, `arn:aws:s3:::${names.sourceBucket(SIGNER_ACCT)}/journal-errors/*`]);
+    expect(trust.Condition.StringEquals).toEqual({ 'aws:SourceAccount': SIGNER_ACCT });
     const sub = Object.values<any>(t.findResources('AWS::Logs::SubscriptionFilter'));
     expect(sub).toHaveLength(1);
     expect(sub[0].Properties.FilterPattern).toBe('');
@@ -172,6 +183,8 @@ describe('the trail and the copies', () => {
   test('the journal\'s copy failing to deliver alarms', () => {
     const a = alarm('journal_copy_failed');
     expect(a.Threshold).toBe(1);
+    expect(JOURNAL_COPY_FAILED).toBe('IF(records > 0 AND FILL(ok, 1) < 1, 1, 0)');
+    expect(a.Metrics.find((m: any) => m.Expression).Expression).toBe(JOURNAL_COPY_FAILED);
     expect(s(a.Metrics)).toContain('DeliveryToS3.Success');
     expect(s(a.AlarmActions)).toContain(topicId());
   });
@@ -182,11 +195,18 @@ describe('rules', () => {
     for (const src of WATCHED_SOURCES) {
       const r = rules(t).filter((x) => s(x.Properties.EventPattern.detail?.eventSource) === s([src]));
       expect(r).toHaveLength(1);
-      expect(r[0].Properties.EventPattern.detail).toEqual({ eventSource: [src], readOnly: [false] });
+      // Management events only: the trail's data events (claim writes,
+      // invokes) reach EventBridge as writes too, and must not alarm.
+      const want: any = { eventSource: [src], readOnly: [false], eventCategory: ['Management'] };
+      if (ROUTINE_WRITES[src]) want.eventName = [{ 'anything-but': ROUTINE_WRITES[src] }];
+      expect(r[0].Properties.EventPattern.detail).toEqual(want);
       expect(r[0].Properties.EventPattern['detail-type']).toEqual(['AWS API Call via CloudTrail']);
     }
     expect(WATCHED_SOURCES).toEqual(['lambda', 'signer', 'kms', 'dynamodb', 'logs', 'sns', 'events', 'monitoring', 'guardduty', 's3',
-      'firehose', 'cloudtrail'].map((x) => `${x}.amazonaws.com`));
+      'firehose', 'cloudtrail', 'cloudformation', 'tagging', 'rolesanywhere', 'account'].map((x) => `${x}.amazonaws.com`));
+    expect(ROUTINE_WRITES).toEqual({
+      'logs.amazonaws.com': ['CreateLogStream'], 'events.amazonaws.com': ['PutEvents'], 'kms.amazonaws.com': ['Sign', 'Verify', 'GetPublicKey'],
+    });
   });
 
   test('the key\'s use: errors and other principals, read-only events seen', () => {
@@ -220,7 +240,7 @@ describe('alarms', () => {
     expect(filters.iam_change).toBe('{ ($.eventSource = "iam.amazonaws.com") && ($.readOnly IS FALSE) }');
     expect(filters.claims_delete).toBe('{ ($.eventCategory = "Data") && ($.eventSource = "dynamodb.amazonaws.com") && ($.eventName = "DeleteItem") }');
     expect(filters.claims_write_other).toBe(`{ ($.eventCategory = "Data") && ($.eventSource = "dynamodb.amazonaws.com") && (($.userIdentity.type != "AssumedRole") || ($.userIdentity.sessionContext.sessionIssuer.arn != "${signerRoleArn}")) }`);
-    expect(filters.invoke_other).toBe(`{ ($.eventCategory = "Data") && ($.eventSource = "lambda.amazonaws.com") && (($.userIdentity.type != "AssumedRole") || ($.userIdentity.sessionContext.sessionIssuer.arn != "${TASK_ROLE}")) }`);
+    expect(filters.invoke_other).toBe('{ ($.eventCategory = "Data") && ($.eventSource = "lambda.amazonaws.com") && (($.userIdentity.accountId != "123456789012") || ($.errorCode EXISTS)) }');
     expect(filters.break_glass).toBe(`{ (($.eventName = "AssumeRole") && ($.requestParameters.roleArn = "${BREAK_GLASS}")) || ($.userIdentity.sessionContext.sessionIssuer.arn = "${BREAK_GLASS}") }`);
     const fs = Object.values<any>(t.findResources('AWS::Logs::MetricFilter')).filter((x) => s(x.Properties.LogGroupName).includes('TrailLogs'));
     for (const [name, pattern] of Object.entries(filters)) {
@@ -236,13 +256,14 @@ describe('alarms', () => {
   });
 
   test('every count alarm: >= its threshold, any 1 of 3 five-minute periods, missing data not breaching, to the topic', () => {
-    for (const name of [...SIGNER_ALARMS, ...Object.keys(filters)]) {
+    expect(COUNT_EVALUATION_PERIODS).toBe(3);
+    for (const name of [...SIGNER_ALARMS, ...Object.keys(filters), 'rule_target_failed']) {
       const a = alarm(name);
       expect(a).toBeDefined();
       expect(a.Threshold).toBe(1);
       expect(a.ComparisonOperator).toBe('GreaterThanOrEqualToThreshold');
-      expect(a.Period).toBe(300);
-      expect(a.EvaluationPeriods).toBe(COUNT_EVALUATION_PERIODS);
+      if (name !== 'rule_target_failed') expect(a.Period).toBe(300);
+      expect(a.EvaluationPeriods).toBe(3);
       expect(a.DatapointsToAlarm).toBe(1);
       expect(a.TreatMissingData).toBe('notBreaching');
       expect(s(a.AlarmActions)).toContain(topicId());
@@ -264,6 +285,9 @@ describe('alarms', () => {
 
   test("the trail's log group going quiet for 30 minutes alarms, missing data breaching", () => {
     const a = alarm('trail_logs_quiet');
+    expect(TRAIL_QUIET_MINUTES).toBe(30);
+    expect(a.Threshold).toBe(1);
+    expect(a.EvaluationPeriods).toBe(6);
     expect(a.Namespace).toBe('AWS/Logs');
     expect(a.MetricName).toBe('IncomingLogEvents');
     expect(a.ComparisonOperator).toBe('LessThanThreshold');
@@ -284,4 +308,10 @@ test('auditAccount: the management account, neither this one nor the service acc
 test('no other function in the signer account: without a release, none at all (no custom resources)', () => {
   expect(Object.keys(t.findResources('AWS::Lambda::Function'))).toHaveLength(0);
   expect(Object.keys(t.findResources('AWS::CloudFormation::CustomResource'))).toHaveLength(0);
+});
+
+test('a rule failing to deliver to its target alarms (any rule)', () => {
+  const a = alarm('rule_target_failed');
+  expect(s(a.Metrics)).toContain('FailedInvocations');
+  expect(s(a.AlarmActions)).toContain(topicId());
 });
