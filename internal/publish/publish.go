@@ -113,35 +113,44 @@ func (p *Publisher) StoredBundle(ctx context.Context, doc []byte) (json.RawMessa
 // bundle returns doc's bundle: the one kept, or a new anchor, kept
 // before it is returned.
 func (p *Publisher) bundle(ctx context.Context, doc []byte) (json.RawMessage, error) {
+	b, _, err := p.bundleNew(ctx, doc)
+	return b, err
+}
+
+// bundleNew is bundle, and reports whether the bundle was anchored by
+// this call (not one kept before).
+func (p *Publisher) bundleNew(ctx context.Context, doc []byte) (json.RawMessage, bool, error) {
 	key := sha256.Sum256(doc)
 	p.mu.Lock()
 	b := p.bundles[key]
 	p.mu.Unlock()
 	if b != nil {
-		return b, nil
+		return b, false, nil
 	}
 	id := hex.EncodeToString(key[:])
 	if p.Records != nil {
 		data, ok, err := p.Records.Get(ctx, KindBundle, id)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if ok {
 			b = data
 		}
 	}
+	anchored := false
 	if b == nil {
 		var err error
 		if b, err = p.Anchor.Anchor(ctx, doc); err != nil {
-			return nil, err
+			return nil, false, err
 		}
+		anchored = true
 		if p.Records != nil {
 			err := p.Records.Apply(ctx, []peer.Change{{Kind: KindBundle, ID: id, Data: b, IfAbsent: true}})
 			if errors.Is(err, peer.ErrConflict) {
-				return p.bundle(ctx, doc) // kept meanwhile: that one
+				return p.bundleNew(ctx, doc) // kept meanwhile: that one
 			}
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 		}
 	}
@@ -151,7 +160,7 @@ func (p *Publisher) bundle(ctx context.Context, doc []byte) (json.RawMessage, er
 	}
 	p.bundles[key] = b
 	p.mu.Unlock()
-	return b, nil
+	return b, anchored, nil
 }
 
 // forget drops doc's kept bundle, in memory and in Records, so that the
@@ -170,35 +179,59 @@ func (p *Publisher) forget(ctx context.Context, doc []byte) error {
 // stampedBundle returns doc's bundle once its timestamp is at or after
 // notBefore (BALLOT-PROTOCOL §8.3 step 2). An earlier bundle means this
 // service's clock is ahead of the timestamp authority's by more than
-// CollectMargin: it is never uploaded, and is dropped so that doc is
-// anchored again, with a new anchor signature (the transparency log
-// refuses an identical entry). One anchor again is tried here; if that
-// is early too, it is dropped as well and the caller retries later.
+// CollectMargin: it is never uploaded, and it is dropped, so that doc is
+// anchored again under a new anchor signature (the same signature would
+// only fetch the transparency log's existing entry). A call anchors at
+// most once: an early bundle anchored by this call is dropped and the
+// caller retries later (ballot.ErrStampedEarly), as one anchored again at
+// once would most likely be early too.
 func (p *Publisher) stampedBundle(ctx context.Context, id string, doc []byte, notBefore int64) (json.RawMessage, error) {
 	if p.Timestamp == nil {
 		return nil, errors.New("publish: no timestamp check for the results")
 	}
-	for try := 0; ; try++ {
-		bundle, err := p.bundle(ctx, doc)
+	var dropped []byte // the anchor signature of a kept bundle dropped
+	for kept := true; ; kept = false {
+		bundle, anchored, err := p.bundleNew(ctx, doc)
 		if err != nil {
 			return nil, err
 		}
+		if !kept && len(dropped) > 0 && bytes.Equal(anchorSig(bundle), dropped) {
+			return nil, errors.New("publish: anchoring the results again gave the same anchor signature")
+		}
 		t, err := p.Timestamp(bundle, doc)
 		if err != nil {
+			// Never uploaded unchecked; kept, as it may be what the site
+			// holds.
+			p.log().Error("the results' bundle doesn't verify", "alarm", "results_bundle_unverified", "proposal_id", id, "anchored", anchored, "err", err.Error())
 			return nil, fmt.Errorf("publish: the results' timestamp: %w", err)
 		}
 		if t >= notBefore {
 			return bundle, nil
 		}
 		p.log().Error("results timestamped before the close: this service's clock is ahead of the timestamp authority's", "alarm", "results_stamped_early",
-			"proposal_id", id, "timestamp", t, "closes_at", notBefore, "try", try)
+			"proposal_id", id, "timestamp", t, "closes_at", notBefore, "anchored", anchored)
 		if err := p.forget(ctx, doc); err != nil {
 			return nil, err
 		}
-		if try > 0 {
+		if anchored || !kept {
 			return nil, ballot.ErrStampedEarly
 		}
+		dropped = anchorSig(bundle)
 	}
+}
+
+// anchorSig is a bundle's message signature (the anchor signature), or
+// nil if it has none.
+func anchorSig(bundle json.RawMessage) []byte {
+	var b struct {
+		MessageSignature struct {
+			Signature []byte `json:"signature"`
+		} `json:"messageSignature"`
+	}
+	if json.Unmarshal(bundle, &b) != nil {
+		return nil
+	}
+	return b.MessageSignature.Signature
 }
 
 // publish anchors doc (once: a retry, even after a restart, sends the

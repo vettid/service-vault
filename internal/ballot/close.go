@@ -164,8 +164,9 @@ func (m *Manager) Close(ctx context.Context, id string) (*ResultsSummary, error)
 		m.announce(ctx, o, pr)
 	} else if pr.IndexStale {
 		// The site has the results; its index missed them. The identical
-		// upload again reruns the index update (its bundle was checked
-		// before the first upload).
+		// upload again reruns the index update. Its bundle was checked
+		// before the first upload and is kept; were it lost, a new anchor
+		// would be refused by the site (write-once), never published.
 		switch rc, err := rp.PublishResults(ctx, id, pr.Results, pr.Sig, pr.Rows, 0); {
 		case err != nil:
 			m.log().Warn("site index still not updated for the results", "proposal_id", id, "err", err.Error())
