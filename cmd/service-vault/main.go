@@ -928,7 +928,7 @@ func healthcheck(listen string) error {
 
 // recordKinds is every kind the service vault stores.
 func recordKinds() []string {
-	return slices.Concat(peer.Kinds(), service.Kinds(), approval.Kinds(), ballot.Kinds(), []string{publish.KindBundle})
+	return slices.Concat(peer.Kinds(), service.Kinds(), approval.Kinds(), ballot.Kinds(), publish.Kinds())
 }
 
 // errKeysLost: a key is missing from a table that holds records. A new

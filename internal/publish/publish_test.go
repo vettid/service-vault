@@ -266,6 +266,27 @@ func TestPublishResultsStamp(t *testing.T) {
 		}
 	})
 
+	// A crash between the wait's save and the drop leaves a kept bundle
+	// whose signature is already dropped: judged as dropped (stamped_early,
+	// nothing kept), not as an error.
+	t.Run("crash between the wait and the drop", func(t *testing.T) {
+		a := &stampAnchor{times: []int64{closes - 5, closes}}
+		e := newEnv(t, a)
+		if _, err := (&Publisher{Anchor: a, Records: e.store}).bundle(ctx, res); err != nil { // signature {1}
+			t.Fatal(err)
+		}
+		if err := e.p.saveWait(ctx, res, &stampWait{TSA: closes - 5, Seen: e.clock.Unix(), Dropped: [][]byte{{1}}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := publish(e); !errors.Is(err, ballot.ErrStampedEarly) || a.n != 1 || len(*e.up) != 0 || stored(e.store) != nil {
+			t.Fatalf("%d anchors, %d uploads, %v", a.n, len(*e.up), err)
+		}
+		e.clock = e.clock.Add(5 * time.Second)
+		if _, err := publish(e); err != nil || a.n != 2 || len(*e.up) != 1 {
+			t.Fatalf("then: %d anchors, %d uploads, %v", a.n, len(*e.up), err)
+		}
+	})
+
 	// An anchor signature dropped once is never taken again, across calls.
 	t.Run("same anchor signature again", func(t *testing.T) {
 		one := []byte{9}

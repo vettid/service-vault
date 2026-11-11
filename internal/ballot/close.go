@@ -92,7 +92,8 @@ func (m *Manager) authorityPast(ctx context.Context, id string, closesAt int64) 
 	}
 	t, err := m.AuthorityTime(ctx)
 	if err != nil {
-		m.probes.Store(id, probeWait{seen: now, failed: true})
+		// The floor runs from when the failure came back.
+		m.probes.Store(id, probeWait{seen: m.Now().Unix(), failed: true})
 		m.log().Error("the timestamp authority's time is unavailable: the vote is not counted", "alarm", "tsa_unavailable", "proposal_id", id, "err", err.Error())
 		return fmt.Errorf("%w: %v", ErrAuthorityTime, err)
 	}

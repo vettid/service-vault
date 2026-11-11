@@ -34,6 +34,10 @@ const KindBundle = "vote_bundle"
 // service's at that stamp, and the anchor signatures dropped.
 const KindStampWait = "vote_stamp_wait"
 
+// Kinds are the record kinds the publisher keeps (sealed and resealed
+// with the rest, cmd/service-vault recordKinds).
+func Kinds() []string { return []string{KindBundle, KindStampWait} }
+
 // maxDroppedSigs is how many dropped anchor signatures are remembered.
 const maxDroppedSigs = 16
 
@@ -170,7 +174,10 @@ func (p *Publisher) bundleNew(ctx context.Context, doc []byte) (json.RawMessage,
 		if p.Records != nil {
 			err := p.Records.Apply(ctx, []peer.Change{{Kind: KindBundle, ID: id, Data: b, IfAbsent: true}})
 			if errors.Is(err, peer.ErrConflict) {
-				return p.bundleNew(ctx, doc) // kept meanwhile: that one
+				// Kept meanwhile: that one. (Should it vanish before the
+				// re-read, this anchors again; the caller still checks the
+				// dropped signatures and the timestamp of whatever it gets.)
+				return p.bundleNew(ctx, doc)
 			}
 			if err != nil {
 				return nil, false, err
@@ -304,6 +311,9 @@ func (p *Publisher) stampedBundle(ctx context.Context, id string, doc []byte, no
 			// Not kept either: a later call must not take it as a kept one.
 			if err := p.forget(ctx, doc, bundle); err != nil {
 				return nil, err
+			}
+			if !anchored && kept {
+				continue // left by a crash between the wait's save and the drop: judged as dropped
 			}
 			return nil, errors.New("publish: anchoring the results again gave an anchor signature dropped before")
 		}

@@ -8,12 +8,15 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/vettid/service-vault/internal/ballot"
 	"github.com/vettid/service-vault/internal/keystore"
 	"github.com/vettid/service-vault/internal/peer"
+	"github.com/vettid/service-vault/internal/publish"
 	"github.com/vettid/service-vault/internal/sealstore"
 )
 
@@ -418,5 +421,29 @@ func TestBallotCopyKeyCheckOverOlderCopy(t *testing.T) {
 	}
 	if _, ok, _ := cp.Get(ctx, copyKeyCheckID, []byte{0}); !ok {
 		t.Fatal("no check after the right key")
+	}
+}
+
+// Every record kind a package declares (a const Kind… string) is resealed
+// with the record key (recordKinds): a kind left out would become
+// unreadable after a rotation.
+func TestRecordKindsCoverPublish(t *testing.T) {
+	have := map[string]bool{}
+	for _, k := range recordKinds() {
+		have[k] = true
+	}
+	for _, k := range []string{publish.KindBundle, publish.KindStampWait} {
+		if !have[k] {
+			t.Errorf("record kind %q is not resealed", k)
+		}
+	}
+	src, err := os.ReadFile("../../internal/publish/publish.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range regexp.MustCompile(`(?m)^const (Kind[A-Za-z]+) = "([a-z_]+)"`).FindAllStringSubmatch(string(src), -1) {
+		if !have[m[2]] {
+			t.Errorf("%s (%q) is not resealed", m[1], m[2])
+		}
 	}
 }
