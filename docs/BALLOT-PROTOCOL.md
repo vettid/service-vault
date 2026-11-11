@@ -583,15 +583,17 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
     verify) counts nothing either; the service never falls back to its
     own clock. The caller retries the close with backoff, as any failed
     close; the service probes again no sooner than 10 s after a failure.
-    A request cancelled by its caller is not a failure.
   - Probes are rationed. A passing probe holds for that `closes_at` (the
     authority's time only moves forward); a `closes_at` moved later by an
     extension is probed again. After a stamp whose `genTime` is before the
     close, the next probe is made no sooner than the service's clock at
     that probe plus (`closes_at` − `genTime`), but never later than
-    5 minutes after it, and at once if the service's clock has gone back
-    since (a corrected clock never starves the close); a going back voids
-    a held pass and the failure floor too. A probe has its own timeout
+    5 minutes after it. These waits are timed on the service process's
+    monotonic clock, so a step of its wall clock neither lengthens nor
+    cuts them, and a corrected clock never starves the close. A wait
+    judged from a stamp kept across a restart (the publisher's, below)
+    is on the wall clock: it is void if that clock has gone back since,
+    and bounded by the same 5 minutes. A probe has its own timeout
     (5 s), apart from the caller's request, so a hung authority is a
     failure (alarmed), and a request its caller drops still gets the
     probe's answer.
@@ -672,11 +674,10 @@ publishes its results has every member's check settle by itself.
    bundle cache keyed by hash, and the new anchor needs a fresh anchor
    signature, the ECDSA one (`results_sig` is deterministic, and the same
    anchor signature would only find the transparency log's existing
-    entry); a re-anchor waits for a probe at or after the close (§7). When
+   entry); a re-anchor waits for a probe at or after the close (§7). When
    the site already holds the results (their index to be redone), an
    early or unverifiable bundle is kept, with an alarm, and not uploaded
-   again. The vault also
-   checks that the proposal
+   again. The vault also checks that the proposal
    and extensions in `results.json` are the ones it received; and its
    row's proof.
 3. **Its row:**
