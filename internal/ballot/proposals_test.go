@@ -54,6 +54,9 @@ type fakeSender struct {
 	// set before any send, holds the sends to a connection until closed.
 	cancelled int
 	hold      map[string]chan struct{}
+	// failWith, set before any send, fails the sends to a connection
+	// with that error (the relay down, say).
+	failWith map[string]error
 }
 
 func (s *fakeSender) SendMessage(ctx context.Context, conn, typ string, body json.RawMessage) (string, error) {
@@ -77,6 +80,9 @@ func (s *fakeSender) SendMessage(ctx context.Context, conn, typ string, body jso
 	defer s.mu.Unlock()
 	if s.down[conn] {
 		return "", peer.ErrNotFound
+	}
+	if err := s.failWith[conn]; err != nil {
+		return "", err
 	}
 	s.sent = append(s.sent, sent{conn, typ, body})
 	return "id", nil

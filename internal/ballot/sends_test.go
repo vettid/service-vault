@@ -3,9 +3,12 @@ package ballot
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/vettid/service-vault/internal/peer"
 )
 
 // Sends run after the request: Publish answers while every send is still
@@ -173,15 +176,17 @@ func TestSendsOrderPerProposal(t *testing.T) {
 // proposal's later sends for every member; a success resets the count.
 func TestSendsGiveUpAfterFailuresInARow(t *testing.T) {
 	m, s, _ := newManager(t)
+	relayDown := errors.New("relay: 503")
+	s.failWith = map[string]error{}
 	var conns []string
 	for i := 0; i < 3*MaxFailuresInARow; i++ {
 		c := fmt.Sprintf("m%03d", i)
 		conns = append(conns, c)
-		s.down[c] = true
+		s.failWith[c] = relayDown
 	}
 	// One member in the middle of the first run is up: the count starts
 	// again after it.
-	s.down[conns[MaxFailuresInARow-2]] = false
+	delete(s.failWith, conns[MaxFailuresInARow-2])
 	tried := 0
 	m.runJob(&sendJob{key: "k", typ: TypeProposal, conns: conns, body: func(string) (json.RawMessage, error) {
 		tried++
@@ -192,5 +197,32 @@ func TestSendsGiveUpAfterFailuresInARow(t *testing.T) {
 	}
 	if len(s.sent) != 1 {
 		t.Fatalf("sent %d, want 1", len(s.sent))
+	}
+}
+
+// Members whose connection is gone (peer.ErrNotFound) or whose outbox is
+// full (peer.ErrBusy) are about that member, not the relay: however many
+// sit together in connection order, the job goes on to the members after
+// them.
+func TestSendsMemberErrorsDontGiveUp(t *testing.T) {
+	m, s, _ := newManager(t)
+	s.failWith = map[string]error{}
+	var conns []string
+	n := 3 * MaxFailuresInARow
+	for i := 0; i < n; i++ {
+		c := fmt.Sprintf("m%03d", i)
+		conns = append(conns, c)
+		switch {
+		case i < MaxFailuresInARow+5:
+			s.down[c] = true // peer.ErrNotFound
+		case i < 2*MaxFailuresInARow+10:
+			s.failWith[c] = peer.ErrBusy
+		}
+	}
+	m.runJob(&sendJob{key: "k", typ: TypeClosed, conns: conns, body: func(string) (json.RawMessage, error) {
+		return json.RawMessage(`{}`), nil
+	}})
+	if want := n - (2*MaxFailuresInARow + 10); len(s.sent) != want {
+		t.Fatalf("sent %d, want %d (the members after the gone and busy ones)", len(s.sent), want)
 	}
 }

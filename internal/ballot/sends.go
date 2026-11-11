@@ -3,9 +3,12 @@ package ballot
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/vettid/service-vault/internal/peer"
 )
 
 // Member sends (BALLOT-PROTOCOL §4.1): vote.proposal, vote.extended and
@@ -27,10 +30,18 @@ import (
 const SendTimeout = 30 * time.Second
 
 // MaxFailuresInARow stops a job after that many sends in a row have
-// failed: the relay is down or hanging, and each failure can take
-// SendTimeout while the job holds the peer, its proposal's later sends and
-// its key (a retry). The members not sent learn of it as above.
+// failed for a reason that isn't the member's own: the relay is down or
+// hanging, and each failure can take SendTimeout while the job holds the
+// peer, its proposal's later sends and its key (a retry). A connection
+// gone (peer.ErrNotFound) or a member's outbox full (peer.ErrBusy) is
+// about that member only: it fails that send without counting. The
+// members not sent learn of it as above.
 const MaxFailuresInARow = 20
+
+// memberOnly reports whether err is about one member, not the relay.
+func memberOnly(err error) bool {
+	return errors.Is(err, peer.ErrNotFound) || errors.Is(err, peer.ErrBusy)
+}
 
 // sendJob is one message to send to a proposal's members.
 type sendJob struct {
@@ -140,6 +151,9 @@ func (m *Manager) runJob(job *sendJob) {
 				m.log().Warn(job.typ+" not sent", "send", job.key, "connection_id", c, "err", err.Error())
 			}
 			failed++
+			if memberOnly(err) {
+				continue
+			}
 			if inARow++; inARow >= MaxFailuresInARow {
 				gaveUp = true
 				m.log().Warn(job.typ+" stopped: sends failed in a row; members not sent learn of it as BALLOT-PROTOCOL §4.2, §8.3 and §10 say",

@@ -581,12 +581,14 @@ func serve(args []string) error {
 	select {
 	case <-sendsDone:
 	default:
-		log.Warn("member sends stopped at shutdown: members not yet sent learn of them as BALLOT-PROTOCOL §4.2, §8.3 and §10 say")
+		returned := true
 		select {
 		case <-sendsDone:
 		case <-time.After(sendsStopWait):
-			log.Warn("a member send had not returned when the service stopped")
+			returned = false
 		}
+		log.Warn("member sends stopped at shutdown: members not yet sent learn of them as BALLOT-PROTOCOL §4.2, §8.3 and §10 say",
+			"all_returned", returned)
 	}
 	if runErr == nil {
 		if err := <-peerErr; err != nil && !errors.Is(err, context.Canceled) {
