@@ -35,6 +35,12 @@ export const AUDIT_CHANGES = ['PutBucketReplication', 'DeleteBucketReplication',
   'PutBucketPublicAccessBlock', 'DeleteBucketPublicAccessBlock', 'PutBucketAcl',
   'DeleteDeliveryStream', 'UpdateDestination', 'StopDeliveryStreamEncryption'] as const;
 
+/** The signer account's heartbeat to the management account's bus, every this many minutes. */
+export const FORWARD_HEARTBEAT_MINUTES = 5;
+
+/** The trail's log group receiving nothing for this long alarms (a multiple of 5). */
+export const TRAIL_QUIET_MINUTES = 15;
+
 /** The signer's own alarm codes (its log's `alarm` field). */
 export const SIGNER_ALARMS = ['claim_conflict', 'claim_stuck', 'journal_failed', 'key_not_listed', 'key_mismatch'] as const;
 
@@ -291,6 +297,15 @@ export function addSignerAlarms(stack: cdk.Stack, props: SignerAlarmsProps): voi
       detail: { alarmName: [{ prefix }], state: { value: ['ALARM'] } } },
     targets: [outside],
   });
+  // The forwarding's heartbeat: every FORWARD_HEARTBEAT_MINUTES, through
+  // the same role, to the same bus. The management account alarms when
+  // they stop (a role denied or recreated, the bus policy, this rule), so
+  // breaking the way out is itself seen from outside.
+  new events.Rule(stack, 'ForwardHeartbeat', {
+    description: 'The signer account\'s heartbeat to the management account\'s alarm bus',
+    schedule: events.Schedule.rate(cdk.Duration.minutes(FORWARD_HEARTBEAT_MINUTES)),
+    targets: [outside],
+  });
   const ns = `VettID/AnchorSigner/${props.envName}`;
 
   // The signer's own alarms, from its log.
@@ -329,4 +344,19 @@ export function addSignerAlarms(stack: cdk.Stack, props: SignerAlarmsProps): voi
     metricNamespace: ns, metricName: 'kms_signs', metricValue: '1',
   }).metric({ statistic: 'Sum', period: cdk.Duration.hours(1) });
   alarm('kms_signs_per_hour', `More than ${SIGNS_PER_HOUR} KMS Sign calls in an hour (the trail)`, kmsSigns, SIGNS_PER_HOUR + 1);
+
+  // The trail's log group must keep receiving (the account's read events
+  // are steady): if its delivery breaks, every filter above goes quiet, so
+  // a gap alarms, missing data breaching.
+  new cloudwatch.Alarm(stack, 'trail_logs_quiet', {
+    alarmName: `${prefix}trail_logs_quiet`,
+    alarmDescription: `The trail's log group received nothing for ${TRAIL_QUIET_MINUTES} minutes: its delivery is broken, and the trail alarms with it`,
+    metric: new cloudwatch.Metric({
+      namespace: 'AWS/Logs', metricName: 'IncomingLogEvents', dimensionsMap: { LogGroupName: trailLogs.logGroupName },
+      statistic: 'Sum', period: cdk.Duration.minutes(5),
+    }),
+    threshold: 1, evaluationPeriods: TRAIL_QUIET_MINUTES / 5,
+    comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+    treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+  }).addAlarmAction(new cwactions.SnsAction(props.topic));
 }

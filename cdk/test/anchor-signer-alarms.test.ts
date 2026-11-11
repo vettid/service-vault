@@ -1,7 +1,7 @@
 import * as cdk from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import { AnchorSignerStack, AnchorSignerStackProps } from '../lib/anchor-signer-stack';
-import { ALARM_PATH_CHANGES, AUDIT_CHANGES, SIGNER_ALARMS, SIGNS_PER_HOUR, signerAuditNames, trailFilters } from '../lib/anchor-signer-alarms';
+import { ALARM_PATH_CHANGES, AUDIT_CHANGES, FORWARD_HEARTBEAT_MINUTES, SIGNER_ALARMS, SIGNS_PER_HOUR, TRAIL_QUIET_MINUTES, signerAuditNames, trailFilters } from '../lib/anchor-signer-alarms';
 
 const SIGNER_ACCT = '444455556666';
 const AUDIT_ACCT = '777788889999';
@@ -13,7 +13,8 @@ const base: AnchorSignerStackProps = {
 const synth = (region = 'us-east-1') =>
   Template.fromStack(new AnchorSignerStack(new cdk.App(), 'AS', { ...base, env: { account: SIGNER_ACCT, region } }));
 const t = synth();
-const rules = (tpl: Template) => Object.values<any>(tpl.findResources('AWS::Events::Rule'));
+const allRules = (tpl: Template) => Object.values<any>(tpl.findResources('AWS::Events::Rule'));
+const rules = (tpl: Template) => allRules(tpl).filter((r) => r.Properties.EventPattern); // the scheduled heartbeat has none
 const ruleFor = (tpl: Template, source: string, name?: string) => rules(tpl).filter((r) => {
   const p = r.Properties.EventPattern;
   return p.source?.includes(source) && (!name || JSON.stringify(p.detail?.eventName ?? []).includes(name));
@@ -234,4 +235,26 @@ test('auditAccount: the management account, neither this one nor the service acc
 test('no other function in the signer account: without a release, none at all (no custom resources)', () => {
   expect(Object.keys(t.findResources('AWS::Lambda::Function'))).toHaveLength(0);
   expect(Object.keys(t.findResources('AWS::CloudFormation::CustomResource'))).toHaveLength(0);
+});
+
+test('the forwarding heartbeat: every 5 minutes, through the forwarding role, to the bus only', () => {
+  const beat = allRules(t).filter((r) => r.Properties.ScheduleExpression);
+  expect(beat).toHaveLength(1);
+  expect(beat[0].Properties.ScheduleExpression).toBe(`rate(${FORWARD_HEARTBEAT_MINUTES} minutes)`);
+  const tg = beat[0].Properties.Targets;
+  expect(tg).toHaveLength(1);
+  expect(s(tg[0].Arn)).toContain(`event-bus/${signerAuditNames('staging').bus}`);
+  expect(s(tg[0].RoleArn)).toContain('AlarmForwardRole');
+});
+
+test("the trail's log group going quiet alarms (its delivery broken silences every trail filter)", () => {
+  const a = Object.values<any>(t.findResources('AWS::CloudWatch::Alarm')).find((x) => x.Properties.AlarmName === 'vettid-anchor-signer-staging-trail_logs_quiet').Properties;
+  expect(a.Namespace).toBe('AWS/Logs');
+  expect(a.MetricName).toBe('IncomingLogEvents');
+  expect(s(a.Dimensions)).toContain('TrailLogs');
+  expect(a.ComparisonOperator).toBe('LessThanThreshold');
+  expect(a.Threshold).toBe(1);
+  expect(a.Period).toBe(300);
+  expect(a.EvaluationPeriods).toBe(TRAIL_QUIET_MINUTES / 5);
+  expect(a.TreatMissingData).toBe('breaching');
 });

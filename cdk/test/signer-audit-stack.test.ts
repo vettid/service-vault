@@ -1,6 +1,6 @@
 import * as cdk from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
-import { AUDIT_RETENTION_DAYS, AUDIT_STALE_HOURS, SignerAuditStack, SignerAuditStackProps } from '../lib/signer-audit-stack';
+import { AUDIT_RETENTION_DAYS, AUDIT_STALE_HOURS, FORWARD_QUIET_MINUTES, SignerAuditStack, SignerAuditStackProps } from '../lib/signer-audit-stack';
 import { signerAuditNames } from '../lib/anchor-signer-alarms';
 
 const MGMT = '777788889999';
@@ -57,7 +57,7 @@ test(`the staleness watch: every arrival logged, none for ${AUDIT_STALE_HOURS} h
   expect(s(rule.EventPattern.detail.bucket.name)).toContain('LockedCopy');
   // Only the trail's hourly digests feed it: the journal's copy or filler elsewhere can't keep it quiet.
   expect(rule.EventPattern.detail.object.key).toEqual([{ prefix: `trail/AWSLogs/${SIGNER}/CloudTrail-Digest/` }]);
-  const alarm = Object.values<any>(t.findResources('AWS::CloudWatch::Alarm'))[0].Properties;
+  const alarm = Object.values<any>(t.findResources('AWS::CloudWatch::Alarm')).find((x) => x.Properties.AlarmName.endsWith('-stale')).Properties;
   expect(alarm.AlarmName).toBe('vettid-signer-audit-staging-stale');
   expect(alarm.ComparisonOperator).toBe('LessThanThreshold');
   expect(alarm.Threshold).toBe(1);
@@ -77,9 +77,21 @@ test("the alarm bus: only the signer account's forwarding role puts on it; every
   const st = policies[0].Properties.Statement;
   expect(st.Action).toBe('events:PutEvents');
   expect(s(st.Principal)).toContain(`:iam::${SIGNER}:role/${names.forwardRole}`);
-  const rule = Object.values<any>(t.findResources('AWS::Events::Rule')).find((r) => r.Properties.EventBusName).Properties;
-  expect(rule.EventPattern).toEqual({ account: [SIGNER] });
-  expect(s(rule.Targets)).toContain('AlarmTopic');
+  const onBus = Object.values<any>(t.findResources('AWS::Events::Rule')).filter((r) => r.Properties.EventBusName).map((r) => r.Properties);
+  expect(onBus).toHaveLength(2);
+  const alarms = onBus.find((r) => r.Description.includes('alarms'));
+  expect(alarms.EventPattern).toEqual({ account: [SIGNER], 'detail-type': [{ 'anything-but': ['Scheduled Event'] }] });
+  expect(s(alarms.Targets)).toContain('AlarmTopic');
+  const beat = onBus.find((r) => r.Description.includes('heartbeat'));
+  expect(beat.EventPattern).toEqual({ account: [SIGNER], source: ['aws.events'], 'detail-type': ['Scheduled Event'] });
+  expect(s(beat.Targets)).toContain('Heartbeats');
+  // No heartbeat for FORWARD_QUIET_MINUTES alarms, missing data breaching.
+  const q = Object.values<any>(t.findResources('AWS::CloudWatch::Alarm')).find((x) => x.Properties.AlarmName === 'vettid-signer-audit-staging-forward_quiet').Properties;
+  expect(q.ComparisonOperator).toBe('LessThanThreshold');
+  expect(q.EvaluationPeriods).toBe(FORWARD_QUIET_MINUTES / 5);
+  expect(q.Period).toBe(300);
+  expect(q.TreatMissingData).toBe('breaching');
+  expect(s(q.AlarmActions)).toContain('AlarmTopic');
 });
 
 test('the names match the signer side', () => {

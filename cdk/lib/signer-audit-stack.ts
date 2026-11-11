@@ -17,6 +17,9 @@ export const AUDIT_RETENTION_DAYS = 365;
 /** With no trail digest arriving for this many hours, the copy is stale and alarms (#7653). */
 export const AUDIT_STALE_HOURS = 2;
 
+/** No heartbeat from the signer account's forwarding for this long alarms (a multiple of 5). */
+export const FORWARD_QUIET_MINUTES = 15;
+
 /** Where the signer's trail writes (its s3KeyPrefix "trail"), before <account>/CloudTrail-Digest/. */
 export const AUDIT_DIGEST_PREFIX = 'trail/AWSLogs/';
 
@@ -154,9 +157,43 @@ export class SignerAuditStack extends cdk.Stack {
     new events.Rule(this, 'SignerAlarms', {
       description: `The signer account's alarms (${envName}), forwarded from it`,
       eventBus: bus,
-      eventPattern: { account: [props.signerAccount] },
+      // Everything but its heartbeat, which is watched below.
+      eventPattern: { account: [props.signerAccount], detailType: [{ 'anything-but': ['Scheduled Event'] }] as any },
       targets: [new targets.SnsTopic(this.topic)],
     });
+    // The forwarding's heartbeat: logged as it arrives; none for
+    // FORWARD_QUIET_MINUTES alarms, missing data breaching. A forwarding
+    // role denied or recreated, the bus policy changed, or the signer's
+    // rules removed: each stops it, and each is seen here.
+    const heartbeats = new logs.LogGroup(this, 'Heartbeats', {
+      retention: logs.RetentionDays.ONE_MONTH, removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+    const heartbeatRule = new events.Rule(this, 'SignerHeartbeat', {
+      description: `The signer account's heartbeat (${envName})`,
+      eventBus: bus,
+      eventPattern: { account: [props.signerAccount], source: ['aws.events'], detailType: ['Scheduled Event'] },
+    });
+    (heartbeatRule.node.defaultChild as events.CfnRule).targets = [{ id: 'Target0', arn: heartbeats.logGroupArn }];
+    new logs.ResourcePolicy(this, 'HeartbeatsPolicy', {
+      resourcePolicyName: `vettid-signer-audit-${envName}-heartbeats`,
+      policyStatements: [new iam.PolicyStatement({
+        principals: [new iam.ServicePrincipal('events.amazonaws.com')],
+        actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
+        resources: [heartbeats.logGroupArn],
+        conditions: { ArnEquals: { 'aws:SourceArn': heartbeatRule.ruleArn } },
+      })],
+    });
+    const beats = new logs.MetricFilter(this, 'HeartbeatCount', {
+      logGroup: heartbeats, filterPattern: logs.FilterPattern.allEvents(),
+      metricNamespace: `VettID/SignerAudit/${envName}`, metricName: 'heartbeats', metricValue: '1',
+    }).metric({ statistic: 'Sum', period: cdk.Duration.minutes(5) });
+    new cloudwatch.Alarm(this, 'ForwardQuiet', {
+      alarmName: `vettid-signer-audit-${envName}-forward_quiet`,
+      alarmDescription: `No heartbeat from the signer account for ${FORWARD_QUIET_MINUTES} minutes: its alarms can't reach this account (the forwarding role, the bus policy or its rules changed). Expected until AnchorSigner-${envName} is deployed.`,
+      metric: beats, threshold: 1, evaluationPeriods: FORWARD_QUIET_MINUTES / 5,
+      comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+    }).addAlarmAction(new cwactions.SnsAction(this.topic));
 
     new cdk.CfnOutput(this, 'LockedCopyBucket', { value: this.bucket.bucketName });
     new cdk.CfnOutput(this, 'AlarmBusArn', { value: bus.eventBusArn });
