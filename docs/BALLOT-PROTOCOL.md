@@ -622,7 +622,9 @@ publishes its results has every member's check settle by itself.
    bundle's time with that `closes_at` and, if it is earlier (its own
    clock was more than a minute fast), anchors them again rather than
    publish results every vault would fail (service-vault follow-up: the
-   bundle cache keyed by hash must not hand back the early bundle); that
+   bundle cache keyed by hash must not hand back the early bundle, and the
+   new anchor needs a fresh signature, since the transparency log refuses
+   an identical entry); that
    the proposal
    and extensions in `results.json` are the ones it received; and its
    row's proof.
