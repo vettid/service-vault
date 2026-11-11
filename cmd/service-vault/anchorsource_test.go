@@ -10,12 +10,14 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
@@ -26,12 +28,20 @@ import (
 
 // fakeSigner is the anchor signer: a probe answer and a call count.
 type fakeSigner struct {
-	spki     []byte
-	probeErr error
-	calls    atomic.Int32
+	spki       []byte
+	probeErr   error
+	failProbes int32 // probes that fail with probeErr before one answers (0: every one does)
+	calls      atomic.Int32
+	probes     atomic.Int32
 }
 
-func (f *fakeSigner) Probe(context.Context) ([]byte, error) { return f.spki, f.probeErr }
+func (f *fakeSigner) Probe(context.Context) ([]byte, error) {
+	n := f.probes.Add(1)
+	if f.probeErr != nil && (f.failProbes == 0 || n <= f.failProbes) {
+		return nil, f.probeErr
+	}
+	return f.spki, nil
+}
 
 func (f *fakeSigner) Call(context.Context, publish.SignerRequest) (publish.SignerResult, error) {
 	f.calls.Add(1)
@@ -113,19 +123,26 @@ func anchorCfg(signer string) *Config {
 
 const testSignerARN = "arn:aws:lambda:us-east-1:123456789012:function:vettid-anchor-signer-staging"
 
-// With the signer, the key comes from its probe; the blob and the marker
-// are never read, and nothing here can sign.
+// With the signer, the key is the pinned one: the signer isn't called at
+// the start, the blob and the marker are never read, and nothing here
+// can sign.
 func TestSetupAnchorWithSigner(t *testing.T) {
 	ctx := context.Background()
-	sg := &fakeSigner{spki: p256SPKI(t)}
+	pinned := p256SPKI(t)
+	sg := &fakeSigner{spki: p256SPKI(t)} // even a signer under another key
 	sc, blobs := &fakeSSM{}, newCountingBlobs()
 	sealAnchorKey(t, blobs) // an old key, still there: never read
-	as, err := setupAnchor(ctx, anchorCfg(testSignerARN), sg, sc, plainKMS{}, blobs)
+	cfg := anchorCfg(testSignerARN)
+	cfg.AnchorKey = pinned
+	as, err := setupAnchor(ctx, cfg, sg, sc, plainKMS{}, blobs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(as.spki, sg.spki) || as.signer == nil || as.anc == nil {
+	if !bytes.Equal(as.spki, pinned) || as.signer == nil || as.anc == nil {
 		t.Fatalf("%+v", as)
+	}
+	if sg.probes.Load() != 0 || sg.calls.Load() != 0 {
+		t.Fatal("the signer was called at the start")
 	}
 	if blobs.anchorReads != 0 || blobs.anchorCreates != 0 || len(sc.asked) != 0 {
 		t.Fatalf("blob reads %d, creates %d, marker reads %v", blobs.anchorReads, blobs.anchorCreates, sc.asked)
@@ -133,27 +150,40 @@ func TestSetupAnchorWithSigner(t *testing.T) {
 	if _, err := as.anc.Anchor(ctx, []byte(`{}`)); err == nil {
 		t.Fatal("the service's own anchorer signed with the signer configured")
 	}
+	// A pinned key that isn't P-256 stops the start.
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	cfg.AnchorKey, _ = x509.MarshalPKIXPublicKey(pub)
+	if _, err := setupAnchor(ctx, cfg, sg, sc, plainKMS{}, blobs); err == nil {
+		t.Fatal("an Ed25519 pin")
+	}
 }
 
-// A signer that doesn't answer the probe turns publishing off, without
-// falling back to the blob; one that answers with another kind of key
-// stops the daemon.
-func TestSetupAnchorSignerFails(t *testing.T) {
-	ctx := context.Background()
-	blobs := newCountingBlobs()
-	sealAnchorKey(t, blobs)
-	_, err := setupAnchor(ctx, anchorCfg(testSignerARN), &fakeSigner{probeErr: errors.New("timeout")}, &fakeSSM{}, plainKMS{}, blobs)
-	if !errors.Is(err, errSignerUnavailable) {
-		t.Fatalf("unreachable signer: %v", err)
+// The background probe: an unreachable signer alarms and is retried with
+// backoff; one under another key than the pinned one alarms; the pinned
+// key ends the watch quietly.
+func TestWatchSigner(t *testing.T) {
+	first, max := probeFirst, probeMax
+	probeFirst, probeMax = time.Millisecond, 4*time.Millisecond
+	defer func() { probeFirst, probeMax = first, max }()
+	pinned := p256SPKI(t)
+	run := func(sg *fakeSigner) string {
+		var buf bytes.Buffer
+		watchSigner(context.Background(), sg, pinned, slog.New(slog.NewJSONHandler(&buf, nil)))
+		return buf.String()
 	}
-	pub, _, _ := ed25519.GenerateKey(rand.Reader)
-	edSPKI, _ := x509.MarshalPKIXPublicKey(pub)
-	if _, err := setupAnchor(ctx, anchorCfg(testSignerARN), &fakeSigner{spki: edSPKI}, &fakeSSM{}, plainKMS{}, blobs); err == nil || errors.Is(err, errSignerUnavailable) {
-		t.Fatalf("an Ed25519 anchor key: %v", err)
+	sg := &fakeSigner{spki: pinned, probeErr: errors.New("timeout"), failProbes: 3}
+	if log := run(sg); strings.Count(log, "anchor_signer_unavailable") != 3 || strings.Contains(log, "anchor_key_changed") || sg.probes.Load() != 4 {
+		t.Fatalf("probes %d, log %s", sg.probes.Load(), log)
 	}
-	if blobs.anchorReads != 0 {
-		t.Fatal("the blob was read as a fallback")
+	if log := run(&fakeSigner{spki: p256SPKI(t)}); !strings.Contains(log, "anchor_key_changed") {
+		t.Fatalf("another key: %s", log)
 	}
+	if log := run(&fakeSigner{spki: pinned}); strings.Contains(log, `"alarm"`) {
+		t.Fatalf("the pinned key: %s", log)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	watchSigner(ctx, &fakeSigner{probeErr: errors.New("x"), failProbes: 1 << 30}, pinned, slog.Default()) // returns
 }
 
 // Without the signer: the marker decides first. Present, or unreadable,
@@ -164,8 +194,8 @@ func TestSetupAnchorMarker(t *testing.T) {
 		blobs := newCountingBlobs()
 		sealAnchorKey(t, blobs)
 		_, err := setupAnchor(ctx, anchorCfg(""), nil, sc, plainKMS{}, blobs)
-		if err == nil || errors.Is(err, errSignerUnavailable) {
-			t.Fatalf("%s: started: %v", name, err)
+		if err == nil {
+			t.Fatalf("%s: started", name)
 		}
 		if name == "present" && !errors.Is(err, errAnchorKeyMoved) {
 			t.Fatalf("present: %v", err)
@@ -180,7 +210,7 @@ func TestSetupAnchorMarker(t *testing.T) {
 }
 
 // Without the signer or the marker, an existing key is opened, as before
-// the signer.
+// the signer; with a pin, it must be the pinned key.
 func TestSetupAnchorExistingKey(t *testing.T) {
 	ctx := context.Background()
 	blobs := newCountingBlobs()
@@ -193,10 +223,20 @@ func TestSetupAnchorExistingKey(t *testing.T) {
 	if !bytes.Equal(as.spki, want) || as.signer != nil || blobs.anchorCreates != 0 {
 		t.Fatalf("%+v creates %d", as, blobs.anchorCreates)
 	}
+	cfg := anchorCfg("")
+	cfg.AnchorKey = want
+	if _, err := setupAnchor(ctx, cfg, nil, &fakeSSM{}, plainKMS{}, blobs); err != nil {
+		t.Fatalf("the pinned key: %v", err)
+	}
+	cfg.AnchorKey = p256SPKI(t)
+	if _, err := setupAnchor(ctx, cfg, nil, &fakeSSM{}, plainKMS{}, blobs); !errors.Is(err, errAnchorKeyNotPinned) {
+		t.Fatalf("another key than the pinned one: %v", err)
+	}
 }
 
 // A release build makes no anchor key: with none stored, the start
-// fails and nothing is written.
+// fails and nothing is written. This is the guard; the nm test below only
+// adds that the maker isn't linked in.
 func TestSetupAnchorNoKeyRelease(t *testing.T) {
 	if devSigner {
 		t.Skip("devsigner build")
@@ -210,8 +250,42 @@ func TestSetupAnchorNoKeyRelease(t *testing.T) {
 	}
 }
 
-// The release binary has no way to make an anchor key: built without the
-// devsigner tag, it doesn't contain keystore.NewAnchorKey at all.
+// The anchor-key item is loaded in one place only (setupAnchor), and only
+// with createAnchorKey, which refuses in a release build.
+func TestOneAnchorKeyLoadSite(t *testing.T) {
+	var sites []string
+	err := filepath.WalkDir("../..", func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && (d.Name() == "node_modules" || d.Name() == ".git" || d.Name() == "cdk") {
+			return filepath.SkipDir
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			if strings.Contains(line, "keystore.AnchorKeyName") && strings.Contains(line, "LoadOrCreate") {
+				sites = append(sites, path+": "+strings.TrimSpace(line))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sites) != 1 || !strings.Contains(sites[0], "anchorsource.go") || !strings.Contains(sites[0], "createAnchorKey)") {
+		t.Fatalf("anchor-key load sites: %q", sites)
+	}
+}
+
+// The release binary doesn't link keystore.NewAnchorKey (built only with
+// the devsigner tag, so this can hardly fail; TestSetupAnchorNoKeyRelease
+// and TestOneAnchorKeyLoadSite are the guards).
 func TestReleaseBinaryHasNoAnchorKeyMaker(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds the daemon")

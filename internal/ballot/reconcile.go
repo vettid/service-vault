@@ -125,7 +125,9 @@ func (m *Manager) reconcile(ctx context.Context, sr SiteReader, ep ExtensionPubl
 		if own == nil {
 			// Sent to the signer, its answer lost: the signer is asked
 			// again, and answers with the bundle the site holds for its
-			// own claim. That answer is ours; the site's files are not.
+			// claim. The publisher keeps it only if its signature is the
+			// pinned anchor key's over this document; its time is then
+			// checked below, as for a bundle kept here.
 			tried, err := attempted(ctx, bs, x.Doc)
 			if err != nil {
 				return err
@@ -163,7 +165,7 @@ func (m *Manager) reconcile(ctx context.Context, sr SiteReader, ep ExtensionPubl
 			switch rc, err := ep.PublishExtension(ctx, p.ProposalID, int64(k+1), pe.Doc, pe.Sig); {
 			case err == nil:
 				if own == nil {
-					own = rc.Bundle // the signer's answer for its claim
+					own = rc.Bundle // the signer's answer, verified under the pinned key
 				}
 				if err := adopt(int64(k+1), pe.Doc, pe.Sig, own); err != nil {
 					return err

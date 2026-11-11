@@ -3,6 +3,11 @@ package publish
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -16,7 +21,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/lambda/types"
 
 	"github.com/vettid/service-vault/internal/ballot"
-	"github.com/vettid/service-vault/internal/ballot/ballottest"
 	"github.com/vettid/service-vault/internal/peer"
 )
 
@@ -45,7 +49,22 @@ func answer(t *testing.T, r SignerResult) *lambda.InvokeOutput {
 	return &lambda.InvokeOutput{StatusCode: 200, Payload: b}
 }
 
-var listedKey = []byte("spki of the listed anchor key")
+// anchorPriv is the pinned anchor key in these tests; listedKey its SPKI.
+var anchorPriv, _ = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+var listedKey, _ = x509.MarshalPKIXPublicKey(&anchorPriv.PublicKey)
+
+// signedBundle is a bundle whose message signature is by key over doc.
+func signedBundle(t *testing.T, key *ecdsa.PrivateKey, doc []byte, extra string) json.RawMessage {
+	t.Helper()
+	d := sha256.Sum256(doc)
+	sig, err := ecdsa.SignASN1(rand.Reader, key, d[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(map[string]any{"mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json", "extra": extra,
+		"messageSignature": map[string]any{"messageDigest": map[string]any{"algorithm": "SHA2_256", "digest": d[:]}, "signature": sig}})
+	return b
+}
 
 // The invoke: synchronous, by the ARN, the request as the signer takes it,
 // under the 150 s deadline; a FunctionError or no answer is a failure, and
@@ -93,9 +112,13 @@ func TestLambdaSignerProbe(t *testing.T) {
 	if err != nil || !bytes.Equal(key, listedKey) || string(f.in.Payload) != "{}" {
 		t.Fatalf("%q %v %s", key, err, f.in.Payload)
 	}
+	if f.deadline <= ProbeTimeout-time.Second || f.deadline > ProbeTimeout {
+		t.Fatalf("probe deadline %v", f.deadline)
+	}
 	for name, r := range map[string]SignerResult{
-		"no key":   {Status: 400, Code: "bad_request"},
-		"accepted": {Status: 201, AnchorKey: listedKey},
+		"no key":       {Status: 400, Code: "bad_request"},
+		"accepted":     {Status: 201, AnchorKey: listedKey},
+		"another code": {Status: 400, Code: "bad_anchor", AnchorKey: listedKey},
 	} {
 		if _, err := (&LambdaSigner{Client: &fakeLambda{out: answer(t, r)}, FunctionARN: "arn"}).Probe(ctx); err == nil {
 			t.Errorf("%s: probe accepted", name)
@@ -133,7 +156,8 @@ func signerPublisher(t *testing.T, f *fakeSigner, log *bytes.Buffer) *Publisher 
 func TestPublishViaSigner(t *testing.T) {
 	ctx := context.Background()
 	var log bytes.Buffer
-	f := &fakeSigner{r: SignerResult{Status: 201, Bundle: json.RawMessage(`{"site":1}`), IndexUpdated: false, AnchorKey: listedKey}}
+	site := signedBundle(t, anchorPriv, []byte("doc"), "site")
+	f := &fakeSigner{r: SignerResult{Status: 201, Bundle: site, IndexUpdated: false, AnchorKey: listedKey}}
 	p := signerPublisher(t, f, &log)
 	// A bundle this service anchored itself before the signer, never
 	// uploaded, is replaced by the site's.
@@ -141,23 +165,49 @@ func TestPublishViaSigner(t *testing.T) {
 		t.Fatal(err)
 	}
 	b, err := p.PublishProposal(ctx, "p1", []byte("doc"), []byte("sig"))
-	if err != nil || string(b) != `{"site":1}` {
+	if err != nil || !bytes.Equal(b, site) {
 		t.Fatalf("%s %v", b, err)
 	}
 	if len(f.reqs) != 1 || f.reqs[0].ProposalID != "p1" || f.reqs[0].Name != "proposal" || string(f.reqs[0].Sig) != "sig" {
 		t.Fatalf("%+v", f.reqs)
 	}
-	if kept, _ := p.StoredBundle(ctx, []byte("doc")); string(kept) != `{"site":1}` {
+	if kept, _ := p.StoredBundle(ctx, []byte("doc")); !bytes.Equal(kept, site) {
 		t.Fatalf("kept %s", kept)
 	}
 	p2 := &Publisher{Records: p.Records} // a restart reads it from Records
-	if kept, _ := p2.StoredBundle(ctx, []byte("doc")); string(kept) != `{"site":1}` {
+	if kept, _ := p2.StoredBundle(ctx, []byte("doc")); !bytes.Equal(kept, site) {
 		t.Fatalf("kept after a restart %s", kept)
 	}
+	f.r.Bundle = signedBundle(t, anchorPriv, []byte("ext"), "")
 	rc, err := p.PublishExtension(ctx, "p1", 2, []byte("ext"), []byte("s2"))
 	if err != nil || !rc.IndexStale || f.reqs[1].Name != "extension-2" {
 		t.Fatalf("%+v %v %+v", rc, err, f.reqs[1])
 	}
+}
+
+// The call outlives the API request that started it (its 30 s write
+// timeout): a canceled request context doesn't cancel it.
+func TestPublishViaSignerOutlivesTheRequest(t *testing.T) {
+	var log bytes.Buffer
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	f := &ctxSigner{r: SignerResult{Status: 201, Bundle: signedBundle(t, anchorPriv, []byte("doc"), ""), IndexUpdated: true, AnchorKey: listedKey}}
+	p := signerPublisher(t, nil, &log)
+	p.Signer = f
+	if _, err := p.PublishProposal(ctx, "p1", []byte("doc"), []byte("sig")); err != nil || f.canceled {
+		t.Fatalf("%v, canceled %v", err, f.canceled)
+	}
+}
+
+// ctxSigner records whether the call's context was already canceled.
+type ctxSigner struct {
+	r        SignerResult
+	canceled bool
+}
+
+func (c *ctxSigner) Call(ctx context.Context, _ SignerRequest) (SignerResult, error) {
+	c.canceled = ctx.Err() != nil
+	return c.r, nil
 }
 
 // Failures: the signer failing is "not published" (retried), but the
@@ -181,7 +231,7 @@ func TestPublishViaSignerFailures(t *testing.T) {
 		t.Fatal("a document never sent is attempted")
 	}
 	f.err = nil
-	f.r = SignerResult{Status: 201, Bundle: json.RawMessage(`{}`), AnchorKey: []byte("another key")}
+	f.r = SignerResult{Status: 201, Bundle: signedBundle(t, anchorPriv, []byte("doc"), ""), AnchorKey: []byte("another key")}
 	if _, err := p.PublishProposal(ctx, "p1", []byte("doc"), []byte("sig")); err == nil || !strings.Contains(log.String(), "anchor_key_changed") {
 		t.Fatalf("another key: %v", err)
 	}
@@ -191,6 +241,30 @@ func TestPublishViaSignerFailures(t *testing.T) {
 	f.r = SignerResult{Status: 201, AnchorKey: listedKey}
 	if _, err := p.PublishProposal(ctx, "p1", []byte("doc"), []byte("sig")); err == nil {
 		t.Fatal("201 without a bundle")
+	}
+	// The bundle itself is checked: the right key field is not enough.
+	other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	for name, b := range map[string]json.RawMessage{
+		"another key's signature": signedBundle(t, other, []byte("doc"), ""),
+		"another document":        signedBundle(t, anchorPriv, []byte("other doc"), ""),
+		"no signature":            json.RawMessage(`{"messageSignature":{}}`),
+		"not JSON":                json.RawMessage(`{`),
+	} {
+		log.Reset()
+		f.r = SignerResult{Status: 201, Bundle: b, AnchorKey: listedKey}
+		if _, err := p.PublishProposal(ctx, "p1", []byte("doc"), []byte("sig")); err == nil || !strings.Contains(log.String(), "signer_bundle_unverified") {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if kept, _ := p.StoredBundle(ctx, []byte("doc")); kept != nil {
+			t.Fatalf("%s: kept", name)
+		}
+	}
+	// No status, or one no answer carries: retried, not a refusal.
+	for _, st := range []int{0, 100, 204, 302} {
+		f.r = SignerResult{Status: st, AnchorKey: listedKey}
+		if _, err := p.PublishProposal(ctx, "p1", []byte("doc"), []byte("sig")); !errors.Is(err, ErrSignerFailed) {
+			t.Fatalf("status %d: %v", st, err)
+		}
 	}
 	var ref *ErrRefused
 	for _, st := range []int{http.StatusServiceUnavailable, http.StatusTooManyRequests} {
@@ -234,7 +308,7 @@ func TestPublishResultsViaSigner(t *testing.T) {
 		"unverifiable":    {0, true, "results_bundle_unverified"},
 	} {
 		var log bytes.Buffer
-		bundle := ballottest.Bundle(c.stamp, c.stamp)
+		bundle := signedBundle(t, anchorPriv, []byte("res"), name)
 		f := &fakeSigner{r: SignerResult{Status: 201, Bundle: bundle, IndexUpdated: true, AnchorKey: listedKey}}
 		p := signerPublisher(t, f, &log)
 		p.Timestamp = func(b json.RawMessage, _ []byte) (int64, error) {

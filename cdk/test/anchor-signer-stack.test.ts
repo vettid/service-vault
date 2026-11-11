@@ -201,10 +201,13 @@ describe('the service vault side', () => {
   const envOf = (s: Template) => Object.fromEntries(container(s).Environment.map((e: any) => [e.Name, e.Value]));
   const statements = (s: Template) => Object.values<any>(s.findResources('AWS::IAM::Policy')).flatMap((p) => p.Properties.PolicyDocument.Statement);
   const MARKER = '/vettid/service-vault/test/anchor_key_moved';
+  const SPKI = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' }).publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
+  const withSigner = { ...sv, anchorSignerFunctionArn: FN_ARN, anchorKeySpki: SPKI };
   test('the task gets the signer and the marker by name; it may read the marker, never write it', () => {
-    const s = Template.fromStack(new ServiceVaultStack(new cdk.App(), 'SV', { ...sv, anchorSignerFunctionArn: FN_ARN }));
+    const s = Template.fromStack(new ServiceVaultStack(new cdk.App(), 'SV', withSigner));
     const env = envOf(s);
     expect(env.SV_ANCHOR_SIGNER).toBe(FN_ARN);
+    expect(env.SV_ANCHOR_KEY).toBe(SPKI);
     expect(env.SV_ANCHOR_MOVED_PARAM).toBe(MARKER);
     const onMarker = statements(s).filter((x) => JSON.stringify(x.Resource).includes('anchor_key_moved'));
     expect(onMarker).toHaveLength(1);
@@ -219,10 +222,11 @@ describe('the service vault side', () => {
   test('without the signer, the marker is still passed and readable', () => {
     const s = Template.fromStack(new ServiceVaultStack(new cdk.App(), 'SV', sv));
     expect(envOf(s).SV_ANCHOR_SIGNER).toBeUndefined();
+    expect(envOf(s).SV_ANCHOR_KEY).toBeUndefined();
     expect(envOf(s).SV_ANCHOR_MOVED_PARAM).toBe(MARKER);
   });
   test('the task may invoke the signer, and nothing of it is made here', () => {
-    const s = Template.fromStack(new ServiceVaultStack(new cdk.App(), 'SV', { ...sv, anchorSignerFunctionArn: FN_ARN }));
+    const s = Template.fromStack(new ServiceVaultStack(new cdk.App(), 'SV', withSigner));
     const st = Object.values<any>(s.findResources('AWS::IAM::Policy')).flatMap((p) => p.Properties.PolicyDocument.Statement);
     const inv = st.filter((x) => asList(x.Action).includes('lambda:InvokeFunction'));
     expect(inv).toHaveLength(1);
@@ -231,10 +235,13 @@ describe('the service vault side', () => {
     expect(JSON.stringify(s.toJSON())).not.toContain('anchor-claims');
   });
   test('refused: a signer in this account, or not a function ARN', () => {
-    expect(() => new ServiceVaultStack(new cdk.App(), 'SV', { ...sv, anchorSignerFunctionArn: FN_ARN.replace(SIGNER_ACCT, SERVICE_ACCT) })).toThrow(/signer account/);
-    expect(() => new ServiceVaultStack(new cdk.App(), 'SV', { ...sv, anchorSignerFunctionArn: 'nope' })).toThrow(/ARN/);
-    expect(() => new ServiceVaultStack(new cdk.App(), 'SV', { ...sv, env: undefined, anchorSignerFunctionArn: FN_ARN })).toThrow(/env.account/);
-    expect(() => new ServiceVaultStack(new cdk.App(), 'SV', { ...sv, votesUrl: undefined, anchorSignerFunctionArn: FN_ARN })).toThrow(/votesUrl/);
+    expect(() => new ServiceVaultStack(new cdk.App(), 'SV', { ...withSigner, anchorSignerFunctionArn: FN_ARN.replace(SIGNER_ACCT, SERVICE_ACCT) })).toThrow(/signer account/);
+    expect(() => new ServiceVaultStack(new cdk.App(), 'SV', { ...withSigner, anchorSignerFunctionArn: 'nope' })).toThrow(/ARN/);
+    expect(() => new ServiceVaultStack(new cdk.App(), 'SV', { ...withSigner, env: undefined })).toThrow(/env.account/);
+    expect(() => new ServiceVaultStack(new cdk.App(), 'SV', { ...withSigner, votesUrl: undefined })).toThrow(/votesUrl/);
+    expect(() => new ServiceVaultStack(new cdk.App(), 'SV', { ...withSigner, anchorKeySpki: undefined })).toThrow(/anchorKeySpki/);
+    const ed = crypto.generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
+    expect(() => new ServiceVaultStack(new cdk.App(), 'SV', { ...withSigner, anchorKeySpki: ed })).toThrow(/anchorKeySpki/);
   });
   test('without it, nothing changes', () => {
     const s = Template.fromStack(new ServiceVaultStack(new cdk.App(), 'SV', sv));

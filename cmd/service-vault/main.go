@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -156,6 +157,12 @@ type Config struct {
 	// daemon refuses to start without AnchorSigner, and never reads the
 	// anchor-key blob. Required with ballots unless AnchorSigner is set.
 	AnchorMovedParam string
+	// AnchorKey pins the anchor key: its SubjectPublicKeyInfo, DER
+	// (SV_ANCHOR_KEY, standard base64, set by the owner). Required with
+	// AnchorSigner: only this key is certified and listed, and every
+	// answer and bundle of the signer is checked against it. Without the
+	// signer, if set, the stored key must be this one.
+	AnchorKey []byte
 }
 
 // anchorSignerARN is a Lambda function's unqualified ARN.
@@ -293,6 +300,19 @@ func configFromEnv(getenv func(string) string) (*Config, error) {
 	c.AnchorMovedParam = strings.TrimSpace(getenv("SV_ANCHOR_MOVED_PARAM"))
 	if c.AnchorSigner != "" && (c.VotesURL == "" || !anchorSignerARN.MatchString(c.AnchorSigner)) {
 		return nil, errors.New("SV_ANCHOR_SIGNER: a Lambda function's unqualified ARN, with SV_VOTES_URL")
+	}
+	if v := strings.TrimSpace(getenv("SV_ANCHOR_KEY")); v != "" {
+		spki, err := base64.StdEncoding.DecodeString(v)
+		if err != nil {
+			return nil, errors.New("SV_ANCHOR_KEY: not standard base64")
+		}
+		if _, err := p256(spki); err != nil {
+			return nil, fmt.Errorf("SV_ANCHOR_KEY: %w", err)
+		}
+		c.AnchorKey = spki
+	}
+	if c.AnchorSigner != "" && c.AnchorKey == nil {
+		return nil, errors.New("SV_ANCHOR_KEY is required with SV_ANCHOR_SIGNER: the anchor key is pinned, never learned from the signer")
 	}
 	if c.BallotsTable != "" && c.AnchorSigner == "" && c.AnchorMovedParam == "" {
 		// Without the marker's name, a moved key couldn't be told from one
@@ -481,23 +501,22 @@ func serve(args []string) error {
 	if ballots != nil {
 		// Publishing (BALLOT-PROTOCOL §3.3) needs SV_VOTES_URL; without it,
 		// creating a proposal answers publication_not_configured.
-		as, err := setupAnchor(ctx, cfg, &publish.LambdaSigner{Client: ac.lambda, FunctionARN: cfg.AnchorSigner},
-			ac.ssm, &keystore.AWSKMS{Client: ac.kms}, tbl.Blobs())
-		switch {
-		case errors.Is(err, errSignerUnavailable):
-			// Sign-ins and approvals go on; no proposal can be created or
-			// published until a restart reaches the signer.
-			log.Error("votes can't be published: "+err.Error(), "alarm", "anchor_signer_unavailable")
-		case err != nil:
+		ls := &publish.LambdaSigner{Client: ac.lambda, FunctionARN: cfg.AnchorSigner}
+		as, err := setupAnchor(ctx, cfg, ls, ac.ssm, &keystore.AWSKMS{Client: ac.kms}, tbl.Blobs())
+		if err != nil {
 			return err
-		default:
-			h := sha256.Sum256(as.spki)
-			cert, err := signIK(vote.LabelAnchorKey, h[:])
-			if err != nil {
-				return err
-			}
-			anchorInfo = &api.AnchorKey{Key: as.spki, Cert: cert, IK: keys.IKPublic(), Sigstore: cfg.Sigstore}
 		}
+		if as.signer != nil {
+			go watchSigner(ctx, ls, as.spki, log)
+		}
+		// Only the pinned key (or the stored one, before the signer) is
+		// certified.
+		h := sha256.Sum256(as.spki)
+		cert, err := signIK(vote.LabelAnchorKey, h[:])
+		if err != nil {
+			return err
+		}
+		anchorInfo = &api.AnchorKey{Key: as.spki, Cert: cert, IK: keys.IKPublic(), Sigstore: cfg.Sigstore}
 		mgr := &ballot.Manager{Store: ballots, Sign: signIK, IK: keys.IKPublic(), Roster: p, Sender: p, Background: sendsCtx,
 			Catcher: p, Approvals: approvals, NewID: envelope.NewULID, Now: time.Now, Log: log}
 		waitSends, stopQueueing = mgr.Wait, mgr.StopSends
@@ -510,7 +529,7 @@ func serve(args []string) error {
 			}
 			return pr.Title, true, nil
 		}
-		if cfg.VotesURL != "" && as != nil {
+		if cfg.VotesURL != "" {
 			mgr.Timestamp = func(bundle json.RawMessage, doc []byte) (int64, error) {
 				return anchor.TimestampTime(cfg.Sigstore, bundle, doc)
 			}

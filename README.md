@@ -159,23 +159,31 @@ destination.
   (`aws dynamodb delete-item --table-name T --key
   '{"pk":{"S":"rec#vote_bundle"},"sk":{"S":"<hex>"}}'`), and close
   again.
-- `anchor_signer_unavailable`: at start, the anchor signer
-  (`SV_ANCHOR_SIGNER`) didn't answer the probe for its key. The daemon
-  runs without publishing: no proposal can be created (`publication_not_configured`)
-  or published until a restart reaches the signer; sign-ins and
-  approvals go on. Check the signer's own alarms (its account), the
-  function's resource policy for this task role, and the task role's
-  `lambda:InvokeFunction`, then restart the task. It never falls back to
-  the `anchor-key` item.
-- `anchor_key_changed`: the anchor signer answered under another key
-  than the one it gave at start (the one this service certified and
-  lists). Nothing from that answer is kept, and the document is not
-  taken as published. A security event: check the signer account (its
-  key alias, function and alarms) before restarting.
+- `anchor_signer_unavailable`: the anchor signer (`SV_ANCHOR_SIGNER`)
+  doesn't answer the background probe (first a few seconds after the
+  start, then with backoff up to 15 minutes, until it answers once).
+  Publishing stays configured, but each call fails and is retried, so
+  documents wait; sign-ins and approvals go on. Check the signer's own
+  alarms (its account), the function's resource policy for this task
+  role, and the task role's `lambda:InvokeFunction`. It never falls back
+  to the `anchor-key` item.
+- `anchor_key_changed`: the anchor signer answered (a call or the
+  probe) under another key than the pinned one (`SV_ANCHOR_KEY`).
+  Nothing from that answer is kept, and the document is not taken as
+  published. A security event: check the signer account (its key alias,
+  function and alarms).
+- `signer_bundle_unverified`: the anchor signer returned a bundle whose
+  message signature is not the pinned key's over the document (or whose
+  digest isn't the document's). It is not kept, and the document is not
+  taken as published. A security event, as `anchor_key_changed`.
 - With the signer, a document whose answer was lost (a timeout, a crash)
   is asked of the signer again, which resumes its claim; a vote
   extension sent to it is never dropped as "never anchored"
-  (`rec#vote_signer_call` marks what was sent). Results come back
+  (`rec#vote_signer_call` marks what was sent), and the bundle the
+  signer then returns is kept only if it verifies under the pinned key.
+  A call that takes longer than the API's 30 s write timeout answers
+  the client with an error, but goes on and keeps what it gets; the
+  next call finds it. Results come back
   already on the site: `results_stamped_early` and
   `results_bundle_unverified` then mean the site took them, so nothing
   is retried; look at them as above.
@@ -549,8 +557,9 @@ which is retained and never deleted with the stack.
 | `SV_BALLOTS_TABLE` | env | The write-once DynamoDB table of accepted ballots (BALLOT-PROTOCOL §6); without it, members' vote requests are answered `unsupported_type` |
 | `SV_SIGSTORE` | env | `staging` or `production`: the Sigstore instance votes are anchored in (BALLOT-PROTOCOL §3.3); required with `SV_BALLOTS_TABLE`. The CDK sets `production` for the `prod` stack and `staging` otherwise |
 | `SV_VOTES_URL` | env | votes.vettid.org (or staging's): where proposals, extensions and results are published, each anchored in Rekor first (BALLOT-PROTOCOL §3.3). Without it, creating a proposal answers `publication_not_configured`. The CDK sets it from the `votesUrl` context |
-| `SV_ANCHOR_SIGNER` | env | The anchor signer's unqualified Lambda function ARN, in the signer's own account (key protection; the CDK's `anchorSignerFunctionArn`). With it, every document is published through the signer, which holds the anchor key in KMS: this service never reads the `anchor-key` item and holds no grant on the key. It takes the key's SPKI from the signer's answer to a probe at start (an empty call, refused before any work) and checks every answer against it. Needs `SV_VOTES_URL` |
-| `SV_ANCHOR_MOVED_PARAM` | env | The SSM parameter that marks the anchor key as moved to the signer (the CDK sets `/vettid/service-vault/<env>/anchor_key_moved`; the owner creates it at the cutover, never the stack, and the task may only read it). Once it exists, or if it can't be read, the daemon refuses to start without `SV_ANCHOR_SIGNER`. Required with `SV_BALLOTS_TABLE` unless `SV_ANCHOR_SIGNER` is set. A release build never creates an anchor key: without the signer it opens the one stored, and refuses to start if there is none; only a `devsigner` build (local development and tests) makes one |
+| `SV_ANCHOR_SIGNER` | env | The anchor signer's unqualified Lambda function ARN, in the signer's own account (key protection; the CDK's `anchorSignerFunctionArn`). With it, every document is published through the signer, which holds the anchor key in KMS: this service never reads the `anchor-key` item and holds no grant on the key. Each call has a 150 s deadline and outlives the API request that started it. Needs `SV_VOTES_URL` and `SV_ANCHOR_KEY` |
+| `SV_ANCHOR_KEY` | env | The anchor key, pinned: its SubjectPublicKeyInfo (DER) in standard base64, a P-256 key (the CDK's `anchorKeySpki`; the owner takes it from the signer account with `aws kms get-public-key`). Required with `SV_ANCHOR_SIGNER`. Only this key is certified and served at `GET /v1/anchor-key`; every answer of the signer must name it, and every bundle it returns must be signed by it over the document, or nothing is kept. The signer is probed in the background (an empty call it refuses before any work, 15 s deadline, then backoff), never on the start's path. Without the signer, if set, the stored key must be this one or the daemon refuses to start |
+| `SV_ANCHOR_MOVED_PARAM` | env | The SSM parameter that marks the anchor key as moved to the signer (the CDK sets `/vettid/service-vault/<env>/anchor_key_moved`; the owner creates it at the cutover, never the stack, and the task may only read it). Once it exists, or if it can't be read, the daemon refuses to start without `SV_ANCHOR_SIGNER`. It is read at start only: the cutover sets `SV_ANCHOR_SIGNER` (with `SV_ANCHOR_KEY`) and creates the marker in the same step, then rolls the task. Required with `SV_BALLOTS_TABLE` unless `SV_ANCHOR_SIGNER` is set. A release build never creates an anchor key: without the signer it opens the one stored, and refuses to start if there is none; only a `devsigner` build (local development and tests) makes one |
 | `SV_KMS_KEY_ID` | env | KMS key ARN for the keystore |
 | `SV_LISTEN` | env | API listen address (`:8080`) |
 | `SV_WEBHOOK_URL` | env | Webhook destination |

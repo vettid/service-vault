@@ -3,7 +3,10 @@ package publish
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -81,25 +84,28 @@ func (l *LambdaSigner) Call(ctx context.Context, req SignerRequest) (SignerResul
 	if err != nil {
 		return SignerResult{}, err
 	}
-	return l.invoke(ctx, payload)
+	return l.invoke(ctx, payload, SignerTimeout)
 }
 
+// ProbeTimeout is the probe's deadline: it asks for nothing but the key.
+const ProbeTimeout = 15 * time.Second
+
 // Probe asks the signer for the anchor key alone: an empty call, which it
-// refuses as malformed before any work (no claim, no sign), answering with
-// its anchor key.
+// refuses as malformed (bad_request) before any work (no claim, no sign),
+// answering with its anchor key.
 func (l *LambdaSigner) Probe(ctx context.Context) ([]byte, error) {
-	r, err := l.invoke(ctx, []byte(`{}`))
+	r, err := l.invoke(ctx, []byte(`{}`), ProbeTimeout)
 	if err != nil {
 		return nil, err
 	}
-	if r.Status != http.StatusBadRequest || len(r.AnchorKey) == 0 {
+	if r.Status != http.StatusBadRequest || r.Code != "bad_request" || len(r.AnchorKey) == 0 {
 		return nil, fmt.Errorf("publish: the anchor signer's probe answered %d %q without the anchor key", r.Status, r.Code)
 	}
 	return r.AnchorKey, nil
 }
 
-func (l *LambdaSigner) invoke(ctx context.Context, payload []byte) (SignerResult, error) {
-	ctx, cancel := context.WithTimeout(ctx, SignerTimeout)
+func (l *LambdaSigner) invoke(ctx context.Context, payload []byte, timeout time.Duration) (SignerResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	out, err := l.Client.Invoke(ctx, &lambda.InvokeInput{
 		FunctionName:   aws.String(l.FunctionARN),
@@ -199,9 +205,14 @@ func (p *Publisher) keep(ctx context.Context, doc []byte, b json.RawMessage) err
 // before collection ended (VOTES-SITE §4), so one it took that this check
 // refuses is an alarm, not a retry (the site holds it).
 func (p *Publisher) viaSigner(ctx context.Context, id, name string, doc, sig, rows []byte, notBefore int64) (ballot.Receipt, error) {
-	if len(p.AnchorKey) == 0 {
-		return ballot.Receipt{}, errors.New("publish: no listed anchor key to check the signer's answers against")
+	pub, err := pinnedKey(p.AnchorKey)
+	if err != nil {
+		return ballot.Receipt{}, fmt.Errorf("publish: the pinned anchor key: %w", err)
 	}
+	// The call outlives the API request that started it (its 30 s write
+	// timeout): a signer's answer that arrives is kept, so the next try
+	// finds the bundle. SignerTimeout still bounds it.
+	ctx = context.WithoutCancel(ctx)
 	if err := p.markCalled(ctx, doc); err != nil {
 		return ballot.Receipt{}, err
 	}
@@ -211,14 +222,21 @@ func (p *Publisher) viaSigner(ctx context.Context, id, name string, doc, sig, ro
 		return ballot.Receipt{}, err
 	}
 	if !bytes.Equal(r.AnchorKey, p.AnchorKey) {
-		p.log().Error("the anchor signer answered under another anchor key than the one listed", "alarm", "anchor_key_changed",
+		p.log().Error("the anchor signer answered under another anchor key than the one pinned", "alarm", "anchor_key_changed",
 			"proposal_id", id, "name", name)
-		return ballot.Receipt{}, errors.New("publish: the anchor signer's key is not the listed anchor key")
+		return ballot.Receipt{}, errors.New("publish: the anchor signer's key is not the pinned anchor key")
 	}
-	switch r.Status {
-	case http.StatusCreated, http.StatusOK:
+	switch {
+	case r.Status == http.StatusCreated || r.Status == http.StatusOK:
 		if len(r.Bundle) == 0 {
 			return ballot.Receipt{}, fmt.Errorf("publish: the anchor signer answered %d without a bundle", r.Status)
+		}
+		// The bundle is checked, not the answer's word: its signature
+		// must be the pinned key's over this document.
+		if err := VerifyBundleSignature(pub, doc, r.Bundle); err != nil {
+			p.log().Error("the anchor signer returned a bundle not signed by the pinned key over this document", "alarm", "signer_bundle_unverified",
+				"proposal_id", id, "name", name, "err", err.Error())
+			return ballot.Receipt{}, fmt.Errorf("publish: the signer's bundle: %w", err)
 		}
 		if err := p.keep(ctx, doc, r.Bundle); err != nil {
 			return ballot.Receipt{}, err
@@ -230,11 +248,57 @@ func (p *Publisher) viaSigner(ctx context.Context, id, name string, doc, sig, ro
 			p.log().Warn("publish: the site's index is not updated", "proposal_id", id, "name", name)
 		}
 		return ballot.Receipt{Bundle: r.Bundle, IndexStale: !r.IndexUpdated}, nil
-	}
-	if r.Status >= 500 || r.Status == http.StatusTooManyRequests {
+	case r.Status >= 500 && r.Status <= 599 || r.Status == http.StatusTooManyRequests:
 		return ballot.Receipt{}, fmt.Errorf("publish: votes.vettid.org answered %d %s (through the anchor signer)", r.Status, r.Code)
+	case r.Status >= 400 && r.Status <= 499:
+		return ballot.Receipt{}, &ErrRefused{Status: r.Status, Code: r.Code}
 	}
-	return ballot.Receipt{}, &ErrRefused{Status: r.Status, Code: r.Code}
+	// No status, or one no answer should carry: not a refusal to act on.
+	return ballot.Receipt{}, fmt.Errorf("%w: an answer with status %d", ErrSignerFailed, r.Status)
+}
+
+// pinnedKey parses the pinned anchor key (an SPKI) as P-256.
+func pinnedKey(spki []byte) (*ecdsa.PublicKey, error) {
+	if len(spki) == 0 {
+		return nil, errors.New("none")
+	}
+	k, err := x509.ParsePKIXPublicKey(spki)
+	if err != nil {
+		return nil, err
+	}
+	pub, ok := k.(*ecdsa.PublicKey)
+	if !ok || pub.Curve != elliptic.P256() {
+		return nil, errors.New("not a P-256 key")
+	}
+	return pub, nil
+}
+
+// VerifyBundleSignature checks a Sigstore bundle's message signature: a
+// SHA-256 digest that is the document's, and an ECDSA signature by pub
+// over it. The bundle's other parts (the timestamp, the log entry) are
+// checked where they are used (anchor.TimestampTime).
+func VerifyBundleSignature(pub *ecdsa.PublicKey, doc []byte, bundle json.RawMessage) error {
+	var b struct {
+		MessageSignature struct {
+			MessageDigest struct {
+				Algorithm string `json:"algorithm"`
+				Digest    []byte `json:"digest"`
+			} `json:"messageDigest"`
+			Signature []byte `json:"signature"`
+		} `json:"messageSignature"`
+	}
+	if err := json.Unmarshal(bundle, &b); err != nil {
+		return fmt.Errorf("the bundle doesn't parse: %w", err)
+	}
+	ms := b.MessageSignature
+	want := sha256.Sum256(doc)
+	if ms.MessageDigest.Algorithm != "SHA2_256" || !bytes.Equal(ms.MessageDigest.Digest, want[:]) {
+		return errors.New("the bundle's digest is not this document's")
+	}
+	if !ecdsa.VerifyASN1(pub, want[:], ms.Signature) {
+		return errors.New("the bundle's signature doesn't verify under the pinned anchor key")
+	}
+	return nil
 }
 
 // checkPublishedResults alarms on published results whose bundle doesn't

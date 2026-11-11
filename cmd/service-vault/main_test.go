@@ -3,6 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/base64"
 	"errors"
 	"log/slog"
 	"net"
@@ -80,7 +85,19 @@ func TestConfigFromEnv(t *testing.T) {
 	}
 	e["SV_ANCHOR_SIGNER"] = signer
 	delete(e, "SV_ANCHOR_MOVED_PARAM")
-	if c, err := configFromEnv(env(e)); err != nil || c.AnchorSigner != signer {
+	if _, err := configFromEnv(env(e)); err == nil || !strings.Contains(err.Error(), "SV_ANCHOR_KEY") {
+		t.Fatalf("a signer without the pinned key: %v", err)
+	}
+	for _, bad := range []string{"not base64!", base64.StdEncoding.EncodeToString([]byte("not a key"))} {
+		e["SV_ANCHOR_KEY"] = bad
+		if _, err := configFromEnv(env(e)); err == nil {
+			t.Fatalf("SV_ANCHOR_KEY %q", bad)
+		}
+	}
+	k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	spki, _ := x509.MarshalPKIXPublicKey(&k.PublicKey)
+	e["SV_ANCHOR_KEY"] = base64.StdEncoding.EncodeToString(spki)
+	if c, err := configFromEnv(env(e)); err != nil || c.AnchorSigner != signer || !bytes.Equal(c.AnchorKey, spki) {
 		t.Fatalf("signer %+v %v", c, err)
 	}
 	delete(e, "SV_VOTES_URL")
