@@ -490,7 +490,8 @@ func serve(args []string) error {
 			mgr.Timestamp = func(bundle json.RawMessage, doc []byte) (int64, error) {
 				return anchor.TimestampTime(cfg.Sigstore, bundle, doc)
 			}
-			mgr.Publisher = &publish.Publisher{URL: cfg.VotesURL, Anchor: anc, Client: anchor.Client(time.Minute), Records: records, Log: log}
+			mgr.Publisher = &publish.Publisher{URL: cfg.VotesURL, Anchor: anc, Client: anchor.Client(time.Minute), Records: records,
+				Timestamp: mgr.Timestamp, Log: log}
 		}
 		if rebuild {
 			// The table was restored: ballots it lost are in the copy (§6).

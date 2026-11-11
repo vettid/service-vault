@@ -58,6 +58,10 @@ func (s *fakeSender) SendMessage(_ context.Context, conn, typ string, body json.
 type fakePublisher struct {
 	fail  bool
 	calls int
+	// notBefore is each results upload's notBefore; stampedEarly answers
+	// the next results upload with ErrStampedEarly.
+	notBefore    []int64
+	stampedEarly bool
 	// started and release, when set, hold an extension's publication
 	// until release is closed, after telling started.
 	started, release chan struct{}
@@ -324,8 +328,13 @@ func TestCreateRefusals(t *testing.T) {
 	}
 }
 
-func (p *fakePublisher) PublishResults(_ context.Context, id string, results, sig, rows []byte) (Receipt, error) {
+func (p *fakePublisher) PublishResults(_ context.Context, id string, results, sig, rows []byte, notBefore int64) (Receipt, error) {
 	p.calls++
+	p.notBefore = append(p.notBefore, notBefore)
+	if p.stampedEarly {
+		p.stampedEarly = false
+		return Receipt{}, ErrStampedEarly
+	}
 	p.resultsUploads++
 	if p.fail {
 		return Receipt{}, errors.New("rekor down")

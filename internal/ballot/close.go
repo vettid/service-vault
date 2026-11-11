@@ -21,7 +21,11 @@ import (
 const KindResults = "vote_results"
 
 // CollectMargin is how far past the close the relay's messages must have
-// been handled before the count (§7).
+// been handled before the count (§7). It is also the allowance for the
+// timestamp authority's clock: a member's vault fails results whose
+// timestamp is before the close (§8.3 step 2), so the results are
+// anchored a minute after it by this service's clock, and checked before
+// they are uploaded (ResultsPublisher).
 const CollectMargin = time.Minute
 
 // Catcher reports whether every message the relay received before t has
@@ -33,15 +37,21 @@ type Catcher interface {
 }
 
 // ResultsPublisher anchors and publishes the results (§3.3), and returns
-// their Sigstore bundle.
+// their Sigstore bundle. With notBefore (Unix seconds, the closes_at in
+// force) it uploads only a bundle timestamped at or after it, anchoring
+// the results again in place of an earlier one (§8.3 step 2), and answers
+// ErrStampedEarly when it has none; 0 checks nothing.
 type ResultsPublisher interface {
-	PublishResults(ctx context.Context, proposalID string, results, sig, rows []byte) (Receipt, error)
+	PublishResults(ctx context.Context, proposalID string, results, sig, rows []byte, notBefore int64) (Receipt, error)
 }
 
 // Errors from Close.
 var (
 	ErrNotClosed = errors.New("ballot: the vote hasn't closed")
 	ErrNotCaught = errors.New("ballot: the relay's messages from before the close aren't all handled yet")
+	// ErrStampedEarly: the results' timestamp is before the close, so
+	// nothing was uploaded; a later Close anchors them again.
+	ErrStampedEarly = errors.New("ballot: the results' timestamp is before the close: not published yet")
 )
 
 // PublishedResults is a vote's results as published.
@@ -143,7 +153,7 @@ func (m *Manager) Close(ctx context.Context, id string) (*ResultsSummary, error)
 		}
 	}
 	if pr.Bundle == nil {
-		rc, err := rp.PublishResults(ctx, id, pr.Results, pr.Sig, pr.Rows)
+		rc, err := rp.PublishResults(ctx, id, pr.Results, pr.Sig, pr.Rows, o.ClosesAt)
 		if err != nil {
 			return nil, fmt.Errorf("ballot: publish results of %s: %w", id, err)
 		}
@@ -154,8 +164,9 @@ func (m *Manager) Close(ctx context.Context, id string) (*ResultsSummary, error)
 		m.announce(ctx, o, pr)
 	} else if pr.IndexStale {
 		// The site has the results; its index missed them. The identical
-		// upload again reruns the index update.
-		switch rc, err := rp.PublishResults(ctx, id, pr.Results, pr.Sig, pr.Rows); {
+		// upload again reruns the index update (its bundle was checked
+		// before the first upload).
+		switch rc, err := rp.PublishResults(ctx, id, pr.Results, pr.Sig, pr.Rows, 0); {
 		case err != nil:
 			m.log().Warn("site index still not updated for the results", "proposal_id", id, "err", err.Error())
 		case !rc.IndexStale:

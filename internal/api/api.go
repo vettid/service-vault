@@ -742,6 +742,8 @@ func (s *Server) closeProposal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "not_closed")
 	case errors.Is(err, ballot.ErrNotCaught):
 		writeError(w, http.StatusServiceUnavailable, "collecting")
+	case errors.Is(err, ballot.ErrStampedEarly):
+		writeError(w, http.StatusServiceUnavailable, "stamped_early") // retry; the clock is off
 	case errors.Is(err, ballot.ErrUnpublished):
 		writeError(w, http.StatusConflict, "not_published")
 	case errors.Is(err, ballot.ErrSiteMismatch):

@@ -45,6 +45,12 @@ type Publisher struct {
 	// memory only (tests).
 	Records peer.Store
 
+	// Timestamp returns the verified RFC 3161 time (Unix seconds) of a
+	// bundle anchored for doc (anchor.TimestampTime). Results are uploaded
+	// only once it is at or after their close (BALLOT-PROTOCOL §8.3 step
+	// 2); nil publishes no results (fail closed).
+	Timestamp func(bundle json.RawMessage, doc []byte) (int64, error)
+
 	// Log is where the publisher logs; nil is slog's default.
 	Log *slog.Logger
 
@@ -66,18 +72,18 @@ type ErrRefused = ballot.ErrPublishRefused
 
 // PublishProposal implements ballot.Publisher.
 func (p *Publisher) PublishProposal(ctx context.Context, id string, doc, sig []byte) (json.RawMessage, error) {
-	rc, err := p.publish(ctx, id, "proposal", doc, sig, nil)
+	rc, err := p.publish(ctx, id, "proposal", doc, sig, nil, 0)
 	return rc.Bundle, err
 }
 
 // PublishExtension implements ballot.ExtensionPublisher.
 func (p *Publisher) PublishExtension(ctx context.Context, id string, n int64, doc, sig []byte) (ballot.Receipt, error) {
-	return p.publish(ctx, id, "extension-"+strconv.FormatInt(n, 10), doc, sig, nil)
+	return p.publish(ctx, id, "extension-"+strconv.FormatInt(n, 10), doc, sig, nil, 0)
 }
 
 // PublishResults implements ballot.ResultsPublisher.
-func (p *Publisher) PublishResults(ctx context.Context, id string, results, sig, rows []byte) (ballot.Receipt, error) {
-	return p.publish(ctx, id, "results", results, sig, rows)
+func (p *Publisher) PublishResults(ctx context.Context, id string, results, sig, rows []byte, notBefore int64) (ballot.Receipt, error) {
+	return p.publish(ctx, id, "results", results, sig, rows, notBefore)
 }
 
 func (p *Publisher) log() *slog.Logger {
@@ -148,10 +154,65 @@ func (p *Publisher) bundle(ctx context.Context, doc []byte) (json.RawMessage, er
 	return b, nil
 }
 
+// forget drops doc's kept bundle, in memory and in Records, so that the
+// next bundle call anchors doc again.
+func (p *Publisher) forget(ctx context.Context, doc []byte) error {
+	key := sha256.Sum256(doc)
+	p.mu.Lock()
+	delete(p.bundles, key)
+	p.mu.Unlock()
+	if p.Records == nil {
+		return nil
+	}
+	return p.Records.Apply(ctx, []peer.Change{{Kind: KindBundle, ID: hex.EncodeToString(key[:])}})
+}
+
+// stampedBundle returns doc's bundle once its timestamp is at or after
+// notBefore (BALLOT-PROTOCOL §8.3 step 2). An earlier bundle means this
+// service's clock is ahead of the timestamp authority's by more than
+// CollectMargin: it is never uploaded, and is dropped so that doc is
+// anchored again, with a new anchor signature (the transparency log
+// refuses an identical entry). One anchor again is tried here; if that
+// is early too, it is dropped as well and the caller retries later.
+func (p *Publisher) stampedBundle(ctx context.Context, id string, doc []byte, notBefore int64) (json.RawMessage, error) {
+	if p.Timestamp == nil {
+		return nil, errors.New("publish: no timestamp check for the results")
+	}
+	for try := 0; ; try++ {
+		bundle, err := p.bundle(ctx, doc)
+		if err != nil {
+			return nil, err
+		}
+		t, err := p.Timestamp(bundle, doc)
+		if err != nil {
+			return nil, fmt.Errorf("publish: the results' timestamp: %w", err)
+		}
+		if t >= notBefore {
+			return bundle, nil
+		}
+		p.log().Error("results timestamped before the close: this service's clock is ahead of the timestamp authority's", "alarm", "results_stamped_early",
+			"proposal_id", id, "timestamp", t, "closes_at", notBefore, "try", try)
+		if err := p.forget(ctx, doc); err != nil {
+			return nil, err
+		}
+		if try > 0 {
+			return nil, ballot.ErrStampedEarly
+		}
+	}
+}
+
 // publish anchors doc (once: a retry, even after a restart, sends the
 // same bundle, which the site wants, §4 "Write-once") and uploads it.
-func (p *Publisher) publish(ctx context.Context, id, name string, doc, sig, rows []byte) (ballot.Receipt, error) {
-	bundle, err := p.bundle(ctx, doc)
+// With notBefore, only a bundle timestamped at or after it is uploaded
+// (stampedBundle).
+func (p *Publisher) publish(ctx context.Context, id, name string, doc, sig, rows []byte, notBefore int64) (ballot.Receipt, error) {
+	var bundle json.RawMessage
+	var err error
+	if notBefore > 0 {
+		bundle, err = p.stampedBundle(ctx, id, doc, notBefore)
+	} else {
+		bundle, err = p.bundle(ctx, doc)
+	}
 	if err != nil {
 		return ballot.Receipt{}, err
 	}

@@ -21,7 +21,7 @@ import (
 
 type closingSite struct{ site }
 
-func (closingSite) PublishResults(context.Context, string, []byte, []byte, []byte) (ballot.Receipt, error) {
+func (closingSite) PublishResults(context.Context, string, []byte, []byte, []byte, int64) (ballot.Receipt, error) {
 	now := time.Now().Unix()
 	return ballot.Receipt{Bundle: ballottest.Bundle(now, now)}, nil
 }
