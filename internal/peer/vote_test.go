@@ -151,7 +151,7 @@ func TestCaughtWaitsOutLeases(t *testing.T) {
 
 func (f *fixture) caught(t time.Time) bool {
 	f.t.Helper()
-	ok, _, err := f.p.Caught(context.Background(), t, time.Time{}, t)
+	ok, _, err := f.p.Caught(context.Background(), t, time.Time{}, time.Time{}, t)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -342,7 +342,7 @@ func (f *fixture) leave(id string) {
 
 func (f *fixture) unhandled(t, from, until time.Time) int64 {
 	f.t.Helper()
-	_, n, err := f.p.Caught(context.Background(), t, from, until)
+	_, n, err := f.p.Caught(context.Background(), t, time.Time{}, from, until)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -880,5 +880,51 @@ func TestVoteNoAnswer(t *testing.T) {
 	f.pump()
 	if answered(held) || len(rv.reqs) != n {
 		t.Fatal("delivered again")
+	}
+}
+
+// An empty collect is timed by this clock, which may run fast: it is
+// evidence only when it started at or after emptyAfter (the passing
+// timestamp-authority probe plus the margin, BALLOT-PROTOCOL §7 0.13.12).
+func TestCaughtEmptyCollectAfterTheProbe(t *testing.T) {
+	f := newFixture(t)
+	f.clk.Advance(2 * time.Minute)
+	f.pump() // an empty collect now
+	at := f.clk.Now().Add(-time.Second)
+	ok, _, err := f.p.Caught(context.Background(), at, f.clk.Now().Add(time.Minute), time.Time{}, at)
+	if err != nil || ok {
+		t.Fatalf("an empty collect before emptyAfter counted: %v %v", ok, err)
+	}
+	f.clk.Advance(2 * time.Minute)
+	f.pump()
+	if ok, _, err := f.p.Caught(context.Background(), at, f.clk.Now().Add(-time.Second), time.Time{}, at); err != nil || !ok {
+		t.Fatalf("an empty collect after emptyAfter: %v %v", ok, err)
+	}
+}
+
+// The boundary: an empty collect started exactly at emptyAfter counts.
+func TestCaughtEmptyCollectAtEmptyAfter(t *testing.T) {
+	f := newFixture(t)
+	f.clk.Advance(2 * time.Minute)
+	f.pump()
+	at := f.p.emptyAt
+	if ok, _, err := f.p.Caught(context.Background(), at.Add(-time.Second), at, time.Time{}, at); err != nil || !ok {
+		t.Fatalf("at emptyAfter: %v %v", ok, err)
+	}
+	if ok, _, _ := f.p.Caught(context.Background(), at.Add(-time.Second), at.Add(time.Nanosecond), time.Time{}, at); ok {
+		t.Fatal("before emptyAfter counted")
+	}
+}
+
+// Step's empty-collect time carries this process's monotonic reading (the
+// evidence is compared on it, BALLOT-PROTOCOL §7 0.13.12).
+func TestEmptyAtIsMonotonic(t *testing.T) {
+	f := newFixture(t)
+	f.clk.Advance(2 * time.Minute)
+	f.pump()
+	f.p.cfg.Now = time.Now
+	f.pump()
+	if !strings.Contains(f.p.emptyAt.String(), " m=") {
+		t.Fatalf("emptyAt without a monotonic reading: %v", f.p.emptyAt)
 	}
 }

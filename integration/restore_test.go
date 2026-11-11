@@ -4,6 +4,8 @@ package integration
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -160,6 +162,33 @@ func TestRestoreChecksOnDynamoDB(t *testing.T) {
 	}
 	if err := dst.CheckTarget(ctx, src.Name, true, now); err != nil {
 		t.Fatalf("CheckTarget with -other-keys: %v", err)
+	}
+	// By sums: the same secrets sealed again (other bytes, the same sum)
+	// are the same deployment; a source without sums is from before the
+	// re-seal, and refused even with -other-keys.
+	sum := sha256.Sum256([]byte("pt"))
+	sealed := func(sum []byte, ct string) []byte {
+		b, _ := json.Marshal(&keystore.Sealed{Version: 1, KeyID: "k", Ciphertext: []byte(ct), Context: sum != nil, Sum: sum})
+		return b
+	}
+	src2, dst2 := newTable(t, ctx), newTable(t, ctx)
+	if err := src2.Blobs().Create(ctx, keystore.SecretsName, sealed(sum[:], "a")); err != nil {
+		t.Fatal(err)
+	}
+	if err := dst2.Blobs().Create(ctx, keystore.SecretsName, sealed(sum[:], "b")); err != nil {
+		t.Fatal(err)
+	}
+	if err := dst2.CheckTarget(ctx, src2.Name, false, now); err != nil {
+		t.Fatalf("CheckTarget, the same sums: %v", err)
+	}
+	legacy := newTable(t, ctx)
+	if err := legacy.Blobs().Create(ctx, keystore.SecretsName, sealed(nil, "a")); err != nil {
+		t.Fatal(err)
+	}
+	for _, other := range []bool{false, true} {
+		if err := dst2.CheckTarget(ctx, legacy.Name, other, now); err == nil || !strings.Contains(err.Error(), "before the re-seal") {
+			t.Fatalf("CheckTarget from before the re-seal (-other-keys %v): %v", other, err)
+		}
 	}
 
 	if _, ok, err := dst.LastHeartbeat(ctx); err != nil || ok {

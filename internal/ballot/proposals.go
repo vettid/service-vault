@@ -88,15 +88,23 @@ type Manager struct {
 	// (anchor.TimestampTime). It decides whether an extension came before
 	// the close it extends; nil decides nothing in effect (fail closed).
 	Timestamp func(bundle json.RawMessage, doc []byte) (int64, error)
-	NewID     func(time.Time) (string, error)
-	Now       func() time.Time
-	Log       *slog.Logger
+	// AuthorityTime asks the timestamp authority for the time, verified
+	// (anchor.AuthorityTime): a vote is counted only once it is at or
+	// after the close in force (BALLOT-PROTOCOL §7, 0.13.12). Nil counts
+	// nothing (fail closed).
+	AuthorityTime func(ctx context.Context) (int64, error)
+	NewID         func(time.Time) (string, error)
+	Now           func() time.Time
+	Log           *slog.Logger
 
 	// locks holds a proposal's lock (a chan struct{} of one) while it is
 	// read, published and saved: Publish, Extend and Close each replace
 	// the whole record, so one mustn't save a copy read before another's
 	// save. One task runs the service vault, so a process lock suffices.
 	locks sync.Map
+	// probes holds, by proposal, an authority time before the close
+	// (probeWait): no probe until the authority's time can have reached it.
+	probes sync.Map
 }
 
 // ErrNoTimestamps is a service vault with no way to verify the time of an

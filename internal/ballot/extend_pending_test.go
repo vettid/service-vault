@@ -223,8 +223,21 @@ func TestCloseReconcilesPending(t *testing.T) {
 		t.Fatalf("the index was not finished: %d uploads", len(pub.published))
 	}
 	clock = time.Unix(in.ClosesAt+7200, 0).Add(2 * CollectMargin)
+	// Results stamped before the close aren't published: Close says so,
+	// and the next one publishes them (BALLOT-PROTOCOL §8.3 step 2).
+	pub.stampedEarly = true
+	if _, err := m.Close(ctx, c.ProposalID); !errors.Is(err, ErrStampedEarly) {
+		t.Fatalf("stamped early: %v", err)
+	}
+	if pr, _ := m.Results(ctx, c.ProposalID); pr == nil || pr.Bundle != nil {
+		t.Fatal("results stamped early were taken as published")
+	}
 	if _, err := m.Close(ctx, c.ProposalID); err != nil {
 		t.Fatal(err)
+	}
+	// Each upload is checked against the close in force: the extended one.
+	if n := len(pub.notBefore); n != 2 || pub.notBefore[0] != in.ClosesAt+7200 || pub.notBefore[1] != in.ClosesAt+7200 {
+		t.Fatalf("notBefore %v, want the extended close %d", pub.notBefore, in.ClosesAt+7200)
 	}
 	pr, _ := m.Results(ctx, c.ProposalID)
 	if _, res, err := vote.Check(m.IK, pr.Results, pr.Sig, pr.Rows); err != nil || len(res.Extensions) != 1 {
@@ -382,6 +395,16 @@ func TestCloseRetriesResultsIndex(t *testing.T) {
 	}
 	if _, err := e.m.Close(ctx, e.id); err != nil || e.pub.resultsUploads != 3 {
 		t.Fatalf("after: %v, uploads %d", err, e.pub.resultsUploads)
+	}
+	// The repeated uploads go through RepublishResults (the bundle the
+	// site holds), checked against the close too.
+	if e.pub.republished != 2 {
+		t.Fatalf("%d uploads again through RepublishResults, want 2", e.pub.republished)
+	}
+	for i, nb := range e.pub.notBefore {
+		if nb != e.in.ClosesAt {
+			t.Fatalf("upload %d: notBefore %d, want %d", i, nb, e.in.ClosesAt)
+		}
 	}
 }
 

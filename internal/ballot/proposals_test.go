@@ -58,6 +58,10 @@ func (s *fakeSender) SendMessage(_ context.Context, conn, typ string, body json.
 type fakePublisher struct {
 	fail  bool
 	calls int
+	// notBefore is each results upload's notBefore; stampedEarly answers
+	// the next results upload with ErrStampedEarly.
+	notBefore    []int64
+	stampedEarly bool
 	// started and release, when set, hold an extension's publication
 	// until release is closed, after telling started.
 	started, release chan struct{}
@@ -74,6 +78,7 @@ type fakePublisher struct {
 	indexStale      bool     // the extension answers say the index isn't updated
 	resultsStale    bool
 	resultsUploads  int
+	republished     int // RepublishResults calls (a stale site index)
 }
 
 func (p *fakePublisher) bundle(doc []byte) json.RawMessage {
@@ -185,6 +190,7 @@ func newManager(t *testing.T) (*Manager, *fakeSender, *fakePublisher) {
 		IK:    ik.Public().(ed25519.PublicKey), Roster: fakeRoster{"c2", "c0", "c1"}, Sender: s, Publisher: p,
 		NewID: envelope.NewULID, Now: func() time.Time { return clock }, Approvals: &fakeApprovals{auto: true}, Timestamp: ballottest.Time,
 	}
+	m.AuthorityTime = func(context.Context) (int64, error) { return m.Now().Unix(), nil } // an authority agreeing with the clock
 	p.integrated = func() int64 { return m.Now().Unix() }
 	return m, s, p
 }
@@ -324,8 +330,13 @@ func TestCreateRefusals(t *testing.T) {
 	}
 }
 
-func (p *fakePublisher) PublishResults(_ context.Context, id string, results, sig, rows []byte) (Receipt, error) {
+func (p *fakePublisher) PublishResults(_ context.Context, id string, results, sig, rows []byte, notBefore int64) (Receipt, error) {
 	p.calls++
+	p.notBefore = append(p.notBefore, notBefore)
+	if p.stampedEarly {
+		p.stampedEarly = false
+		return Receipt{}, ErrStampedEarly
+	}
 	p.resultsUploads++
 	if p.fail {
 		return Receipt{}, errors.New("rekor down")
@@ -333,12 +344,19 @@ func (p *fakePublisher) PublishResults(_ context.Context, id string, results, si
 	return Receipt{Bundle: json.RawMessage(`{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}`), IndexStale: p.resultsStale}, nil
 }
 
-type fakeCatcher struct {
-	caught    bool
-	unhandled int64
+func (p *fakePublisher) RepublishResults(ctx context.Context, id string, results, sig, rows []byte, _ json.RawMessage, notBefore int64) (Receipt, error) {
+	p.republished++
+	return p.PublishResults(ctx, id, results, sig, rows, notBefore)
 }
 
-func (c *fakeCatcher) Caught(context.Context, time.Time, time.Time, time.Time) (bool, int64, error) {
+type fakeCatcher struct {
+	caught     bool
+	unhandled  int64
+	emptyAfter []time.Time // per call
+}
+
+func (c *fakeCatcher) Caught(_ context.Context, _, emptyAfter, _, _ time.Time) (bool, int64, error) {
+	c.emptyAfter = append(c.emptyAfter, emptyAfter)
 	return c.caught, c.unhandled, nil
 }
 
@@ -595,6 +613,7 @@ func TestTwoTasksSaveByVersion(t *testing.T) {
 	m1.Now = func() time.Time { return time.Unix(in.ClosesAt-600, 0) }
 	m2 := &Manager{Store: m1.Store, Sign: m1.Sign, IK: m1.IK, Roster: m1.Roster, Sender: m1.Sender, Publisher: pub,
 		Catcher: &fakeCatcher{caught: true}, NewID: m1.NewID, Now: func() time.Time { return time.Unix(in.ClosesAt, 0).Add(2 * CollectMargin) }}
+	m2.AuthorityTime = func(context.Context) (int64, error) { return m2.Now().Unix(), nil }
 	pub.started, pub.release = make(chan struct{}), make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
@@ -932,5 +951,262 @@ func TestCloseRefusesUnpublished(t *testing.T) {
 	}
 	if pr, _ := m.Results(ctx, c.ProposalID); pr != nil {
 		t.Fatal("counted")
+	}
+}
+
+// BALLOT-PROTOCOL §7 (0.13.12): a fast service clock doesn't start the
+// count. Until the timestamp authority's time is past the close the vote
+// is still collecting, nothing is fixed, and an in-window cast is taken,
+// not refused late; probes are rationed; then it counts every ballot.
+func TestCloseWaitsForTheAuthority(t *testing.T) {
+	ctx := context.Background()
+	m, _, _ := newManager(t)
+	m.Catcher = &fakeCatcher{caught: true}
+	c, err := m.Create(ctx, "apv", input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := input()
+	if castFor(t, m, c.ProposalID, "c0", "c1", uint64(in.OpensAt)*1000+1) != "" {
+		t.Fatal("cast refused")
+	}
+	clock := time.Unix(in.ClosesAt, 0).Add(5 * time.Minute) // 5 min fast
+	m.Now = func() time.Time { return clock }
+	authority, probes := in.ClosesAt-4*60, 0 // the real time
+	m.AuthorityTime = func(context.Context) (int64, error) { probes++; return authority, nil }
+	if _, err := m.Close(ctx, c.ProposalID); !errors.Is(err, ErrAuthorityEarly) || probes != 1 {
+		t.Fatalf("a fast clock: %v, %d probes", err, probes)
+	}
+	if o, _ := m.Store.OpenProposal(ctx, c.ProposalID); o.Published || o.Unhandled != nil {
+		t.Fatal("the counts were fixed")
+	}
+	if code := castFor(t, m, c.ProposalID, "c1", "c2", uint64(in.ClosesAt)*1000-1000); code != "" {
+		t.Fatalf("an in-window cast while still collecting: %q", code)
+	}
+	// Rationed: no probe until the authority can be past the close.
+	clock = clock.Add(4*time.Minute - time.Second)
+	authority += 4*60 - 1
+	if _, err := m.Close(ctx, c.ProposalID); !errors.Is(err, ErrAuthorityEarly) || probes != 1 {
+		t.Fatalf("probed too soon: %v, %d probes", err, probes)
+	}
+	clock, authority = clock.Add(time.Second), authority+1
+	sum, err := m.Close(ctx, c.ProposalID)
+	if err != nil || probes != 2 || sum.Counts.Ballots != 2 {
+		t.Fatalf("at the real close: %v, %d probes, %+v", err, probes, sum)
+	}
+}
+
+// A probe that fails counts nothing, never falling back to the service's
+// clock; the next is at least ProbeRetry later. No probe at all: nothing
+// is counted.
+func TestCloseWithoutTheAuthority(t *testing.T) {
+	ctx := context.Background()
+	m, _, _ := newManager(t)
+	m.Catcher = &fakeCatcher{caught: true}
+	c, err := m.Create(ctx, "apv", input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Unix(input().ClosesAt, 0).Add(2 * CollectMargin)
+	m.Now = func() time.Time { return clock }
+	probes, fail := 0, true
+	m.AuthorityTime = func(context.Context) (int64, error) {
+		probes++
+		if fail {
+			return 0, errors.New("unreachable")
+		}
+		return clock.Unix(), nil
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := m.Close(ctx, c.ProposalID); !errors.Is(err, ErrAuthorityTime) || probes != 1 {
+			t.Fatalf("try %d: %v, %d probes", i, err, probes)
+		}
+	}
+	if o, _ := m.Store.OpenProposal(ctx, c.ProposalID); o.Published {
+		t.Fatal("counted without the authority's time")
+	}
+	clock, fail = clock.Add(ProbeRetry), false
+	if _, err := m.Close(ctx, c.ProposalID); err != nil || probes != 2 {
+		t.Fatalf("after the retry time: %v, %d probes", err, probes)
+	}
+	m2, _, _ := newManager(t)
+	m2.Catcher = &fakeCatcher{caught: true}
+	c2, err := m2.Create(ctx, "apv", input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2.Now, m2.AuthorityTime = m.Now, nil
+	if _, err := m2.Close(ctx, c2.ProposalID); !errors.Is(err, ErrAuthorityTime) {
+		t.Fatalf("no probe: %v", err)
+	}
+	if o, _ := m2.Store.OpenProposal(ctx, c2.ProposalID); o.Published {
+		t.Fatal("counted with no probe")
+	}
+}
+
+// The probe's rules (§7, 0.13.12): the close itself is the boundary; a
+// passing probe holds for that close across collecting retries, and the
+// empty-collect evidence must follow it plus the margin; a wait is void
+// when the clock went back, and none lasts over ProbeMaxWait; a cancelled
+// request is not a failure.
+func TestAuthorityProbeRules(t *testing.T) {
+	ctx := context.Background()
+	m, _, _ := newManager(t)
+	ct := &fakeCatcher{}
+	m.Catcher = ct
+	c, err := m.Create(ctx, "apv", input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := input()
+	clock := time.Unix(in.ClosesAt, 0).Add(2 * CollectMargin)
+	m.Now = func() time.Time { return clock }
+	authority, probes := in.ClosesAt-1, 0
+	var probeErr error
+	m.AuthorityTime = func(ctx context.Context) (int64, error) {
+		probes++
+		if probeErr != nil {
+			return 0, probeErr
+		}
+		return authority, ctx.Err()
+	}
+	if _, err := m.Close(ctx, c.ProposalID); !errors.Is(err, ErrAuthorityEarly) || probes != 1 {
+		t.Fatalf("one second before the close: %v, %d probes", err, probes)
+	}
+	// The clock went back: the wait is void.
+	clock = clock.Add(-30 * time.Second) // still past the close + margin
+	if _, err := m.Close(ctx, c.ProposalID); !errors.Is(err, ErrAuthorityEarly) || probes != 2 {
+		t.Fatalf("after the clock went back: %v, %d probes", err, probes)
+	}
+	// A wait never lasts over ProbeMaxWait, whatever the estimate.
+	clock, authority = time.Unix(in.ClosesAt, 0).Add(2*CollectMargin), in.ClosesAt-6*3600
+	if _, err := m.Close(ctx, c.ProposalID); !errors.Is(err, ErrAuthorityEarly) || probes != 3 {
+		t.Fatalf("a far-behind authority: %v, %d probes", err, probes)
+	}
+	clock = clock.Add(ProbeMaxWait - time.Second)
+	if _, err := m.Close(ctx, c.ProposalID); !errors.Is(err, ErrAuthorityEarly) || probes != 3 {
+		t.Fatalf("within the cap: %v, %d probes", err, probes)
+	}
+	clock = clock.Add(time.Second)
+	// A request its caller cancelled still gets the whole probe (its own
+	// timeout, apart from the request's): an answer, not a failure.
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := m.authorityPast(cctx, c.ProposalID, in.ClosesAt); !errors.Is(err, ErrAuthorityEarly) || probes != 4 {
+		t.Fatalf("a cancelled request's probe: %v, %d probes", err, probes)
+	}
+	clock = clock.Add(ProbeMaxWait)
+	// At the close itself it passes; the relay isn't caught up yet, and the
+	// passing probe holds for the retries (not probed again).
+	authority, before := in.ClosesAt, probes
+	if _, err := m.Close(ctx, c.ProposalID); !errors.Is(err, ErrNotCaught) || probes != before+1 {
+		t.Fatalf("at the close: %v, %d probes", err, probes-before)
+	}
+	probedAt := clock
+	clock = clock.Add(time.Minute)
+	if _, err := m.Close(ctx, c.ProposalID); !errors.Is(err, ErrNotCaught) || probes != before+1 {
+		t.Fatalf("a retry probed again: %v, %d probes", err, probes-before)
+	}
+	for i, at := range ct.emptyAfter {
+		if !at.Equal(probedAt.Add(CollectMargin)) {
+			t.Fatalf("Caught %d: emptyAfter %v, want the probe %v plus the margin", i, at, probedAt)
+		}
+	}
+	if o, _ := m.Store.OpenProposal(ctx, c.ProposalID); o.Published {
+		t.Fatal("the counts were fixed before the relay was caught up")
+	}
+}
+
+// The probe is judged against the close in force: past the original close
+// but before the extended one, the vote is still collecting.
+func TestAuthorityProbeExtendedClose(t *testing.T) {
+	ctx := context.Background()
+	e := newExtEnv(t)
+	if _, err := e.m.Extend(ctx, e.id, "apv", e.req(7200)); err != nil {
+		t.Fatal(err)
+	}
+	*e.clock = time.Unix(e.in.ClosesAt+7200, 0).Add(2 * CollectMargin)
+	e.m.AuthorityTime = func(context.Context) (int64, error) { return e.in.ClosesAt + 3600, nil }
+	if _, err := e.m.Close(ctx, e.id); !errors.Is(err, ErrAuthorityEarly) {
+		t.Fatalf("between the closes: %v", err)
+	}
+	e.m.probes.Delete(e.id)
+	e.m.AuthorityTime = func(context.Context) (int64, error) { return e.in.ClosesAt + 7200, nil }
+	if _, err := e.m.Close(ctx, e.id); err != nil {
+		t.Fatalf("at the extended close: %v", err)
+	}
+}
+
+// A cached pass keeps the probe's monotonic reading: the empty-collect
+// evidence is compared on that clock, which a wall-clock step (NTP
+// correcting a fast clock) doesn't move.
+func TestAuthorityProbeCacheIsMonotonic(t *testing.T) {
+	ctx := context.Background()
+	m, _, _ := newManager(t)
+	m.Now = time.Now
+	m.AuthorityTime = func(context.Context) (int64, error) { return time.Now().Unix(), nil }
+	first, err := m.authorityPast(ctx, "p", time.Now().Unix()-60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cached, err := m.authorityPast(ctx, "p", time.Now().Unix()-60)
+	if err != nil || !cached.Equal(first) {
+		t.Fatalf("%v %v", cached, err)
+	}
+	if !strings.Contains(cached.String(), " m=") {
+		t.Fatalf("the cached pass lost its monotonic reading: %v", cached)
+	}
+}
+
+// A cached pass holds only for its close: a moved close (here judged
+// directly) is probed again. seen is taken when the probe came back. The
+// probe has its own deadline, apart from a cancelled request.
+func TestAuthorityProbeCacheAndDeadline(t *testing.T) {
+	ctx := context.Background()
+	m, _, _ := newManager(t)
+	clock := time.Unix(1_800_000_000, 0)
+	m.Now = func() time.Time { return clock }
+	probes, authority := 0, int64(1_800_000_000)
+	m.AuthorityTime = func(pctx context.Context) (int64, error) {
+		probes++
+		if d, ok := pctx.Deadline(); !ok || time.Until(d) > ProbeTimeout || pctx.Err() != nil {
+			t.Errorf("the probe's context: deadline %v %v, err %v", d, ok, pctx.Err())
+		}
+		clock = clock.Add(time.Minute) // the probe took a while
+		return authority, nil
+	}
+	at, err := m.authorityPast(ctx, "p", 1_800_000_000-60)
+	if err != nil || probes != 1 || !at.Equal(clock) {
+		t.Fatalf("seen %v, want when the probe came back %v; %v", at, clock, err)
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := m.authorityPast(cctx, "p", 1_800_000_000+3600); !errors.Is(err, ErrAuthorityEarly) || probes != 2 {
+		t.Fatalf("a moved close: %v, %d probes", err, probes)
+	}
+}
+
+// The monotonic reading reaches Caught: with this process's clock, the
+// emptyAfter Close passes carries it, and the probe record goes once the
+// counts are saved.
+func TestCloseEmptyAfterIsMonotonic(t *testing.T) {
+	ctx := context.Background()
+	m, _, _ := newManager(t)
+	ct := &fakeCatcher{caught: true}
+	m.Catcher = ct
+	c, err := m.Create(ctx, "apv", input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Now = time.Now // past the close: the test input's dates are before today
+	m.AuthorityTime = func(context.Context) (int64, error) { return time.Now().Unix(), nil }
+	if _, err := m.Close(ctx, c.ProposalID); err != nil {
+		t.Fatal(err)
+	}
+	if len(ct.emptyAfter) != 1 || !strings.Contains(ct.emptyAfter[0].String(), " m=") {
+		t.Fatalf("emptyAfter without a monotonic reading: %v", ct.emptyAfter)
+	}
+	if _, ok := m.probes.Load(c.ProposalID); ok {
+		t.Fatal("the probe record was kept after the count")
 	}
 }

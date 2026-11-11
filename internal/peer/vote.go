@@ -162,7 +162,14 @@ func (p *Peer) SendMessage(ctx context.Context, connID, typ string, body json.Ra
 // lease marker) hold it false until one visibility timeout after it last
 // leased messages, and the evidence must come from a collect started
 // after.
-func (p *Peer) Caught(ctx context.Context, t, from, until time.Time) (caught bool, unhandled int64, err error) {
+//
+// t is in relay time for a handled message (its msg_ms), but an empty
+// collect is timed by this process's clock, which may run fast: that
+// evidence counts only from a collect that started at or after
+// emptyAfter, a time on this clock known to follow the real close (the
+// passing timestamp-authority probe plus the margin, BALLOT-PROTOCOL §7,
+// 0.13.12).
+func (p *Peer) Caught(ctx context.Context, t, emptyAfter, from, until time.Time) (caught bool, unhandled int64, err error) {
 	marks, err := p.cfg.Store.Load(ctx, kindLease)
 	if err != nil {
 		return false, 0, err
@@ -183,6 +190,9 @@ func (p *Peer) Caught(ctx context.Context, t, from, until time.Time) (caught boo
 		if err := json.Unmarshal(r.Data, &mark); err != nil {
 			return false, 0, fmt.Errorf("peer: lease marker: %w", err)
 		}
+		// Another process's lease marker is compared by wall time: that
+		// relies on one task running at a time (the stack's desiredCount 1,
+		// maxHealthyPercent 100), so two tasks' clocks never meet here.
 		if end := mark.At.Add(p.visibility() + leaseMargin); end.After(since) {
 			since = end
 		}
@@ -232,7 +242,12 @@ func (p *Peer) Caught(ctx context.Context, t, from, until time.Time) (caught boo
 	if held {
 		return false, unhandled, nil
 	}
-	caught = p.lastMsgMS >= tms && !p.lastMsgAt.Before(since) || !p.emptyAt.Before(t) && !p.emptyAt.Before(since)
+	// These must stay time.Time Before comparisons: emptyAt (Step's start)
+	// and emptyAfter (the probe's time) carry this process's monotonic
+	// reading, which a wall-clock step doesn't move (BALLOT-PROTOCOL §7,
+	// 0.13.12). Never compare them by Unix time or after Round(0).
+	caught = p.lastMsgMS >= tms && !p.lastMsgAt.Before(since) ||
+		!p.emptyAt.Before(t) && !p.emptyAt.Before(emptyAfter) && !p.emptyAt.Before(since)
 	return caught, unhandled, nil
 }
 

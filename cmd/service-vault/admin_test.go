@@ -20,7 +20,7 @@ import (
 // keystore path, nothing more.
 type plainKMS struct{}
 
-func (plainKMS) GenerateDataKey(context.Context, string) ([]byte, []byte, error) {
+func (plainKMS) GenerateDataKey(context.Context, string, map[string]string) ([]byte, []byte, error) {
 	k := make([]byte, 32)
 	if _, err := rand.Read(k); err != nil {
 		return nil, nil, err
@@ -28,7 +28,7 @@ func (plainKMS) GenerateDataKey(context.Context, string) ([]byte, []byte, error)
 	return k, bytes.Clone(k), nil
 }
 
-func (plainKMS) Decrypt(_ context.Context, _ string, w []byte) ([]byte, error) {
+func (plainKMS) Decrypt(_ context.Context, _ string, w []byte, _ map[string]string) ([]byte, error) {
 	return bytes.Clone(w), nil
 }
 
@@ -57,11 +57,62 @@ func (b *memBlobs) Create(_ context.Context, name string, data []byte) error {
 	return nil
 }
 
+func (b *memBlobs) Replace(_ context.Context, name string, old, data []byte) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	v, ok := b.m[name]
+	switch {
+	case !ok:
+		return keystore.ErrNotFound
+	case !bytes.Equal(v, old):
+		return keystore.ErrChanged
+	}
+	b.m[name] = data
+	return nil
+}
+
+func (b *memBlobs) List(context.Context) ([]string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]string, 0, len(b.m))
+	for k := range b.m {
+		out = append(out, k)
+	}
+	return out, nil
+}
+
 func (b *memBlobs) Delete(_ context.Context, name string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	delete(b.m, name)
 	return nil
+}
+
+// admin reseal-blobs takes no arguments; it reports the items' names,
+// never what they hold.
+func TestResealBlobs(t *testing.T) {
+	if err := admin([]string{"reseal-blobs", "extra"}, &bytes.Buffer{}); err == nil {
+		t.Error("reseal-blobs with an argument accepted")
+	}
+	ctx := context.Background()
+	b := &memBlobs{m: map[string][]byte{}}
+	if _, err := keystore.LoadOrCreate(ctx, plainKMS{}, "k", b, keystore.SecretsName, keystore.NewSecrets); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := resealBlobs(ctx, plainKMS{}, "k", b, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), keystore.SecretsName) || strings.Contains(out.String(), "pepper") ||
+		strings.Contains(out.String(), "INCOMPLETE") {
+		t.Fatalf("report: %s", out.String())
+	}
+	// A record that doesn't open: the run says it is incomplete.
+	b.m["broken"] = []byte("{")
+	out.Reset()
+	if err := resealBlobs(ctx, plainKMS{}, "k", b, &out); err == nil || !strings.Contains(out.String(), "INCOMPLETE") {
+		t.Fatalf("a failed run: %v %s", err, out.String())
+	}
 }
 
 func TestAdminUsage(t *testing.T) {
