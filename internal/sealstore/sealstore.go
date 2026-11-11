@@ -346,6 +346,11 @@ func (s *Store) Reseal(ctx context.Context, kinds []string) error {
 			if len(recs) == 0 {
 				break
 			}
+			if last := recs[len(recs)-1].ID; last <= after {
+				// A pager that doesn't move past after would serve
+				// the same page for ever.
+				return fmt.Errorf("sealstore: reseal %s: the pager did not move past %q", k, after)
+			}
 			after = recs[len(recs)-1].ID
 			if _, err := s.openAndReseal(ctx, k, recs); err != nil {
 				return err

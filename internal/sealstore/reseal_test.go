@@ -10,6 +10,31 @@ import (
 	"github.com/vettid/service-vault/internal/peer"
 )
 
+// stuckPager serves the first page whatever after is.
+type stuckPager struct{ *peer.MemStore }
+
+func (p stuckPager) Page(ctx context.Context, kind, _ string, limit int) ([]peer.Record, error) {
+	return p.MemStore.Page(ctx, kind, "", limit)
+}
+
+// A pager that doesn't move on is an error, not a start that never ends.
+func TestResealStuckPager(t *testing.T) {
+	ctx := context.Background()
+	mem := peer.NewMemStore()
+	v1 := newStore(t, mem, false)
+	if err := v1.Apply(ctx, []peer.Change{{Kind: "chunk", ID: "c1", Data: []byte{1}}}); err != nil {
+		t.Fatal(err)
+	}
+	both, err := New(mem, map[uint32][]byte{1: key, 2: bytes.Repeat([]byte{7}, 32)}, 2, false) // TEST ONLY
+	if err != nil {
+		t.Fatal(err)
+	}
+	both.Pages = stuckPager{mem}
+	if err := both.Reseal(ctx, []string{"chunk"}); err == nil {
+		t.Fatal("a stuck pager accepted")
+	}
+}
+
 // countingPager records the largest page it served. With short set, it
 // serves at most short records a page, as a pager may before the end.
 type countingPager struct {

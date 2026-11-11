@@ -438,7 +438,8 @@ func TestRecordKindsResealed(t *testing.T) {
 // larger than a page, expired records among them, and pages that mix
 // records under the current version with records an admin run wrote
 // under the older one. Every live record ends under the new version
-// before the older one is retired.
+// before the older one is retired. (Short pages before the end are
+// TestResealPaged's.)
 func TestRecordKeyRotationPaged(t *testing.T) {
 	ctx := context.Background()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -454,7 +455,7 @@ func TestRecordKeyRotationPaged(t *testing.T) {
 	for i := 0; i < n; i++ {
 		ch := peer.Change{Kind: "conn", ID: fmt.Sprintf("c%03d", 2*i), Data: []byte(fmt.Sprintf(`{"id":"c%03d"}`, 2*i))}
 		if i%sealstore.ResealPage == sealstore.ResealPage-1 {
-			ch.Expires = time.Now().Add(-time.Minute) // at a page's end
+			ch.Expires = time.Now().Add(-time.Minute) // expired: not read, left to the table
 		}
 		if err := st.Apply(ctx, []peer.Change{ch}); err != nil {
 			t.Fatal(err)

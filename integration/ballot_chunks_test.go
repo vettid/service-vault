@@ -105,11 +105,17 @@ func TestBallotChunksAtCapOnDynamoDB(t *testing.T) {
 	t.Logf("%d members in %d chunks, %d bytes of rows in %d chunks", len(o.Members), len(o.MemberChunks), len(pr.Rows), len(pr.RowChunks))
 
 	// A chunk lost: the proposal is an error, never a proposal without
-	// members.
+	// members. The members a process has already read and checked stay
+	// in its cache (they never change); a fresh process, as a restore's
+	// start is, reads the chunks again.
 	if err := tbl.Peer().Apply(ctx, []peer.Change{{Kind: ballot.KindChunk, ID: o.MemberChunks[0].ID}}); err != nil {
 		t.Fatal(err)
 	}
-	if o, err := m.Store.OpenProposal(ctx, c.ProposalID); o != nil || !errors.Is(err, ballot.ErrChunkMissing) {
+	if o, err := m.Store.OpenProposal(ctx, c.ProposalID); err != nil || len(o.Members) != ballot.MaxEligible {
+		t.Fatalf("cached members, with a chunk deleted: %v", err)
+	}
+	fresh := &ballot.RecordStore{Records: st, Copy: &ballot.MemCopy{}}
+	if o, err := fresh.OpenProposal(ctx, c.ProposalID); o != nil || !errors.Is(err, ballot.ErrChunkMissing) {
 		t.Fatalf("with a chunk deleted: %v", err)
 	}
 }
