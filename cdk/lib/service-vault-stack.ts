@@ -202,7 +202,30 @@ export interface ServiceVaultStackProps extends cdk.StackProps {
    * the signer account. Left out, the task anchors as before.
    */
   readonly anchorSignerFunctionArn?: string;
+  /**
+   * The keystore key's encryption-context allow-list (GC #7406 §7 step 4,
+   * as amended in #7475): Decrypt and GenerateDataKey only under
+   * `{"blob": <a known name>}`, `anchor-key` not among them, for every
+   * principal (explicit denies). Set only at the runbook's step 7 (P1.6),
+   * after the re-seal and the deletion of `anchor-key`: before that, it
+   * would lock out every blob not yet re-sealed. And only once the task
+   * runs P1.4's code: the daemon before it loads (or creates) `anchor-key`
+   * at start (cmd/service-vault), which the policy refuses, so it
+   * wouldn't start. Default off.
+   */
+  readonly keystoreContextRequired?: boolean;
 }
+
+/**
+ * The keystore's blob names (internal/keystore SecretsName and
+ * BallotCopyKeyName; internal/sealstore KeyName and KeyNameOf's ".v<n>"),
+ * as kms:EncryptionContext:blob patterns. `anchor-key` is not among them:
+ * once the policy is on, the old in-memory anchor key never opens again.
+ */
+export const KEYSTORE_BLOBS = ['service-secrets', 'ballot-copy-key', 'record-key', 'record-key.v*'] as const;
+
+/** The keystore key's actions the context allow-list binds. */
+export const KEYSTORE_CONTEXT_ACTIONS = ['kms:Decrypt', 'kms:GenerateDataKey*', 'kms:Encrypt', 'kms:ReEncrypt*'];
 
 /**
  * The VettID service vault on one ARM64 Fargate Spot task
@@ -481,8 +504,24 @@ export class ServiceVaultStack extends cdk.Stack {
         principals: [new iam.ArnPrincipal(taskDef.taskRole.roleArn)],
         actions: ['kms:GenerateDataKey', 'kms:Decrypt'],
         resources: ['*'],
+        ...(props.keystoreContextRequired ? { conditions: {
+          StringLike: { 'kms:EncryptionContext:blob': [...KEYSTORE_BLOBS] },
+          'ForAllValues:StringEquals': { 'kms:EncryptionContextKeys': ['blob'] },
+        } } : {}),
       }),
     );
+    if (props.keystoreContextRequired) {
+      // Explicit denies, for every principal (an Allow elsewhere can't
+      // undo them): no context, a name off the list, or any other context
+      // key. ForAllValues alone would pass a request with no context at
+      // all, hence the Null check.
+      const deny = (sid: string, conditions: Record<string, unknown>) => this.key.addToResourcePolicy(new iam.PolicyStatement({
+        sid, effect: iam.Effect.DENY, principals: [new iam.AnyPrincipal()], actions: KEYSTORE_CONTEXT_ACTIONS, resources: ['*'], conditions,
+      }));
+      deny('DenyNoBlobContext', { Null: { 'kms:EncryptionContext:blob': 'true' } });
+      deny('DenyUnknownBlob', { StringNotLike: { 'kms:EncryptionContext:blob': [...KEYSTORE_BLOBS] } });
+      deny('DenyOtherContextKeys', { 'ForAnyValue:StringNotEquals': { 'kms:EncryptionContextKeys': ['blob'] } });
+    }
     if (props.anchorSignerFunctionArn !== undefined) {
       if (!/^arn:aws[a-z-]*:lambda:[a-z0-9-]+:[0-9]{12}:function:[A-Za-z0-9_-]+$/.test(props.anchorSignerFunctionArn)) {
         throw new Error(`anchorSignerFunctionArn must be a function's unqualified ARN (got "${props.anchorSignerFunctionArn}")`);
@@ -852,6 +891,16 @@ export class ServiceVaultStack extends cdk.Stack {
         eventName: ['Decrypt', 'ReEncrypt'],
         resources: { ARN: [this.key.keyArn] },
         $or: notTaskRoleSession,
+      }, true);
+    // Any refused use of the keystore key (GC #7406 §6), by anyone: once
+    // the context allow-list is on, an attempt on `anchor-key` or with no
+    // context lands here.
+    secRule('keystore_error', 'alarm', 'A use of the keystore key failed',
+      'A Decrypt, GenerateDataKey, Encrypt or ReEncrypt on the keystore KMS key failed (an errorCode): a refused context, a missing grant, or the key disabled',
+      'aws.kms', {
+        eventName: ['Decrypt', 'GenerateDataKey', 'GenerateDataKeyWithoutPlaintext', 'Encrypt', 'ReEncrypt'],
+        resources: { ARN: [this.key.keyArn] },
+        errorCode: [{ exists: true }],
       }, true);
     // Two rules, one label (pattern limit of 2048 characters): callers that are
     // not role sessions, and role sessions of another issuer.

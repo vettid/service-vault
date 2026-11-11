@@ -1,6 +1,8 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import * as cdk from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
-import { ALARMS, API_PORT, CLIENT_PARAMS, ERROR_THRESHOLD, EXPECTED_STOP_CODES, ServiceVaultStack, ssmPrefix, ServiceVaultStackProps, TASK_CPU, TASK_MEMORY_MIB } from '../lib/service-vault-stack';
+import { ALARMS, API_PORT, CLIENT_PARAMS, ERROR_THRESHOLD, EXPECTED_STOP_CODES, KEYSTORE_BLOBS, KEYSTORE_CONTEXT_ACTIONS, ServiceVaultStack, ssmPrefix, ServiceVaultStackProps, TASK_CPU, TASK_MEMORY_MIB } from '../lib/service-vault-stack';
 
 const DIGEST = 'sha256:' + 'a'.repeat(64);
 const CLIENT_SG = 'sg-0123456789abcdef0';
@@ -294,6 +296,54 @@ describe('data', () => {
     const use = stmts.find((s: any) => s.Sid === 'TaskUse');
     expect(asList(use.Action).sort()).toEqual(['kms:Decrypt', 'kms:GenerateDataKey']);
     expect(use.Principal).toEqual({ AWS: { 'Fn::GetAtt': [roleId, 'Arn'] } });
+    expect(use.Condition).toBeUndefined(); // the context allow-list is off until runbook step 7
+  });
+
+  test('keystoreContextRequired: the task only under a known blob context, and denies that bind every principal', () => {
+    const key = Object.values<any>(synth({ keystoreContextRequired: true }).findResources('AWS::KMS::Key'))[0].Properties;
+    const stmts = key.KeyPolicy.Statement;
+    expect(stmts.map((x: any) => x.Sid).sort()).toEqual(['Administer', 'DenyNoBlobContext', 'DenyOtherContextKeys', 'DenyUnknownBlob', 'TaskUse']);
+    const use = stmts.find((x: any) => x.Sid === 'TaskUse');
+    expect(use.Condition).toEqual({
+      StringLike: { 'kms:EncryptionContext:blob': [...KEYSTORE_BLOBS] },
+      'ForAllValues:StringEquals': { 'kms:EncryptionContextKeys': ['blob'] },
+    });
+    expect([...KEYSTORE_CONTEXT_ACTIONS]).toEqual(['kms:Decrypt', 'kms:GenerateDataKey*', 'kms:Encrypt', 'kms:ReEncrypt*']);
+    const denies = stmts.filter((x: any) => x.Effect === 'Deny');
+    expect(denies).toHaveLength(3);
+    for (const d of denies) {
+      expect(d.Principal).toEqual({ AWS: '*' });
+      expect(asList(d.Action).sort()).toEqual([...KEYSTORE_CONTEXT_ACTIONS].sort());
+    }
+    const cond = (sid: string) => denies.find((d: any) => d.Sid === sid).Condition;
+    expect(cond('DenyNoBlobContext')).toEqual({ Null: { 'kms:EncryptionContext:blob': 'true' } });
+    expect(cond('DenyUnknownBlob')).toEqual({ StringNotLike: { 'kms:EncryptionContext:blob': [...KEYSTORE_BLOBS] } });
+    expect(cond('DenyOtherContextKeys')).toEqual({ 'ForAnyValue:StringNotEquals': { 'kms:EncryptionContextKeys': ['blob'] } });
+    // The old in-memory anchor key never opens once this is on.
+    for (const p of KEYSTORE_BLOBS) expect('anchor-key').not.toMatch(new RegExp(`^${p.replace(/[.]/g, '\\.').replace(/\*/g, '.*')}$`));
+  });
+
+  test('KEYSTORE_BLOBS: every name the daemon seals under, read from the Go source', () => {
+    const go = (f: string) => fs.readFileSync(path.join(__dirname, '..', '..', f), 'utf8');
+    const constOf = (src: string, name: string) => new RegExp(`const ${name} = "([^"]+)"`).exec(src)?.[1];
+    const ks = ['secrets.go', 'ballotcopy.go', 'anchor.go'].map((f) => go(`internal/keystore/${f}`)).join('\n');
+    const ss = go('internal/sealstore/sealstore.go');
+    expect(constOf(ks, 'SecretsName')).toBe('service-secrets');
+    expect(constOf(ks, 'BallotCopyKeyName')).toBe('ballot-copy-key');
+    expect(constOf(ks, 'AnchorKeyName')).toBe('anchor-key');
+    // The context key the policy names is the one the keystore sends.
+    const keystore = go('internal/keystore/keystore.go');
+    expect(constOf(keystore, 'ContextKey')).toBe('blob');
+    expect(keystore).toContain('map[string]string{ContextKey: name}');
+    expect(constOf(ss, 'KeyName')).toBe('record-key');
+    expect(ss).toContain('return KeyName + ".v" + strconv.FormatUint(uint64(version), 10)');
+    expect([...KEYSTORE_BLOBS]).toEqual(['service-secrets', 'ballot-copy-key', 'record-key', 'record-key.v*']);
+    // Every keystore.LoadOrCreate in the daemon names one of these.
+    const main = go('cmd/service-vault/main.go');
+    const named = [...main.matchAll(/keystore\.LoadOrCreate\([^)]*?, (keystore\.\w+|sealstore\.KeyNameOf\(\w+\))/g)].map((m) => m[1]);
+    expect(named.length).toBeGreaterThanOrEqual(4);
+    for (const n of named) expect(['keystore.SecretsName', 'keystore.BallotCopyKeyName', 'keystore.AnchorKeyName']
+      .includes(n) || n.startsWith('sealstore.KeyNameOf(')).toBe(true);
   });
 
   test('task role: only kms:GenerateDataKey and kms:Decrypt, on the keystore key', () => {
@@ -369,7 +419,7 @@ describe('alarms', () => {
       TreatMissingData: 'breaching',
     });
     const alarms = Object.values<any>(t.findResources('AWS::CloudWatch::Alarm'));
-    expect(alarms).toHaveLength(Object.keys(ALARMS).length + 12); // + key_change, errors, task_stopped, deploy_failed, down, 7 control-plane
+    expect(alarms).toHaveLength(Object.keys(ALARMS).length + 13); // + key_change, errors, task_stopped, deploy_failed, down, 8 control-plane
     for (const a of alarms) expect(a.Properties.AlarmActions).toEqual([base.alarmTopicArn]);
   });
 
@@ -438,6 +488,7 @@ describe('alarms', () => {
       ['run_task', 'alarm', 'vettid-service-vault-test-run_task'],
       ['taskrole_use', 'alarm', 'vettid-service-vault-test-taskrole_use'],
       ['keystore_decrypt', 'alarm', 'vettid-service-vault-test-keystore_decrypt'],
+      ['keystore_error', 'alarm', 'vettid-service-vault-test-keystore_error'],
       ['tls_pin_change', 'alarm', 'vettid-service-vault-test-tls_pin_change'],
       ['taskrole_policy_change', 'alarm', 'vettid-service-vault-test-taskrole_policy_change'],
     ])('%s (%s): CloudTrail rule, labelled log target, metric filter and an alarm to the topic', (name, severity, alarmName) => {
@@ -538,6 +589,16 @@ describe('alarms', () => {
       for (const n of ['run_task', 'tls_pin_change', 'taskrole_use']) expect(rule(n).State).toBe('ENABLED');
       expect(s(d.resources)).toContain('KeystoreKey');
       notTaskRole(d.$or);
+    });
+
+    test('keystore_error: any failed use of the keystore key, by anyone; read-only events seen', () => {
+      const d = rule('keystore_error').EventPattern.detail;
+      expect(rule('keystore_error').EventPattern.source).toEqual(['aws.kms']);
+      for (const n of ['Decrypt', 'GenerateDataKey', 'Encrypt', 'ReEncrypt']) expect(d.eventName).toContain(n);
+      expect(d.errorCode).toEqual([{ exists: true }]);
+      expect(s(d.resources)).toContain('KeystoreKey');
+      expect(d.$or).toBeUndefined();
+      expect(rule('keystore_error').State).toBe('ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS');
     });
 
     test('tls_pin_change: Put/DeleteParameter(s) on the pin parameter by anyone but the task role', () => {
