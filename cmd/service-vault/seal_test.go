@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"maps"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -424,9 +425,9 @@ func TestBallotCopyKeyCheckOverOlderCopy(t *testing.T) {
 	}
 }
 
-// Every record kind a package declares (a const Kind… string) is resealed
-// with the record key (recordKinds): a kind left out would become
-// unreadable after a rotation.
+// Every record kind the publisher declares (a Kind… string constant, in
+// any form, in internal/publish) is resealed with the record key
+// (recordKinds): a kind left out would become unreadable after a rotation.
 func TestRecordKindsCoverPublish(t *testing.T) {
 	have := map[string]bool{}
 	for _, k := range recordKinds() {
@@ -437,13 +438,28 @@ func TestRecordKindsCoverPublish(t *testing.T) {
 			t.Errorf("record kind %q is not resealed", k)
 		}
 	}
-	src, err := os.ReadFile("../../internal/publish/publish.go")
-	if err != nil {
-		t.Fatal(err)
+	files, err := filepath.Glob("../../internal/publish/*.go")
+	if err != nil || len(files) == 0 {
+		t.Fatal("no publisher sources", err)
 	}
-	for _, m := range regexp.MustCompile(`(?m)^const (Kind[A-Za-z]+) = "([a-z_]+)"`).FindAllStringSubmatch(string(src), -1) {
-		if !have[m[2]] {
-			t.Errorf("%s (%q) is not resealed", m[1], m[2])
+	decl := regexp.MustCompile(`(?m)^\s*(?:const\s+)?(Kind[A-Za-z]+)\s*(?:string\s*)?=\s*"([a-z_]+)"`)
+	found := 0
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
 		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range decl.FindAllStringSubmatch(string(src), -1) {
+			found++
+			if !have[m[2]] {
+				t.Errorf("%s (%q) is not resealed", m[1], m[2])
+			}
+		}
+	}
+	if found < 2 {
+		t.Fatalf("found %d record kinds in the publisher", found)
 	}
 }
