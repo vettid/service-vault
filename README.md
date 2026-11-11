@@ -120,8 +120,11 @@ destination.
   just before counting, the service asks the authority for the time, a
   stamp with no transparency-log entry). The vote is not counted yet:
   the close answers 503 `collecting`, and no cast is refused `late` for
-  it. Probes are rationed: none until the authority's time, judged from
-  the last one, can have reached the close. Check both clocks, as for
+  it. Probes are rationed: a passing one holds for that close; after one
+  before the close, none until the authority's time, judged from it, can
+  have reached the close, but never more than 5 minutes later, and at
+  once if the task's clock went back (a corrected clock never starves the
+  close). Each probe has its own 5 s timeout. Check both clocks, as for
   `results_stamped_early`. A probe that fails (the authority unreachable,
   or a stamp that doesn't verify) counts nothing either: the close
   answers 503 `timestamp_unavailable` and raises `tsa_unavailable`,
@@ -136,11 +139,11 @@ destination.
   the Amazon Time Sync Service; compare with `date -u` on a trusted host)
   and the authority's (the stamp's time on the line). Then close again.
   Each anchor is a permanent public entry in the transparency log, so
-  they are rationed: at most one per close, and none until the
-  authority's time, judged from the early stamp, can have reached the
-  close (`rec#vote_stamp_wait`); a close before then answers
-  `stamped_early` at once. Member vaults keep checking for 7 days, so a
-  late publication is still judged.
+  they are rationed: at most one per close, and none until a probe of the
+  authority's time (no log entry, at least 10 s apart) is at or after the
+  close (`rec#vote_stamp_wait` keeps the early stamp); a close before
+  then answers `stamped_early` at once. Member vaults keep checking for
+  7 days, so a late publication is still judged.
 - `results_bundle_unverified`: a vote's results bundle failed its
   timestamp check (the authority's signature, the pinned trusted root, or
   its validity period); the results are not published. One anchored by

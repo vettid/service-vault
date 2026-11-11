@@ -302,11 +302,36 @@ func TestPublishResultsStamp(t *testing.T) {
 			t.Fatalf("the probe says early: %d anchors, %d probes, %v", a.n, probes, err)
 		}
 		authority = closes // the estimate (an hour off) would still wait
+		if _, err := publish(e); !errors.Is(err, ballot.ErrStampedEarly) || probes != 1 {
+			t.Fatalf("probed again within ballot.ProbeRetry: %d probes, %v", probes, err)
+		}
+		e.clock = e.clock.Add(ballot.ProbeRetry)
 		if _, err := publish(e); err != nil || a.n != 2 || probes != 2 || len(*e.up) != 1 {
 			t.Fatalf("the probe says on time: %d anchors, %d probes, %d uploads, %v", a.n, probes, len(*e.up), err)
 		}
 		if w, _ := e.p.loadWait(ctx, res); w != nil {
 			t.Fatalf("the wait was kept after publishing: %+v", w)
+		}
+	})
+
+	// A request its caller cancelled still gets the probe's answer (the
+	// probe has its own deadline).
+	t.Run("a cancelled request's probe", func(t *testing.T) {
+		a := &stampAnchor{times: []int64{closes - 3600, closes}}
+		e := newEnv(t, a)
+		e.p.AuthorityTime = func(pctx context.Context) (int64, error) {
+			if pctx.Err() != nil {
+				return 0, pctx.Err()
+			}
+			return closes, nil
+		}
+		if _, err := publish(e); !errors.Is(err, ballot.ErrStampedEarly) {
+			t.Fatal(err)
+		}
+		cctx, cancel := context.WithCancel(ctx)
+		cancel()
+		if _, err := e.p.PublishResults(cctx, id, res, []byte("s"), []byte("rows"), closes); errors.Is(err, ballot.ErrAuthorityTime) || a.n != 2 {
+			t.Fatalf("the probe was cut by the request: %d anchors, %v", a.n, err)
 		}
 	})
 

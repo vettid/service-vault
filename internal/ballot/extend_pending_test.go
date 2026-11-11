@@ -396,7 +396,11 @@ func TestCloseRetriesResultsIndex(t *testing.T) {
 	if _, err := e.m.Close(ctx, e.id); err != nil || e.pub.resultsUploads != 3 {
 		t.Fatalf("after: %v, uploads %d", err, e.pub.resultsUploads)
 	}
-	// The repeated uploads are checked against the close too.
+	// The repeated uploads go through RepublishResults (the bundle the
+	// site holds), checked against the close too.
+	if e.pub.republished != 2 {
+		t.Fatalf("%d uploads again through RepublishResults, want 2", e.pub.republished)
+	}
 	for i, nb := range e.pub.notBefore {
 		if nb != e.in.ClosesAt {
 			t.Fatalf("upload %d: notBefore %d, want %d", i, nb, e.in.ClosesAt)

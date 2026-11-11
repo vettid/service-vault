@@ -901,3 +901,17 @@ func TestCaughtEmptyCollectAfterTheProbe(t *testing.T) {
 		t.Fatalf("an empty collect after emptyAfter: %v %v", ok, err)
 	}
 }
+
+// The boundary: an empty collect started exactly at emptyAfter counts.
+func TestCaughtEmptyCollectAtEmptyAfter(t *testing.T) {
+	f := newFixture(t)
+	f.clk.Advance(2 * time.Minute)
+	f.pump()
+	at := f.p.emptyAt
+	if ok, _, err := f.p.Caught(context.Background(), at.Add(-time.Second), at, time.Time{}, at); err != nil || !ok {
+		t.Fatalf("at emptyAfter: %v %v", ok, err)
+	}
+	if ok, _, _ := f.p.Caught(context.Background(), at.Add(-time.Second), at.Add(time.Nanosecond), time.Time{}, at); ok {
+		t.Fatal("before emptyAfter counted")
+	}
+}

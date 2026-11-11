@@ -484,3 +484,20 @@ func TestAuthorityTimeWiring(t *testing.T) {
 		t.Fatalf("a failing authority gave %d", got)
 	}
 }
+
+// The publisher is wired with the manager's timestamp check and its
+// authority probe.
+func TestVotesPublisherWiring(t *testing.T) {
+	mgr := &ballot.Manager{Timestamp: func(json.RawMessage, []byte) (int64, error) { return 7, nil },
+		AuthorityTime: func(context.Context) (int64, error) { return 8, nil }}
+	p := votesPublisher("https://votes.example", nil, peer.NewMemStore(), mgr, slog.Default())
+	if p.Timestamp == nil || p.AuthorityTime == nil || p.Records == nil {
+		t.Fatalf("%+v", p)
+	}
+	if v, _ := p.Timestamp(nil, nil); v != 7 {
+		t.Fatal("another Timestamp")
+	}
+	if v, _ := p.AuthorityTime(context.Background()); v != 8 {
+		t.Fatal("another AuthorityTime")
+	}
+}

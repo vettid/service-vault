@@ -76,6 +76,7 @@ type Publisher struct {
 	mu      sync.Mutex
 	bundles map[[32]byte]json.RawMessage // anchored this run, by document
 	waits   map[[32]byte]*stampWait      // without Records (tests)
+	probed  map[[32]byte]time.Time       // the last authority probe, by results
 }
 
 var (
@@ -405,11 +406,24 @@ func (p *Publisher) tooSoon(ctx context.Context, id string, doc []byte, w *stamp
 	}
 	now := p.now().Unix()
 	if p.AuthorityTime != nil {
-		t, err := p.AuthorityTime(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				return false, ctx.Err()
+		// Rationed as the count's probes: at least ballot.ProbeRetry apart.
+		key := sha256.Sum256(doc)
+		p.mu.Lock()
+		last, ok := p.probed[key]
+		if !ok || !p.now().Before(last.Add(ballot.ProbeRetry)) || p.now().Before(last) {
+			if p.probed == nil {
+				p.probed = map[[32]byte]time.Time{}
 			}
+			p.probed[key], ok = p.now(), false
+		}
+		p.mu.Unlock()
+		if ok {
+			return true, nil
+		}
+		pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ballot.ProbeTimeout)
+		t, err := p.AuthorityTime(pctx)
+		cancel()
+		if err != nil {
 			p.log().Error("the timestamp authority's time is unavailable: the results are not anchored again", "alarm", "tsa_unavailable", "proposal_id", id, "err", err.Error())
 			return false, fmt.Errorf("%w: %v", ballot.ErrAuthorityTime, err)
 		}

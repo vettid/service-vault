@@ -71,13 +71,21 @@ var (
 // for closes), an authority time before the close (tsa), or a failure;
 // seen is this service's clock when it came back.
 type probeWait struct {
-	closes, tsa, seen int64
-	ok, failed        bool
+	closes, tsa int64
+	// seen keeps its monotonic reading (this process's): a cached pass
+	// is compared with an empty collect's start on that clock, which a
+	// wall-clock step doesn't move.
+	seen       time.Time
+	ok, failed bool
 }
 
 // ProbeRetry is the least time between two probes when the last failed;
 // the caller backs off further (BALLOT-PROTOCOL §7, 0.13.12).
 const ProbeRetry = 10 * time.Second
+
+// ProbeTimeout is how long a probe may take (shorter than a caller's
+// request, so a hung authority is seen and alarmed).
+const ProbeTimeout = 5 * time.Second
 
 // ProbeMaxWait bounds the rationing: however the estimate reads, a probe
 // is made again after it, so a clock corrected meanwhile never starves
@@ -97,14 +105,18 @@ const ProbeMaxWait = 5 * time.Minute
 // the proposal's lock, so a slow authority holds that lock up to the
 // client's timeout (a minute or so).
 func (m *Manager) authorityPast(ctx context.Context, id string, closesAt int64) (time.Time, error) {
-	now := m.Now().Unix()
+	nowT := m.Now()
 	if v, ok := m.probes.Load(id); ok {
-		w, since := v.(probeWait), now-v.(probeWait).seen
+		w := v.(probeWait)
+		since := int64(nowT.Sub(w.seen) / time.Second)
+		if nowT.Before(w.seen) {
+			since = -1
+		}
 		switch {
 		case since < 0:
 			// This clock went back: what was judged by it is void.
 		case w.ok && w.closes == closesAt:
-			return time.Unix(w.seen, 0), nil
+			return w.seen, nil
 		case w.failed && since < int64(ProbeRetry/time.Second):
 			m.log().Info("the timestamp authority's time: retried too soon after a failure", "proposal_id", id)
 			return time.Time{}, ErrAuthorityTime
@@ -117,24 +129,26 @@ func (m *Manager) authorityPast(ctx context.Context, id string, closesAt int64) 
 		m.log().Error("no timestamp authority to ask: the vote is not counted", "alarm", "tsa_unavailable", "proposal_id", id)
 		return time.Time{}, ErrAuthorityTime
 	}
-	t, err := m.AuthorityTime(ctx)
+	// The probe has its own timeout, apart from the request's: a hung
+	// authority is the authority's failure (alarmed), not a cancelled
+	// request's, and a request the caller drops doesn't cut it short.
+	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ProbeTimeout)
+	t, err := m.AuthorityTime(pctx)
+	cancel()
 	if err != nil {
-		if ctx.Err() != nil {
-			return time.Time{}, ctx.Err() // the request ended: not the authority's failure
-		}
 		// The floor runs from when the failure came back.
-		m.probes.Store(id, probeWait{seen: m.Now().Unix(), failed: true})
+		m.probes.Store(id, probeWait{seen: m.Now(), failed: true})
 		m.log().Error("the timestamp authority's time is unavailable: the vote is not counted", "alarm", "tsa_unavailable", "proposal_id", id, "err", err.Error())
 		return time.Time{}, fmt.Errorf("%w: %v", ErrAuthorityTime, err)
 	}
 	seen := m.Now()
 	if t < closesAt {
-		m.probes.Store(id, probeWait{closes: closesAt, tsa: t, seen: seen.Unix()})
+		m.probes.Store(id, probeWait{closes: closesAt, tsa: t, seen: seen})
 		m.log().Error("the vote's close passed by this service's clock but not by the timestamp authority's: still collecting", "alarm", "count_clock_ahead",
 			"proposal_id", id, "authority_time", t, "closes_at", closesAt, "skew_seconds", seen.Unix()-t)
 		return time.Time{}, ErrAuthorityEarly
 	}
-	m.probes.Store(id, probeWait{closes: closesAt, seen: seen.Unix(), ok: true})
+	m.probes.Store(id, probeWait{closes: closesAt, seen: seen, ok: true})
 	return seen, nil
 }
 
@@ -244,6 +258,7 @@ func (m *Manager) Close(ctx context.Context, id string) (*ResultsSummary, error)
 			if err := m.Store.SaveProposal(ctx, o, false); err != nil {
 				return nil, err
 			}
+			m.probes.Delete(id) // counted: no more probes for it
 		}
 		if pr, err = m.count(ctx, o); err != nil {
 			return nil, err

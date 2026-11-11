@@ -78,6 +78,7 @@ type fakePublisher struct {
 	indexStale      bool     // the extension answers say the index isn't updated
 	resultsStale    bool
 	resultsUploads  int
+	republished     int // RepublishResults calls (a stale site index)
 }
 
 func (p *fakePublisher) bundle(doc []byte) json.RawMessage {
@@ -344,6 +345,7 @@ func (p *fakePublisher) PublishResults(_ context.Context, id string, results, si
 }
 
 func (p *fakePublisher) RepublishResults(ctx context.Context, id string, results, sig, rows []byte, _ json.RawMessage, notBefore int64) (Receipt, error) {
+	p.republished++
 	return p.PublishResults(ctx, id, results, sig, rows, notBefore)
 }
 
@@ -1086,15 +1088,16 @@ func TestAuthorityProbeRules(t *testing.T) {
 		t.Fatalf("within the cap: %v, %d probes", err, probes)
 	}
 	clock = clock.Add(time.Second)
-	// A cancelled request: not counted as a failure (no floor after it).
+	// A request its caller cancelled still gets the whole probe (its own
+	// timeout, apart from the request's): an answer, not a failure.
 	cctx, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := m.authorityPast(cctx, c.ProposalID, in.ClosesAt); !errors.Is(err, context.Canceled) {
-		t.Fatalf("a cancelled probe: %v", err)
+	if _, err := m.authorityPast(cctx, c.ProposalID, in.ClosesAt); !errors.Is(err, ErrAuthorityEarly) || probes != 4 {
+		t.Fatalf("a cancelled request's probe: %v, %d probes", err, probes)
 	}
-	// At the close itself it passes, at once (no failure floor after the
-	// cancel); the relay isn't caught up yet, and the passing probe holds
-	// for the retries (not probed again).
+	clock = clock.Add(ProbeMaxWait)
+	// At the close itself it passes; the relay isn't caught up yet, and the
+	// passing probe holds for the retries (not probed again).
 	authority, before := in.ClosesAt, probes
 	if _, err := m.Close(ctx, c.ProposalID); !errors.Is(err, ErrNotCaught) || probes != before+1 {
 		t.Fatalf("at the close: %v, %d probes", err, probes-before)
@@ -1131,5 +1134,54 @@ func TestAuthorityProbeExtendedClose(t *testing.T) {
 	e.m.AuthorityTime = func(context.Context) (int64, error) { return e.in.ClosesAt + 7200, nil }
 	if _, err := e.m.Close(ctx, e.id); err != nil {
 		t.Fatalf("at the extended close: %v", err)
+	}
+}
+
+// A cached pass keeps the probe's monotonic reading: the empty-collect
+// evidence is compared on that clock, which a wall-clock step (NTP
+// correcting a fast clock) doesn't move.
+func TestAuthorityProbeCacheIsMonotonic(t *testing.T) {
+	ctx := context.Background()
+	m, _, _ := newManager(t)
+	m.Now = time.Now
+	m.AuthorityTime = func(context.Context) (int64, error) { return time.Now().Unix(), nil }
+	first, err := m.authorityPast(ctx, "p", time.Now().Unix()-60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cached, err := m.authorityPast(ctx, "p", time.Now().Unix()-60)
+	if err != nil || !cached.Equal(first) {
+		t.Fatalf("%v %v", cached, err)
+	}
+	if !strings.Contains(cached.String(), " m=") {
+		t.Fatalf("the cached pass lost its monotonic reading: %v", cached)
+	}
+}
+
+// A cached pass holds only for its close: a moved close (here judged
+// directly) is probed again. seen is taken when the probe came back. The
+// probe has its own deadline, apart from a cancelled request.
+func TestAuthorityProbeCacheAndDeadline(t *testing.T) {
+	ctx := context.Background()
+	m, _, _ := newManager(t)
+	clock := time.Unix(1_800_000_000, 0)
+	m.Now = func() time.Time { return clock }
+	probes, authority := 0, int64(1_800_000_000)
+	m.AuthorityTime = func(pctx context.Context) (int64, error) {
+		probes++
+		if d, ok := pctx.Deadline(); !ok || time.Until(d) > ProbeTimeout || pctx.Err() != nil {
+			t.Errorf("the probe's context: deadline %v %v, err %v", d, ok, pctx.Err())
+		}
+		clock = clock.Add(time.Minute) // the probe took a while
+		return authority, nil
+	}
+	at, err := m.authorityPast(ctx, "p", 1_800_000_000-60)
+	if err != nil || probes != 1 || !at.Equal(clock) {
+		t.Fatalf("seen %v, want when the probe came back %v; %v", at, clock, err)
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := m.authorityPast(cctx, "p", 1_800_000_000+3600); !errors.Is(err, ErrAuthorityEarly) || probes != 2 {
+		t.Fatalf("a moved close: %v, %d probes", err, probes)
 	}
 }
