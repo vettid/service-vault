@@ -54,14 +54,15 @@ members' signatures, for the organisation.
   the VMS convention). The terminator makes the vote labels prefix-free
   among themselves (no label is the start of another, whatever follows
   it), and the `vettid/vote/` prefix keeps them apart from every VMS
-  label. **(chosen; differs from the
+  label as long as no VMS label begins with `vettid/vote/` or is a prefix
+  of it (VAULT-MESSAGING 0.88.12 §4.1 reserves the prefix). **(chosen; differs from the
   plan:** the plan's `"vettid-vote-v1"` follows vettid-dev.)
 - **Signatures:** `Sign(sk, label, m)` is `suite.Sign` from vettid-vault
   `vms/suite`: Ed25519 over `label ‖ m`, with the label's own `0x00`
   separating it from `m`. Every signature the service identity key
   makes is over a label-prefixed string, in VMS and here: the
   `vettid/vote/` and `vettid/vms/` prefixes differ, so a vote signature
-  can't be taken for a VMS one or the other way round. A hashed string that starts with a label includes
+  can't be taken for a VMS one or the other way around. A hashed string that starts with a label includes
   the label's `0x00`.
 - **Ed25519 verification,** by every verifier (the service vault, the
   member vault, the app, observers and the site), is exactly:
@@ -104,7 +105,7 @@ The proposal is a document (§8.5).
 | `proposal_id` | A ULID. |
 | `service` | The service identity key that signs it. |
 | `title`, `text` | UTF-8; `title` 1–200 bytes, `text` at most 16,384 bytes. |
-| `choices` | 3–17 entries `{id, label}`, in display order, with `id` matching `[a-z0-9-]{1,32}` and unique and `label` UTF-8 of 1–200 bytes: at least two real choices (16 at most), and `abstain`, reserved and always present, for a member who wants to be counted without choosing. The service vault assigns the ids itself (`c1`, `c2`, …, §3.4) and always adds `abstain`; a member's vault checks this grammar and (0.13.11) that **no two labels are the same once folded**: the format characters (Unicode Cf, the bidirectional marks and isolates among them) removed, NFC, then **simple** Unicode case folding (not full folding: `ß` is not `ss`); `abstain`'s label counts, so a real choice can't read as it (VAULT-MESSAGING 0.88.12 §10.19.4 step 2). The service's own rule (§3.4: distinct under `strings.ToLower`, ASCII and Latin-1 only, `µ` excluded) agrees with simple folding in that range, so it never signs what a vault refuses. |
+| `choices` | 3–17 entries `{id, label}`, in display order, with `id` matching `[a-z0-9-]{1,32}` and unique and `label` UTF-8 of 1–200 bytes: at least two real choices (16 at most), and `abstain`, reserved and always present, for a member who wants to be counted without choosing. The service vault assigns the ids itself (`c1`, `c2`, …, §3.4) and always adds `abstain`; a member's vault checks this grammar and (0.13.11) that **no two labels are the same once folded**: the format characters (Unicode Cf, the bidirectional marks and isolates among them) removed, NFC, then **simple** Unicode case folding (not full folding: `ß` is not `ss`); `abstain`'s label counts, so a real choice can't read as it (VAULT-MESSAGING 0.88.12 §10.19.4 step 2). The service's own rule (§3.4: distinct under `strings.ToLower`, printable ASCII and the Latin-1 letters U+00C0–U+00FF only, `×` and `÷` excluded) agrees with simple folding in that range, and a label empty once folded is refused too, so it never signs what a vault refuses. |
 | `quorum` | The quorum rule, as text (UTF-8, at most 1,024 bytes, may be empty), and the number of ballots it needs (`min_ballots`, at least 0). `abstain` counts toward it. |
 | `binding` | Whether the organisation treats the result as binding. The protocol is the same either way. |
 | `removed_may_vote` | Whether a member removed or suspended after `record_at` may still vote. |
@@ -614,17 +615,19 @@ publishes its results has every member's check settle by itself.
 2. **The vault** checks `results_sig` and the bundle, whose timestamp
    must be **at or after the `closes_at` in force** (0.13.11; with the
    extensions in `results.json`): the service counts and anchors only
-   once its clock is past that `closes_at` + 1 min (`CollectMargin`), and
-   the minute is the allowance for the timestamp authority's clock, so a
-   vault requires the close itself and an earlier timestamp is a failure
+   once its clock is at or past that `closes_at` + 1 min (`CollectMargin`),
+   and the 1-minute margin also serves as the allowance for the timestamp
+   authority's clock, so a vault requires the close itself and an earlier timestamp is a failure
    (results made before every ballot could be in). **The service checks
    the timestamp too:** before it uploads the results it compares the
-   bundle's time with that `closes_at` and, if it is earlier (its own
-   clock was more than a minute fast), anchors them again rather than
+   bundle's time with that `closes_at` and, if it is earlier (its clock
+   and the timestamp authority's differ by more than a minute), anchors
+   them again rather than
    publish results every vault would fail (service-vault follow-up: the
    bundle cache keyed by hash must not hand back the early bundle, and the
-   new anchor needs a fresh signature, since the transparency log refuses
-   an identical entry); that
+   new anchor needs a fresh anchor signature, the ECDSA one, since the
+   transparency log refuses an identical entry and `results_sig` is
+   deterministic); that
    the proposal
    and extensions in `results.json` are the ones it received; and its
    row's proof.
@@ -714,7 +717,10 @@ SubjectPublicKeyInfo; `?` marks a field present only where stated.
   anyone it shows a `cast_sig` to (the organisation, an auditor:
   §8.3 step 4), can link that member's ballots across proposals and to
   their sign-ins, and can prove to a third party which choice the
-  member's key signed for. This is what lets the organisation's record
+  member's key signed for. The same credential key signs in to every
+  service, so `cast_sig`s shown together link the member across
+  organisations too, and a rotation (the old key signs the new) links the
+  old key's ballots to the new one's. This is what lets the organisation's record
   settle a disputed ballot (§8.3), and it is why `cast_sig` is never
   published: the public still cannot link a member's rows (below).
 - **VettID's relay and hosts:** which vaults sent a message to the
@@ -918,7 +924,7 @@ item.
   prefix-free and apart from VMS. §3.1: a member's vault also refuses
   labels that are the same once folded (format characters removed, NFC,
   simple case folding, which agrees with the service's `ToLower` rule on
-  Latin-1). §8.3 step 2 and §8.4 item 6: the results' timestamp is at or
+  printable ASCII and the Latin-1 letters). §8.3 step 2 and §8.4 item 6: the results' timestamp is at or
   after the `closes_at` in force (the service's 1-minute margin is the
   timestamp authority's allowance); the service checks the bundle's time
   before upload and anchors again if it is early (code follow-up). §9.1:
