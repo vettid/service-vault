@@ -672,7 +672,8 @@ func (s *Server) proposalStatus(w http.ResponseWriter, r *http.Request) {
 
 // publishProposal serves POST /v1/proposals/{id}/publish: a proposal
 // whose publication failed is published, and it is sent again to every
-// eligible member (who asks with vote.status otherwise, §4.2).
+// eligible member in the background (who asks with vote.status
+// otherwise, §4.2).
 func (s *Server) publishProposal(w http.ResponseWriter, r *http.Request) {
 	n, err := s.Proposals.Publish(r.Context(), r.PathValue("id"))
 	switch {
@@ -686,7 +687,7 @@ func (s *Server) publishProposal(w http.ResponseWriter, r *http.Request) {
 		s.log().Error("publish proposal", "err", err)
 		writeError(w, http.StatusServiceUnavailable, "unavailable")
 	default:
-		writeJSON(w, http.StatusOK, map[string]int{"sent": n})
+		writeJSON(w, http.StatusOK, map[string]int{"sending": n})
 	}
 }
 

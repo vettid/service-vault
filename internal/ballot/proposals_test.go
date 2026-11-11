@@ -42,14 +42,57 @@ type sent struct {
 	body      json.RawMessage
 }
 
+// fakeSender records what was sent. Sends run in the background
+// (sends.go), so a test reads sent only after m.Wait().
 type fakeSender struct {
+	mu   sync.Mutex
 	sent []sent
 	down map[string]bool
+	// block, when set, holds every send until it is closed.
+	block chan struct{}
+	// cancelled counts the calls made with a context already done; hold,
+	// set before any send, holds the sends to a connection until closed.
+	cancelled int
+	hold      map[string]chan struct{}
+	// failWith, set before any send, fails the sends to a connection
+	// with that error (the relay down, say).
+	failWith map[string]error
+	// left is how long the last send's context had before its deadline;
+	// notAfter is the last send's.
+	left     time.Duration
+	notAfter time.Time
 }
 
-func (s *fakeSender) SendMessage(_ context.Context, conn, typ string, body json.RawMessage) (string, error) {
+func (s *fakeSender) SendMessage(ctx context.Context, conn, typ string, body json.RawMessage, notAfter time.Time) (string, error) {
+	if ctx.Err() != nil {
+		s.mu.Lock()
+		s.cancelled++
+		s.mu.Unlock()
+		return "", ctx.Err()
+	}
+	if h := s.hold[conn]; h != nil {
+		<-h
+	}
+	if s.block != nil {
+		select {
+		case <-s.block:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.notAfter = notAfter
+	if d, ok := ctx.Deadline(); ok {
+		s.left = time.Until(d)
+	} else {
+		s.left = -1
+	}
 	if s.down[conn] {
 		return "", peer.ErrNotFound
+	}
+	if err := s.failWith[conn]; err != nil {
+		return "", err
 	}
 	s.sent = append(s.sent, sent{conn, typ, body})
 	return "id", nil
@@ -211,7 +254,8 @@ func TestCreateProposal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Eligible != 3 || c.Sent != 3 || len(s.sent) != 3 || pub.calls != 1 {
+	m.Wait()
+	if c.Eligible != 3 || c.Sending != 3 || len(s.sent) != 3 || pub.calls != 1 {
 		t.Fatalf("created %+v, sent %d, published %d", c, len(s.sent), pub.calls)
 	}
 	tags := map[string]bool{}
@@ -308,6 +352,7 @@ func TestCreateRefusals(t *testing.T) {
 	if !errors.As(err, &np) || c == nil || np.ProposalID != c.ProposalID {
 		t.Fatalf("created while Rekor is down: %v", err)
 	}
+	m.Wait()
 	if len(s.sent) != 0 {
 		t.Fatal("sent an unpublished proposal")
 	}
@@ -325,8 +370,9 @@ func TestCreateRefusals(t *testing.T) {
 	pub.fail = false
 	s.down["c1"] = true
 	n, err := m.Publish(ctx, id)
-	if err != nil || n != 2 {
-		t.Fatalf("Publish: %d, %v", n, err)
+	m.Wait()
+	if err != nil || n != 3 || len(s.sent) != 2 {
+		t.Fatalf("Publish: sending %d, sent %d, %v", n, len(s.sent), err)
 	}
 }
 
@@ -416,8 +462,10 @@ func TestClose(t *testing.T) {
 		t.Fatalf("a cast during the count: %q", code)
 	}
 	pub.fail = false
+	m.Wait()
 	s.sent = nil
 	sum1, err := m.Close(ctx, c.ProposalID)
+	m.Wait()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -443,6 +491,7 @@ func TestClose(t *testing.T) {
 	// Again: the same results, announced once.
 	s.sent = nil
 	sum2, err := m.Close(ctx, c.ProposalID)
+	m.Wait()
 	if err != nil || !bytes.Equal(sum2.ResultsHash, sum1.ResultsHash) || len(s.sent) != 0 {
 		t.Fatalf("second close: %v, sent %d", err, len(s.sent))
 	}
@@ -500,6 +549,7 @@ func TestExtend(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
+	m.Wait()
 	s.sent = nil
 	// An outage still going on: its length is not known yet.
 	now := m.Now().Unix()
@@ -512,6 +562,7 @@ func TestExtend(t *testing.T) {
 	if err != nil || e.N != 1 {
 		t.Fatalf("Extend: %v", err)
 	}
+	m.Wait()
 	if len(s.sent) != 3 || s.sent[0].typ != TypeExtended {
 		t.Fatalf("vote.extended sent %d", len(s.sent))
 	}

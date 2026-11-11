@@ -420,7 +420,7 @@ func TestSendMessage(t *testing.T) {
 	if got := f.p.Eligible(); len(got) != 1 || got[0] != cid {
 		t.Fatalf("Eligible = %v", got)
 	}
-	id, err := f.p.SendMessage(context.Background(), cid, "vote.proposal", json.RawMessage(`{"proposal":"x"}`))
+	id, err := f.p.SendMessage(context.Background(), cid, "vote.proposal", json.RawMessage(`{"proposal":"x"}`), time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -429,10 +429,10 @@ func TestSendMessage(t *testing.T) {
 	if len(got) != 1 || got[0].ID != id || string(got[0].Body) != `{"proposal":"x"}` {
 		t.Fatalf("received %v", got)
 	}
-	if _, err := f.p.SendMessage(context.Background(), "nope", "vote.proposal", nil); err != ErrNotFound {
+	if _, err := f.p.SendMessage(context.Background(), "nope", "vote.proposal", nil, time.Time{}); err != ErrNotFound {
 		t.Fatalf("unknown connection: %v", err)
 	}
-	if _, err := f.p.SendMessage(context.Background(), cid, "Bad Type", nil); err == nil {
+	if _, err := f.p.SendMessage(context.Background(), cid, "Bad Type", nil, time.Time{}); err == nil {
 		t.Fatal("invalid type sent")
 	}
 }
@@ -926,5 +926,243 @@ func TestEmptyAtIsMonotonic(t *testing.T) {
 	f.pump()
 	if !strings.Contains(f.p.emptyAt.String(), " m=") {
 		t.Fatalf("emptyAt without a monotonic reading: %v", f.p.emptyAt)
+	}
+}
+
+// SendMessage stops adding to an outbox the relay isn't taking from, by
+// entries and by bytes, with ErrOutboxFull; once the relay takes them,
+// sends go again.
+func TestSendMessageOutboxBound(t *testing.T) {
+	ctx := context.Background()
+	for _, bound := range []string{"entries", "bytes"} {
+		f := newFixture(t)
+		var cids []string
+		for i := 0; i < 4; i++ {
+			cids = append(cids, f.connect(f.member(byte(10+i)), fmt.Sprintf("t%d", i)))
+		}
+		f.pump()
+		down := true
+		f.failDeposit = func(string, string) error {
+			if down {
+				return errUnavailable
+			}
+			return nil
+		}
+		body := json.RawMessage(`{"proposal":"` + strings.Repeat("x", 1000) + `"}`)
+		old := sendOutboxLimit
+		n, _ := f.p.voteOutboxLoad(f.clk.Now())
+		if bound == "entries" {
+			sendOutboxLimit.n = n + 5
+		} else {
+			_, size := f.p.voteOutboxLoad(f.clk.Now())
+			sendOutboxLimit.bytes = size + 5*1000 // about 5 sealed bodies
+		}
+		t.Cleanup(func() { sendOutboxLimit = old })
+		queued, full := 0, 0
+		for i := 0; i < 40; i++ {
+			_, err := f.p.SendMessage(ctx, cids[i%len(cids)], "vote.proposal", body, time.Time{})
+			switch {
+			case err == nil:
+				queued++
+			case errors.Is(err, ErrOutboxFull):
+				full++
+			default:
+				t.Fatalf("%s: send %d: %v", bound, i, err)
+			}
+		}
+		if queued == 0 || queued > 5 || full != 40-queued {
+			t.Fatalf("%s: queued %d, full %d", bound, queued, full)
+		}
+		if got, _ := f.p.voteOutboxLoad(f.clk.Now()); got > n+5 {
+			t.Fatalf("%s: outbox %d entries", bound, got)
+		}
+		down = false
+		f.clk.Advance(time.Minute) // past the deposits' retry backoff
+		f.pump()
+		if _, err := f.p.SendMessage(ctx, cids[0], "vote.proposal", body, time.Time{}); err != nil {
+			t.Fatalf("%s: after the relay is back: %v", bound, err)
+		}
+		sendOutboxLimit = old
+	}
+}
+
+// Members whose deposits the relay refuses (their vaults gone, no
+// connection.removed) don't count toward the bound, nor do the token
+// refreshes and other messages queued for them: a healthy member is
+// still sent to, however many such members there are. A vote deposit
+// past its notAfter is dropped and stops counting.
+func TestSendMessageBoundIgnoresUnreachable(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	var gone []string
+	for i := 0; i < 6; i++ {
+		gone = append(gone, f.connect(f.member(byte(20+i)), fmt.Sprintf("g%d", i)))
+	}
+	ok := f.connect(f.member(30), "ok")
+	f.pump()
+	goneBox := map[string]bool{}
+	for _, c := range gone {
+		goneBox[f.p.conns[c].Peer.Relay.Mailbox] = true
+	}
+	f.failDeposit = func(mailbox, _ string) error {
+		if goneBox[mailbox] {
+			return &relayclient.Error{Status: 401, Code: codeTokenExpired}
+		}
+		return nil
+	}
+	old := sendOutboxLimit
+	t.Cleanup(func() { sendOutboxLimit = old })
+	sendOutboxLimit.n = 3
+	body := json.RawMessage(`{"proposal":"x"}`)
+	// Each gone member: one vote deposit, refused and parked; after it,
+	// SendMessage queues nothing more for them (ErrBusy, member-only).
+	for _, c := range gone {
+		if _, err := f.p.SendMessage(ctx, c, "vote.proposal", body, time.Time{}); err != nil {
+			t.Fatalf("first send to %s: %v", c, err)
+		}
+	}
+	f.pump()
+	for _, c := range gone {
+		if !f.p.awaitingToken(c) {
+			t.Fatalf("%s not parked", c)
+		}
+		if _, err := f.p.SendMessage(ctx, c, "vote.extended", body, time.Time{}); !errors.Is(err, ErrBusy) {
+			t.Fatalf("a parked member: %v", err)
+		}
+	}
+	// Other messages pile up for them (refreshes, say): not counted.
+	for _, c := range gone {
+		for i := 0; i < 10; i++ {
+			f.p.mu.Lock()
+			f.p.queueDeposit(&outboxEntry{ConnID: c, Mailbox: f.p.conns[c].Peer.Relay.Mailbox, Payload: make([]byte, 100)}, f.clk.Now())
+			f.p.mu.Unlock()
+		}
+	}
+	if n, _ := f.p.voteOutboxLoad(f.clk.Now()); n != 0 {
+		t.Fatalf("%d counted", n)
+	}
+	// Kept across a restart: the parked deposits are still marked Vote
+	// and still parked.
+	f.start()
+	for _, c := range gone {
+		if !f.p.awaitingToken(c) {
+			t.Fatalf("%s not parked after a restart", c)
+		}
+	}
+	f.p.mu.Lock()
+	marked := 0
+	for _, e := range f.p.outbox {
+		if e.Vote {
+			marked++
+		}
+	}
+	f.p.mu.Unlock()
+	if marked != len(gone) {
+		t.Fatalf("%d vote deposits marked after a restart, want %d", marked, len(gone))
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := f.p.SendMessage(ctx, ok, "vote.proposal", body, time.Time{}); err != nil {
+			t.Fatalf("the healthy member, send %d: %v", i, err)
+		}
+	}
+	f.pump()
+	if got := len(f.ms[len(f.ms)-1].Received("vote.proposal")); got != 5 {
+		t.Fatalf("the healthy member got %d", got)
+	}
+
+	// Past its notAfter, a vote deposit no longer counts, and the drain
+	// drops it.
+	f.failDeposit = func(string, string) error { return errUnavailable }
+	until := f.clk.Now().Add(time.Hour)
+	for i := 0; i < 3; i++ {
+		if _, err := f.p.SendMessage(ctx, ok, "vote.proposal", body, until); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := f.p.SendMessage(ctx, ok, "vote.proposal", body, until); !errors.Is(err, ErrOutboxFull) {
+		t.Fatalf("at the bound: %v", err)
+	}
+	// Vote and NotAfter are kept across a restart: still full, and the
+	// deposits still end at until.
+	f.start()
+	if _, err := f.p.SendMessage(ctx, ok, "vote.proposal", body, until); !errors.Is(err, ErrOutboxFull) {
+		t.Fatalf("at the bound after a restart: %v", err)
+	}
+	f.p.mu.Lock()
+	for _, e := range f.p.outbox {
+		if e.Vote && e.ConnID == ok && !e.NotAfter.Equal(until) {
+			f.p.mu.Unlock()
+			t.Fatalf("NotAfter %v after a restart, want %v", e.NotAfter, until)
+		}
+	}
+	f.p.mu.Unlock()
+	f.clk.Advance(2 * time.Hour)
+	if n, _ := f.p.voteOutboxLoad(f.clk.Now()); n != 0 {
+		t.Fatalf("%d counted past notAfter", n)
+	}
+	f.pump()
+	f.p.mu.Lock()
+	left := 0
+	for _, e := range f.p.outbox {
+		if e.Vote && e.ConnID == ok {
+			left++
+		}
+	}
+	f.p.mu.Unlock()
+	if left != 0 {
+		t.Fatalf("%d expired vote deposits kept", left)
+	}
+}
+
+// Members whose vaults are gone, over days of hourly housekeeping (the
+// token refreshes it queues for them pile up), don't stop a healthy
+// member's vote messages.
+func TestSendMessageBoundOverDaysOfTicks(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	var gone []string
+	for i := 0; i < 4; i++ {
+		gone = append(gone, f.connect(f.member(byte(40+i)), fmt.Sprintf("g%d", i)))
+	}
+	ok := f.connect(f.member(50), "ok")
+	f.pump()
+	goneBox := map[string]bool{}
+	for _, c := range gone {
+		goneBox[f.p.conns[c].Peer.Relay.Mailbox] = true
+	}
+	f.failDeposit = func(mailbox, _ string) error {
+		if goneBox[mailbox] {
+			return &relayclient.Error{Status: 401, Code: codeTokenExpired}
+		}
+		return nil
+	}
+	old := sendOutboxLimit
+	t.Cleanup(func() { sendOutboxLimit = old })
+	sendOutboxLimit.n = 8
+	body := json.RawMessage(`{"proposal":"x"}`)
+	f.p.mu.Lock()
+	before := len(f.p.outbox)
+	f.p.mu.Unlock()
+	for h := 0; h < 30*24; h++ {
+		if h%24 == 0 {
+			for _, c := range gone {
+				_, _ = f.p.SendMessage(ctx, c, "vote.proposal", body, f.clk.Now().Add(48*time.Hour))
+			}
+			if _, err := f.p.SendMessage(ctx, ok, "vote.proposal", body, f.clk.Now().Add(48*time.Hour)); err != nil {
+				t.Fatalf("day %d, the healthy member: %v", h/24, err)
+			}
+		}
+		f.clk.Advance(time.Hour)
+		f.tick()
+		f.pump()
+	}
+	f.p.mu.Lock()
+	after := len(f.p.outbox)
+	f.p.mu.Unlock()
+	if after <= before+len(gone) {
+		t.Fatalf("outbox %d -> %d: nothing piled up, so the test shows nothing", before, after)
+	}
+	if got := len(f.ms[len(f.ms)-1].Received("vote.proposal")); got != 30 {
+		t.Fatalf("the healthy member got %d of 30", got)
 	}
 }

@@ -34,7 +34,7 @@ type Roster interface {
 
 // Sender sends a message to a member's vault over its connection.
 type Sender interface {
-	SendMessage(ctx context.Context, connID, typ string, body json.RawMessage) (string, error)
+	SendMessage(ctx context.Context, connID, typ string, body json.RawMessage, notAfter time.Time) (string, error)
 }
 
 // Publisher anchors a proposal and publishes it on votes.vettid.org
@@ -96,6 +96,11 @@ type Manager struct {
 	NewID         func(time.Time) (string, error)
 	Now           func() time.Time
 	Log           *slog.Logger
+	// Background is the context member sends run under, after the request
+	// that started them (sends.go); they stop when it ends. The daemon's
+	// lasts until its shutdown has waited for them. Nil:
+	// context.Background().
+	Background context.Context
 
 	// locks holds a proposal's lock (a chan struct{} of one) while it is
 	// read, published and saved: Publish, Extend and Close each replace
@@ -105,6 +110,7 @@ type Manager struct {
 	// probes holds, by proposal, an authority time before the close
 	// (probeWait): no probe until the authority's time can have reached it.
 	probes sync.Map
+	sends  sends
 }
 
 // ErrNoTimestamps is a service vault with no way to verify the time of an
@@ -163,7 +169,9 @@ type Created struct {
 	// credential key at creation: their vaults refuse a vote
 	// (not_signed_in) until the member signs in.
 	Unsigned int `json:"unsigned"`
-	Sent     int `json:"sent"`
+	// Sending is how many members vote.proposal is being sent to, in the
+	// background (sends.go).
+	Sending int `json:"sending"`
 }
 
 // ErrInput is a proposal the application asked for that isn't valid.
@@ -252,7 +260,7 @@ func (m *Manager) Create(ctx context.Context, approvalID string, in ProposalInpu
 		return nil, err
 	}
 	c := &Created{ProposalID: id, ProposalHash: sum(doc), Eligible: len(tags), Unsigned: countIn(conns, m.Roster.EligibleUnsigned())}
-	if c.Sent, err = m.Publish(ctx, id); err != nil {
+	if c.Sending, err = m.Publish(ctx, id); err != nil {
 		return c, &ErrNotPublished{ProposalID: id, Err: err}
 	}
 	return c, nil
@@ -268,9 +276,11 @@ type ErrNotPublished struct {
 func (e *ErrNotPublished) Error() string { return e.Err.Error() }
 func (e *ErrNotPublished) Unwrap() error { return e.Err }
 
-// Publish publishes a stored proposal if it isn't yet, then sends
-// vote.proposal to every eligible member, and returns how many it sent.
-// A member it couldn't reach asks later (vote.status, §4.2).
+// Publish publishes a stored proposal if it isn't yet, then starts
+// sending vote.proposal to every eligible member in the background
+// (sends.go), and returns how many it is sending to. A member it can't
+// reach asks later (vote.status, §4.2). Called again while its sends run,
+// it doesn't start them twice.
 func (m *Manager) Publish(ctx context.Context, id string) (int, error) {
 	if m.Publisher == nil {
 		return 0, ErrNoPublisher
@@ -286,6 +296,15 @@ func (m *Manager) Publish(ctx context.Context, id string) (int, error) {
 	}
 	if o == nil {
 		return 0, ErrUnknownProposal
+	}
+	// Once the vote is counted (the results record is kept at the count,
+	// before the upload), members are sent vote.closed: a vote.proposal
+	// sent after it would only tell them of a vote that is over.
+	if _, done, err := m.Store.Records.Get(ctx, KindResults, id); err != nil {
+		return 0, err
+	} else if done {
+		m.log().Info("vote.proposal not sent: the vote is counted", "proposal_id", id)
+		return 0, nil
 	}
 	if o.Bundle == nil {
 		// Published late (members' requests went unanswered meanwhile):
@@ -305,31 +324,29 @@ func (m *Manager) Publish(ctx context.Context, id string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	conns := make([]string, 0, len(o.Members))
-	for c := range o.Members {
-		conns = append(conns, c)
-	}
-	sort.Strings(conns)
-	sent := 0
-	for _, c := range conns {
+	conns := sortedConns(o.Members)
+	body := func(c string) (json.RawMessage, error) {
 		mem := o.Members[c]
 		proof, err := o.proofOf(mem.Tag)
 		if err != nil {
-			return sent, err
+			return nil, err
 		}
-		body, err := json.Marshal(proposalBody{Proposal: o.Doc, ProposalSig: o.Sig, Bundle: o.Bundle, RecordSecret: mem.Secret,
+		return json.Marshal(proposalBody{Proposal: o.Doc, ProposalSig: o.Sig, Bundle: o.Bundle, RecordSecret: mem.Secret,
 			RecordProof: proof})
-		if err != nil {
-			return sent, err
-		}
-		if _, err := m.Sender.SendMessage(ctx, c, TypeProposal, body); err != nil {
-			m.log().Warn("vote.proposal not sent", "proposal_id", id, "connection_id", c, "err", err.Error())
-			continue
-		}
-		sent++
 	}
-	m.log().Info("proposal published", "proposal_id", id, "eligible", p.Eligible, "sent", sent)
-	return sent, nil
+	// The first member's body is built here, so that a broken record tree
+	// fails the request rather than every send after it has answered.
+	if len(conns) > 0 {
+		if _, err := body(conns[0]); err != nil {
+			return 0, fmt.Errorf("ballot: publish %s: a member's body: %w", id, err)
+		}
+	}
+	sending := 0
+	if m.sendInBackground(id, "proposal/"+id, TypeProposal, conns, voteSendUntil(o.ClosesAt), body) {
+		sending = len(conns)
+	}
+	m.log().Info("proposal published", "proposal_id", id, "eligible", p.Eligible, "sending", sending)
+	return sending, nil
 }
 
 // proposalBody is vote.proposal's body (§4.1).

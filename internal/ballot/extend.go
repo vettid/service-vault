@@ -246,11 +246,8 @@ func (m *Manager) Extend(ctx context.Context, id, approvalID string, in Extensio
 		ExtensionSig []byte          `json:"extension_sig"`
 		Bundle       json.RawMessage `json:"bundle"`
 	}{id, doc, sig, bundle})
-	for c := range o.Members {
-		if _, err := m.Sender.SendMessage(ctx, c, TypeExtended, body); err != nil {
-			m.log().Warn("vote.extended not sent", "proposal_id", id, "connection_id", c, "err", err.Error())
-		}
-	}
+	m.sendInBackground(id, fmt.Sprintf("extended/%s/%d", id, e.N), TypeExtended, sortedConns(o.Members), voteSendUntil(o.ClosesAt),
+		func(string) (json.RawMessage, error) { return body, nil })
 	m.log().Info("vote extended", "proposal_id", id, "n", e.N, "closes_at", e.ClosesAt)
 	return e, nil
 }
