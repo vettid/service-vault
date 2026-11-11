@@ -396,6 +396,12 @@ func TestCloseRetriesResultsIndex(t *testing.T) {
 	if _, err := e.m.Close(ctx, e.id); err != nil || e.pub.resultsUploads != 3 {
 		t.Fatalf("after: %v, uploads %d", err, e.pub.resultsUploads)
 	}
+	// The repeated uploads are checked against the close too.
+	for i, nb := range e.pub.notBefore {
+		if nb != e.in.ClosesAt {
+			t.Fatalf("upload %d: notBefore %d, want %d", i, nb, e.in.ClosesAt)
+		}
+	}
 }
 
 // The store holding an extension the site lacks, or another one, is not

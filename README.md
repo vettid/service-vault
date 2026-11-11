@@ -118,17 +118,31 @@ destination.
 - `results_stamped_early`: a vote's results came back from the timestamp
   authority stamped before their close, so the service's clock is more
   than a minute ahead of the authority's (BALLOT-PROTOCOL §8.3 step 2:
-  every member vault would fail them). They are not published, and the
-  close answers 503 `stamped_early`. Fix the clock (NTP), then close
-  again: each close anchors the results at most once more, and nothing
-  retries by itself. Member vaults keep checking for 7 days, so a late
-  publication is still judged.
+  every member vault would fail them; `skew_seconds` on the line is the
+  difference seen). They are not published, and the close answers 503
+  `stamped_early`. Check both clocks: the task's (Fargate takes it from
+  the Amazon Time Sync Service; compare with `date -u` on a trusted host)
+  and the authority's (the stamp's time on the line). Then close again.
+  Each anchor is a permanent public entry in the transparency log, so
+  they are rationed: at most one per close, and none until the
+  authority's time, judged from the early stamp, can have reached the
+  close (`rec#vote_stamp_wait`); a close before then answers
+  `stamped_early` at once. Member vaults keep checking for 7 days, so a
+  late publication is still judged.
 - `results_bundle_unverified`: a vote's results bundle failed its
   timestamp check (the authority's signature, the pinned trusted root, or
   its validity period); the results are not published. One anchored by
   that close is dropped, so the next close anchors again; one kept from
-  an earlier close stays, as the site may hold it. The ERROR line names
-  the proposal and the error.
+  an earlier close stays, as the site may hold it, and blocks the
+  results until it is dealt with. The ERROR line names the proposal and
+  the error. First check whether votes.vettid.org has the results
+  (`GET /v1/p/<proposal id>/results.json`): if it does, keep the bundle
+  and fix the check (often a release whose pinned trusted root is out of
+  date). If it doesn't, delete the kept bundle, item pk
+  `rec#vote_bundle`, sk the hex SHA-256 of the results document
+  (`aws dynamodb delete-item --table-name T --key
+  '{"pk":{"S":"rec#vote_bundle"},"sk":{"S":"<hex>"}}'`), and close
+  again.
 - `ballot_not_counted`: a stored ballot failed the count's re-check
   (tag, credential signature or time) and was left out; the ERROR line
   names the proposal and the tag.
@@ -545,7 +559,7 @@ billed.
 | `GET /v1/proposals/{id}` | `{proposal_id, proposal, proposal_hash, eligible, opens_at, closes_at, published}`: nothing that counts ballots before the results |
 | `POST /v1/proposals/{id}/publish` | `{sent}`: publishes a proposal whose publication failed, and sends it again to each eligible member. A proposal not published is no member's: a cast on it is `not_eligible`, `vote.status` `unknown_proposal`. `not_found` (404) |
 | `POST /v1/proposals/{id}/extend` `{approval_id, closes_at, outage: {from, to, source}}` | Needs `approval_id`: the admins' `vote.extend` approval of exactly this extension of this proposal, used up once (the same errors as creating). The extension (BALLOT-PROTOCOL §10.2), published and sent to each member: for a relay outage of over an hour within the window that is over (its `to` not after now), by its length rounded up to the hour, 24 h in all at most; an outage still going on near the close is extended in parts (§10.2). `invalid_extension` (400), `outage_not_over` (422) for an outage still going on, `too_late` (409) once the close has passed. Requesting the `vote.extend` approval itself answers `outage_not_over` (422) for an outage still going on. A vote has at most 24 extensions (`invalid_extension` past that) |
-| `POST /v1/proposals/{id}/close` | Needs only the API key: it publishes what the closed vote counted and decides nothing (it is refused before `closes_at` + 1 minute). `{proposal_id, results_hash, tally, counts}`: counts the vote and publishes the results (BALLOT-PROTOCOL §7), or reports them if already published. `not_closed` (409) before `closes_at` + 1 minute; `collecting` (503) until the relay's messages from before then are all handled: retry |
+| `POST /v1/proposals/{id}/close` | Needs only the API key: it publishes what the closed vote counted and decides nothing (it is refused before `closes_at` + 1 minute). `{proposal_id, results_hash, tally, counts}`: counts the vote and publishes the results (BALLOT-PROTOCOL §7), or reports them if already published. `not_closed` (409) before `closes_at` + 1 minute; `collecting` (503) until the relay's messages from before then are all handled: retry; `stamped_early` (503) while the results come back from the timestamp authority stamped before the close (the service's clock is ahead: see the alarm `results_stamped_early`). A retry is safe: it anchors nothing until the authority's time can have reached the close, so retry with backoff, and fix the clock |
 | `GET /v1/proposals/{id}/results` | `{results, results_sig, rows, bundle}` once published |
 | `GET /v1/anchor-key` | `{anchor_key, anchor_cert, service_ik, sigstore}`: the service's anchor key (DER SubjectPublicKeyInfo), certified by its identity key, for registering the service on votes.vettid.org (BALLOT-PROTOCOL §3.3) |
 | `GET /health` | `{status: "ok"}` (no key) |

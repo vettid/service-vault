@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/vettid/service-vault/anchor"
 	"github.com/vettid/service-vault/internal/ballot"
@@ -27,6 +28,14 @@ import (
 // KindBundle is a document's Sigstore bundle in the record store, by the
 // document's SHA-256 (hex).
 const KindBundle = "vote_bundle"
+
+// KindStampWait is what an early results timestamp taught, by the
+// results' SHA-256 (hex): the timestamp authority's time and this
+// service's at that stamp, and the anchor signatures dropped.
+const KindStampWait = "vote_stamp_wait"
+
+// maxDroppedSigs is how many dropped anchor signatures are remembered.
+const maxDroppedSigs = 16
 
 // Anchorer anchors a document and returns its Sigstore bundle.
 type Anchorer interface {
@@ -53,9 +62,12 @@ type Publisher struct {
 
 	// Log is where the publisher logs; nil is slog's default.
 	Log *slog.Logger
+	// Now is the clock; nil is time.Now.
+	Now func() time.Time
 
 	mu      sync.Mutex
 	bundles map[[32]byte]json.RawMessage // anchored this run, by document
+	waits   map[[32]byte]*stampWait      // without Records (tests)
 }
 
 var (
@@ -81,9 +93,20 @@ func (p *Publisher) PublishExtension(ctx context.Context, id string, n int64, do
 	return p.publish(ctx, id, "extension-"+strconv.FormatInt(n, 10), doc, sig, nil, 0)
 }
 
-// PublishResults implements ballot.ResultsPublisher.
+// PublishResults implements ballot.ResultsPublisher. Results are always
+// checked: notBefore must be the close in force.
 func (p *Publisher) PublishResults(ctx context.Context, id string, results, sig, rows []byte, notBefore int64) (ballot.Receipt, error) {
+	if notBefore <= 0 {
+		return ballot.Receipt{}, errors.New("publish: results without the close they must be stamped at or after")
+	}
 	return p.publish(ctx, id, "results", results, sig, rows, notBefore)
+}
+
+func (p *Publisher) now() time.Time {
+	if p.Now != nil {
+		return p.Now()
+	}
+	return time.Now()
 }
 
 func (p *Publisher) log() *slog.Logger {
@@ -163,54 +186,136 @@ func (p *Publisher) bundleNew(ctx context.Context, doc []byte) (json.RawMessage,
 	return b, anchored, nil
 }
 
-// forget drops doc's kept bundle, in memory and in Records, so that the
-// next bundle call anchors doc again.
-func (p *Publisher) forget(ctx context.Context, doc []byte) error {
+// forget drops doc's kept bundle b, in memory and in Records, so that
+// the next bundle call anchors doc again. Only b is dropped: a bundle
+// another process kept meanwhile stays.
+func (p *Publisher) forget(ctx context.Context, doc []byte, b json.RawMessage) error {
 	key := sha256.Sum256(doc)
 	p.mu.Lock()
-	delete(p.bundles, key)
+	if bytes.Equal(p.bundles[key], b) {
+		delete(p.bundles, key)
+	}
 	p.mu.Unlock()
 	if p.Records == nil {
 		return nil
 	}
-	return p.Records.Apply(ctx, []peer.Change{{Kind: KindBundle, ID: hex.EncodeToString(key[:])}})
+	id := hex.EncodeToString(key[:])
+	rg, ok := p.Records.(peer.RecordGetter)
+	if !ok {
+		return errors.New("publish: the record store can't drop a bundle conditionally")
+	}
+	r, ok, err := rg.GetRecord(ctx, KindBundle, id)
+	if err != nil || !ok || !bytes.Equal(r.Data, b) {
+		return err
+	}
+	err = p.Records.Apply(ctx, []peer.Change{{Kind: KindBundle, ID: id, IfVersion: r.Version}})
+	if errors.Is(err, peer.ErrConflict) {
+		return nil // replaced meanwhile: not ours to drop
+	}
+	return err
+}
+
+// stampWait is a KindStampWait record.
+type stampWait struct {
+	TSA     int64    `json:"tsa"`  // the early stamp's time
+	Seen    int64    `json:"seen"` // this service's clock then
+	Dropped [][]byte `json:"dropped,omitempty"`
+}
+
+func (p *Publisher) loadWait(ctx context.Context, doc []byte) (*stampWait, error) {
+	if p.Records == nil {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if w := p.waits[sha256.Sum256(doc)]; w != nil {
+			c := *w
+			return &c, nil
+		}
+		return nil, nil
+	}
+	key := sha256.Sum256(doc)
+	data, ok, err := p.Records.Get(ctx, KindStampWait, hex.EncodeToString(key[:]))
+	if err != nil || !ok {
+		return nil, err
+	}
+	var w stampWait
+	if err := json.Unmarshal(data, &w); err != nil {
+		return nil, fmt.Errorf("publish: the kept stamp wait: %w", err)
+	}
+	return &w, nil
+}
+
+func (p *Publisher) saveWait(ctx context.Context, doc []byte, w *stampWait) error {
+	key := sha256.Sum256(doc)
+	if p.Records == nil {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if p.waits == nil {
+			p.waits = map[[32]byte]*stampWait{}
+		}
+		c := *w
+		p.waits[key] = &c
+		return nil
+	}
+	data, err := json.Marshal(w)
+	if err != nil {
+		return err
+	}
+	return p.Records.Apply(ctx, []peer.Change{{Kind: KindStampWait, ID: hex.EncodeToString(key[:]), Data: data}})
 }
 
 // stampedBundle returns doc's bundle once its timestamp is at or after
 // notBefore (BALLOT-PROTOCOL §8.3 step 2). An earlier bundle means this
 // service's clock is ahead of the timestamp authority's by more than
 // CollectMargin: it is never uploaded, and it is dropped, so that doc is
-// anchored again under a new anchor signature (the same signature would
-// only fetch the transparency log's existing entry). A call anchors at
-// most once: an early bundle anchored by this call is dropped and the
-// caller retries later (ballot.ErrStampedEarly), as one anchored again at
-// once would most likely be early too.
+// anchored again, under a new anchor signature (the same signature would
+// only fetch the transparency log's existing entry).
+//
+// Each anchor is a permanent public log entry, so they are rationed: a
+// call anchors at most once, and after an early stamp none is made until
+// the authority's time, judged from that stamp and this service's clock
+// since, has reached notBefore (the call answers ballot.ErrStampedEarly
+// meanwhile). The early stamp and the dropped anchor signatures are kept
+// (KindStampWait), so these hold across calls and restarts.
 func (p *Publisher) stampedBundle(ctx context.Context, id string, doc []byte, notBefore int64) (json.RawMessage, error) {
 	if p.Timestamp == nil {
 		return nil, errors.New("publish: no timestamp check for the results")
 	}
-	var dropped []byte // the anchor signature of a kept bundle dropped
+	w, err := p.loadWait(ctx, doc)
+	if err != nil {
+		return nil, err
+	}
 	for kept := true; ; kept = false {
-		bundle, anchored, err := p.bundleNew(ctx, doc)
+		// A kept bundle is checked as it is; a new anchor waits until the
+		// authority's time can have reached notBefore.
+		bundle, err := p.StoredBundle(ctx, doc)
 		if err != nil {
 			return nil, err
 		}
-		if !kept && len(dropped) > 0 && bytes.Equal(anchorSig(bundle), dropped) {
-			// Not kept either: a later call must not take it as a kept one.
-			if err := p.forget(ctx, doc); err != nil {
+		anchored := false
+		if bundle == nil {
+			if w != nil && w.TSA+(p.now().Unix()-w.Seen) < notBefore {
+				return nil, ballot.ErrStampedEarly // too soon to anchor again
+			}
+			if bundle, anchored, err = p.bundleNew(ctx, doc); err != nil {
 				return nil, err
 			}
-			return nil, errors.New("publish: anchoring the results again gave the same anchor signature")
+		}
+		if w != nil && containsSig(w.Dropped, anchorSig(bundle)) {
+			// Not kept either: a later call must not take it as a kept one.
+			if err := p.forget(ctx, doc, bundle); err != nil {
+				return nil, err
+			}
+			return nil, errors.New("publish: anchoring the results again gave an anchor signature dropped before")
 		}
 		t, err := p.Timestamp(bundle, doc)
 		if err != nil {
 			// Never uploaded unchecked. One kept from before stays kept, as
-			// it may be what the site holds; one anchored by this call was
-			// never uploaded, so it is dropped and the next call anchors
-			// again.
+			// it may be what the site holds (README "results_bundle_unverified");
+			// one anchored by this call was never uploaded, so it is dropped
+			// and the next call anchors again.
 			p.log().Error("the results' bundle doesn't verify", "alarm", "results_bundle_unverified", "proposal_id", id, "anchored", anchored, "err", err.Error())
 			if anchored {
-				if ferr := p.forget(ctx, doc); ferr != nil {
+				if ferr := p.forget(ctx, doc, bundle); ferr != nil {
 					return nil, ferr
 				}
 			}
@@ -219,16 +324,43 @@ func (p *Publisher) stampedBundle(ctx context.Context, id string, doc []byte, no
 		if t >= notBefore {
 			return bundle, nil
 		}
+		now := p.now().Unix()
 		p.log().Error("results timestamped before the close: this service's clock is ahead of the timestamp authority's", "alarm", "results_stamped_early",
-			"proposal_id", id, "timestamp", t, "closes_at", notBefore, "anchored", anchored)
-		if err := p.forget(ctx, doc); err != nil {
+			"proposal_id", id, "timestamp", t, "closes_at", notBefore, "skew_seconds", now-t, "anchored", anchored)
+		if w == nil {
+			w = &stampWait{}
+		}
+		w.TSA, w.Seen = t, now
+		if sig := anchorSig(bundle); len(sig) > 0 {
+			w.Dropped = append(w.Dropped, sig)
+			if len(w.Dropped) > maxDroppedSigs {
+				w.Dropped = w.Dropped[len(w.Dropped)-maxDroppedSigs:]
+			}
+		}
+		// Kept before the bundle is dropped: a crash between them leaves
+		// the wait, never an early bundle without it.
+		if err := p.saveWait(ctx, doc, w); err != nil {
+			return nil, err
+		}
+		if err := p.forget(ctx, doc, bundle); err != nil {
 			return nil, err
 		}
 		if anchored || !kept {
 			return nil, ballot.ErrStampedEarly
 		}
-		dropped = anchorSig(bundle)
 	}
+}
+
+func containsSig(list [][]byte, sig []byte) bool {
+	if len(sig) == 0 {
+		return false
+	}
+	for _, x := range list {
+		if bytes.Equal(x, sig) {
+			return true
+		}
+	}
+	return false
 }
 
 // anchorSig is a bundle's message signature (the anchor signature), or

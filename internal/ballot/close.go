@@ -40,7 +40,7 @@ type Catcher interface {
 // their Sigstore bundle. With notBefore (Unix seconds, the closes_at in
 // force) it uploads only a bundle timestamped at or after it, anchoring
 // the results again in place of an earlier one (§8.3 step 2), and answers
-// ErrStampedEarly when it has none; 0 checks nothing.
+// ErrStampedEarly when it has none.
 type ResultsPublisher interface {
 	PublishResults(ctx context.Context, proposalID string, results, sig, rows []byte, notBefore int64) (Receipt, error)
 }
@@ -165,9 +165,8 @@ func (m *Manager) Close(ctx context.Context, id string) (*ResultsSummary, error)
 	} else if pr.IndexStale {
 		// The site has the results; its index missed them. The identical
 		// upload again reruns the index update. Its bundle was checked
-		// before the first upload and is kept; were it lost, a new anchor
-		// would be refused by the site (write-once), never published.
-		switch rc, err := rp.PublishResults(ctx, id, pr.Results, pr.Sig, pr.Rows, 0); {
+		// before the first upload, and is checked again.
+		switch rc, err := rp.PublishResults(ctx, id, pr.Results, pr.Sig, pr.Rows, o.ClosesAt); {
 		case err != nil:
 			m.log().Warn("site index still not updated for the results", "proposal_id", id, "err", err.Error())
 		case !rc.IndexStale:

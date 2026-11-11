@@ -1,12 +1,17 @@
 package publish
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,7 +51,8 @@ func TestPublish(t *testing.T) {
 	}))
 	defer srv.Close()
 	a := &fakeAnchor{}
-	p := &Publisher{URL: srv.URL + "/", Anchor: a, Client: srv.Client()}
+	p := &Publisher{URL: srv.URL + "/", Anchor: a, Client: srv.Client(),
+		Timestamp: func(json.RawMessage, []byte) (int64, error) { return 1, nil }} // results stamped at the close
 	ctx := context.Background()
 	const id = "01JBQZ0000000000000000000A"
 
@@ -71,12 +77,12 @@ func TestPublish(t *testing.T) {
 	if _, err := p.PublishExtension(ctx, id, 3, []byte("ext"), []byte("s")); err != nil || paths[len(paths)-1] != "/api/v1/p/"+id+"/extension-3" {
 		t.Fatalf("extension: %v %s", err, paths[len(paths)-1])
 	}
-	if _, err := p.PublishResults(ctx, id, []byte("res"), []byte("s"), []byte("rows"), 0); err != nil || string(got[len(got)-1].Rows) != "rows" {
+	if _, err := p.PublishResults(ctx, id, []byte("res"), []byte("s"), []byte("rows"), 1); err != nil || string(got[len(got)-1].Rows) != "rows" {
 		t.Fatalf("results: %v", err)
 	}
 	status = 422
 	var ref *ErrRefused
-	if _, err := p.PublishResults(ctx, id, []byte("res"), []byte("s"), []byte("rows"), 0); !errors.As(err, &ref) || ref.Code != "too_late" {
+	if _, err := p.PublishResults(ctx, id, []byte("res"), []byte("s"), []byte("rows"), 1); !errors.As(err, &ref) || ref.Code != "too_late" {
 		t.Fatalf("a refusal: %v", err)
 	}
 }
@@ -127,20 +133,20 @@ func TestPublishNoRedirect(t *testing.T) {
 }
 
 // stampAnchor anchors with the test timestamps in times, in turn, each
-// bundle with its own anchor signature (or the same one, with sameSig).
+// bundle with its own anchor signature, or sigs[i] when given.
 type stampAnchor struct {
-	times   []int64
-	n       int
-	sameSig bool
+	times []int64
+	sigs  [][]byte
+	n     int
 }
 
 func (a *stampAnchor) Anchor(_ context.Context, _ []byte) (json.RawMessage, error) {
 	t := a.times[a.n]
-	a.n++
-	sig := []byte{byte(a.n)}
-	if a.sameSig {
-		sig = []byte{1}
+	sig := []byte{byte(a.n + 1)}
+	if a.n < len(a.sigs) && a.sigs[a.n] != nil {
+		sig = a.sigs[a.n]
 	}
+	a.n++
 	var b map[string]any
 	_ = json.Unmarshal(ballottest.Bundle(t, t+1), &b)
 	b["messageSignature"] = map[string]any{"signature": sig}
@@ -162,9 +168,10 @@ func stampSite(t *testing.T) (*httptest.Server, *[]json.RawMessage) {
 }
 
 // Results are uploaded only with a timestamp at or after the close in
-// force (BALLOT-PROTOCOL §8.3 step 2): an earlier bundle is never
-// uploaded and never kept, and the results are anchored again: at once
-// for a bundle kept before, at the next call for one this call anchored.
+// force (BALLOT-PROTOCOL §8.3 step 2). An earlier bundle is never uploaded
+// and never kept; anchors are rationed: at most one per call, and none
+// until the authority's time, judged from the early stamp, can have
+// reached the close.
 func TestPublishResultsStamp(t *testing.T) {
 	const id, closes = "01JBQZ0000000000000000000A", int64(1_800_000_000)
 	ctx := context.Background()
@@ -174,119 +181,182 @@ func TestPublishResultsStamp(t *testing.T) {
 		b, _ := (&Publisher{Records: store}).StoredBundle(ctx, res)
 		return b
 	}
+	type env struct {
+		up    *[]json.RawMessage
+		store *peer.MemStore
+		clock time.Time
+		p     *Publisher
+	}
+	newEnv := func(t *testing.T, a Anchorer) *env {
+		srv, up := stampSite(t)
+		e := &env{up: up, store: peer.NewMemStore(), clock: time.Unix(closes+60, 0)}
+		e.p = &Publisher{URL: srv.URL, Anchor: a, Client: srv.Client(), Records: e.store, Timestamp: ballottest.Time, Now: func() time.Time { return e.clock }}
+		return e
+	}
+	publish := func(e *env) (ballot.Receipt, error) {
+		return e.p.PublishResults(ctx, id, res, []byte("s"), []byte("rows"), closes)
+	}
 
 	t.Run("at the close", func(t *testing.T) {
-		srv, up := stampSite(t)
 		a := &stampAnchor{times: []int64{closes}}
-		p := &Publisher{URL: srv.URL, Anchor: a, Client: srv.Client(), Records: peer.NewMemStore(), Timestamp: ballottest.Time}
-		rc, err := p.PublishResults(ctx, id, res, []byte("s"), []byte("rows"), closes)
-		if err != nil || a.n != 1 || len(*up) != 1 || stamp(rc.Bundle) != closes {
-			t.Fatalf("%d anchors, %d uploads, %v", a.n, len(*up), err)
+		e := newEnv(t, a)
+		rc, err := publish(e)
+		if err != nil || a.n != 1 || len(*e.up) != 1 || stamp(rc.Bundle) != closes {
+			t.Fatalf("%d anchors, %d uploads, %v", a.n, len(*e.up), err)
 		}
 	})
 
 	t.Run("early, then on time", func(t *testing.T) {
-		srv, up := stampSite(t)
-		store := peer.NewMemStore()
-		a := &stampAnchor{times: []int64{closes - 1, closes + 3}}
-		p := &Publisher{URL: srv.URL, Anchor: a, Client: srv.Client(), Records: store, Timestamp: ballottest.Time}
-		// The call that anchored early doesn't anchor again at once.
-		if _, err := p.PublishResults(ctx, id, res, []byte("s"), []byte("rows"), closes); !errors.Is(err, ballot.ErrStampedEarly) || a.n != 1 || len(*up) != 0 {
-			t.Fatalf("%d anchors, %d uploads, %v", a.n, len(*up), err)
+		a := &stampAnchor{times: []int64{closes - 5, closes + 1}}
+		e := newEnv(t, a)
+		if _, err := publish(e); !errors.Is(err, ballot.ErrStampedEarly) || a.n != 1 || len(*e.up) != 0 || stored(e.store) != nil {
+			t.Fatalf("%d anchors, %d uploads, %v", a.n, len(*e.up), err)
 		}
-		if b := stored(store); b != nil {
-			t.Fatalf("an early bundle was kept: %s", b)
+		// The authority is 5 s short of the close: no anchor until then,
+		// also after a restart.
+		e.clock = e.clock.Add(4 * time.Second)
+		if _, err := publish(e); !errors.Is(err, ballot.ErrStampedEarly) || a.n != 1 {
+			t.Fatalf("anchored too soon: %d anchors, %v", a.n, err)
 		}
-		rc, err := p.PublishResults(ctx, id, res, []byte("s"), []byte("rows"), closes)
-		if err != nil || a.n != 2 || len(*up) != 1 || stamp((*up)[0]) != closes+3 || stamp(rc.Bundle) != closes+3 {
-			t.Fatalf("retry: %d anchors, %d uploads, %v", a.n, len(*up), err)
+		restarted := &Publisher{URL: e.p.URL, Anchor: a, Client: e.p.Client, Records: e.store, Timestamp: ballottest.Time, Now: e.p.Now}
+		if _, err := restarted.PublishResults(ctx, id, res, []byte("s"), []byte("rows"), closes); !errors.Is(err, ballot.ErrStampedEarly) || a.n != 1 {
+			t.Fatalf("anchored too soon after a restart: %d anchors, %v", a.n, err)
 		}
-		if kept, _ := p.StoredBundle(ctx, res); stamp(kept) != closes+3 || stamp(stored(store)) != closes+3 {
+		e.clock = e.clock.Add(time.Second)
+		rc, err := publish(e)
+		if err != nil || a.n != 2 || len(*e.up) != 1 || stamp((*e.up)[0]) != closes+1 || stamp(rc.Bundle) != closes+1 {
+			t.Fatalf("on time: %d anchors, %d uploads, %v", a.n, len(*e.up), err)
+		}
+		if kept, _ := e.p.StoredBundle(ctx, res); stamp(kept) != closes+1 || stamp(stored(e.store)) != closes+1 {
 			t.Fatal("the bundle kept is not the one uploaded")
 		}
 	})
 
-	t.Run("early twice", func(t *testing.T) {
-		srv, up := stampSite(t)
-		store := peer.NewMemStore()
-		a := &stampAnchor{times: []int64{closes - 120, closes - 100, closes + 1}}
-		p := &Publisher{URL: srv.URL, Anchor: a, Client: srv.Client(), Records: store, Timestamp: ballottest.Time}
-		for i := 1; i <= 2; i++ {
-			if _, err := p.PublishResults(ctx, id, res, []byte("s"), []byte("rows"), closes); !errors.Is(err, ballot.ErrStampedEarly) || len(*up) != 0 || a.n != i || stored(store) != nil {
-				t.Fatalf("try %d: %d anchors, %d uploads, %v", i, a.n, len(*up), err)
-			}
-		}
-		rc, err := p.PublishResults(ctx, id, res, []byte("s"), []byte("rows"), closes)
-		if err != nil || a.n != 3 || len(*up) != 1 || stamp(rc.Bundle) != closes+1 {
-			t.Fatalf("retry: %d anchors, %d uploads, %v", a.n, len(*up), err)
-		}
-	})
-
-	// A bundle kept by an earlier run is checked too, not handed back: it
-	// is dropped and the results anchored again at once.
+	// A bundle kept by an earlier run is checked, not handed back: dropped,
+	// and, as the authority is short of the close, not anchored again yet.
 	t.Run("early bundle kept before a restart", func(t *testing.T) {
-		srv, up := stampSite(t)
-		store := peer.NewMemStore()
-		old := &Publisher{URL: "https://unused.invalid", Anchor: &stampAnchor{times: []int64{closes - 5}}, Records: store}
-		if _, err := old.bundle(ctx, res); err != nil {
+		a := &stampAnchor{times: []int64{closes - 5, closes}}
+		e := newEnv(t, a)
+		if _, err := (&Publisher{Anchor: a, Records: e.store}).bundle(ctx, res); err != nil {
 			t.Fatal(err)
 		}
-		a := &stampAnchor{times: []int64{0, closes}, n: 1} // a new signature, {2}
-		p := &Publisher{URL: srv.URL, Anchor: a, Client: srv.Client(), Records: store, Timestamp: ballottest.Time}
-		rc, err := p.PublishResults(ctx, id, res, []byte("s"), []byte("rows"), closes)
-		if err != nil || a.n != 2 || len(*up) != 1 || stamp(rc.Bundle) != closes {
-			t.Fatalf("%d anchors, %d uploads, %v", a.n, len(*up), err)
+		if _, err := publish(e); !errors.Is(err, ballot.ErrStampedEarly) || a.n != 1 || len(*e.up) != 0 || stored(e.store) != nil {
+			t.Fatalf("%d anchors, %d uploads, %v", a.n, len(*e.up), err)
+		}
+		e.clock = e.clock.Add(5 * time.Second)
+		if rc, err := publish(e); err != nil || a.n != 2 || len(*e.up) != 1 || stamp(rc.Bundle) != closes {
+			t.Fatalf("%d anchors, %d uploads, %v", a.n, len(*e.up), err)
 		}
 	})
 
-	// Anchoring again must give a new anchor signature: the same one would
-	// only fetch the log's existing entry.
+	// While the wait holds, a bundle kept meanwhile (another process's,
+	// on time) is still checked and uploaded: the wait only stops anchors.
+	t.Run("kept bundle during the wait", func(t *testing.T) {
+		a := &stampAnchor{times: []int64{closes - 30, closes + 2}}
+		e := newEnv(t, a)
+		if _, err := publish(e); !errors.Is(err, ballot.ErrStampedEarly) || a.n != 1 {
+			t.Fatal(err)
+		}
+		if _, err := (&Publisher{Anchor: a, Records: e.store}).bundle(ctx, res); err != nil { // on time
+			t.Fatal(err)
+		}
+		rc, err := publish(e)
+		if err != nil || a.n != 2 || len(*e.up) != 1 || stamp(rc.Bundle) != closes+2 {
+			t.Fatalf("%d anchors, %d uploads, %v", a.n, len(*e.up), err)
+		}
+	})
+
+	// An anchor signature dropped once is never taken again, across calls.
 	t.Run("same anchor signature again", func(t *testing.T) {
-		srv, up := stampSite(t)
-		store := peer.NewMemStore()
-		old := &Publisher{URL: "https://unused.invalid", Anchor: &stampAnchor{times: []int64{closes - 5}, sameSig: true}, Records: store}
-		if _, err := old.bundle(ctx, res); err != nil {
+		one := []byte{9}
+		a := &stampAnchor{times: []int64{closes - 1, closes, closes}, sigs: [][]byte{one, one}}
+		e := newEnv(t, a)
+		if _, err := publish(e); !errors.Is(err, ballot.ErrStampedEarly) {
 			t.Fatal(err)
 		}
-		a := &stampAnchor{times: []int64{closes, closes}, sameSig: true}
-		p := &Publisher{URL: srv.URL, Anchor: a, Client: srv.Client(), Records: store, Timestamp: ballottest.Time}
-		if _, err := p.PublishResults(ctx, id, res, []byte("s"), []byte("rows"), closes); err == nil || len(*up) != 0 || stored(store) != nil {
-			t.Fatalf("published or kept under the same anchor signature: %v", err)
+		e.clock = e.clock.Add(time.Second)
+		if _, err := publish(e); err == nil || errors.Is(err, ballot.ErrStampedEarly) || len(*e.up) != 0 || stored(e.store) != nil {
+			t.Fatalf("published or kept under a dropped anchor signature: %v", err)
 		}
-		// Not kept, so the next call doesn't take it as a kept bundle: it
-		// anchors anew (and publishes that one).
-		if _, err := p.PublishResults(ctx, id, res, []byte("s"), []byte("rows"), closes); err != nil || a.n != 2 || len(*up) != 1 {
-			t.Fatalf("next call: %d anchors, %d uploads, %v", a.n, len(*up), err)
+		if _, err := publish(e); err != nil || a.n != 3 || len(*e.up) != 1 {
+			t.Fatalf("next call: %d anchors, %d uploads, %v", a.n, len(*e.up), err)
 		}
 	})
 
-	// A bundle that doesn't verify is never uploaded. One kept from
-	// before stays kept (the site may hold it); one this call anchored is
-	// dropped.
+	// A bundle that doesn't verify is never uploaded. One kept from before
+	// stays kept (the site may hold it); one this call anchored is dropped.
 	t.Run("unverifiable bundle", func(t *testing.T) {
-		srv, up := stampSite(t)
-		store := peer.NewMemStore()
 		a := &stampAnchor{times: []int64{closes, closes}}
-		bad := func(json.RawMessage, []byte) (int64, error) { return 0, errors.New("untrusted") }
-		p := &Publisher{URL: srv.URL, Anchor: a, Client: srv.Client(), Records: store, Timestamp: bad}
-		if _, err := p.PublishResults(ctx, id, res, []byte("s"), []byte("rows"), closes); err == nil || errors.Is(err, ballot.ErrStampedEarly) || len(*up) != 0 || stored(store) != nil {
-			t.Fatalf("anchored now: %d uploads, %v", len(*up), err)
+		e := newEnv(t, a)
+		e.p.Timestamp = func(json.RawMessage, []byte) (int64, error) { return 0, errors.New("untrusted") }
+		if _, err := publish(e); err == nil || errors.Is(err, ballot.ErrStampedEarly) || len(*e.up) != 0 || stored(e.store) != nil {
+			t.Fatalf("anchored now: %d uploads, %v", len(*e.up), err)
 		}
-		if _, err := (&Publisher{Anchor: a, Records: store}).bundle(ctx, res); err != nil {
+		if _, err := (&Publisher{Anchor: a, Records: e.store}).bundle(ctx, res); err != nil {
 			t.Fatal(err)
 		}
-		p = &Publisher{URL: srv.URL, Anchor: a, Client: srv.Client(), Records: store, Timestamp: bad}
-		if _, err := p.PublishResults(ctx, id, res, []byte("s"), []byte("rows"), closes); err == nil || len(*up) != 0 || stored(store) == nil || a.n != 2 {
-			t.Fatalf("kept: %d anchors, %d uploads, %v", a.n, len(*up), err)
+		if _, err := publish(e); err == nil || len(*e.up) != 0 || stored(e.store) == nil || a.n != 2 {
+			t.Fatalf("kept: %d anchors, %d uploads, %v", a.n, len(*e.up), err)
 		}
 	})
 
 	t.Run("no timestamp check", func(t *testing.T) {
-		srv, up := stampSite(t)
 		a := &stampAnchor{times: []int64{closes}}
-		p := &Publisher{URL: srv.URL, Anchor: a, Client: srv.Client()}
-		if _, err := p.PublishResults(ctx, id, res, []byte("s"), []byte("rows"), closes); err == nil || len(*up) != 0 {
+		e := newEnv(t, a)
+		e.p.Timestamp = nil
+		if _, err := publish(e); err == nil || len(*e.up) != 0 {
 			t.Fatalf("published without a timestamp check: %v", err)
 		}
 	})
+
+	t.Run("results without a close", func(t *testing.T) {
+		a := &stampAnchor{times: []int64{closes}}
+		e := newEnv(t, a)
+		if _, err := e.p.PublishResults(ctx, id, res, []byte("s"), []byte("rows"), 0); err == nil || a.n != 0 || len(*e.up) != 0 {
+			t.Fatalf("results published unchecked: %v", err)
+		}
+	})
+
+	// Both alarms are logged as alarms.
+	t.Run("alarms", func(t *testing.T) {
+		var logs bytes.Buffer
+		a := &stampAnchor{times: []int64{closes - 1, closes}}
+		e := newEnv(t, a)
+		e.p.Log = slog.New(slog.NewJSONHandler(&logs, nil))
+		_, _ = publish(e)
+		e.clock = e.clock.Add(time.Second)
+		e.p.Timestamp = func(json.RawMessage, []byte) (int64, error) { return 0, errors.New("untrusted") }
+		_, _ = publish(e)
+		for _, name := range []string{"results_stamped_early", "results_bundle_unverified"} {
+			if !strings.Contains(logs.String(), `"alarm":"`+name+`"`) {
+				t.Errorf("no %s alarm in %s", name, logs.String())
+			}
+		}
+	})
+}
+
+// forget drops only the bundle it was given: one another process kept
+// meanwhile stays.
+func TestForgetIsConditional(t *testing.T) {
+	ctx := context.Background()
+	store := peer.NewMemStore()
+	doc := []byte("res")
+	key := sha256.Sum256(doc)
+	theirs := json.RawMessage(`{"theirs":1}`)
+	if err := store.Apply(ctx, []peer.Change{{Kind: KindBundle, ID: hex.EncodeToString(key[:]), Data: theirs}}); err != nil {
+		t.Fatal(err)
+	}
+	p := &Publisher{Records: store}
+	if err := p.forget(ctx, doc, json.RawMessage(`{"mine":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := p.StoredBundle(ctx, doc); string(b) != string(theirs) {
+		t.Fatalf("another's bundle was dropped: %s", b)
+	}
+	if err := p.forget(ctx, doc, theirs); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := p.StoredBundle(ctx, doc); b != nil {
+		t.Fatalf("not dropped: %s", b)
+	}
 }
