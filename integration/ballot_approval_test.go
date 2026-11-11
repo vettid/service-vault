@@ -31,7 +31,7 @@ func (r roster) Active() []string           { return append([]string{}, r...) }
 
 type sink struct{}
 
-func (sink) SendMessage(context.Context, string, string, json.RawMessage) (string, error) {
+func (sink) SendMessage(context.Context, string, string, json.RawMessage, time.Time) (string, error) {
 	return "id", nil
 }
 

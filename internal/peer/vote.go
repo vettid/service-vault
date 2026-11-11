@@ -120,7 +120,10 @@ func (p *Peer) activeIf(keep func(*Connection) bool) []string {
 
 // SendMessage sends a message the application asks for (a vote.proposal,
 // for one) to an active connection, and returns its inner id.
-func (p *Peer) SendMessage(ctx context.Context, connID, typ string, body json.RawMessage) (string, error) {
+//
+// notAfter, when set, is when the message stops being worth delivering:
+// a deposit not made by then is dropped from the outbox.
+func (p *Peer) SendMessage(ctx context.Context, connID, typ string, body json.RawMessage, notAfter time.Time) (string, error) {
 	if !envelope.ValidType(typ) {
 		return "", errors.New("peer: invalid message type")
 	}
@@ -133,16 +136,25 @@ func (p *Peer) SendMessage(ctx context.Context, connID, typ string, body json.Ra
 	if c == nil || c.State != StateActive {
 		return "", ErrNotFound
 	}
-	if n, size := p.outboxLoad(); n >= sendOutboxLimit.n || size >= sendOutboxLimit.bytes {
+	now := p.now()
+	if p.awaitingToken(c.ID) {
+		// The relay refused this member's deposits (token_expired,
+		// quota_exceeded): nothing more is queued for them until a fresh
+		// token comes, so silent members don't fill the outbox.
+		return "", ErrBusy
+	}
+	if n, size := p.voteOutboxLoad(now); n >= sendOutboxLimit.n || size >= sendOutboxLimit.bytes {
 		return "", ErrOutboxFull
 	}
-	now := p.now()
 	id := p.sendTo(c, typ, body, now)
 	if id == "" {
 		if p.outboxFor(c.ID) >= MaxOutboxPerConn {
 			return "", ErrBusy
 		}
 		return "", ErrNotFound
+	}
+	if e := p.outbox[len(p.outbox)-1]; e.ConnID == c.ID && e.Op == opDeposit {
+		e.Vote, e.NotAfter = true, notAfter
 	}
 	if err := p.flushAndDrain(ctx); err != nil {
 		return "", err
@@ -158,9 +170,18 @@ func (p *Peer) SendMessage(ctx context.Context, connID, typ string, body json.Ra
 // against the task's 512 MiB (#6946). Past either bound SendMessage
 // answers ErrOutboxFull, and the vote's send gives up after
 // ballot.MaxFailuresInARow of them; members not sent learn of the vote
-// as BALLOT-PROTOCOL §4.2 says. The other messages (responses, sign-in
-// and approval challenges) are bounded per connection only
-// (MaxOutboxPerConn), so a vote's sends can't crowd them out.
+// as BALLOT-PROTOCOL §4.2 says.
+//
+// Only SendMessage's own deposits that are still due count: not one
+// parked until the member's next token (AwaitToken; SendMessage queues
+// nothing more for that member meanwhile), nor one past its notAfter
+// (the drain drops it). So members whose vaults are gone can't switch the
+// sends off for everyone. The other messages (responses, token refreshes,
+// sign-in and approval challenges) count neither, and are bounded per
+// connection only (MaxOutboxPerConn), so a vote's sends can't crowd them
+// out of the outbox. They can wait behind them, though: after an outage,
+// the first drain works through the queued vote deposits under the peer's
+// lock, and a challenge behind them may miss its request's deadline.
 const (
 	MaxSendOutbox      = 8192
 	MaxSendOutboxBytes = 64 << 20
@@ -169,13 +190,28 @@ const (
 // sendOutboxLimit is the bounds in force (tests lower them).
 var sendOutboxLimit = struct{ n, bytes int }{MaxSendOutbox, MaxSendOutboxBytes}
 
-// outboxLoad is the outbox's entries and their payload bytes.
-func (p *Peer) outboxLoad() (n, size int) {
+// voteOutboxLoad is SendMessage's deposits still due at now, and their
+// payload bytes.
+func (p *Peer) voteOutboxLoad(now time.Time) (n, size int) {
 	for _, e := range p.outbox {
+		if !e.Vote || e.AwaitToken || !e.NotAfter.IsZero() && !now.Before(e.NotAfter) {
+			continue
+		}
 		n++
 		size += len(e.Payload)
 	}
 	return n, size
+}
+
+// awaitingToken reports whether a deposit to the connection waits for
+// the member's next token.
+func (p *Peer) awaitingToken(connID string) bool {
+	for _, e := range p.outbox {
+		if e.ConnID == connID && e.Op == opDeposit && e.AwaitToken {
+			return true
+		}
+	}
+	return false
 }
 
 // Caught reports whether every message the relay received before t has

@@ -291,6 +291,9 @@ type outboxEntry struct {
 	Attempts   int       `json:"attempts,omitempty"`
 	AwaitToken bool      `json:"await_token,omitempty"`
 	BestEffort bool      `json:"best_effort,omitempty"`
+	// Vote is a deposit SendMessage queued: only these count toward
+	// MaxSendOutbox and MaxSendOutboxBytes.
+	Vote bool `json:"vote,omitempty"`
 
 	dropped bool // removed by dropOutbox: a drain in progress skips it
 }
