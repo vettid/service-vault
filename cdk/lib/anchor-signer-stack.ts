@@ -13,6 +13,7 @@ import * as sns from 'aws-cdk-lib/aws-sns';
 import * as subs from 'aws-cdk-lib/aws-sns-subscriptions';
 import { Construct } from 'constructs';
 import { KEY_ADMIN_ACTIONS } from './kms-actions';
+import { addSignerAlarms } from './anchor-signer-alarms';
 
 /** The function's own limits (GC #7406 §1): 120 s, at most two at once, 1,024 MB for results of 15,000 members. */
 export const SIGNER_TIMEOUT_SECONDS = 120;
@@ -61,6 +62,12 @@ export interface AnchorSignerStackProps extends cdk.StackProps {
   readonly votesBucketName: string;
   /** Where this account's alarms go: the owner. */
   readonly alarmEmail: string;
+  /**
+   * The management account (the owner's a on #7646): its SignerAudit-<env>
+   * stack holds the Object Lock copy of this account's trail and journal,
+   * and watches that they keep arriving. Deployed there first.
+   */
+  readonly auditAccount: string;
   /** How long a signature stays valid for deploys (checked at deploy only; rollback is possible only within it). */
   readonly signatureValidityDays: number;
   /** The signed release to run; left out (the first deploy), no function is made. */
@@ -158,6 +165,9 @@ export class AnchorSignerStack extends cdk.Stack {
     const taskAccount = props.taskRoleArn.split(':')[4];
     if (taskAccount === this.account) {
       throw new Error('the task role must be in the service account, not in the signer account');
+    }
+    if (!/^[0-9]{12}$/.test(props.auditAccount) || props.auditAccount === this.account || props.auditAccount === taskAccount) {
+      throw new Error(`auditAccount must be the management account: 12 digits, neither this account nor the service account (got "${props.auditAccount}")`);
     }
     const names = signerNames(envName);
     const fnArn = this.formatArn({ service: 'lambda', resource: 'function', resourceName: names.functionName, arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME });
@@ -346,6 +356,12 @@ export class AnchorSignerStack extends cdk.Stack {
       });
       new cdk.CfnOutput(this, 'FunctionArn', { value: this.fn.functionArn });
     }
+    // Its alarms, trail and GuardDuty (P1.3): with them, before anything signs.
+    addSignerAlarms(this, {
+      envName, topic: this.topic, keyArn: this.key.keyArn, signerRoleName: names.roleName,
+      breakGlassRoleArn: props.breakGlassRoleArn, claimsTable: names.claimsTable, journal: this.journal, functionLogs: fnLogs,
+      auditAccount: props.auditAccount,
+    });
     new cdk.CfnOutput(this, 'SignerRoleArn', { value: this.role.roleArn });
     new cdk.CfnOutput(this, 'KeyAliasArn', { value: aliasArn });
     new cdk.CfnOutput(this, 'ArtifactsBucket', { value: this.artifacts.bucketName });
