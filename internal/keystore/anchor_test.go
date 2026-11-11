@@ -1,3 +1,5 @@
+//go:build devsigner
+
 package keystore
 
 import (

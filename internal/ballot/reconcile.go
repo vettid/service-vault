@@ -123,6 +123,22 @@ func (m *Manager) reconcile(ctx context.Context, sr SiteReader, ep ExtensionPubl
 			return err
 		}
 		if own == nil {
+			// Sent to the signer, its answer lost: the signer is asked
+			// again, and answers with the bundle the site holds for its
+			// own claim. That answer is ours; the site's files are not.
+			tried, err := attempted(ctx, bs, x.Doc)
+			if err != nil {
+				return err
+			}
+			if tried {
+				rc, err := ep.PublishExtension(ctx, p.ProposalID, int64(i+1), x.Doc, x.Sig)
+				if err != nil {
+					return fmt.Errorf("ballot: asking the signer again for extension %d: %w", i+1, err)
+				}
+				own = rc.Bundle
+			}
+		}
+		if own == nil {
 			return fail("extension %d: no bundle of our own for it", i+1)
 		}
 		if err := adopt(int64(i+1), x.Doc, x.Sig, own); err != nil {
@@ -137,11 +153,18 @@ func (m *Manager) reconcile(ctx context.Context, sr SiteReader, ep ExtensionPubl
 		if err != nil {
 			return err
 		}
-		drop := own == nil // never anchored: never reached the site
+		tried, err := attempted(ctx, bs, pe.Doc)
+		if err != nil {
+			return err
+		}
+		drop := own == nil && !tried // never anchored: never reached the site
 		if !drop {
 			var ref *ErrPublishRefused
-			switch _, err := ep.PublishExtension(ctx, p.ProposalID, int64(k+1), pe.Doc, pe.Sig); {
+			switch rc, err := ep.PublishExtension(ctx, p.ProposalID, int64(k+1), pe.Doc, pe.Sig); {
 			case err == nil:
+				if own == nil {
+					own = rc.Bundle // the signer's answer for its claim
+				}
 				if err := adopt(int64(k+1), pe.Doc, pe.Sig, own); err != nil {
 					return err
 				}

@@ -493,9 +493,16 @@ func TestAuthorityTimeWiring(t *testing.T) {
 func TestVotesPublisherWiring(t *testing.T) {
 	mgr := &ballot.Manager{Timestamp: func(json.RawMessage, []byte) (int64, error) { return 7, nil },
 		AuthorityTime: func(context.Context) (int64, error) { return 8, nil }}
-	p := votesPublisher("https://votes.example", nil, peer.NewMemStore(), mgr, slog.Default())
-	if p.Timestamp == nil || p.AuthorityTime == nil || p.Records == nil {
+	p := votesPublisher("https://votes.example", &anchorSetup{}, peer.NewMemStore(), mgr, slog.Default())
+	if p.Timestamp == nil || p.AuthorityTime == nil || p.Records == nil || p.Signer != nil {
 		t.Fatalf("%+v", p)
+	}
+	// With the signer: it publishes, against the listed key, and nothing
+	// anchors here.
+	sg := &fakeSigner{spki: []byte{1, 2, 3}}
+	ps := votesPublisher("https://votes.example", &anchorSetup{spki: sg.spki, signer: sg}, peer.NewMemStore(), mgr, slog.Default())
+	if ps.Signer != sg || !bytes.Equal(ps.AnchorKey, sg.spki) || ps.Anchor != nil {
+		t.Fatalf("with the signer %+v", ps)
 	}
 	if v, _ := p.Timestamp(nil, nil); v != 7 {
 		t.Fatal("another Timestamp")

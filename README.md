@@ -159,6 +159,26 @@ destination.
   (`aws dynamodb delete-item --table-name T --key
   '{"pk":{"S":"rec#vote_bundle"},"sk":{"S":"<hex>"}}'`), and close
   again.
+- `anchor_signer_unavailable`: at start, the anchor signer
+  (`SV_ANCHOR_SIGNER`) didn't answer the probe for its key. The daemon
+  runs without publishing: no proposal can be created (`publication_not_configured`)
+  or published until a restart reaches the signer; sign-ins and
+  approvals go on. Check the signer's own alarms (its account), the
+  function's resource policy for this task role, and the task role's
+  `lambda:InvokeFunction`, then restart the task. It never falls back to
+  the `anchor-key` item.
+- `anchor_key_changed`: the anchor signer answered under another key
+  than the one it gave at start (the one this service certified and
+  lists). Nothing from that answer is kept, and the document is not
+  taken as published. A security event: check the signer account (its
+  key alias, function and alarms) before restarting.
+- With the signer, a document whose answer was lost (a timeout, a crash)
+  is asked of the signer again, which resumes its claim; a vote
+  extension sent to it is never dropped as "never anchored"
+  (`rec#vote_signer_call` marks what was sent). Results come back
+  already on the site: `results_stamped_early` and
+  `results_bundle_unverified` then mean the site took them, so nothing
+  is retried; look at them as above.
 - `ballot_not_counted`: a stored ballot failed the count's re-check
   (tag, credential signature or time) and was left out; the ERROR line
   names the proposal and the tag.
@@ -529,6 +549,8 @@ which is retained and never deleted with the stack.
 | `SV_BALLOTS_TABLE` | env | The write-once DynamoDB table of accepted ballots (BALLOT-PROTOCOL §6); without it, members' vote requests are answered `unsupported_type` |
 | `SV_SIGSTORE` | env | `staging` or `production`: the Sigstore instance votes are anchored in (BALLOT-PROTOCOL §3.3); required with `SV_BALLOTS_TABLE`. The CDK sets `production` for the `prod` stack and `staging` otherwise |
 | `SV_VOTES_URL` | env | votes.vettid.org (or staging's): where proposals, extensions and results are published, each anchored in Rekor first (BALLOT-PROTOCOL §3.3). Without it, creating a proposal answers `publication_not_configured`. The CDK sets it from the `votesUrl` context |
+| `SV_ANCHOR_SIGNER` | env | The anchor signer's unqualified Lambda function ARN, in the signer's own account (key protection; the CDK's `anchorSignerFunctionArn`). With it, every document is published through the signer, which holds the anchor key in KMS: this service never reads the `anchor-key` item and holds no grant on the key. It takes the key's SPKI from the signer's answer to a probe at start (an empty call, refused before any work) and checks every answer against it. Needs `SV_VOTES_URL` |
+| `SV_ANCHOR_MOVED_PARAM` | env | The SSM parameter that marks the anchor key as moved to the signer (the CDK sets `/vettid/service-vault/<env>/anchor_key_moved`; the owner creates it at the cutover, never the stack, and the task may only read it). Once it exists, or if it can't be read, the daemon refuses to start without `SV_ANCHOR_SIGNER`. Required with `SV_BALLOTS_TABLE` unless `SV_ANCHOR_SIGNER` is set. A release build never creates an anchor key: without the signer it opens the one stored, and refuses to start if there is none; only a `devsigner` build (local development and tests) makes one |
 | `SV_KMS_KEY_ID` | env | KMS key ARN for the keystore |
 | `SV_LISTEN` | env | API listen address (`:8080`) |
 | `SV_WEBHOOK_URL` | env | Webhook destination |

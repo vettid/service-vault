@@ -195,7 +195,32 @@ describe('the service vault side', () => {
     envName: 'test', image: `ghcr.io/vettid/service-vault@sha256:${'a'.repeat(64)}`,
     webhookUrl: 'https://member.example.org/webhooks/service-vault', apiClientSecurityGroupId: 'sg-0123456789abcdef0',
     alarmTopicArn: `arn:aws:sns:us-east-1:${SERVICE_ACCT}:alerts`, env: { account: SERVICE_ACCT, region: 'us-east-1' },
+    votesUrl: 'https://votes.staging.vettid.org',
   };
+  const container = (s: Template) => Object.values<any>(s.findResources('AWS::ECS::TaskDefinition'))[0].Properties.ContainerDefinitions[0];
+  const envOf = (s: Template) => Object.fromEntries(container(s).Environment.map((e: any) => [e.Name, e.Value]));
+  const statements = (s: Template) => Object.values<any>(s.findResources('AWS::IAM::Policy')).flatMap((p) => p.Properties.PolicyDocument.Statement);
+  const MARKER = '/vettid/service-vault/test/anchor_key_moved';
+  test('the task gets the signer and the marker by name; it may read the marker, never write it', () => {
+    const s = Template.fromStack(new ServiceVaultStack(new cdk.App(), 'SV', { ...sv, anchorSignerFunctionArn: FN_ARN }));
+    const env = envOf(s);
+    expect(env.SV_ANCHOR_SIGNER).toBe(FN_ARN);
+    expect(env.SV_ANCHOR_MOVED_PARAM).toBe(MARKER);
+    const onMarker = statements(s).filter((x) => JSON.stringify(x.Resource).includes('anchor_key_moved'));
+    expect(onMarker).toHaveLength(1);
+    expect(asList(onMarker[0].Action)).toEqual(['ssm:GetParameter']);
+    // No other statement can write any parameter but the TLS pin.
+    const writes = statements(s).filter((x) => asList(x.Action).some((a: string) => /^ssm:(Put|Delete|\*|Label|AddTags)/.test(a) || a === '*'));
+    expect(writes.every((x) => JSON.stringify(x.Resource).includes("TlsPin"))).toBe(true);
+    // The marker itself is the owner's: this stack doesn't make it.
+    const params = Object.values<any>(s.findResources('AWS::SSM::Parameter')).map((p) => p.Properties.Name);
+    expect(params).not.toContain(MARKER);
+  });
+  test('without the signer, the marker is still passed and readable', () => {
+    const s = Template.fromStack(new ServiceVaultStack(new cdk.App(), 'SV', sv));
+    expect(envOf(s).SV_ANCHOR_SIGNER).toBeUndefined();
+    expect(envOf(s).SV_ANCHOR_MOVED_PARAM).toBe(MARKER);
+  });
   test('the task may invoke the signer, and nothing of it is made here', () => {
     const s = Template.fromStack(new ServiceVaultStack(new cdk.App(), 'SV', { ...sv, anchorSignerFunctionArn: FN_ARN }));
     const st = Object.values<any>(s.findResources('AWS::IAM::Policy')).flatMap((p) => p.Properties.PolicyDocument.Statement);
@@ -209,6 +234,7 @@ describe('the service vault side', () => {
     expect(() => new ServiceVaultStack(new cdk.App(), 'SV', { ...sv, anchorSignerFunctionArn: FN_ARN.replace(SIGNER_ACCT, SERVICE_ACCT) })).toThrow(/signer account/);
     expect(() => new ServiceVaultStack(new cdk.App(), 'SV', { ...sv, anchorSignerFunctionArn: 'nope' })).toThrow(/ARN/);
     expect(() => new ServiceVaultStack(new cdk.App(), 'SV', { ...sv, env: undefined, anchorSignerFunctionArn: FN_ARN })).toThrow(/env.account/);
+    expect(() => new ServiceVaultStack(new cdk.App(), 'SV', { ...sv, votesUrl: undefined, anchorSignerFunctionArn: FN_ARN })).toThrow(/votesUrl/);
   });
   test('without it, nothing changes', () => {
     const s = Template.fromStack(new ServiceVaultStack(new cdk.App(), 'SV', sv));

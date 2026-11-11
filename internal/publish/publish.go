@@ -36,7 +36,7 @@ const KindStampWait = "vote_stamp_wait"
 
 // Kinds are the record kinds the publisher keeps (sealed and resealed
 // with the rest, cmd/service-vault recordKinds).
-func Kinds() []string { return []string{KindBundle, KindStampWait} }
+func Kinds() []string { return []string{KindBundle, KindStampWait, KindSignerCall} }
 
 // maxDroppedSigs is how many dropped anchor signatures are remembered.
 const maxDroppedSigs = 16
@@ -49,9 +49,18 @@ type Anchorer interface {
 // Publisher uploads to one site.
 type Publisher struct {
 	// URL is the site's base, https://votes.vettid.org.
-	URL    string
+	URL string
+	// Anchor anchors here, with a key this service holds: development, and
+	// the time before the signer (key protection, GC #7406 §7 step 1).
+	// Unused when Signer is set.
 	Anchor Anchorer
-	Client *http.Client
+	// Signer, when set, publishes each document (signer.go), so this
+	// service never holds the anchor key. AnchorKey is the listed anchor
+	// key's SubjectPublicKeyInfo, which every answer of the signer must
+	// carry.
+	Signer    Signer
+	AnchorKey []byte
+	Client    *http.Client
 	// Records keeps each bundle before its upload. The site takes a
 	// document once, with its bundle (§4 "Write-once"), so a retry after
 	// a restart must send the same bundle, not a new anchor. Nil: kept in
@@ -77,6 +86,7 @@ type Publisher struct {
 	bundles map[[32]byte]json.RawMessage // anchored this run, by document
 	waits   map[[32]byte]*stampWait      // without Records (tests)
 	probed  map[[32]byte]lastProbe       // the last authority probe, by results
+	called  map[[32]byte]bool            // sent to the signer, without Records (tests)
 }
 
 var (
@@ -84,6 +94,7 @@ var (
 	_ ballot.ExtensionPublisher = (*Publisher)(nil)
 	_ ballot.ResultsPublisher   = (*Publisher)(nil)
 	_ ballot.BundleSource       = (*Publisher)(nil)
+	_ ballot.AttemptSource      = (*Publisher)(nil)
 	_ Anchorer                  = (*anchor.Anchorer)(nil)
 )
 
@@ -119,6 +130,11 @@ func (p *Publisher) PublishResults(ctx context.Context, id string, results, sig,
 func (p *Publisher) RepublishResults(ctx context.Context, id string, results, sig, rows []byte, bundle json.RawMessage, notBefore int64) (ballot.Receipt, error) {
 	if notBefore <= 0 || p.Timestamp == nil {
 		return ballot.Receipt{}, errors.New("publish: results again without their timestamp check")
+	}
+	if p.Signer != nil {
+		// The signer uploads again what the site holds, with the site's
+		// bundle; it never signs a document the site already has.
+		return p.viaSigner(ctx, id, "results", results, sig, rows, notBefore)
 	}
 	t, err := p.Timestamp(bundle, results)
 	if err != nil {
@@ -515,6 +531,9 @@ func uploadBody(doc, sig []byte, bundle json.RawMessage, rows []byte) ([]byte, e
 // With notBefore, only a bundle timestamped at or after it is uploaded
 // (stampedBundle).
 func (p *Publisher) publish(ctx context.Context, id, name string, doc, sig, rows []byte, notBefore int64) (ballot.Receipt, error) {
+	if p.Signer != nil {
+		return p.viaSigner(ctx, id, name, doc, sig, rows, notBefore)
+	}
 	var bundle json.RawMessage
 	var err error
 	if notBefore > 0 {

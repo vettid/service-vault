@@ -57,13 +57,39 @@ func TestConfigFromEnv(t *testing.T) {
 		t.Fatal("ballots without SV_SIGSTORE")
 	}
 	e["SV_SIGSTORE"] = "staging"
-	if c, err := configFromEnv(env(e)); err != nil || c.Sigstore != "staging" || c.BallotsTable != "t-ballots" {
+	if _, err := configFromEnv(env(e)); err == nil || !strings.Contains(err.Error(), "SV_ANCHOR_MOVED_PARAM") {
+		t.Fatalf("ballots without the anchor marker's name or the signer: %v", err)
+	}
+	e["SV_ANCHOR_MOVED_PARAM"] = "/vettid/service-vault/staging/anchor_key_moved"
+	if c, err := configFromEnv(env(e)); err != nil || c.Sigstore != "staging" || c.BallotsTable != "t-ballots" ||
+		c.AnchorMovedParam != "/vettid/service-vault/staging/anchor_key_moved" || c.AnchorSigner != "" {
 		t.Fatalf("ballots %+v %v", c, err)
 	}
 	e["SV_VOTES_URL"] = "https://votes.vettid.org/"
 	if c, err := configFromEnv(env(e)); err != nil || c.VotesURL != "https://votes.vettid.org" {
 		t.Fatalf("votes URL %+v %v", c, err)
 	}
+	// The signer: an unqualified function ARN, with the votes URL; then the
+	// marker's name isn't needed.
+	signer := "arn:aws:lambda:us-east-1:123456789012:function:vettid-anchor-signer-staging"
+	for _, bad := range []string{"arn:aws:lambda:us-east-1:123456789012:function:f:live", "vettid-anchor-signer", "arn:aws:iam::123456789012:role/x"} {
+		e["SV_ANCHOR_SIGNER"] = bad
+		if _, err := configFromEnv(env(e)); err == nil {
+			t.Fatalf("SV_ANCHOR_SIGNER %q", bad)
+		}
+	}
+	e["SV_ANCHOR_SIGNER"] = signer
+	delete(e, "SV_ANCHOR_MOVED_PARAM")
+	if c, err := configFromEnv(env(e)); err != nil || c.AnchorSigner != signer {
+		t.Fatalf("signer %+v %v", c, err)
+	}
+	delete(e, "SV_VOTES_URL")
+	if _, err := configFromEnv(env(e)); err == nil {
+		t.Fatal("a signer without the votes URL")
+	}
+	e["SV_VOTES_URL"] = "https://votes.vettid.org"
+	delete(e, "SV_ANCHOR_SIGNER")
+	e["SV_ANCHOR_MOVED_PARAM"] = "/p/moved"
 	e["SV_VOTES_URL"] = "http://votes.vettid.org"
 	if _, err := configFromEnv(env(e)); err == nil {
 		t.Fatal("an http votes URL")
