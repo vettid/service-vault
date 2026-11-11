@@ -104,7 +104,7 @@ The proposal is a document (§8.5).
 | `proposal_id` | A ULID. |
 | `service` | The service identity key that signs it. |
 | `title`, `text` | UTF-8; `title` 1–200 bytes, `text` at most 16,384 bytes. |
-| `choices` | 3–17 entries `{id, label}`, in display order, with `id` matching `[a-z0-9-]{1,32}` and unique and `label` UTF-8 of 1–200 bytes: at least two real choices (16 at most), and `abstain`, reserved and always present, for a member who wants to be counted without choosing. The service vault assigns the ids itself (`c1`, `c2`, …, §3.4) and always adds `abstain`; a member's vault checks this grammar and (0.13.11) that **no two labels are the same once folded**: the format characters (Unicode Cf, the bidirectional marks and isolates among them) removed, NFC, then Unicode case folding; `abstain`'s label counts, so a real choice can't read as it (VAULT-MESSAGING 0.88.12 §10.19.4 step 2). The service's own rule (§3.4: distinct ignoring case, ASCII and Latin-1 only) is stricter, so it never signs what a vault refuses. |
+| `choices` | 3–17 entries `{id, label}`, in display order, with `id` matching `[a-z0-9-]{1,32}` and unique and `label` UTF-8 of 1–200 bytes: at least two real choices (16 at most), and `abstain`, reserved and always present, for a member who wants to be counted without choosing. The service vault assigns the ids itself (`c1`, `c2`, …, §3.4) and always adds `abstain`; a member's vault checks this grammar and (0.13.11) that **no two labels are the same once folded**: the format characters (Unicode Cf, the bidirectional marks and isolates among them) removed, NFC, then **simple** Unicode case folding (not full folding: `ß` is not `ss`); `abstain`'s label counts, so a real choice can't read as it (VAULT-MESSAGING 0.88.12 §10.19.4 step 2). The service's own rule (§3.4: distinct under `strings.ToLower`, ASCII and Latin-1 only, `µ` excluded) agrees with simple folding in that range, so it never signs what a vault refuses. |
 | `quorum` | The quorum rule, as text (UTF-8, at most 1,024 bytes, may be empty), and the number of ballots it needs (`min_ballots`, at least 0). `abstain` counts toward it. |
 | `binding` | Whether the organisation treats the result as binding. The protocol is the same either way. |
 | `removed_may_vote` | Whether a member removed or suspended after `record_at` may still vote. |
@@ -617,7 +617,13 @@ publishes its results has every member's check settle by itself.
    once its clock is past that `closes_at` + 1 min (`CollectMargin`), and
    the minute is the allowance for the timestamp authority's clock, so a
    vault requires the close itself and an earlier timestamp is a failure
-   (results made before every ballot could be in); that the proposal
+   (results made before every ballot could be in). **The service checks
+   the timestamp too:** before it uploads the results it compares the
+   bundle's time with that `closes_at` and, if it is earlier (its own
+   clock was more than a minute fast), anchors them again rather than
+   publish results every vault would fail (service-vault follow-up: the
+   bundle cache keyed by hash must not hand back the early bundle); that
+   the proposal
    and extensions in `results.json` are the ones it received; and its
    row's proof.
 3. **Its row:**
@@ -909,11 +915,13 @@ item.
   §2: vote labels end in `0x00`, unlike VMS labels; why they are
   prefix-free and apart from VMS. §3.1: a member's vault also refuses
   labels that are the same once folded (format characters removed, NFC,
-  case folding). §8.3 step 2 and §8.4 item 6: the results' timestamp is at
-  or after the `closes_at` in force (the service's 1-minute margin is the
-  timestamp authority's allowance). §9.1: `cast_sig` is transferable and
-  links a member's ballots and sign-ins for whoever is shown it. No change
-  to the service's code, messages or documents.
+  simple case folding, which agrees with the service's `ToLower` rule on
+  Latin-1). §8.3 step 2 and §8.4 item 6: the results' timestamp is at or
+  after the `closes_at` in force (the service's 1-minute margin is the
+  timestamp authority's allowance); the service checks the bundle's time
+  before upload and anchors again if it is early (code follow-up). §9.1:
+  `cast_sig` is transferable and links a member's ballots and sign-ins for
+  whoever is shown it. No change to the messages or documents.
 - **0.13.10 (2026-11-06):** §11 item 4: twelve more Ed25519 vectors:
   mixed-order keys (one valid, one whose equation holds only times 8),
   `R` of small order with the equation holding, and non-canonical
