@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.13.10 (2026-11-06)
+**Status:** 0.13.11 (2026-11-11)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -47,15 +47,21 @@ members' signatures, for the organisation.
 - `‖` is concatenation. `u16` and `u64` are big-endian unsigned
   integers. `lp(x) = u16(len(x)) ‖ x`, with `len(x) ≤ 65535`.
 - `H` is SHA-256.
-- **Labels** follow the VMS convention (VAULT-MESSAGING §4.1): ASCII
-  strings embedding the version, **each ending in a `0x00` byte**, for
-  example `"vettid/vote/1/ballot\x00"`. **(chosen; differs from the
+- **Labels** are ASCII strings embedding the version, like the VMS
+  labels (VAULT-MESSAGING §4.1), but unlike them **each ends in a `0x00`
+  byte** and contains no other, for example `"vettid/vote/1/ballot\x00"`
+  (0.13.11: VMS labels have no terminator, so this is a difference, not
+  the VMS convention). The terminator makes the vote labels prefix-free
+  among themselves (no label is the start of another, whatever follows
+  it), and the `vettid/vote/` prefix keeps them apart from every VMS
+  label. **(chosen; differs from the
   plan:** the plan's `"vettid-vote-v1"` follows vettid-dev.)
 - **Signatures:** `Sign(sk, label, m)` is `suite.Sign` from vettid-vault
   `vms/suite`: Ed25519 over `label ‖ m`, with the label's own `0x00`
   separating it from `m`. Every signature the service identity key
-  makes, in VMS and here, is over a label-prefixed string, so the two
-  can't be confused. A hashed string that starts with a label includes
+  makes is over a label-prefixed string, in VMS and here: the
+  `vettid/vote/` and `vettid/vms/` prefixes differ, so a vote signature
+  can't be taken for a VMS one or the other way round. A hashed string that starts with a label includes
   the label's `0x00`.
 - **Ed25519 verification,** by every verifier (the service vault, the
   member vault, the app, observers and the site), is exactly:
@@ -98,7 +104,7 @@ The proposal is a document (§8.5).
 | `proposal_id` | A ULID. |
 | `service` | The service identity key that signs it. |
 | `title`, `text` | UTF-8; `title` 1–200 bytes, `text` at most 16,384 bytes. |
-| `choices` | 3–17 entries `{id, label}`, in display order, with `id` matching `[a-z0-9-]{1,32}` and unique and `label` UTF-8 of 1–200 bytes: at least two real choices (16 at most), and `abstain`, reserved and always present, for a member who wants to be counted without choosing. The service vault assigns the ids itself (`c1`, `c2`, …, §3.4) and always adds `abstain`; a member's vault checks only this grammar. |
+| `choices` | 3–17 entries `{id, label}`, in display order, with `id` matching `[a-z0-9-]{1,32}` and unique and `label` UTF-8 of 1–200 bytes: at least two real choices (16 at most), and `abstain`, reserved and always present, for a member who wants to be counted without choosing. The service vault assigns the ids itself (`c1`, `c2`, …, §3.4) and always adds `abstain`; a member's vault checks this grammar and (0.13.11) that **no two labels are the same once folded**: the format characters (Unicode Cf, the bidirectional marks and isolates among them) removed, NFC, then Unicode case folding; `abstain`'s label counts, so a real choice can't read as it (VAULT-MESSAGING 0.88.12 §10.19.4 step 2). The service's own rule (§3.4: distinct ignoring case, ASCII and Latin-1 only) is stricter, so it never signs what a vault refuses. |
 | `quorum` | The quorum rule, as text (UTF-8, at most 1,024 bytes, may be empty), and the number of ballots it needs (`min_ballots`, at least 0). `abstain` counts toward it. |
 | `binding` | Whether the organisation treats the result as binding. The protocol is the same either way. |
 | `removed_may_vote` | Whether a member removed or suspended after `record_at` may still vote. |
@@ -605,7 +611,13 @@ publishes its results has every member's check settle by itself.
    votes.vettid.org, with no session, verifies them as an observer does
    (§8.4), and hands the vault `results.json`, the bundle, the vault's
    own row and its inclusion proof to `rows_root`.
-2. **The vault** checks `results_sig` and the bundle; that the proposal
+2. **The vault** checks `results_sig` and the bundle, whose timestamp
+   must be **at or after the `closes_at` in force** (0.13.11; with the
+   extensions in `results.json`): the service counts and anchors only
+   once its clock is past that `closes_at` + 1 min (`CollectMargin`), and
+   the minute is the allowance for the timestamp authority's clock, so a
+   vault requires the close itself and an earlier timestamp is a failure
+   (results made before every ballot could be in); that the proposal
    and extensions in `results.json` are the ones it received; and its
    row's proof.
 3. **Its row:**
@@ -634,7 +646,9 @@ From votes.vettid.org alone:
    the proposal's;
 4. the tally and `ballots` recompute;
 5. each extension is timestamped (by its bundle) before the `closes_at`
-   it extends, and they total at most 24 h.
+   it extends, and they total at most 24 h;
+6. (0.13.11) the results are timestamped (by their bundle) at or after
+   the `closes_at` in force.
 
 ### 8.5 Schemas
 
@@ -686,7 +700,15 @@ SubjectPublicKeyInfo; `?` marks a field present only where stated.
 ### 9.1 What each party learns
 
 - **The service vault and the organisation:** who is eligible, and how
-  and when each member voted. They keep it (§6).
+  and when each member voted. They keep it (§6). (0.13.11) `cast_sig`
+  (§5) is a **transferable** signature under the member's long-lived
+  credential key, the key the service pins at sign-in: the service, and
+  anyone it shows a `cast_sig` to (the organisation, an auditor:
+  §8.3 step 4), can link that member's ballots across proposals and to
+  their sign-ins, and can prove to a third party which choice the
+  member's key signed for. This is what lets the organisation's record
+  settle a disputed ballot (§8.3), and it is why `cast_sig` is never
+  published: the public still cannot link a member's rows (below).
 - **VettID's relay and hosts:** which vaults sent a message to the
   service and when, as for any message; not the ballot, which is inside
   the session's encryption.
@@ -883,6 +905,15 @@ item.
 
 ## Changes
 
+- **0.13.11 (2026-11-11):** (GC #1344, Ballot P1; VAULT-MESSAGING 0.88.12)
+  §2: vote labels end in `0x00`, unlike VMS labels; why they are
+  prefix-free and apart from VMS. §3.1: a member's vault also refuses
+  labels that are the same once folded (format characters removed, NFC,
+  case folding). §8.3 step 2 and §8.4 item 6: the results' timestamp is at
+  or after the `closes_at` in force (the service's 1-minute margin is the
+  timestamp authority's allowance). §9.1: `cast_sig` is transferable and
+  links a member's ballots and sign-ins for whoever is shown it. No change
+  to the service's code, messages or documents.
 - **0.13.10 (2026-11-06):** §11 item 4: twelve more Ed25519 vectors:
   mixed-order keys (one valid, one whose equation holds only times 8),
   `R` of small order with the equation holding, and non-canonical
