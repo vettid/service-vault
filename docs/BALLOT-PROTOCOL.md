@@ -559,21 +559,31 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
   still leased, it has every ballot of the window. A `vote.cast` handled
   after that gets `late`.
 - **The count waits for the timestamp authority's time** (0.13.12, owner
-  decision 2026-11-11). The service's clock alone never starts the count:
-  a clock running fast would count, and refuse casts as `late`, before
-  the real close. Just before counting, the service asks the timestamp
-  authority its anchors use (§3.3) for a timestamp over a fresh random
-  value, a stamp only, with no transparency-log entry, and verifies it as
-  it verifies an anchor's. It counts only once that time is at or after
-  the `closes_at` in force (with the extensions). Until then a close is
-  still collecting: nothing is counted or fixed, and no cast is refused
-  `late` for it.
+  decision 2026-11-11). The service's clock (at or past `closes_at` +
+  1 min, `CollectMargin`) alone never starts the count: a clock running
+  fast would count, and refuse casts as `late`, before the real close.
+  Just before counting, after the reconcile of the extensions (§10.2),
+  the service asks the timestamp authority of its pinned Sigstore trusted
+  root (§8.5 "Rekor profile") for an RFC 3161 timestamp whose message
+  imprint is SHA-256 of 32 fresh random bytes (they only pair answer and
+  request): a stamp only, with no transparency-log entry. It checks the
+  imprint and the token's chain, usage and `validFor` as for an anchor
+  (§10.2), and reads its `genTime`. It counts only once that time is at
+  or after the `closes_at` the reconcile left in force; if that
+  `closes_at` moves later, the close is still collecting and probes
+  again. Until then nothing is counted, `published` and the counts are
+  not fixed (§6), and no cast is refused `late` for it.
   - A probe that fails (the authority unreachable, a stamp that doesn't
     verify) counts nothing either; the service never falls back to its
-    own clock.
-  - Probes are rationed: after one before the close, the next waits until
-    the authority's time, judged from that stamp and the service's clock
-    since, can have reached the close.
+    own clock. A failed probe is retried with backoff, as a failed close
+    is.
+  - Probes are rationed: after a stamp whose `genTime` is before the
+    close, the next is made no sooner than the service's clock at that
+    probe plus (`closes_at` − `genTime`). A re-anchor of early results
+    (§8.3 step 2) waits the same way, from the early bundle's time.
+  - An authority that is unreachable or behind delays the count but
+    can't make it early; the service raises an alarm while a close waits
+    on it, as when Rekor is down (§10.1).
 - **A message left unacked** (one the service couldn't handle yet, and
   the relay hands out again) holds the count at most 24 hours from when
   it was first left (owner decision 2026-10-30), however often it comes
@@ -790,6 +800,7 @@ SubjectPublicKeyInfo; `?` marks a field present only where stated.
 | The relay is down | Members can't send. Beyond §10.2's bound, the vote is extended. |
 | votes.vettid.org is down | The vault checks the proposal from the bundle its message carried, and the site again when it can. |
 | Rekor is down | The service can't publish or extend; it publishes when Rekor is back. |
+| The timestamp authority is down or behind | Nothing is counted; the vote is still collecting (§7, 0.13.12); it counts once a probe's time is at or after the close. |
 | The member's vault is locked | Voting needs the app, so an unlocked vault. The app reminds the member a day before `closes_at`. |
 | Clock skew | The relay's time decides (§6); the app stops two minutes early, and `not_open` is retried. |
 | A restore of the member's vault | §5. |
@@ -935,14 +946,15 @@ item.
 
 ## Changes
 
-- **0.13.12 (2026-11-11):** (owner decision 2026-11-11, from the reviews
-  of service-vault #137) §7: the count waits for the timestamp
-  authority's time. Just before counting, the service gets a stamp (no
-  transparency-log entry) and counts only once its time is at or after
-  the `closes_at` in force; until then, and when the probe fails, the
-  vote is still collecting and no cast is refused `late` for it. Probes
-  and re-anchors are rationed. §8.3 step 2: the re-anchor of early
-  results stays, as the backstop. No change to the messages, the
+- **0.13.12 (2026-11-11):** (owner decision 2026-11-11; service-vault
+  #137) §7: the count waits for the timestamp authority's time. Just
+  before counting, after the reconcile of the extensions, the service
+  gets a stamp (no transparency-log entry) and counts only once its time
+  is at or after the `closes_at` in force; until then, and when the probe
+  fails, the vote is still collecting and no cast is refused `late` for
+  it. Probes and re-anchors are rationed. §8.3 step 2: the re-anchor of
+  early results stays, as the backstop. §10.1: the authority down or
+  behind. No change to the messages, the
   documents, the vectors or what a member's vault checks.
 - **0.13.11 (2026-11-11):** (GC #1344, Ballot P1; VAULT-MESSAGING 0.88.12)
   §2: vote labels end in `0x00`, unlike VMS labels; why they are
