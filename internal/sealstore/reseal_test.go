@@ -10,13 +10,18 @@ import (
 	"github.com/vettid/service-vault/internal/peer"
 )
 
-// countingPager records the largest page it served.
+// countingPager records the largest page it served. With short set, it
+// serves at most short records a page, as a pager may before the end.
 type countingPager struct {
 	*peer.MemStore
+	short          int
 	largest, pages int
 }
 
 func (p *countingPager) Page(ctx context.Context, kind, after string, limit int) ([]peer.Record, error) {
+	if p.short > 0 {
+		limit = min(limit, p.short)
+	}
 	recs, err := p.MemStore.Page(ctx, kind, after, limit)
 	p.pages++
 	p.largest = max(p.largest, len(recs))
@@ -24,11 +29,17 @@ func (p *countingPager) Page(ctx context.Context, kind, after string, limit int)
 }
 
 // With a pager, Reseal moves every record of a kind to the current key a
-// page at a time (never more than ResealPage), including a last page that
-// is full.
+// page at a time (never more than ResealPage), reading on until a page
+// comes back empty: also past a full last page, and past short pages
+// before the end.
 func TestResealPaged(t *testing.T) {
 	ctx := context.Background()
-	for n, pages := range map[int]int{0: 1, 1: 1, ResealPage: 2, 2*ResealPage + 3: 3} {
+	type tc struct{ n, short, pages int }
+	for _, c := range []tc{
+		{0, 0, 1}, {1, 0, 2}, {ResealPage, 0, 2}, {2*ResealPage + 3, 0, 4},
+		{2*ResealPage + 3, 7, 9}, // 53 records, 7 a page: 8 pages, then an empty one
+	} {
+		n := c.n
 		mem := peer.NewMemStore()
 		v1 := newStore(t, mem, false)
 		for i := 0; i < n; i++ {
@@ -41,7 +52,7 @@ func TestResealPaged(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		pager := &countingPager{MemStore: mem}
+		pager := &countingPager{MemStore: mem, short: c.short}
 		both.Pages = pager
 		if err := both.Reseal(ctx, []string{"chunk"}); err != nil {
 			t.Fatal(err)
@@ -55,8 +66,8 @@ func TestResealPaged(t *testing.T) {
 				t.Fatalf("n=%d: %s not resealed", n, r.ID)
 			}
 		}
-		if pager.largest > ResealPage || pager.pages != pages {
-			t.Fatalf("n=%d: pages of up to %d, %d pages, want %d", n, pager.largest, pager.pages, pages)
+		if pager.largest > ResealPage || pager.pages != c.pages {
+			t.Fatalf("n=%d short=%d: pages of up to %d, %d pages, want %d", n, c.short, pager.largest, pager.pages, c.pages)
 		}
 	}
 }

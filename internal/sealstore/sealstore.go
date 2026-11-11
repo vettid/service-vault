@@ -111,7 +111,9 @@ type Store struct {
 	aeads   map[uint32]cipher.AEAD
 }
 
-// Pager is the paged read of an append-only kind (the audit log).
+// Pager is the paged read of a kind: at most limit records whose ids
+// sort after after, in id order, and none once there are no more. A page
+// may be short before the end (Reseal reads on until an empty one).
 type Pager interface {
 	Page(ctx context.Context, kind, after string, limit int) ([]peer.Record, error)
 }
@@ -347,9 +349,6 @@ func (s *Store) Reseal(ctx context.Context, kinds []string) error {
 			after = recs[len(recs)-1].ID
 			if _, err := s.openAndReseal(ctx, k, recs); err != nil {
 				return err
-			}
-			if len(recs) < ResealPage {
-				break
 			}
 		}
 	}

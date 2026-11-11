@@ -136,8 +136,8 @@ func TestMaxEligibleFitsOneItem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := base64.StdEncoding.EncodedLen(len(pr.Rows)); n > siteRowsUpload {
-		t.Errorf("rows: %d bytes as base64, over the site's %d", n, siteRowsUpload)
+	if n := base64.StdEncoding.EncodedLen(len(pr.Rows)); n > SiteRowsUpload {
+		t.Errorf("rows: %d bytes as base64, over the site's %d", n, SiteRowsUpload)
 	}
 	// The per-member bounds the chunk lists are checked against.
 	o, err := m.Store.OpenProposal(ctx, c.ProposalID)

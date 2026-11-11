@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"maps"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vettid/service-vault/internal/ballot"
 	"github.com/vettid/service-vault/internal/keystore"
@@ -428,6 +430,62 @@ func TestRecordKindsResealed(t *testing.T) {
 	for _, k := range []string{ballot.KindChunk, ballot.KindProposal, ballot.KindResults} {
 		if !slices.Contains(recordKinds(), k) {
 			t.Errorf("%s not resealed", k)
+		}
+	}
+}
+
+// The start's rotation through a pager, as the daemon runs it: a kind
+// larger than a page, expired records among them, and pages that mix
+// records under the current version with records an admin run wrote
+// under the older one. Every live record ends under the new version
+// before the older one is retired.
+func TestRecordKeyRotationPaged(t *testing.T) {
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	blobs, inner := &memBlobs{m: map[string][]byte{}}, peer.NewMemStore()
+	start := func(version uint32, create bool) (*sealstore.Store, error) {
+		return sealedStore(ctx, plainKMS{}, "k", blobs, inner, inner, memAnyRecord(inner), create, version, false, log)
+	}
+	st, err := start(1, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 2*sealstore.ResealPage + 3
+	for i := 0; i < n; i++ {
+		ch := peer.Change{Kind: "conn", ID: fmt.Sprintf("c%03d", 2*i), Data: []byte(fmt.Sprintf(`{"id":"c%03d"}`, 2*i))}
+		if i%sealstore.ResealPage == sealstore.ResealPage-1 {
+			ch.Expires = time.Now().Add(-time.Minute) // at a page's end
+		}
+		if err := st.Apply(ctx, []peer.Change{ch}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stale, err := start(1, false) // an admin run, before the rotation
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := start(2, true); err != nil {
+		t.Fatal(err)
+	}
+	// Between the records under version 2, the admin run writes under 1.
+	for i := 0; i < n; i += 3 {
+		if err := stale.Apply(ctx, []peer.Change{{Kind: "conn", ID: fmt.Sprintf("c%03d", 2*i+1), Data: []byte(`{}`)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := start(2, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := blobs.m[sealstore.KeyName]; ok {
+		t.Fatal("version 1 not retired")
+	}
+	recs, _ := inner.Load(ctx, "conn")
+	if want := n - n/sealstore.ResealPage + (n+2)/3; len(recs) != want {
+		t.Fatalf("%d live records, want %d", len(recs), want)
+	}
+	for _, r := range recs {
+		if sealstore.VersionOf(r.Data) != 2 {
+			t.Fatalf("%s under version %d", r.ID, sealstore.VersionOf(r.Data))
 		}
 	}
 }

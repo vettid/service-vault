@@ -29,19 +29,20 @@ const ChunkSize = 300_000
 // 251 at MaxEligible with the largest inputs (TestMaxEligibleFitsOneItem
 // checks they stay under these). maxRowBytes is also bounded by the
 // results' single upload to the votes site: MaxEligible rows of it, as
-// base64, fit siteRowsUpload (TestChunkBounds).
+// base64, fit SiteRowsUpload (TestChunkBounds).
 const (
 	maxMemberBytes = 200
 	maxRowBytes    = 270
 )
 
-// siteRowsUpload is the most rows, as base64, the results' upload to the
+// SiteRowsUpload is the most rows, as base64, the results' upload to the
 // votes site can carry whatever the rest of it: the site takes 6,225,920
 // bytes (its MaxUpload, measured on staging, GC #7325; Lambda's 6 MB
-// request, less room), less the largest results (512 KB) and bundle
-// (64 KB) as base64, and the JSON around them. The site is another
-// repository: a change to its limit has to change this.
-const siteRowsUpload = 6_225_920 - 699_052 - 87_384 - 4_096
+// request, less room), less the largest results (512 KB, sent as base64:
+// 699,052), the largest bundle (64 KB, sent as JSON as it is) and the
+// JSON around them (the publish package checks the whole body). The site
+// is another repository: a change to its limit has to change this.
+const SiteRowsUpload = 6_225_920 - 699_052 - 65_536 - 4_096
 
 // The most chunks each value may name, from MaxEligible: a list longer
 // than this is refused when read, and a longer value is not written.
