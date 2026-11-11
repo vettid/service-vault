@@ -915,3 +915,16 @@ func TestCaughtEmptyCollectAtEmptyAfter(t *testing.T) {
 		t.Fatal("before emptyAfter counted")
 	}
 }
+
+// Step's empty-collect time carries this process's monotonic reading (the
+// evidence is compared on it, BALLOT-PROTOCOL §7 0.13.12).
+func TestEmptyAtIsMonotonic(t *testing.T) {
+	f := newFixture(t)
+	f.clk.Advance(2 * time.Minute)
+	f.pump()
+	f.p.cfg.Now = time.Now
+	f.pump()
+	if !strings.Contains(f.p.emptyAt.String(), " m=") {
+		t.Fatalf("emptyAt without a monotonic reading: %v", f.p.emptyAt)
+	}
+}

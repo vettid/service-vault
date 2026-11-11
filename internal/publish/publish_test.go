@@ -314,6 +314,37 @@ func TestPublishResultsStamp(t *testing.T) {
 		}
 	})
 
+	// The publisher's probe has its own deadline; a retry within
+	// ProbeRetry of a failed probe is timestamp_unavailable, not early.
+	t.Run("the publisher probe's deadline and failure", func(t *testing.T) {
+		a := &stampAnchor{times: []int64{closes - 3600, closes}}
+		e := newEnv(t, a)
+		fail := true
+		e.p.AuthorityTime = func(pctx context.Context) (int64, error) {
+			if d, ok := pctx.Deadline(); !ok || time.Until(d) > ballot.ProbeTimeout {
+				t.Errorf("the probe's deadline: %v %v", d, ok)
+			}
+			if fail {
+				return 0, errors.New("down")
+			}
+			return closes, nil
+		}
+		if _, err := publish(e); !errors.Is(err, ballot.ErrStampedEarly) {
+			t.Fatal(err)
+		}
+		if _, err := publish(e); !errors.Is(err, ballot.ErrAuthorityTime) {
+			t.Fatalf("a failed probe: %v", err)
+		}
+		fail = false
+		if _, err := publish(e); !errors.Is(err, ballot.ErrAuthorityTime) || a.n != 1 {
+			t.Fatalf("within ProbeRetry of the failure: %d anchors, %v", a.n, err)
+		}
+		e.clock = e.clock.Add(ballot.ProbeRetry)
+		if _, err := publish(e); err != nil || a.n != 2 {
+			t.Fatalf("after ProbeRetry: %d anchors, %v", a.n, err)
+		}
+	})
+
 	// A request its caller cancelled still gets the probe's answer (the
 	// probe has its own deadline).
 	t.Run("a cancelled request's probe", func(t *testing.T) {

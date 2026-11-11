@@ -1185,3 +1185,28 @@ func TestAuthorityProbeCacheAndDeadline(t *testing.T) {
 		t.Fatalf("a moved close: %v, %d probes", err, probes)
 	}
 }
+
+// The monotonic reading reaches Caught: with this process's clock, the
+// emptyAfter Close passes carries it, and the probe record goes once the
+// counts are saved.
+func TestCloseEmptyAfterIsMonotonic(t *testing.T) {
+	ctx := context.Background()
+	m, _, _ := newManager(t)
+	ct := &fakeCatcher{caught: true}
+	m.Catcher = ct
+	c, err := m.Create(ctx, "apv", input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Now = time.Now // past the close: the test input's dates are before today
+	m.AuthorityTime = func(context.Context) (int64, error) { return time.Now().Unix(), nil }
+	if _, err := m.Close(ctx, c.ProposalID); err != nil {
+		t.Fatal(err)
+	}
+	if len(ct.emptyAfter) != 1 || !strings.Contains(ct.emptyAfter[0].String(), " m=") {
+		t.Fatalf("emptyAfter without a monotonic reading: %v", ct.emptyAfter)
+	}
+	if _, ok := m.probes.Load(c.ProposalID); ok {
+		t.Fatal("the probe record was kept after the count")
+	}
+}

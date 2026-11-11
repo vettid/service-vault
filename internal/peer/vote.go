@@ -190,6 +190,9 @@ func (p *Peer) Caught(ctx context.Context, t, emptyAfter, from, until time.Time)
 		if err := json.Unmarshal(r.Data, &mark); err != nil {
 			return false, 0, fmt.Errorf("peer: lease marker: %w", err)
 		}
+		// Another process's lease marker is compared by wall time: that
+		// relies on one task running at a time (the stack's desiredCount 1,
+		// maxHealthyPercent 100), so two tasks' clocks never meet here.
 		if end := mark.At.Add(p.visibility() + leaseMargin); end.After(since) {
 			since = end
 		}
@@ -239,6 +242,10 @@ func (p *Peer) Caught(ctx context.Context, t, emptyAfter, from, until time.Time)
 	if held {
 		return false, unhandled, nil
 	}
+	// These must stay time.Time Before comparisons: emptyAt (Step's start)
+	// and emptyAfter (the probe's time) carry this process's monotonic
+	// reading, which a wall-clock step doesn't move (BALLOT-PROTOCOL §7,
+	// 0.13.12). Never compare them by Unix time or after Round(0).
 	caught = p.lastMsgMS >= tms && !p.lastMsgAt.Before(since) ||
 		!p.emptyAt.Before(t) && !p.emptyAt.Before(emptyAfter) && !p.emptyAt.Before(since)
 	return caught, unhandled, nil

@@ -102,8 +102,8 @@ const ProbeMaxWait = 5 * time.Minute
 // until the authority's time, judged from it and this clock since, can
 // have reached closesAt; after a failure, ProbeRetry. A wait is void if
 // this clock went back, and none lasts over ProbeMaxWait. It runs under
-// the proposal's lock, so a slow authority holds that lock up to the
-// client's timeout (a minute or so).
+// the proposal's lock, so a slow authority holds that lock up to
+// ProbeTimeout (5 s).
 func (m *Manager) authorityPast(ctx context.Context, id string, closesAt int64) (time.Time, error) {
 	nowT := m.Now()
 	if v, ok := m.probes.Load(id); ok {

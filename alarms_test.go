@@ -13,11 +13,6 @@ import (
 	"testing"
 )
 
-// notAlerted are alarm names logged on purpose without an alarm of their own.
-var notAlerted = map[string]bool{
-	"gov_migration_waiting": true, // a WARN, repeated per connection
-}
-
 func TestAlarmsAreInTheStack(t *testing.T) {
 	stack, err := os.ReadFile("cdk/lib/service-vault-stack.ts")
 	if err != nil {
@@ -47,7 +42,7 @@ func TestAlarmsAreInTheStack(t *testing.T) {
 		}
 		for _, m := range logged.FindAllStringSubmatch(string(src), -1) {
 			found++
-			if !notAlerted[m[1]] && !regexp.MustCompile(`\n\s*`+m[1]+`:`).MatchString(block) {
+			if !regexp.MustCompile(`\n\s*`+m[1]+`:`).MatchString(block) {
 				t.Errorf("%s logs alarm %q, which isn't in ALARMS (cdk/lib/service-vault-stack.ts)", path, m[1])
 			}
 		}

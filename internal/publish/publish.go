@@ -76,7 +76,7 @@ type Publisher struct {
 	mu      sync.Mutex
 	bundles map[[32]byte]json.RawMessage // anchored this run, by document
 	waits   map[[32]byte]*stampWait      // without Records (tests)
-	probed  map[[32]byte]time.Time       // the last authority probe, by results
+	probed  map[[32]byte]lastProbe       // the last authority probe, by results
 }
 
 var (
@@ -410,20 +410,27 @@ func (p *Publisher) tooSoon(ctx context.Context, id string, doc []byte, w *stamp
 		key := sha256.Sum256(doc)
 		p.mu.Lock()
 		last, ok := p.probed[key]
-		if !ok || !p.now().Before(last.Add(ballot.ProbeRetry)) || p.now().Before(last) {
+		if !ok || !p.now().Before(last.at.Add(ballot.ProbeRetry)) || p.now().Before(last.at) {
 			if p.probed == nil {
-				p.probed = map[[32]byte]time.Time{}
+				p.probed = map[[32]byte]lastProbe{}
 			}
-			p.probed[key], ok = p.now(), false
+			p.probed[key], ok = lastProbe{at: p.now()}, false
 		}
 		p.mu.Unlock()
 		if ok {
+			if last.failed {
+				p.log().Info("the timestamp authority's time: retried too soon after a failure", "proposal_id", id)
+				return false, ballot.ErrAuthorityTime
+			}
 			return true, nil
 		}
 		pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ballot.ProbeTimeout)
 		t, err := p.AuthorityTime(pctx)
 		cancel()
 		if err != nil {
+			p.mu.Lock()
+			p.probed[key] = lastProbe{at: p.now(), failed: true}
+			p.mu.Unlock()
 			p.log().Error("the timestamp authority's time is unavailable: the results are not anchored again", "alarm", "tsa_unavailable", "proposal_id", id, "err", err.Error())
 			return false, fmt.Errorf("%w: %v", ballot.ErrAuthorityTime, err)
 		}
@@ -446,6 +453,12 @@ func (p *Publisher) tooSoon(ctx context.Context, id string, doc []byte, w *stamp
 		return true, nil
 	}
 	return false, nil
+}
+
+// lastProbe is a publisher probe's time, and whether it failed.
+type lastProbe struct {
+	at     time.Time
+	failed bool
 }
 
 // dropWait deletes doc's stamp wait.

@@ -122,9 +122,10 @@ destination.
   the close answers 503 `collecting`, and no cast is refused `late` for
   it. Probes are rationed: a passing one holds for that close; after one
   before the close, none until the authority's time, judged from it, can
-  have reached the close, but never more than 5 minutes later, and at
-  once if the task's clock went back (a corrected clock never starves the
-  close). Each probe has its own 5 s timeout. Check both clocks, as for
+  have reached the close, but never more than 5 minutes later. The waits
+  are timed on the process's monotonic clock, so stepping the task's
+  wall clock neither lengthens nor cuts them, and a corrected clock never
+  starves the close. Each probe has its own 5 s timeout. Check both clocks, as for
   `results_stamped_early`. A probe that fails (the authority unreachable,
   or a stamp that doesn't verify) counts nothing either: the close
   answers 503 `timestamp_unavailable` and raises `tsa_unavailable`,
@@ -168,6 +169,14 @@ destination.
   from a backup of the table. After a table restore with votes off, the
   ballots the restore lost are put back from the copy at the first start
   with votes on (marker `run#ballots_rebuild`).
+- `gov_migration_waiting`: an admin's governance key (see "Governance
+  key" under "Admin approvals") can't be pinned yet, because the service
+  doesn't know that admin's connection (logged at most once an hour per
+  admin, `connection_id` on the line). Until it can, that admin's
+  governance approvals (`admin_set.*`, `admin.repin`, `proposal.create`,
+  `vote.extend`, `contract_template.change`) are recorded but don't count.
+  Check that the connection is active and reachable (a reconnect after a
+  restore, a suspended connection); if it is gone, repair the admin set.
 - `admins_short`: an admin's connection was removed (severed, or
   replaced by a new connection) and fewer admins than m remain, so no
   approval can pass (see "Recovering admins" under "Admin approvals").
