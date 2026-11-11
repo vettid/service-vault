@@ -308,7 +308,7 @@ func (m *Manager) Publish(ctx context.Context, id string) (int, error) {
 		return 0, err
 	}
 	conns := sortedConns(o.Members)
-	m.sendInBackground(id, "proposal/"+id, TypeProposal, conns, func(c string) (json.RawMessage, error) {
+	body := func(c string) (json.RawMessage, error) {
 		mem := o.Members[c]
 		proof, err := o.proofOf(mem.Tag)
 		if err != nil {
@@ -316,7 +316,15 @@ func (m *Manager) Publish(ctx context.Context, id string) (int, error) {
 		}
 		return json.Marshal(proposalBody{Proposal: o.Doc, ProposalSig: o.Sig, Bundle: o.Bundle, RecordSecret: mem.Secret,
 			RecordProof: proof})
-	})
+	}
+	// The first member's body is built here, so that a broken record tree
+	// fails the request rather than every send after it has answered.
+	if len(conns) > 0 {
+		if _, err := body(conns[0]); err != nil {
+			return 0, fmt.Errorf("ballot: publish %s: a member's body: %w", id, err)
+		}
+	}
+	m.sendInBackground(id, "proposal/"+id, TypeProposal, conns, body)
 	m.log().Info("proposal published", "proposal_id", id, "eligible", p.Eligible, "sending", len(conns))
 	return len(conns), nil
 }

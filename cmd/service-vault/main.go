@@ -565,16 +565,29 @@ func serve(args []string) error {
 	defer cancel()
 	_ = srv.Shutdown(sctx)
 	// The member sends: nothing more is queued, and those running get at
-	// most sendsGrace, so that the heartbeat is still cleared below.
+	// most sendsGrace, within the 20 seconds above, so that the heartbeat
+	// is still cleared below. Then they are stopped and given
+	// sendsStopWait to return, so that none still writes the peer's state
+	// after "stopped".
 	stopQueueing()
 	sendsDone := make(chan struct{})
 	go func() { waitSends(); close(sendsDone) }()
 	select {
 	case <-sendsDone:
+	case <-sctx.Done():
 	case <-time.After(sendsGrace):
-		log.Warn("member sends stopped at shutdown: members not yet sent learn of them as BALLOT-PROTOCOL §4.2, §8.3 and §10 say")
 	}
 	stopSends()
+	select {
+	case <-sendsDone:
+	default:
+		log.Warn("member sends stopped at shutdown: members not yet sent learn of them as BALLOT-PROTOCOL §4.2, §8.3 and §10 say")
+		select {
+		case <-sendsDone:
+		case <-time.After(sendsStopWait):
+			log.Warn("a member send had not returned when the service stopped")
+		}
+	}
 	if runErr == nil {
 		if err := <-peerErr; err != nil && !errors.Is(err, context.Canceled) {
 			runErr = fmt.Errorf("peer: %w", err)
@@ -594,13 +607,19 @@ func serve(args []string) error {
 // daemon must have stopped by then. It stops once heartbeatStopAfter has
 // passed since its last good write; each write gives up after
 // heartbeatWriteTimeout. At worst the stop starts at about 70 seconds
-// (a tick at 60 seconds plus a write timing out) and shutdown takes 20
-// more, well inside the 2 minutes, whatever DynamoDB does.
+// (a tick at 60 seconds plus a write timing out) and shutdown takes at
+// most 32 more (the HTTP drain and the member sends' grace within 20,
+// sendsStopWait, then the heartbeat's clear), inside the 2 minutes,
+// whatever DynamoDB does. (The wait for the peer to return is not bounded
+// here; it returns once ctx is done.)
 const (
 	heartbeatStopAfter    = store.HeartbeatStale / 2
 	heartbeatWriteTimeout = 10 * time.Second
 	// sendsGrace is how long a shutdown waits for member sends to end.
 	sendsGrace = 10 * time.Second
+	// sendsStopWait is how long it then waits for them to return, once
+	// stopped.
+	sendsStopWait = 2 * time.Second
 )
 
 // firstHeartbeat writes the first heartbeat, stamped now, under

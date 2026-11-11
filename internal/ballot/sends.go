@@ -26,6 +26,12 @@ import (
 // for the peer's lock is not bounded by it).
 const SendTimeout = 30 * time.Second
 
+// MaxFailuresInARow stops a job after that many sends in a row have
+// failed: the relay is down or hanging, and each failure can take
+// SendTimeout while the job holds the peer, its proposal's later sends and
+// its key (a retry). The members not sent learn of it as above.
+const MaxFailuresInARow = 20
+
 // sendJob is one message to send to a proposal's members.
 type sendJob struct {
 	key, typ string
@@ -108,7 +114,8 @@ func (m *Manager) runJob(job *sendJob) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	sent, failed, bodyErrs := 0, 0, 0
+	sent, failed, bodyErrs, inARow := 0, 0, 0, 0
+	gaveUp := false
 	for _, c := range job.conns {
 		// Checked before each send: the peer queues a message before it
 		// looks at the context.
@@ -128,15 +135,24 @@ func (m *Manager) runJob(job *sendJob) {
 		cancel()
 		if err != nil {
 			// A send that timed out may still be in the peer's outbox, and go
-			// out later.
-			m.log().Warn(job.typ+" not sent", "send", job.key, "connection_id", c, "err", err.Error())
+			// out later. The first failure is logged; the rest are counted.
+			if failed == 0 {
+				m.log().Warn(job.typ+" not sent", "send", job.key, "connection_id", c, "err", err.Error())
+			}
 			failed++
+			if inARow++; inARow >= MaxFailuresInARow {
+				gaveUp = true
+				m.log().Warn(job.typ+" stopped: sends failed in a row; members not sent learn of it as BALLOT-PROTOCOL §4.2, §8.3 and §10 say",
+					"send", job.key, "in_a_row", inARow)
+				break
+			}
 			continue
 		}
+		inARow = 0
 		sent++
 	}
 	m.log().Info(job.typ+" sent", "send", job.key, "sent", sent, "failed", failed, "body_errors", bodyErrs,
-		"of", len(job.conns), "stopped", ctx.Err() != nil)
+		"of", len(job.conns), "stopped", ctx.Err() != nil, "gave_up", gaveUp)
 }
 
 // Wait waits for every background send to end (tests, and the daemon's

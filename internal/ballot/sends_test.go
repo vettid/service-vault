@@ -3,6 +3,7 @@ package ballot
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -164,5 +165,32 @@ func TestSendsOrderPerProposal(t *testing.T) {
 	m2.Wait()
 	if len(s2.sent) != 2 || s2.sent[0].conn != "b" {
 		t.Fatalf("sent %+v", s2.sent)
+	}
+}
+
+// A job whose sends keep failing (the relay down or hanging) stops after
+// MaxFailuresInARow in a row, rather than holding the peer and its
+// proposal's later sends for every member; a success resets the count.
+func TestSendsGiveUpAfterFailuresInARow(t *testing.T) {
+	m, s, _ := newManager(t)
+	var conns []string
+	for i := 0; i < 3*MaxFailuresInARow; i++ {
+		c := fmt.Sprintf("m%03d", i)
+		conns = append(conns, c)
+		s.down[c] = true
+	}
+	// One member in the middle of the first run is up: the count starts
+	// again after it.
+	s.down[conns[MaxFailuresInARow-2]] = false
+	tried := 0
+	m.runJob(&sendJob{key: "k", typ: TypeProposal, conns: conns, body: func(string) (json.RawMessage, error) {
+		tried++
+		return json.RawMessage(`{}`), nil
+	}})
+	if want := MaxFailuresInARow - 1 + MaxFailuresInARow; tried != want {
+		t.Fatalf("tried %d members, want %d", tried, want)
+	}
+	if len(s.sent) != 1 {
+		t.Fatalf("sent %d, want 1", len(s.sent))
 	}
 }
