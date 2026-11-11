@@ -2,7 +2,7 @@
 
 package ballot
 
-// The size and timing test at MaxEligible. It casts MaxEligible ballots,
+// The size and timing test at PlannedMaxEligible. It casts PlannedMaxEligible ballots,
 // which takes seconds without the race detector and minutes with it, so
 // the race run leaves it out and CI runs it in a step of its own.
 
@@ -18,7 +18,7 @@ import (
 	"github.com/vettid/service-vault/vote"
 )
 
-// At MaxEligible members, everyone voting, with the largest inputs the
+// At PlannedMaxEligible members, everyone voting, with the largest inputs the
 // service takes (the longest title, text and labels, 16 choices, 26-byte
 // connection ids, MaxExtensions extensions and a 10 KB anchor bundle),
 // every item stored (the proposal's record, the results' record and each
@@ -27,7 +27,7 @@ import (
 // site's upload.
 func TestMaxEligibleFitsOneItem(t *testing.T) {
 	if testing.Short() {
-		t.Skip("casts MaxEligible ballots")
+		t.Skip("casts PlannedMaxEligible ballots")
 	}
 	// Each request (create, close) answers well within the API's 30 s
 	// WriteTimeout (cmd/service-vault), and the sends end.
@@ -37,11 +37,12 @@ func TestMaxEligibleFitsOneItem(t *testing.T) {
 	m, _, _ := newManager(t)
 	ct := &fakeCatcher{caught: true}
 	m.Catcher = ct
-	roster := make(fakeRoster, MaxEligible)
+	roster := make(fakeRoster, PlannedMaxEligible)
 	for i := range roster {
 		roster[i] = fmt.Sprintf("01JBQZ%020d", i) // a ULID's length
 	}
 	m.Roster = roster
+	m.eligibleCap = PlannedMaxEligible
 	// The largest input create accepts: the longest title (the text may
 	// only repeat it), then the most and longest labels the admins'
 	// summary still shows whole.
@@ -62,7 +63,7 @@ func TestMaxEligibleFitsOneItem(t *testing.T) {
 			} else if d := time.Since(start); d > requestBudget {
 				t.Errorf("create took %v", d)
 			} else {
-				t.Logf("create (with publish) took %v at %d members", d.Round(time.Millisecond), MaxEligible)
+				t.Logf("create (with publish) took %v at %d members", d.Round(time.Millisecond), PlannedMaxEligible)
 			}
 		}
 	}
@@ -71,7 +72,7 @@ func TestMaxEligibleFitsOneItem(t *testing.T) {
 	}
 	start := time.Now()
 	m.Wait()
-	t.Logf("vote.proposal to %d members took %v (a fake peer)", MaxEligible, time.Since(start).Round(time.Millisecond))
+	t.Logf("vote.proposal to %d members took %v (a fake peer)", PlannedMaxEligible, time.Since(start).Round(time.Millisecond))
 	t.Logf("%d choices, labels of %d, title of %d", len(in.Choices), len(in.Choices[0].Label), len(in.Title))
 	// MaxExtensions extensions, each moving the close by a second for an
 	// outage of just over an hour that is over.
@@ -102,7 +103,7 @@ func TestMaxEligibleFitsOneItem(t *testing.T) {
 	if d := time.Since(start); d > requestBudget {
 		t.Errorf("close took %v", d)
 	} else {
-		t.Logf("close (count, results, publish) took %v at %d members", d.Round(time.Millisecond), MaxEligible)
+		t.Logf("close (count, results, publish) took %v at %d members", d.Round(time.Millisecond), PlannedMaxEligible)
 	}
 	m.Wait()
 	bundle, _ := json.Marshal(map[string]string{"pad": strings.Repeat("b", 10<<10)})
@@ -121,7 +122,7 @@ func TestMaxEligibleFitsOneItem(t *testing.T) {
 		if len(data) > itemLimit {
 			t.Errorf("%s record: %d bytes, over %d", kind, len(data), itemLimit)
 		}
-		t.Logf("%s record: %d bytes at %d members", kind, len(data), MaxEligible)
+		t.Logf("%s record: %d bytes at %d members", kind, len(data), PlannedMaxEligible)
 	}
 	chunks, err := m.Store.Records.Load(ctx, KindChunk)
 	if err != nil || len(chunks) == 0 {
@@ -145,12 +146,12 @@ func TestMaxEligibleFitsOneItem(t *testing.T) {
 		t.Fatal(err)
 	}
 	md, _ := json.Marshal(o.Members)
-	if len(md) > MaxEligible*maxMemberBytes || len(pr.Rows) > MaxEligible*maxRowBytes {
+	if len(md) > PlannedMaxEligible*maxMemberBytes || len(pr.Rows) > PlannedMaxEligible*maxRowBytes {
 		t.Errorf("members %d bytes, rows %d bytes: over %d and %d a member", len(md), len(pr.Rows), maxMemberBytes, maxRowBytes)
 	}
-	t.Logf("members %d bytes, rows %d bytes at %d members", len(md), len(pr.Rows), MaxEligible)
+	t.Logf("members %d bytes, rows %d bytes at %d members", len(md), len(pr.Rows), PlannedMaxEligible)
 	if len(pr.RowChunks) > maxRowChunks || len(o.MemberChunks) > maxMemberChunks {
 		t.Errorf("%d row chunks, %d member chunks", len(pr.RowChunks), len(o.MemberChunks))
 	}
-	t.Logf("%d chunks; rows %d bytes in %d chunks at %d members", len(chunks), len(pr.Rows), len(pr.RowChunks), MaxEligible)
+	t.Logf("%d chunks; rows %d bytes in %d chunks at %d members", len(chunks), len(pr.Rows), len(pr.RowChunks), PlannedMaxEligible)
 }

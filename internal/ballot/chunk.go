@@ -26,9 +26,9 @@ const ChunkSize = 300_000
 
 // The most bytes a member takes in a proposal's members, and a row in
 // the results' rows (chosen; not in the spec): measured at about 140 and
-// 251 at MaxEligible with the largest inputs (TestMaxEligibleFitsOneItem
+// 251 at PlannedMaxEligible with the largest inputs (TestMaxEligibleFitsOneItem
 // checks they stay under these). maxRowBytes is also bounded by the
-// results' single upload to the votes site: MaxEligible rows of it, as
+// results' single upload to the votes site: PlannedMaxEligible rows of it, as
 // base64, fit SiteRowsUpload (TestChunkBounds).
 const (
 	maxMemberBytes = 200
@@ -47,11 +47,12 @@ const (
 // site is another repository: a change to its limit has to change this.
 const SiteRowsUpload = 6_225_920 - 699_052 - 65_536 - 4_096
 
-// The most chunks each value may name, from MaxEligible: a list longer
-// than this is refused when read, and a longer value is not written.
+// The most chunks each value may name, from PlannedMaxEligible (so that
+// raising MaxEligible to it needs nothing here): a list longer than this
+// is refused when read, and a longer value is not written.
 const (
-	maxMemberChunks = (MaxEligible*maxMemberBytes+ChunkSize-1)/ChunkSize + 1
-	maxRowChunks    = (MaxEligible*maxRowBytes+ChunkSize-1)/ChunkSize + 1
+	maxMemberChunks = (PlannedMaxEligible*maxMemberBytes+ChunkSize-1)/ChunkSize + 1
+	maxRowChunks    = (PlannedMaxEligible*maxRowBytes+ChunkSize-1)/ChunkSize + 1
 )
 
 // chunkRef names one chunk in the record that holds the value: its id,

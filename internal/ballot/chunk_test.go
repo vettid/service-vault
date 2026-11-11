@@ -98,16 +98,19 @@ func TestChunksRefused(t *testing.T) {
 	}
 }
 
-// The bounds follow MaxEligible.
+// The bounds follow PlannedMaxEligible, which PlannedMaxEligible never exceeds.
 func TestChunkBounds(t *testing.T) {
-	if maxMemberChunks*ChunkSize < MaxEligible*maxMemberBytes || maxRowChunks*ChunkSize < MaxEligible*maxRowBytes {
+	if MaxEligible > PlannedMaxEligible {
+		t.Fatalf("MaxEligible %d over PlannedMaxEligible %d", MaxEligible, PlannedMaxEligible)
+	}
+	if maxMemberChunks*ChunkSize < PlannedMaxEligible*maxMemberBytes || maxRowChunks*ChunkSize < PlannedMaxEligible*maxRowBytes {
 		t.Fatalf("bounds %d and %d chunks too small", maxMemberChunks, maxRowChunks)
 	}
-	if (maxMemberChunks-2)*ChunkSize >= MaxEligible*maxMemberBytes || (maxRowChunks-2)*ChunkSize >= MaxEligible*maxRowBytes {
+	if (maxMemberChunks-2)*ChunkSize >= PlannedMaxEligible*maxMemberBytes || (maxRowChunks-2)*ChunkSize >= PlannedMaxEligible*maxRowBytes {
 		t.Fatalf("bounds %d and %d chunks looser than the cap needs", maxMemberChunks, maxRowChunks)
 	}
-	if n := base64.StdEncoding.EncodedLen(MaxEligible * maxRowBytes); n > SiteRowsUpload {
-		t.Fatalf("MaxEligible rows of maxRowBytes are %d bytes as base64, over the site's %d", n, SiteRowsUpload)
+	if n := base64.StdEncoding.EncodedLen(PlannedMaxEligible * maxRowBytes); n > SiteRowsUpload {
+		t.Fatalf("PlannedMaxEligible rows of maxRowBytes are %d bytes as base64, over the site's %d", n, SiteRowsUpload)
 	}
 }
 

@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.13.13 (2026-11-11)
+**Status:** 0.13.12 (2026-11-11)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -140,10 +140,10 @@ receives.
   `record_root` is the RFC 6962 root (§8.2) over the tags, sorted, and
   `eligible` their number: at most 100,000 in a proposal document, as a
   member's vault bounds it (VAULT-MESSAGING §10.19.4 step 2). This service
-  allows at most 15,000: its members and its results' rows are stored in
-  chunks, and the rows go to the votes site in one upload, which past
-  about 16,000 members they would no longer fit. It refuses to create a
-  bigger proposal. **(chosen; not in the spec.)**
+  allows at most 1,000: a proposal's record and its results' record are
+  each one item in its store, which DynamoDB caps at 400 KB, and past
+  about 1,000 members the results could not be saved at the close. It
+  refuses to create a bigger proposal. **(chosen; not in the spec.)**
 - **Delivery:** each member receives, in `vote.proposal` (§4.1), their
   `record_secret` and an inclusion proof of their tag. The vault checks
   the proof at once against `record_root` (RFC 9162 §2.1.3.2).
@@ -969,11 +969,6 @@ item.
 
 ## Changes
 
-- **0.13.13 (2026-11-11):** (service-vault #140, for the owner's
-  approval) §3.2: this service allows 15,000 eligible members (was
-  1,000): its members and results' rows are stored in chunks, and the
-  bound is now the results' single upload to the votes site. A chosen
-  limit; no change to the messages, the documents or the vectors.
 - **0.13.12 (2026-11-11):** (owner decision 2026-11-11; service-vault
   #137) §7: the count waits for the timestamp authority's time. Just
   before counting, after the reconcile of the extensions, the service
