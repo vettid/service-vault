@@ -184,6 +184,34 @@ func TestWatchSigner(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	watchSigner(ctx, &fakeSigner{probeErr: errors.New("x"), failProbes: 1 << 30}, pinned, slog.Default()) // returns
+	// A probe that fails because the service is shutting down raises no
+	// alarm.
+	var buf bytes.Buffer
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	sd := &shutdownProber{cancel: cancel2}
+	watchSigner(ctx2, sd, pinned, slog.New(slog.NewJSONHandler(&buf, nil)))
+	if strings.Contains(buf.String(), "alarm") {
+		t.Fatalf("an alarm at shutdown: %s", buf.String())
+	}
+	// The next probe logged is never past the cap.
+	probeFirst, probeMax = time.Millisecond, 2*time.Millisecond
+	buf.Reset()
+	watchSigner(context.Background(), &fakeSigner{spki: pinned, probeErr: errors.New("t"), failProbes: 4}, pinned, slog.New(slog.NewJSONHandler(&buf, nil)))
+	if !strings.Contains(buf.String(), `"next_probe":"2ms"`) || strings.Contains(buf.String(), `"next_probe":"4ms"`) {
+		t.Fatalf("next_probe past the cap: %s", buf.String())
+	}
+}
+
+// shutdownProber fails its probe because the service is stopping.
+type shutdownProber struct{ cancel context.CancelFunc }
+
+func (s *shutdownProber) Probe(context.Context) ([]byte, error) {
+	s.cancel()
+	return nil, context.Canceled
+}
+
+func (s *shutdownProber) Call(context.Context, publish.SignerRequest) (publish.SignerResult, error) {
+	return publish.SignerResult{}, nil
 }
 
 // Without the signer: the marker decides first. Present, or unreadable,

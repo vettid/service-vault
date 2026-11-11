@@ -127,10 +127,12 @@ func watchSigner(ctx context.Context, p keyProber, pinned []byte, log *slog.Logg
 		}
 		spki, err := p.Probe(ctx)
 		switch {
+		case ctx.Err() != nil:
+			return // shutting down: not the signer's failure
 		case err != nil:
-			log.Error("the anchor signer doesn't answer: votes can't be published until it does", "alarm", "anchor_signer_unavailable",
-				"err", err.Error(), "next_probe", (2 * wait).String())
 			wait = min(2*wait, probeMax)
+			log.Error("the anchor signer doesn't answer: votes can't be published until it does", "alarm", "anchor_signer_unavailable",
+				"err", err.Error(), "next_probe", wait.String())
 			continue
 		case !bytes.Equal(spki, pinned):
 			log.Error("the anchor signer's key is not the pinned anchor key: nothing it answers is used", "alarm", "anchor_key_changed")

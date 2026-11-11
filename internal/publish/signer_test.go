@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -334,3 +335,57 @@ func TestPublishResultsViaSigner(t *testing.T) {
 }
 
 var _ ballot.AttemptSource = (*Publisher)(nil)
+
+// The bundle's fields, each checked on its own: a valid signature over
+// the document doesn't save a wrong digest field or algorithm, and names
+// that appear twice (also as a case variant) are refused, so no reader
+// sees another value.
+func TestVerifyBundleSignatureFields(t *testing.T) {
+	doc := []byte("doc")
+	d := sha256.Sum256(doc)
+	sig, _ := ecdsa.SignASN1(rand.Reader, anchorPriv, d[:])
+	other := sha256.Sum256([]byte("other"))
+	b64 := func(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
+	mk := func(alg, digest string) json.RawMessage {
+		return json.RawMessage(`{"messageSignature":{"messageDigest":{"algorithm":"` + alg + `","digest":"` + digest + `"},"signature":"` + b64(sig) + `"}}`)
+	}
+	if err := VerifyBundleSignature(&anchorPriv.PublicKey, doc, mk("SHA2_256", b64(d[:]))); err != nil {
+		t.Fatalf("the good one: %v", err)
+	}
+	ms := `"messageSignature":{"messageDigest":{"algorithm":"SHA2_256","digest":"` + b64(d[:]) + `"},"signature":"` + b64(sig) + `"}`
+	for name, b := range map[string]json.RawMessage{
+		"another digest field":  mk("SHA2_256", b64(other[:])),
+		"another algorithm":     mk("SHA2_384", b64(d[:])),
+		"a duplicate member":    json.RawMessage(`{` + ms + `,` + ms + `}`),
+		"a case variant":        json.RawMessage(`{` + ms + `,"MessageSignature":{}}`),
+		"a nested case variant": json.RawMessage(`{"messageSignature":{"messageDigest":{"algorithm":"SHA2_256","digest":"` + b64(d[:]) + `","Digest":"` + b64(other[:]) + `"},"signature":"` + b64(sig) + `"}}`),
+		"data after the object": json.RawMessage(`{` + ms + `} {}`),
+		"not an object":         json.RawMessage(`[]`),
+		"no message signature":  json.RawMessage(`{}`),
+	} {
+		if err := VerifyBundleSignature(&anchorPriv.PublicKey, doc, b); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+// An error status without a key is judged by its status, with no false
+// key alarm; a success without the key is the alarm.
+func TestPublishViaSignerErrorWithoutKey(t *testing.T) {
+	ctx := context.Background()
+	var log bytes.Buffer
+	f := &fakeSigner{r: SignerResult{Status: 503}}
+	p := signerPublisher(t, f, &log)
+	var ref *ErrRefused
+	if _, err := p.PublishProposal(ctx, "p1", []byte("doc"), []byte("sig")); err == nil || errors.As(err, &ref) || strings.Contains(log.String(), "anchor_key_changed") {
+		t.Fatalf("503: %v %s", err, log.String())
+	}
+	f.r = SignerResult{Status: 422, Code: "too_late"}
+	if _, err := p.PublishExtension(ctx, "p1", 1, []byte("e"), []byte("s")); !errors.As(err, &ref) || strings.Contains(log.String(), "anchor_key_changed") {
+		t.Fatalf("422: %v %s", err, log.String())
+	}
+	f.r = SignerResult{Status: 201, Bundle: signedBundle(t, anchorPriv, []byte("doc"), "")}
+	if _, err := p.PublishProposal(ctx, "p1", []byte("doc"), []byte("sig")); err == nil || !strings.Contains(log.String(), "anchor_key_changed") {
+		t.Fatalf("a success without the key: %v", err)
+	}
+}

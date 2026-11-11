@@ -11,7 +11,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -86,6 +88,10 @@ func (l *LambdaSigner) Call(ctx context.Context, req SignerRequest) (SignerResul
 	}
 	return l.invoke(ctx, payload, SignerTimeout)
 }
+
+// recordTimeout bounds each record write around a signer call (the mark,
+// the bundle), which run detached from the request.
+const recordTimeout = 10 * time.Second
 
 // ProbeTimeout is the probe's deadline: it asks for nothing but the key.
 const ProbeTimeout = 15 * time.Second
@@ -213,7 +219,10 @@ func (p *Publisher) viaSigner(ctx context.Context, id, name string, doc, sig, ro
 	// timeout): a signer's answer that arrives is kept, so the next try
 	// finds the bundle. SignerTimeout still bounds it.
 	ctx = context.WithoutCancel(ctx)
-	if err := p.markCalled(ctx, doc); err != nil {
+	mctx, cancel := context.WithTimeout(ctx, recordTimeout)
+	err = p.markCalled(mctx, doc)
+	cancel()
+	if err != nil {
 		return ballot.Receipt{}, err
 	}
 	r, err := p.Signer.Call(ctx, SignerRequest{ProposalID: id, Name: name, Doc: doc, Sig: sig, Rows: rows})
@@ -221,7 +230,11 @@ func (p *Publisher) viaSigner(ctx context.Context, id, name string, doc, sig, ro
 		p.log().Warn("publish: the anchor signer failed; retried later", "proposal_id", id, "name", name, "err", err.Error())
 		return ballot.Receipt{}, err
 	}
-	if !bytes.Equal(r.AnchorKey, p.AnchorKey) {
+	// Every answer of the signer carries its key (refusals included); an
+	// error status without one is judged by its status alone, but a
+	// success needs the pinned key.
+	success := r.Status == http.StatusCreated || r.Status == http.StatusOK
+	if (success || len(r.AnchorKey) > 0) && !bytes.Equal(r.AnchorKey, p.AnchorKey) {
 		p.log().Error("the anchor signer answered under another anchor key than the one pinned", "alarm", "anchor_key_changed",
 			"proposal_id", id, "name", name)
 		return ballot.Receipt{}, errors.New("publish: the anchor signer's key is not the pinned anchor key")
@@ -238,7 +251,10 @@ func (p *Publisher) viaSigner(ctx context.Context, id, name string, doc, sig, ro
 				"proposal_id", id, "name", name, "err", err.Error())
 			return ballot.Receipt{}, fmt.Errorf("publish: the signer's bundle: %w", err)
 		}
-		if err := p.keep(ctx, doc, r.Bundle); err != nil {
+		kctx, cancel := context.WithTimeout(ctx, recordTimeout)
+		err := p.keep(kctx, doc, r.Bundle)
+		cancel()
+		if err != nil {
 			return ballot.Receipt{}, err
 		}
 		if notBefore > 0 {
@@ -278,27 +294,72 @@ func pinnedKey(spki []byte) (*ecdsa.PublicKey, error) {
 // over it. The bundle's other parts (the timestamp, the log entry) are
 // checked where they are used (anchor.TimestampTime).
 func VerifyBundleSignature(pub *ecdsa.PublicKey, doc []byte, bundle json.RawMessage) error {
-	var b struct {
-		MessageSignature struct {
-			MessageDigest struct {
-				Algorithm string `json:"algorithm"`
-				Digest    []byte `json:"digest"`
-			} `json:"messageDigest"`
-			Signature []byte `json:"signature"`
-		} `json:"messageSignature"`
+	// Parsed strictly along the path read: each object's names unique,
+	// also ignoring case (encoding/json would take a case variant, and
+	// the last of duplicates), so no other reader can see another value.
+	top, err := strictObject(bundle)
+	if err != nil {
+		return fmt.Errorf("the bundle: %w", err)
 	}
-	if err := json.Unmarshal(bundle, &b); err != nil {
-		return fmt.Errorf("the bundle doesn't parse: %w", err)
+	ms, err := strictObject(top["messageSignature"])
+	if err != nil {
+		return fmt.Errorf("the bundle's messageSignature: %w", err)
 	}
-	ms := b.MessageSignature
+	md, err := strictObject(ms["messageDigest"])
+	if err != nil {
+		return fmt.Errorf("the bundle's messageDigest: %w", err)
+	}
+	var alg string
+	var digest, sig []byte
+	if json.Unmarshal(md["algorithm"], &alg) != nil || json.Unmarshal(md["digest"], &digest) != nil || json.Unmarshal(ms["signature"], &sig) != nil {
+		return errors.New("the bundle's message signature doesn't parse")
+	}
 	want := sha256.Sum256(doc)
-	if ms.MessageDigest.Algorithm != "SHA2_256" || !bytes.Equal(ms.MessageDigest.Digest, want[:]) {
+	if alg != "SHA2_256" {
+		return fmt.Errorf("the bundle's digest algorithm is %q, not SHA2_256", alg)
+	}
+	if !bytes.Equal(digest, want[:]) {
 		return errors.New("the bundle's digest is not this document's")
 	}
-	if !ecdsa.VerifyASN1(pub, want[:], ms.Signature) {
+	if !ecdsa.VerifyASN1(pub, want[:], sig) {
 		return errors.New("the bundle's signature doesn't verify under the pinned anchor key")
 	}
 	return nil
+}
+
+// strictObject reads a JSON object's members, refusing anything but an
+// object, and a name that appears twice, also as a case variant.
+func strictObject(data json.RawMessage) (map[string]json.RawMessage, error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return nil, errors.New("not an object")
+	}
+	out := map[string]json.RawMessage{}
+	seen := map[string]bool{}
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		name, _ := t.(string)
+		folded := strings.ToLower(name)
+		if seen[folded] {
+			return nil, fmt.Errorf("the name %q appears twice", name)
+		}
+		seen[folded] = true
+		var v json.RawMessage
+		if err := dec.Decode(&v); err != nil {
+			return nil, err
+		}
+		out[name] = v
+	}
+	if t, err := dec.Token(); err != nil || t != json.Delim('}') {
+		return nil, errors.New("not an object")
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, errors.New("data after the object")
+	}
+	return out, nil
 }
 
 // checkPublishedResults alarms on published results whose bundle doesn't

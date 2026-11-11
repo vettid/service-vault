@@ -108,7 +108,7 @@ export const ALARMS = {
   results_stamped_early: 'A vote\'s results were timestamped before their close: the service\'s clock is more than a minute ahead of the timestamp authority\'s. They are not published; check both clocks (the task\'s and the authority\'s), then close again (POST /v1/proposals/{id}/close) (README "results_stamped_early")',
   /** The results' bundle failed its timestamp check (internal/publish/publish.go): not published. */
   results_bundle_unverified: 'A vote\'s results bundle failed its timestamp check (TSA signature, trusted root or validity): the results are not published; look at the ERROR line, then close again (README "results_bundle_unverified")',
-  /** The anchor signer didn't answer the start's probe (cmd/service-vault anchorsource.go): votes are not published until a restart reaches it. */
+  /** The anchor signer doesn't answer the background probe (cmd/service-vault anchorsource.go): documents wait, calls are retried. */
   anchor_signer_unavailable: 'The anchor signer does not answer the service\'s probe: documents are not published until it does (calls fail and are retried); sign-ins and approvals go on. Check the signer (its account\'s alarms) and the invoke permission (README "anchor_signer_unavailable")',
   /** The anchor signer answered under a key other than the one listed (internal/publish/signer.go): nothing is kept from that answer. */
   anchor_key_changed: 'The anchor signer answered under another anchor key than the pinned one (SV_ANCHOR_KEY): nothing from that answer is used. Treat it as a security event: check the signer account and its key (README "anchor_key_changed")',
