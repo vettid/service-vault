@@ -490,6 +490,9 @@ func serve(args []string) error {
 			mgr.Timestamp = func(bundle json.RawMessage, doc []byte) (int64, error) {
 				return anchor.TimestampTime(cfg.Sigstore, bundle, doc)
 			}
+			mgr.AuthorityTime = func(ctx context.Context) (int64, error) {
+				return anchor.AuthorityTime(ctx, anc, cfg.Sigstore)
+			}
 			mgr.Publisher = &publish.Publisher{URL: cfg.VotesURL, Anchor: anc, Client: anchor.Client(time.Minute), Records: records,
 				Timestamp: mgr.Timestamp, Log: log}
 		}

@@ -115,6 +115,18 @@ destination.
   at any time, also after the close. A member vault restored meanwhile
   may show the vote as being checked until the member opens it again or
   checks it in the app.
+- `count_clock_ahead`: a vote's close has passed by the service's clock
+  but not by the timestamp authority's (BALLOT-PROTOCOL §7, 0.13.12:
+  just before counting, the service asks the authority for the time, a
+  stamp with no transparency-log entry). The vote is not counted yet:
+  the close answers 503 `collecting`, and no cast is refused `late` for
+  it. Probes are rationed: none until the authority's time, judged from
+  the last one, can have reached the close. Check both clocks, as for
+  `results_stamped_early`. A probe that fails (the authority unreachable,
+  or a stamp that doesn't verify) counts nothing either: the close
+  answers 503 `timestamp_unavailable` and raises `tsa_unavailable`,
+  whose ERROR line says why; probes after a failure are at least 10 s
+  apart.
 - `results_stamped_early`: a vote's results came back from the timestamp
   authority stamped before their close, so the service's clock is more
   than a minute ahead of the authority's (BALLOT-PROTOCOL §8.3 step 2:
@@ -559,7 +571,7 @@ billed.
 | `GET /v1/proposals/{id}` | `{proposal_id, proposal, proposal_hash, eligible, opens_at, closes_at, published}`: nothing that counts ballots before the results |
 | `POST /v1/proposals/{id}/publish` | `{sent}`: publishes a proposal whose publication failed, and sends it again to each eligible member. A proposal not published is no member's: a cast on it is `not_eligible`, `vote.status` `unknown_proposal`. `not_found` (404) |
 | `POST /v1/proposals/{id}/extend` `{approval_id, closes_at, outage: {from, to, source}}` | Needs `approval_id`: the admins' `vote.extend` approval of exactly this extension of this proposal, used up once (the same errors as creating). The extension (BALLOT-PROTOCOL §10.2), published and sent to each member: for a relay outage of over an hour within the window that is over (its `to` not after now), by its length rounded up to the hour, 24 h in all at most; an outage still going on near the close is extended in parts (§10.2). `invalid_extension` (400), `outage_not_over` (422) for an outage still going on, `too_late` (409) once the close has passed. Requesting the `vote.extend` approval itself answers `outage_not_over` (422) for an outage still going on. A vote has at most 24 extensions (`invalid_extension` past that) |
-| `POST /v1/proposals/{id}/close` | Needs only the API key: it publishes what the closed vote counted and decides nothing (it is refused before `closes_at` + 1 minute). `{proposal_id, results_hash, tally, counts}`: counts the vote and publishes the results (BALLOT-PROTOCOL §7), or reports them if already published. `not_closed` (409) before `closes_at` + 1 minute; `collecting` (503) until the relay's messages from before then are all handled: retry; `stamped_early` (503) while the results come back from the timestamp authority stamped before the close (the service's clock is ahead: see the alarm `results_stamped_early`). A retry is safe: it anchors nothing until the authority's time can have reached the close, so retry with backoff, and fix the clock |
+| `POST /v1/proposals/{id}/close` | Needs only the API key: it publishes what the closed vote counted and decides nothing (it is refused before `closes_at` + 1 minute). `{proposal_id, results_hash, tally, counts}`: counts the vote and publishes the results (BALLOT-PROTOCOL §7), or reports them if already published. `not_closed` (409) before `closes_at` + 1 minute; `collecting` (503) until the relay's messages from before then are all handled: retry; `stamped_early` (503) while the results come back from the timestamp authority stamped before the close (the service's clock is ahead: see the alarm `results_stamped_early`). A retry is safe: it anchors nothing until the authority's time can have reached the close, so retry with backoff, and fix the clock. `collecting` is also the answer while the timestamp authority's time is before the close (0.13.12: the service's clock alone never starts the count), and `timestamp_unavailable` (503) when the authority's time can't be had or verified: retry |
 | `GET /v1/proposals/{id}/results` | `{results, results_sig, rows, bundle}` once published |
 | `GET /v1/anchor-key` | `{anchor_key, anchor_cert, service_ik, sigstore}`: the service's anchor key (DER SubjectPublicKeyInfo), certified by its identity key, for registering the service on votes.vettid.org (BALLOT-PROTOCOL §3.3) |
 | `GET /health` | `{status: "ok"}` (no key) |

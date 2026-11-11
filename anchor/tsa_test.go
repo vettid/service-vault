@@ -144,3 +144,40 @@ func TestStagingRootAgreesWithSiteAndVault(t *testing.T) {
 		}
 	}
 }
+
+// VerifyTimestamp (the count's probe, BALLOT-PROTOCOL §7 0.13.12) checks a
+// stamp over given data as a bundle's is checked: the staging vector's
+// stamp over its message signature verifies, with the bundle's time; over
+// other data, or against production's chain, it doesn't.
+func TestVerifyTimestamp(t *testing.T) {
+	v := loadVector(t)
+	var b struct {
+		VerificationMaterial struct {
+			TimestampVerificationData struct {
+				Timestamps []struct {
+					SignedTimestamp []byte `json:"signedTimestamp"`
+				} `json:"rfc3161Timestamps"`
+			} `json:"timestampVerificationData"`
+		} `json:"verificationMaterial"`
+		MessageSignature struct {
+			Signature []byte `json:"signature"`
+		} `json:"messageSignature"`
+	}
+	if err := json.Unmarshal(v.Bundle, &b); err != nil {
+		t.Fatal(err)
+	}
+	resp, sig := b.VerificationMaterial.TimestampVerificationData.Timestamps[0].SignedTimestamp, b.MessageSignature.Signature
+	want, err := TimestampTime(Staging, v.Bundle, []byte(v.Proposal))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := VerifyTimestamp(Staging, resp, sig); err != nil || got != want {
+		t.Fatalf("%d, %v; want %d", got, err, want)
+	}
+	if _, err := VerifyTimestamp(Staging, resp, append([]byte{0}, sig...)); err == nil {
+		t.Error("a stamp over other data verified")
+	}
+	if _, err := VerifyTimestamp(Production, resp, sig); err == nil {
+		t.Error("a staging stamp verified against production's chain")
+	}
+}

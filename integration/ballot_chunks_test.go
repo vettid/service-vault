@@ -66,7 +66,8 @@ func TestBallotChunksAtCapOnDynamoDB(t *testing.T) {
 	m := &ballot.Manager{Store: &ballot.RecordStore{Records: st, Copy: &ballot.MemCopy{}}, IK: ik.Public().(ed25519.PublicKey),
 		Sign:   func(label string, msg []byte) ([]byte, error) { return suite.Sign(ik, label, msg) },
 		Roster: r, Sender: sink{}, Publisher: closingSite{}, Catcher: caught{}, Approvals: approveAll{}, NewID: envelope.NewULID,
-		Now: func() time.Time { return now }, Timestamp: ballottest.Time}
+		Now: func() time.Time { return now }, Timestamp: ballottest.Time,
+		AuthorityTime: func(context.Context) (int64, error) { return now.Unix(), nil }}
 	opens := now.Add(time.Hour).Unix()
 	in := ballot.ProposalInput{Title: "Adopt the 2027 budget", Choices: []ballot.ChoiceInput{{Label: "Yes"}, {Label: "No"}},
 		Quorum: vote.Quorum{MinBallots: 0}, OpensAt: opens, ClosesAt: opens + 86400, OutageRule: ballot.DefaultOutageRule}

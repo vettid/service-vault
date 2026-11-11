@@ -52,7 +52,59 @@ var (
 	// ErrStampedEarly: the results' timestamp is before the close, so
 	// nothing was uploaded; a later Close anchors them again.
 	ErrStampedEarly = errors.New("ballot: the results' timestamp is before the close: not published yet")
+	// ErrAuthorityEarly: the timestamp authority's time is before the
+	// close in force, so the vote is still collecting (§7, 0.13.12).
+	ErrAuthorityEarly = errors.New("ballot: the timestamp authority's time is before the close: still collecting")
+	// ErrAuthorityTime: the timestamp authority's time couldn't be had or
+	// verified; nothing is counted (never the service's clock instead).
+	ErrAuthorityTime = errors.New("ballot: the timestamp authority's time is unavailable: not counted")
 )
+
+// probeWait is an authority time seen before a close, and this service's
+// clock then; or (failed) the time of a probe that failed.
+type probeWait struct {
+	tsa, seen int64
+	failed    bool
+}
+
+// ProbeRetry is the least time between two probes when the last failed;
+// the caller backs off further (BALLOT-PROTOCOL §7, 0.13.12).
+const ProbeRetry = 10 * time.Second
+
+// authorityPast reports, as nil, that the timestamp authority's time is at
+// or after closesAt (§7, 0.13.12): the count may start. Before it, the
+// vote is still collecting (ErrAuthorityEarly), and the next probe waits
+// until the authority's time, judged from that one and this service's
+// clock since, can have reached closesAt. A probe that fails is
+// ErrAuthorityTime.
+func (m *Manager) authorityPast(ctx context.Context, id string, closesAt int64) error {
+	if m.AuthorityTime == nil {
+		return ErrAuthorityTime
+	}
+	now := m.Now().Unix()
+	if v, ok := m.probes.Load(id); ok {
+		switch w := v.(probeWait); {
+		case w.failed && now-w.seen < int64(ProbeRetry/time.Second):
+			return ErrAuthorityTime
+		case !w.failed && w.tsa+(now-w.seen) < closesAt:
+			return ErrAuthorityEarly
+		}
+	}
+	t, err := m.AuthorityTime(ctx)
+	if err != nil {
+		m.probes.Store(id, probeWait{seen: now, failed: true})
+		m.log().Error("the timestamp authority's time is unavailable: the vote is not counted", "alarm", "tsa_unavailable", "proposal_id", id, "err", err.Error())
+		return fmt.Errorf("%w: %v", ErrAuthorityTime, err)
+	}
+	if t < closesAt {
+		m.probes.Store(id, probeWait{tsa: t, seen: now})
+		m.log().Error("the vote's close passed by this service's clock but not by the timestamp authority's: still collecting", "alarm", "count_clock_ahead",
+			"proposal_id", id, "authority_time", t, "closes_at", closesAt, "skew_seconds", now-t)
+		return ErrAuthorityEarly
+	}
+	m.probes.Delete(id)
+	return nil
+}
 
 // PublishedResults is a vote's results as published.
 type PublishedResults struct {
@@ -133,6 +185,14 @@ func (m *Manager) Close(ctx context.Context, id string) (*ResultsSummary, error)
 		// the moment are fixed: a retry after a failed count or publication
 		// uses them, not the roster or the relay as they are then.
 		if !o.Published || o.Unhandled == nil || o.Removed == nil {
+			// The service's clock alone never starts the count: the
+			// timestamp authority's time must be past the close too (§7,
+			// 0.13.12), or a fast clock would refuse in-window casts.
+			if !o.Published {
+				if err := m.authorityPast(ctx, id, o.ClosesAt); err != nil {
+					return nil, err
+				}
+			}
 			// unhandled counts the window's messages: one in the last
 			// minute would be a late cast.
 			caught, unhandled, err := m.Catcher.Caught(ctx, end, time.Unix(p.OpensAt, 0), time.Unix(o.ClosesAt, 0))

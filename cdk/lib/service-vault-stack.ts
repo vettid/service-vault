@@ -93,6 +93,10 @@ export const ALARMS = {
   ballots_off: 'Ballots are off: the ballot copy\'s key is missing or not the one its ballots are under; restore the keystore item ballot-copy-key from a backup of the table (README "Rotating the record key")',
   /** A vote request or a close for a proposal held but not published (internal/ballot/box.go, close.go): members get no answer and it can't close until it is published. */
   vote_unpublished: 'Members sent vote requests for a proposal the service holds but has not published (after a restore or a lost publication), or its close was refused: they get no answer until it is published (POST /v1/proposals/{id}/publish): publish at once, and extend the vote too if its close is less than about 70 minutes away (README "vote_unpublished")',
+  /** The vote's close passed by the service's clock but not the timestamp authority's (internal/ballot/close.go): not counted yet. */
+  count_clock_ahead: 'A vote\'s close has passed by the service\'s clock but not by the timestamp authority\'s: the service\'s clock is ahead. The vote is not counted (still collecting) until the authority\'s time passes the close; check both clocks (README "count_clock_ahead")',
+  /** The timestamp authority's time couldn't be had or verified before a count (internal/ballot/close.go): the vote is not counted. */
+  tsa_unavailable: 'Before counting a vote, the service could not get or verify the timestamp authority\'s time: the vote is not counted until it can (README "count_clock_ahead"); look at the ERROR line for why',
   /** The results' bundle was timestamped before the close (internal/publish/publish.go): not published; the clock is ahead of the timestamp authority's. */
   results_stamped_early: 'A vote\'s results were timestamped before their close: the service\'s clock is more than a minute ahead of the timestamp authority\'s. They are not published; check both clocks (the task\'s and the authority\'s), then close again (POST /v1/proposals/{id}/close) (README "results_stamped_early")',
   /** The results' bundle failed its timestamp check (internal/publish/publish.go): not published. */

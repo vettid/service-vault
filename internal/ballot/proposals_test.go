@@ -189,6 +189,7 @@ func newManager(t *testing.T) (*Manager, *fakeSender, *fakePublisher) {
 		IK:    ik.Public().(ed25519.PublicKey), Roster: fakeRoster{"c2", "c0", "c1"}, Sender: s, Publisher: p,
 		NewID: envelope.NewULID, Now: func() time.Time { return clock }, Approvals: &fakeApprovals{auto: true}, Timestamp: ballottest.Time,
 	}
+	m.AuthorityTime = func(context.Context) (int64, error) { return m.Now().Unix(), nil } // an authority agreeing with the clock
 	p.integrated = func() int64 { return m.Now().Unix() }
 	return m, s, p
 }
@@ -604,6 +605,7 @@ func TestTwoTasksSaveByVersion(t *testing.T) {
 	m1.Now = func() time.Time { return time.Unix(in.ClosesAt-600, 0) }
 	m2 := &Manager{Store: m1.Store, Sign: m1.Sign, IK: m1.IK, Roster: m1.Roster, Sender: m1.Sender, Publisher: pub,
 		Catcher: &fakeCatcher{caught: true}, NewID: m1.NewID, Now: func() time.Time { return time.Unix(in.ClosesAt, 0).Add(2 * CollectMargin) }}
+	m2.AuthorityTime = func(context.Context) (int64, error) { return m2.Now().Unix(), nil }
 	pub.started, pub.release = make(chan struct{}), make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
@@ -941,5 +943,95 @@ func TestCloseRefusesUnpublished(t *testing.T) {
 	}
 	if pr, _ := m.Results(ctx, c.ProposalID); pr != nil {
 		t.Fatal("counted")
+	}
+}
+
+// BALLOT-PROTOCOL §7 (0.13.12): a fast service clock doesn't start the
+// count. Until the timestamp authority's time is past the close the vote
+// is still collecting, nothing is fixed, and an in-window cast is taken,
+// not refused late; probes are rationed; then it counts every ballot.
+func TestCloseWaitsForTheAuthority(t *testing.T) {
+	ctx := context.Background()
+	m, _, _ := newManager(t)
+	m.Catcher = &fakeCatcher{caught: true}
+	c, err := m.Create(ctx, "apv", input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := input()
+	if castFor(t, m, c.ProposalID, "c0", "c1", uint64(in.OpensAt)*1000+1) != "" {
+		t.Fatal("cast refused")
+	}
+	clock := time.Unix(in.ClosesAt, 0).Add(5 * time.Minute) // 5 min fast
+	m.Now = func() time.Time { return clock }
+	authority, probes := in.ClosesAt-4*60, 0 // the real time
+	m.AuthorityTime = func(context.Context) (int64, error) { probes++; return authority, nil }
+	if _, err := m.Close(ctx, c.ProposalID); !errors.Is(err, ErrAuthorityEarly) || probes != 1 {
+		t.Fatalf("a fast clock: %v, %d probes", err, probes)
+	}
+	if o, _ := m.Store.OpenProposal(ctx, c.ProposalID); o.Published || o.Unhandled != nil {
+		t.Fatal("the counts were fixed")
+	}
+	if code := castFor(t, m, c.ProposalID, "c1", "c2", uint64(in.ClosesAt)*1000-1000); code != "" {
+		t.Fatalf("an in-window cast while still collecting: %q", code)
+	}
+	// Rationed: no probe until the authority can be past the close.
+	clock = clock.Add(4*time.Minute - time.Second)
+	authority += 4*60 - 1
+	if _, err := m.Close(ctx, c.ProposalID); !errors.Is(err, ErrAuthorityEarly) || probes != 1 {
+		t.Fatalf("probed too soon: %v, %d probes", err, probes)
+	}
+	clock, authority = clock.Add(time.Second), authority+1
+	sum, err := m.Close(ctx, c.ProposalID)
+	if err != nil || probes != 2 || sum.Counts.Ballots != 2 {
+		t.Fatalf("at the real close: %v, %d probes, %+v", err, probes, sum)
+	}
+}
+
+// A probe that fails counts nothing, never falling back to the service's
+// clock; the next is at least ProbeRetry later. No probe at all: nothing
+// is counted.
+func TestCloseWithoutTheAuthority(t *testing.T) {
+	ctx := context.Background()
+	m, _, _ := newManager(t)
+	m.Catcher = &fakeCatcher{caught: true}
+	c, err := m.Create(ctx, "apv", input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Unix(input().ClosesAt, 0).Add(2 * CollectMargin)
+	m.Now = func() time.Time { return clock }
+	probes, fail := 0, true
+	m.AuthorityTime = func(context.Context) (int64, error) {
+		probes++
+		if fail {
+			return 0, errors.New("unreachable")
+		}
+		return clock.Unix(), nil
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := m.Close(ctx, c.ProposalID); !errors.Is(err, ErrAuthorityTime) || probes != 1 {
+			t.Fatalf("try %d: %v, %d probes", i, err, probes)
+		}
+	}
+	if o, _ := m.Store.OpenProposal(ctx, c.ProposalID); o.Published {
+		t.Fatal("counted without the authority's time")
+	}
+	clock, fail = clock.Add(ProbeRetry), false
+	if _, err := m.Close(ctx, c.ProposalID); err != nil || probes != 2 {
+		t.Fatalf("after the retry time: %v, %d probes", err, probes)
+	}
+	m2, _, _ := newManager(t)
+	m2.Catcher = &fakeCatcher{caught: true}
+	c2, err := m2.Create(ctx, "apv", input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2.Now, m2.AuthorityTime = m.Now, nil
+	if _, err := m2.Close(ctx, c2.ProposalID); !errors.Is(err, ErrAuthorityTime) {
+		t.Fatalf("no probe: %v", err)
+	}
+	if o, _ := m2.Store.OpenProposal(ctx, c2.ProposalID); o.Published {
+		t.Fatal("counted with no probe")
 	}
 }
