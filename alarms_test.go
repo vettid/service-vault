@@ -42,7 +42,7 @@ func TestAlarmsAreInTheStack(t *testing.T) {
 		}
 		for _, m := range logged.FindAllStringSubmatch(string(src), -1) {
 			found++
-			if !regexp.MustCompile(`\n\s*`+m[1]+`:`).MatchString(block) {
+			if !regexp.MustCompile(`\n\s*` + m[1] + `:`).MatchString(block) {
 				t.Errorf("%s logs alarm %q, which isn't in ALARMS (cdk/lib/service-vault-stack.ts)", path, m[1])
 			}
 		}
