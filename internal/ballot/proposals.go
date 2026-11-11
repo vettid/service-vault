@@ -34,7 +34,7 @@ type Roster interface {
 
 // Sender sends a message to a member's vault over its connection.
 type Sender interface {
-	SendMessage(ctx context.Context, connID, typ string, body json.RawMessage) (string, error)
+	SendMessage(ctx context.Context, connID, typ string, body json.RawMessage, notAfter time.Time) (string, error)
 }
 
 // Publisher anchors a proposal and publishes it on votes.vettid.org
@@ -297,13 +297,13 @@ func (m *Manager) Publish(ctx context.Context, id string) (int, error) {
 	if o == nil {
 		return 0, ErrUnknownProposal
 	}
-	// Once the results are published, members are sent vote.closed: a
-	// vote.proposal sent after it would only tell them of a vote that is
-	// over.
+	// Once the vote is counted (the results record is kept at the count,
+	// before the upload), members are sent vote.closed: a vote.proposal
+	// sent after it would only tell them of a vote that is over.
 	if _, done, err := m.Store.Records.Get(ctx, KindResults, id); err != nil {
 		return 0, err
 	} else if done {
-		m.log().Info("vote.proposal not sent: the results are published", "proposal_id", id)
+		m.log().Info("vote.proposal not sent: the vote is counted", "proposal_id", id)
 		return 0, nil
 	}
 	if o.Bundle == nil {
@@ -342,7 +342,7 @@ func (m *Manager) Publish(ctx context.Context, id string) (int, error) {
 		}
 	}
 	sending := 0
-	if m.sendInBackground(id, "proposal/"+id, TypeProposal, conns, body) {
+	if m.sendInBackground(id, "proposal/"+id, TypeProposal, conns, voteSendUntil(o.ClosesAt), body) {
 		sending = len(conns)
 	}
 	m.log().Info("proposal published", "proposal_id", id, "eligible", p.Eligible, "sending", sending)

@@ -34,6 +34,19 @@ import (
 // retry.
 const SendTimeout = 30 * time.Second
 
+// A queued vote.proposal or vote.extended is worth delivering until the
+// close in force plus the most the extensions may add (BALLOT-PROTOCOL
+// §10.2: 24 h in all); a vote.closed for ClosedSendLife. The peer drops a
+// deposit not made by then, so it no longer counts toward its bound.
+const (
+	extensionsMax  = 24 * time.Hour
+	ClosedSendLife = 7 * 24 * time.Hour
+)
+
+func voteSendUntil(closesAt int64) time.Time {
+	return time.Unix(closesAt, 0).Add(extensionsMax)
+}
+
 // MaxFailuresInARow stops a job after that many sends in a row have
 // failed for a reason that isn't the member's own: the relay hanging (the
 // drain runs out SendTimeout) or the store failing, while the job holds
@@ -55,6 +68,7 @@ func memberOnly(err error) bool {
 type sendJob struct {
 	key, typ string
 	conns    []string
+	notAfter time.Time
 	body     func(conn string) (json.RawMessage, error)
 }
 
@@ -84,7 +98,7 @@ func sortedConns(members map[string]Member) []string {
 // queued again, nor is anything once StopSends was called: it returns
 // false, and the caller answers that nothing is being sent. Each body is
 // built as it is sent, so the bodies aren't all held at once.
-func (m *Manager) sendInBackground(proposalID, key, typ string, conns []string, body func(conn string) (json.RawMessage, error)) bool {
+func (m *Manager) sendInBackground(proposalID, key, typ string, conns []string, notAfter time.Time, body func(conn string) (json.RawMessage, error)) bool {
 	m.sends.mu.Lock()
 	defer m.sends.mu.Unlock()
 	if m.sends.queues == nil {
@@ -100,7 +114,7 @@ func (m *Manager) sendInBackground(proposalID, key, typ string, conns []string, 
 	}
 	m.sends.keys[key] = true
 	q, running := m.sends.queues[proposalID]
-	m.sends.queues[proposalID] = append(q, &sendJob{key: key, typ: typ, conns: conns, body: body})
+	m.sends.queues[proposalID] = append(q, &sendJob{key: key, typ: typ, conns: conns, notAfter: notAfter, body: body})
 	if !running {
 		m.sends.wg.Add(1)
 		go m.runSends(proposalID)
@@ -151,7 +165,7 @@ func (m *Manager) runJob(job *sendJob) {
 			continue
 		}
 		sctx, cancel := context.WithTimeout(ctx, SendTimeout)
-		_, err = m.Sender.SendMessage(sctx, c, job.typ, b)
+		_, err = m.Sender.SendMessage(sctx, c, job.typ, b, job.notAfter)
 		cancel()
 		if err != nil {
 			// A send that timed out may still be in the peer's outbox, and go

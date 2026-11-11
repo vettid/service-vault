@@ -107,12 +107,12 @@ func TestSendsOrderPerProposal(t *testing.T) {
 	s.block = make(chan struct{})
 	conns := []string{"a", "b"}
 	body := func(string) (json.RawMessage, error) { return json.RawMessage(`{}`), nil }
-	m.sendInBackground("p1", "proposal/p1", TypeProposal, conns, body)
-	m.sendInBackground("p1", "extended/p1/1", TypeExtended, conns, body)
-	if m.sendInBackground("p1", "extended/p1/1", TypeExtended, conns, body) {
+	m.sendInBackground("p1", "proposal/p1", TypeProposal, conns, time.Time{}, body)
+	m.sendInBackground("p1", "extended/p1/1", TypeExtended, conns, time.Time{}, body)
+	if m.sendInBackground("p1", "extended/p1/1", TypeExtended, conns, time.Time{}, body) {
 		t.Fatal("a queued key queued twice")
 	}
-	m.sendInBackground("p1", "closed/p1", TypeClosed, conns, body)
+	m.sendInBackground("p1", "closed/p1", TypeClosed, conns, time.Time{}, body)
 	close(s.block)
 	m.Wait()
 	want := []string{TypeProposal, TypeProposal, TypeExtended, TypeExtended, TypeClosed, TypeClosed}
@@ -129,8 +129,8 @@ func TestSendsOrderPerProposal(t *testing.T) {
 	m3, s3, _ := newManager(t)
 	h := make(chan struct{})
 	s3.hold = map[string]chan struct{}{"a": h}
-	m3.sendInBackground("p1", "proposal/p1", TypeProposal, []string{"a"}, body)
-	m3.sendInBackground("p1", "extended/p1/1", TypeExtended, []string{"b"}, body)
+	m3.sendInBackground("p1", "proposal/p1", TypeProposal, []string{"a"}, time.Time{}, body)
+	m3.sendInBackground("p1", "extended/p1/1", TypeExtended, []string{"b"}, time.Time{}, body)
 	time.Sleep(100 * time.Millisecond)
 	s3.mu.Lock()
 	early := len(s3.sent)
@@ -142,7 +142,7 @@ func TestSendsOrderPerProposal(t *testing.T) {
 	}
 	// After StopSends nothing is queued.
 	m3.StopSends()
-	if m3.sendInBackground("p1", "closed/p1", TypeClosed, []string{"a"}, body) {
+	if m3.sendInBackground("p1", "closed/p1", TypeClosed, []string{"a"}, time.Time{}, body) {
 		t.Fatal("queued after StopSends")
 	}
 
@@ -150,8 +150,8 @@ func TestSendsOrderPerProposal(t *testing.T) {
 	m2, s2, _ := newManager(t)
 	held := make(chan struct{})
 	s2.hold = map[string]chan struct{}{"a": held}
-	m2.sendInBackground("p1", "proposal/p1", TypeProposal, []string{"a"}, body)
-	m2.sendInBackground("p2", "proposal/p2", TypeProposal, []string{"b"}, body)
+	m2.sendInBackground("p1", "proposal/p1", TypeProposal, []string{"a"}, time.Time{}, body)
+	m2.sendInBackground("p2", "proposal/p2", TypeProposal, []string{"b"}, time.Time{}, body)
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		s2.mu.Lock()
@@ -255,7 +255,7 @@ type boundedOutbox struct {
 	bound, queued, calls int
 }
 
-func (b *boundedOutbox) SendMessage(_ context.Context, _, _ string, _ json.RawMessage) (string, error) {
+func (b *boundedOutbox) SendMessage(_ context.Context, _, _ string, _ json.RawMessage, _ time.Time) (string, error) {
 	b.calls++
 	if b.queued >= b.bound {
 		return "", peer.ErrOutboxFull
@@ -316,5 +316,27 @@ func TestPublishSendsNothingAfterResultsOrStop(t *testing.T) {
 	m2.Wait()
 	if len(s2.sent) != before {
 		t.Fatal("sent while stopping")
+	}
+}
+
+// Each message's deposits stop being worth making at the close in force
+// plus what extensions may add (proposal, extended), or ClosedSendLife
+// after the count (closed).
+func TestSendsNotAfter(t *testing.T) {
+	ctx := context.Background()
+	m, s, _ := newManager(t)
+	c, err := m.Create(ctx, "apv", input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Wait()
+	if want := time.Unix(input().ClosesAt, 0).Add(24 * time.Hour); !s.notAfter.Equal(want) {
+		t.Fatalf("vote.proposal not after %v, want %v", s.notAfter, want)
+	}
+	o, _ := m.Store.OpenProposal(ctx, c.ProposalID)
+	m.announce(o, &PublishedResults{})
+	m.Wait()
+	if want := m.Now().Add(ClosedSendLife); !s.notAfter.Equal(want) {
+		t.Fatalf("vote.closed not after %v, want %v", s.notAfter, want)
 	}
 }
