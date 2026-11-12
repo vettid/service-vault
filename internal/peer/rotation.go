@@ -71,11 +71,31 @@ func (p *Peer) identityRotate(c *Connection, body []byte, now time.Time) {
 		return // the same statement again
 	}
 	final, kem, err := handshake.ResolveChain(c.Peer.IK, []*handshake.Rotation{r})
-	if err != nil {
+	if err != nil || p.revisits(c, []*handshake.Rotation{r}) {
 		p.audit("bad_rotation", c.ID)
 		return
 	}
 	p.followRotation(c, final, kem, []*handshake.Rotation{r})
+}
+
+// revisits reports whether following links would lead the connection's
+// identity back to a key it already had (a cycle, such as A->B then
+// B->A): one successor per key could then no longer be judged on the
+// chain, so such links are never followed.
+func (p *Peer) revisits(c *Connection, links []*handshake.Rotation) bool {
+	seen := []ed25519.PublicKey{c.Peer.IK}
+	for _, r := range chainOf(c) {
+		seen = append(seen, r.OldIK, r.NewIK)
+	}
+	for _, r := range links {
+		for _, k := range seen {
+			if suite.EqualPublic(k, r.NewIK) {
+				return true
+			}
+		}
+		seen = append(seen, r.NewIK)
+	}
+	return false
 }
 
 // followRotation records links the connection's identity advanced through
@@ -111,7 +131,20 @@ func (p *Peer) followRotation(c *Connection, ik ed25519.PublicKey, kem *suite.Pu
 func (p *Peer) dropStaleAnswers(c *Connection) {
 	now := p.now()
 	for id, aw := range p.awaiting {
-		if aw.ConnID != c.ID || aw.New != nil || aw.Purpose != handshake.PurposeRekey {
+		if aw.ConnID != c.ID || aw.New != nil {
+			continue
+		}
+		if aw.Reconnect != nil {
+			// A reconnect answer stored before signers were kept, without
+			// links: its signer is unknown, so it is dropped. Others are
+			// judged at their hs.fin (checkSigner).
+			if aw.Reconnect.Signer == nil && len(aw.Reconnect.Links) == 0 {
+				p.audit("reconnect_answer_dropped", c.ID)
+				p.dropAwaiting(id, now)
+			}
+			continue
+		}
+		if aw.Purpose != handshake.PurposeRekey {
 			continue
 		}
 		if aw.Follow != nil {
@@ -191,6 +224,10 @@ func (p *Peer) checkSigner(c *Connection, ik ed25519.PublicKey, kem *suite.Publi
 	final, fkem, n, err := handshake.ResolveChainKnown(c.Peer.IK, chainOf(c), links)
 	if err != nil || !suite.EqualPublic(final, ik) || fkem != nil && !fkem.Equal(kem) {
 		p.audit("ancestor_ik", c.ID) // Table B, an hs.fin to our answer
+		return nil, false
+	}
+	if p.revisits(c, links[n:]) {
+		p.audit("bad_rotation", c.ID)
 		return nil, false
 	}
 	return links[n:], true

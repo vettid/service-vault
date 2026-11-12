@@ -784,7 +784,9 @@ the move:
   answered under a key that a later rotation moved past is dropped at
   that rotation. A second successor found while following links suspends
   the connection, and the handshake that was being completed then
-  completes nothing. One gap: a second successor carried in an `hs.resp`
+  completes nothing. Links that would lead the identity back to a key it
+  already had (a cycle, such as A to B, then B to A) are refused, so
+  that "one successor per key" can still be judged. One gap: a second successor carried in an `hs.resp`
   to the service's own rekey is refused by the handshake library before
   the service sees it, so it shows only as failed rekeys (backed off),
   not as `rotate_conflict`. `identity.rotate` itself still reads only its

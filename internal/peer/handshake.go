@@ -723,7 +723,14 @@ func (p *Peer) handleResp(id string, raw []byte, sender ed25519.PublicKey, now t
 	// stored key after those already followed and verified sig_R under:
 	// followed before the epoch is installed, so the stored key is the
 	// one the epoch was made with.
-	if fresh := res.Resp.Rotations[handshake.KnownPrefix(chainOf(c), res.Resp.Rotations):]; len(fresh) > 0 {
+	fresh := res.Resp.Rotations[handshake.KnownPrefix(chainOf(c), res.Resp.Rotations):]
+	if p.revisits(c, fresh) {
+		p.audit("bad_rotation", c.ID)
+		res.Epoch.Destroy()
+		p.rekeyFailed(og, now)
+		return ackAfterFlush
+	}
+	if len(fresh) > 0 {
 		p.followRotation(c, res.ResponderIK, res.ResponderKEM, fresh)
 	}
 	if c.State == StateSuspended {
