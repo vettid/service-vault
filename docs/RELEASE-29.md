@@ -82,7 +82,8 @@ current epoch unless stated:
    token only, not the connection: the refused entry and the others to
    the member wait in the outbox for a valid standing token. Today the
    service makes the connection `stale` and drops its other entries,
-   which changes. A reconnect's own `hs.init`
+   which changes with the second change (until then the refused and
+   dropped entries are audited `undelivered_refused`). A reconnect's own `hs.init`
    answered `token_revoked` is a failed try at once, as §8.6 says (it can
    never be answered); a carried token's refusal is not a try at all;
 5. after `quota_exceeded` on its standing token, at once and also while

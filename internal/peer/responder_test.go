@@ -454,6 +454,8 @@ func TestDepositRefusals(t *testing.T) {
 		{"timestamp_stale", 401, false, false},
 		{"replay_detected", 409, false, true},
 		{"bad_request", 400, true, false},
+		{"mailbox_unknown", 404, true, false},
+		{"token_revoked", 403, true, false},
 	} {
 		f := newFixture(t)
 		m := f.member(10)
@@ -476,8 +478,14 @@ func TestDepositRefusals(t *testing.T) {
 		if (e == nil) != tc.ended {
 			t.Fatalf("%s: ended %v", tc.code, e == nil)
 		}
-		if tc.ended && !strings.Contains(f.logs.String(), "reason=undelivered_refused") {
-			t.Fatalf("%s: not audited", tc.code)
+		if tc.ended {
+			reason := "undelivered_refused"
+			if tc.code == "mailbox_unknown" {
+				reason = "undelivered_mailbox_unknown"
+			}
+			if n := strings.Count(f.logs.String(), "reason="+reason+" connection_id="+cid+" ref="+id); n != 1 {
+				t.Fatalf("%s: audited %d times with its ref:\n%s", tc.code, n, f.logs.String())
+			}
 		}
 		if e != nil && e.Tried != tc.tried {
 			t.Fatalf("%s: tried %v", tc.code, e.Tried)
@@ -708,15 +716,19 @@ func TestUndeliveredAudited(t *testing.T) {
 // member message under the new epoch that those refuse still confirms it
 // and sets the received flag.
 func TestConfirmBeforeTimeWindowAndDedupe(t *testing.T) {
-	for _, tc := range []string{"stale", "duplicate"} {
+	for _, tc := range []string{"stale", "duplicate", "rate_limited"} {
 		f := newFixture(t)
 		m := f.member(10)
 		cid := f.connect(m, "")
 		_, e2 := memberRekey(t, f, m, cid)
 		in := &envelope.Inner{ID: m.NewID(), Type: peerwire.TypeProfileUpdate, TS: f.clk.Now(), Body: m.ProfileBody(2)}
-		if tc == "stale" {
+		switch tc {
+		case "stale":
 			in.TS = f.clk.Now().Add(-30 * 24 * time.Hour)
-		} else {
+		case "rate_limited":
+			for f.p.rateAllow(cid, f.clk.Now()) {
+			}
+		default:
 			f.p.mark(kindInner, cid+"|"+in.ID, []byte{1}, f.clk.Now().Add(time.Hour)) // seen already
 			if err := f.p.flush(context.Background()); err != nil {
 				t.Fatal(err)
@@ -750,6 +762,9 @@ func TestKeepOnlyTheConfirmed(t *testing.T) {
 	}
 	if k := c.kr.Find(e1); k == nil || !k.HasRK() {
 		t.Fatal("the confirmed epoch lost its rk")
+	}
+	if c.kr.Find(e2) == nil {
+		t.Fatal("the superseded epoch's receive key is gone at once")
 	}
 	m.Send(peerwire.TypeProfileUpdate, m.ProfileBody(2)) // confirms e3
 	f.pump()
@@ -913,5 +928,84 @@ func TestUnconfirmedLate(t *testing.T) {
 	f.tick()
 	if n := strings.Count(f.logs.String(), "reason=unconfirmed_late"); n != 1 {
 		t.Fatalf("noted %d times", n)
+	}
+}
+
+// The superseded, unconfirmed epoch's receive key goes after 16 days; the
+// confirmed one's stays to 48.
+func TestUnconfirmedKeptSixteenDays(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	e1, e2 := memberRekey(t, f, m, cid)
+	m.IgnoreStray = true
+	m.Reconnect()
+	f.pump()
+	c := f.p.conns[cid]
+	f.clk.Advance(handshake.ReceiveKeyRetention + time.Minute)
+	f.tick()
+	if c.kr.Find(e2) != nil {
+		t.Fatal("the unconfirmed superseded epoch outlived 16 days")
+	}
+	if c.kr.Find(e1) == nil {
+		t.Fatal("the confirmed epoch's keys went before 48 days")
+	}
+}
+
+// The first epoch's received flag is set at activation, by the member's
+// connection.approved, before the member sends anything else.
+func TestReceivedAtActivation(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	inv := f.invite("")
+	m.Accept(inv.Link, "")
+	f.pump()
+	m.Approve()
+	if _, err := f.p.Step(context.Background(), 0); err != nil { // the member does not step
+		t.Fatal(err)
+	}
+	if len(f.p.conns) != 1 {
+		t.Fatalf("%d connections", len(f.p.conns))
+	}
+	for _, c := range f.p.conns {
+		if len(c.Epochs) != 1 || !c.Epochs[0].Received {
+			t.Fatalf("flag clear at activation: %+v", c.Epochs)
+		}
+	}
+}
+
+// Re-stamping keeps the outbox order: an old untried entry A, then a
+// young B; nothing goes in the pass that re-stamps A; then A before B.
+func TestRestampKeepsOrder(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	c := f.p.conns[cid]
+	a := f.p.sendTo(c, "connection.note", []byte(`{"x":1}`), f.clk.Now())
+	f.clk.Advance(RestampAfter + time.Hour)
+	b := f.p.sendTo(c, "connection.note", []byte(`{"x":2}`), f.clk.Now())
+	deposits := 0
+	f.failDeposit = func(string, string) error { deposits++; return nil }
+	f.p.mu.Lock()
+	f.p.drainOutbox(context.Background())
+	f.p.mu.Unlock()
+	if deposits != 0 {
+		t.Fatalf("%d deposited in the re-stamp pass", deposits)
+	}
+	f.failDeposit = nil
+	m.IgnoreStray = true
+	f.tick()
+	f.pump()
+	ia, ib := -1, -1
+	for i, g := range m.Got {
+		switch g.ID {
+		case a:
+			ia = i
+		case b:
+			ib = i
+		}
+	}
+	if ia < 0 || ib < 0 || ia > ib {
+		t.Fatalf("order A %d, B %d", ia, ib)
 	}
 }

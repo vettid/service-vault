@@ -334,7 +334,7 @@ const (
 // than RestampAfter goes as it is, noted once (unconfirmed_late).
 func (p *Peer) checkAtDeposit(e *outboxEntry, now time.Time) int {
 	c := p.conns[e.ConnID]
-	if c == nil || e.Confirm || e.BestEffort || e.Token != "" || len(e.Payload) == 0 || c.kr == nil || c.kr.Current() == nil {
+	if c == nil || e.Confirm || e.Handshake || e.BestEffort || e.Token != "" || len(e.Payload) == 0 || c.kr == nil || c.kr.Current() == nil {
 		return atDepositGo
 	}
 	env, err := envelope.Parse(e.Payload)
@@ -405,7 +405,9 @@ func (p *Peer) dropUndelivered(c *Connection, reason string, keep *outboxEntry) 
 
 // auditRefused audits an entry the relay refused for good (§8.3 cases 5
 // and 8): a durable message to a connection with its inner id as ref, any
-// other entry by its reason alone.
+// other entry by its reason alone. TODO(change 2): an entry still sealed
+// under an older epoch gets no ref until the initiator's re-seal at
+// confirmation leaves none there.
 func (p *Peer) auditRefused(e *outboxEntry, reason string) {
 	if c := p.conns[e.ConnID]; c != nil && c.kr != nil && c.kr.Current() != nil && !e.Handshake && !e.BestEffort && !e.Confirm {
 		if env, err := envelope.Parse(e.Payload); err == nil {
