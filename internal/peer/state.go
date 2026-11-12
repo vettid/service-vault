@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
@@ -106,6 +107,11 @@ type Connection struct {
 	// ReconnectSlow is set once the reconnect_slow alarm was raised.
 	ReconnectSince time.Time `json:"reconnect_since,omitzero"`
 	ReconnectSlow  bool      `json:"reconnect_slow,omitempty"`
+	// ReconnectIK is the identity key a reconnect hs.init dropped at
+	// start named, other than this service's (dropStale): no new try
+	// starts while this service's key differs from it, since the member
+	// would refuse it. Cleared when they match again.
+	ReconnectIK []byte `json:"reconnect_ik,omitempty"`
 
 	Created   time.Time `json:"created"`
 	Activated time.Time `json:"activated"`
@@ -632,12 +638,12 @@ func (p *Peer) load(ctx context.Context) error {
 // service never rotates its identity key, so this means its keys or
 // secrets are wrong, or the table is another service's: an alarm, not an
 // audit. The tokens the hs.init carries are revoked, as dropOutgoing
-// does, but a reconnect is not ended: the connection stays reconnecting,
-// so resumeReconnects starts a fresh try at this start, under the current
-// key. Starts under that same key keep that try; the start after the keys
-// are put right drops it in turn and spends another. Each key change thus
-// costs one try (MaxReconnectTries); ReconnectTimeout still counts from
-// the reconnect's start.
+// does, but a reconnect is not ended: the connection stays reconnecting
+// (so nothing else starts on it, a rekey included), and the key its
+// hs.init named is kept (ReconnectIK). No try starts while this service's
+// key differs from that one (reconnectHeld); the first start with it
+// again resumes, with one try. ReconnectTimeout still counts from the
+// reconnect's start and ends it if the key is never put right.
 func (p *Peer) dropStale(stale []*outgoing) {
 	for _, og := range stale {
 		p.log().Error("a stored hs.init names another identity key than this service's: dropped; check the service's keys and secrets",
@@ -646,5 +652,15 @@ func (p *Peer) dropStale(stale []*outgoing) {
 			p.denyJTI(j, p.now())
 		}
 		p.markDirty(kindOutgoing, og.ID)
+		if c := p.conns[og.ConnID]; c != nil && og.Init.Purpose == handshake.PurposeReconnect && c.Reconnecting {
+			// RestoreInitiator parsed the body before refusing it; one
+			// that does not parse here holds the reconnect until it
+			// times out (fail closed).
+			c.ReconnectIK = []byte{0}
+			if body, err := handshake.ParseInit(og.Init.Body); err == nil {
+				c.ReconnectIK = bytes.Clone(body.From.IK)
+			}
+			p.markDirty(kindConn, c.ID)
+		}
 	}
 }

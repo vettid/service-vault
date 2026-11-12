@@ -9,7 +9,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -319,10 +318,6 @@ type Member struct {
 	// IgnoreStray drops a sealed message no handshake of ours matches
 	// (an hs.resp to a reconnect we replaced), as a vault does.
 	IgnoreStray bool
-
-	// IgnoreForeign drops a reconnect hs.init signed by another identity
-	// key than the service's, as a vault does.
-	IgnoreForeign bool
 
 	Got        []*envelope.Inner // messages received in the session
 	Challenges []*peerwire.ConnAuthChallenge
@@ -696,9 +691,6 @@ func (m *Member) answerReconnect(raw []byte, sender ed25519.PublicKey) {
 	resp, env, err := pi.Respond(handshake.ResponderConfig{Identity: m.IK, Policy: handshake.PolicyVaultToVault,
 		CollectSender: sender, RecordRelayKey: m.svc.Relay.PK, KnownInitiatorIK: m.svc.IK, ExpectedCtx: body.Ctx,
 		Token: m.Mint(peerwire.StandingMax), ReconnectToken: m.Mint(300 * 24 * time.Hour), Rotations: m.Rotations, Now: now})
-	if err != nil && m.IgnoreForeign && errors.Is(err, handshake.ErrIdentity) {
-		return
-	}
 	if err != nil {
 		m.t.Fatalf("Member: respond reconnect: %v", err)
 	}

@@ -95,14 +95,15 @@ destination.
   than the one it now has. The service never rotates its identity key,
   so its keys or secrets are wrong, or the table is another service's.
   The handshake is dropped and the tokens it carried are revoked; a
-  rekey starts again later. A reconnect stays open and a new try starts
-  at once, under the key the service now has. Further starts under that
-  same key keep that try. Once the keys are put right, the next start
-  drops that try in turn (the alarm fires again; expect it) and spends
-  another. So each key change costs a reconnect one of its 3 tries, and
-  the 7 days still count from when it started: a reconnect already on
-  its second try when the keys went wrong ends (`reconnect_failed`), and
-  that member must connect again from a new invitation.
+  rekey starts again later. A reconnect stays open but held: no new try
+  starts while the service's key differs from the one the reconnect was
+  made under, and nothing else (a rekey included) starts on that
+  connection. Further starts under the wrong key raise nothing new.
+  The first start with the right key resumes it without another
+  `outgoing_identity_changed`, spending one try. The 7 days still count
+  from when the reconnect started: if the key is not put right by then,
+  it ends (`reconnect_failed`) and that member must connect again from a
+  new invitation.
 - `reconnect_failed`: after a table restore, a connection's reconnect
   could not start or complete, so that member must connect again (see
   "Restoring the table").

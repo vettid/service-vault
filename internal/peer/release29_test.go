@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vettid/service-vault/internal/peer/peertest"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/peerwire"
@@ -256,15 +257,11 @@ func TestStaleOutgoingDroppedAtStart(t *testing.T) {
 	}
 }
 
-// A stored reconnect hs.init under another identity key is dropped at
-// start and its tokens revoked, but the reconnect stays open: a fresh try
-// starts at once, a second start under the same key keeps it, and once
-// the key is put right, that try is dropped in turn (a second alarm) and
-// the next one completes.
-func TestStaleReconnectDroppedAtStart(t *testing.T) {
-	f := newFixture(t)
-	m := f.member(10)
-	cid := f.connect(m, "")
+// staleReconnect stores a reconnect hs.init (after a marked restore),
+// then restarts under another identity key; it returns the original key
+// and the dropped hs.init's tokens.
+func staleReconnect(t *testing.T, f *fixture, m *peertest.Member) (ed25519.PrivateKey, []string) {
+	t.Helper()
 	b := f.backup()
 	m.StartRekey()
 	f.pump()
@@ -273,40 +270,69 @@ func TestStaleReconnectDroppedAtStart(t *testing.T) {
 	for _, og := range f.p.outgoing {
 		issued = og.Issued
 	}
-	if len(issued) == 0 || f.p.conns[cid].ReconnectTries != 1 {
-		t.Fatalf("no reconnect stored: %d tokens, tries %d", len(issued), f.p.conns[cid].ReconnectTries)
+	if len(issued) == 0 || len(f.p.outgoing) != 1 {
+		t.Fatalf("no reconnect stored: %d tokens, %d outgoing", len(issued), len(f.p.outgoing))
 	}
 	ik := f.keys.IK
 	f.keys.IK = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{88}, 32))
 	f.start()
-	if !strings.Contains(f.logs.String(), "alarm=outgoing_identity_changed") {
-		t.Fatalf("no alarm:\n%s", f.logs.String())
+	return ik, issued
+}
+
+// held checks a reconnect held under a wrong key: still open, on its
+// first try, nothing outgoing, and the key it was made under marked.
+func held(t *testing.T, f *fixture, cid string, ik ed25519.PrivateKey) {
+	t.Helper()
+	c := f.p.conns[cid]
+	if !c.Reconnecting || c.State != StateActive || c.ReconnectTries != 1 || len(f.p.outgoing) != 0 ||
+		!bytes.Equal(c.ReconnectIK, ik.Public().(ed25519.PublicKey)) {
+		t.Fatalf("reconnecting %v, state %s, tries %d, %d outgoing, mark %x", c.Reconnecting, c.State, c.ReconnectTries, len(f.p.outgoing), c.ReconnectIK)
 	}
-	if strings.Contains(f.logs.String(), "alarm=reconnect_failed") {
-		t.Fatal("the reconnect was ended")
+}
+
+// A stored reconnect hs.init under another identity key is dropped at
+// start, its tokens revoked, and the reconnect held: starts under a wrong
+// key (the same one, or yet another) start no try, deposit and revoke
+// nothing and raise no new alarm, and the mark survives each restart.
+// The first start with the right key resumes it with one try, and it
+// completes.
+func TestStaleReconnectHeldUntilKeyRight(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	ik, issued := staleReconnect(t, f, m)
+	if strings.Count(f.logs.String(), "alarm=outgoing_identity_changed") != 1 || strings.Contains(f.logs.String(), "alarm=reconnect_failed") {
+		t.Fatalf("alarms:\n%s", f.logs.String())
 	}
 	for _, j := range issued {
 		if tk := f.p.issued[j]; tk == nil || !tk.Denied {
 			t.Fatalf("token %s of the dropped hs.init not revoked", j)
 		}
 	}
-	c := f.p.conns[cid]
-	if !c.Reconnecting || c.State != StateActive || c.ReconnectTries != 2 || len(f.p.outgoing) != 1 {
-		t.Fatalf("reconnecting %v, state %s, tries %d, %d outgoing", c.Reconnecting, c.State, c.ReconnectTries, len(f.p.outgoing))
+	held(t, f, cid, ik)
+	deposits, revokes := 0, len(f.revokes)
+	f.failDeposit = func(string, string) error { deposits++; return nil }
+	for i, seed := range []byte{88, 88, 89} { // the same wrong key, then another
+		f.keys.IK = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed}, 32))
+		f.start()
+		f.tick()
+		held(t, f, cid, ik)
+		if deposits != 0 || len(f.revokes) != revokes {
+			t.Fatalf("start %d: %d deposits, %d revocations more", i, deposits, len(f.revokes)-revokes)
+		}
 	}
-	f.start() // still the wrong key: its own try loads and is kept
-	c = f.p.conns[cid]
-	if n := strings.Count(f.logs.String(), "alarm=outgoing_identity_changed"); n != 1 || !c.Reconnecting || c.ReconnectTries != 2 || len(f.p.outgoing) != 1 {
-		t.Fatalf("%d alarms, reconnecting %v, tries %d, %d outgoing", n, c.Reconnecting, c.ReconnectTries, len(f.p.outgoing))
+	if n := strings.Count(f.logs.String(), "alarm=outgoing_identity_changed"); n != 1 {
+		t.Fatalf("%d alarms under the wrong key", n)
 	}
-	f.keys.IK = ik // put right: the try made under the wrong key is dropped in turn
+	f.failDeposit = nil
+	f.keys.IK = ik // put right: one try, no new alarm
 	f.start()
-	c = f.p.conns[cid]
-	if n := strings.Count(f.logs.String(), "alarm=outgoing_identity_changed"); n != 2 || !c.Reconnecting || c.ReconnectTries != 3 {
-		t.Fatalf("%d alarms, reconnecting %v, tries %d", n, c.Reconnecting, c.ReconnectTries)
+	c := f.p.conns[cid]
+	if !c.Reconnecting || c.ReconnectTries != 2 || len(c.ReconnectIK) != 0 || len(f.p.outgoing) != 1 ||
+		strings.Count(f.logs.String(), "alarm=outgoing_identity_changed") != 1 {
+		t.Fatalf("reconnecting %v, tries %d, mark %x, %d outgoing", c.Reconnecting, c.ReconnectTries, c.ReconnectIK, len(f.p.outgoing))
 	}
-	m.IgnoreRevoked = true // its answer to the first hs.init is refused
-	m.IgnoreForeign = true // the one signed under the wrong key is dropped
+	m.IgnoreRevoked = true // its answer to the dropped hs.init is refused
 	f.pump()
 	c = f.p.conns[cid]
 	if c.Reconnecting || c.kr.Current().ID() != m.KR.Current().ID() {
@@ -317,32 +343,18 @@ func TestStaleReconnectDroppedAtStart(t *testing.T) {
 	}
 }
 
-// A reconnect already on its second try when the key goes wrong spends
-// its last try under the wrong key, so once the key is put right it
-// cannot start another and ends: the member must connect again.
-func TestStaleReconnectLastTryEnds(t *testing.T) {
+// A reconnect held under a wrong key that is never put right ends at
+// ReconnectTimeout from its start (reconnect_failed), and the mark goes.
+func TestStaleReconnectHeldTimesOut(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
 	cid := f.connect(m, "")
-	b := f.backup()
-	m.StartRekey()
-	f.pump()
-	f.restore(b, true)
-	f.p.conns[cid].ReconnectTries = 2 // as after a second try
-	f.p.markDirty(kindConn, cid)
-	if err := f.p.flush(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	ik := f.keys.IK
-	f.keys.IK = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{88}, 32))
-	f.start()
-	if c := f.p.conns[cid]; !c.Reconnecting || c.ReconnectTries != 3 {
-		t.Fatalf("reconnecting %v, tries %d", c.Reconnecting, c.ReconnectTries)
-	}
-	f.keys.IK = ik
-	f.start()
+	ik, _ := staleReconnect(t, f, m)
+	held(t, f, cid, ik)
+	f.clk.Advance(ReconnectTimeout)
+	f.tick()
 	c := f.p.conns[cid]
-	if c.Reconnecting || c.State != StateStale || !strings.Contains(f.logs.String(), "alarm=reconnect_failed") {
-		t.Fatalf("reconnecting %v, state %s:\n%s", c.Reconnecting, c.State, f.logs.String())
+	if c.Reconnecting || c.State != StateStale || len(c.ReconnectIK) != 0 || !strings.Contains(f.logs.String(), "alarm=reconnect_failed") {
+		t.Fatalf("reconnecting %v, state %s, mark %x", c.Reconnecting, c.State, c.ReconnectIK)
 	}
 }
