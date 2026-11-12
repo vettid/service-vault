@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -495,6 +496,7 @@ func (p *Peer) flush(ctx context.Context) error {
 
 // load reads every record into memory at start.
 func (p *Peer) load(ctx context.Context) error {
+	var stale []*outgoing
 	type target struct {
 		kind string
 		put  func([]byte) (string, error)
@@ -553,6 +555,13 @@ func (p *Peer) load(ctx context.Context) error {
 				return "", err
 			}
 			ini, err := handshake.RestoreInitiator(og.Init, p.cfg.Keys.IK)
+			if errors.Is(err, handshake.ErrIdentity) {
+				// Its hs.init names another identity key than this
+				// service's: it can never finish. Dropped after the load
+				// (dropStale), not a reason to refuse to start.
+				stale = append(stale, og)
+				return og.ID, nil
+			}
 			if err != nil {
 				return "", err
 			}
@@ -614,5 +623,23 @@ func (p *Peer) load(ctx context.Context) error {
 	for _, e := range p.events {
 		p.seq = max(p.seq, e.Seq)
 	}
+	p.dropStale(stale)
 	return nil
+}
+
+// dropStale drops, once everything is loaded, the outgoing handshakes
+// whose hs.init names another identity key than this service's, as
+// dropOutgoing would: the tokens a reconnect's hs.init carries are
+// revoked and the reconnect ends.
+func (p *Peer) dropStale(stale []*outgoing) {
+	for _, og := range stale {
+		p.audit("outgoing_identity_changed", og.ConnID)
+		for _, j := range og.Issued {
+			p.denyJTI(j, p.now())
+		}
+		if c := p.conns[og.ConnID]; c != nil && len(og.Issued) > 0 {
+			p.reconnectFailed(c) // only a reconnect's hs.init carries tokens
+		}
+		p.markDirty(kindOutgoing, og.ID)
+	}
 }

@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/peerwire"
+	"github.com/vettid/vettid-vault/vms/suite"
 )
 
 // The service advertises no features, so a release-29 member vault sends
@@ -146,5 +148,104 @@ func TestRelease29MessagesTolerated(t *testing.T) {
 	f.pump()
 	if got, _ := f.p.Connection(cid); got.Name != "Nora Renamed" {
 		t.Fatalf("name %q: a message with inner features was not handled", got.Name)
+	}
+}
+
+// A real release-29 member (0.87.0 S8): its identity.rotate is followed,
+// then its rekey still carries the link from the epoch's signer, as a
+// release-29 vault sends the whole chain on every rekey to every peer.
+// The rekey is refused (pinning today's behaviour until this service
+// follows S8 links), and the key the service followed stays.
+func TestRelease29RotatedMemberRekeyRefused(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	epoch := f.p.conns[cid].kr.Current().ID()
+	r := m.RotateIdentity(40, true)
+	m.SendRotation(r)
+	f.pump()
+	followed := m.IK.Public().(ed25519.PublicKey)
+	if !followed.Equal(f.p.conns[cid].Peer.IK) {
+		t.Fatal("identity.rotate not followed")
+	}
+	m.StartRekeyWithLinks() // the link from the epoch's signer, already followed
+	f.pump()
+	c := f.p.conns[cid]
+	if c.kr.Current().ID() != epoch || m.KR.Current().ID() != epoch {
+		t.Fatal("the epoch moved")
+	}
+	if !followed.Equal(c.Peer.IK) {
+		t.Fatal("the followed key changed")
+	}
+	if !strings.Contains(f.logs.String(), "reason=rekey_rejected") {
+		t.Fatalf("not audited:\n%s", f.logs.String())
+	}
+}
+
+// An hs.resp to the service's rekey whose chain is forged (a link that
+// does not start at the member's key) aborts the rekey: no epoch move,
+// no hs.fin.
+func TestServiceRekeyRespForgedChain(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	stored := f.p.conns[cid].Peer.IK
+	epoch := f.p.conns[cid].kr.Current().ID()
+	stranger := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{77}, 32))
+	next := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{78}, 32))
+	kem, err := suite.NewPrivateKey(bytes.Repeat([]byte{79}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged, err := handshake.NewRotation(stranger, next, kem.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.RespRotations = []*handshake.Rotation{forged}
+	f.clk.Advance(handshake.PolicyVaultToVault.MaxAge + time.Second)
+	f.tick()
+	if len(f.p.outgoing) != 1 {
+		t.Fatalf("%d outgoing rekeys", len(f.p.outgoing))
+	}
+	f.pump()
+	c := f.p.conns[cid]
+	if len(f.p.outgoing) != 0 {
+		t.Fatal("the rekey is still outgoing")
+	}
+	if c.kr.Current().ID() != epoch || m.KR.Current().ID() != epoch {
+		t.Fatal("the epoch moved on a forged chain")
+	}
+	if !ed25519.PublicKey(stored).Equal(c.Peer.IK) {
+		t.Fatal("the stored identity key changed")
+	}
+	if !strings.Contains(f.logs.String(), "reason=hs_resp_aborted") {
+		t.Fatalf("not audited:\n%s", f.logs.String())
+	}
+}
+
+// A stored outgoing handshake whose hs.init names another identity key
+// than this service's is dropped at start, with an audit, instead of
+// stopping the service from starting.
+func TestStaleOutgoingDroppedAtStart(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	f.p.startRekey(f.p.conns[cid], f.clk.Now())
+	f.p.Step(context.Background(), 0) // flushed
+	if len(f.p.outgoing) != 1 {
+		t.Fatal("no rekey stored")
+	}
+	f.keys.IK = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{88}, 32))
+	f.start() // fails the test if the load is refused
+	if len(f.p.outgoing) != 0 {
+		t.Fatal("the stale handshake was kept")
+	}
+	if !strings.Contains(f.logs.String(), "reason=outgoing_identity_changed") {
+		t.Fatalf("not audited:\n%s", f.logs.String())
+	}
+	f.p.Step(context.Background(), 0) // the drop is flushed
+	f.start()
+	if len(f.p.outgoing) != 0 {
+		t.Fatal("the stale handshake is back after a restart")
 	}
 }
