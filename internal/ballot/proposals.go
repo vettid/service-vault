@@ -319,7 +319,7 @@ func (m *Manager) Publish(ctx context.Context, id string) (int, error) {
 		return 0, err
 	}
 	defer unlock()
-	o, err := m.Store.OpenProposal(ctx, id)
+	o, err := m.Store.OpenProposalFresh(ctx, id)
 	if err != nil {
 		return 0, err
 	}

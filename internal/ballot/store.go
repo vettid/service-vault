@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/vettid/service-vault/internal/peer"
 	"github.com/vettid/service-vault/vote"
@@ -67,11 +69,25 @@ type CopyItem struct {
 type RecordStore struct {
 	Records peer.Store
 	Copy    Copy
+	// Now is the clock of the members cache (nil: time.Now).
+	Now func() time.Time
+	// Log is where a lost chunk's alarm goes; nil discards it.
+	Log *slog.Logger
 
 	members membersCache
+
+	alarmMu sync.Mutex
+	lostAt  map[string]*heldAlarm // the vote_chunk_missing lines, by proposal
 }
 
 var _ BoxStore = (*RecordStore)(nil)
+
+func (s *RecordStore) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
+}
 
 func ballotID(proposalID string, tag []byte) string {
 	return BallotID(proposalID, tag)
@@ -88,8 +104,20 @@ func BallotID(proposalID string, tag []byte) string {
 var ErrProposalChanged = errors.New("ballot: the proposal changed since it was read")
 
 // OpenProposal implements BoxStore. The proposal keeps the version it was
-// read at, for SaveProposal.
+// read at, for SaveProposal. Its members may come from the members cache
+// (checked again at least every membersRecheck).
 func (s *RecordStore) OpenProposal(ctx context.Context, id string) (*OpenProposal, error) {
+	return s.open(ctx, id, false)
+}
+
+// OpenProposalFresh is OpenProposal with the members read from their
+// chunks and checked, never from the cache: for a close, a publication
+// and an extension, which must not act on members the store has lost.
+func (s *RecordStore) OpenProposalFresh(ctx context.Context, id string) (*OpenProposal, error) {
+	return s.open(ctx, id, true)
+}
+
+func (s *RecordStore) open(ctx context.Context, id string, fresh bool) (*OpenProposal, error) {
 	g, ok := s.Records.(peer.RecordGetter)
 	if !ok {
 		return nil, errors.New("ballot: the record store returns no versions")
@@ -106,19 +134,25 @@ func (s *RecordStore) OpenProposal(ctx context.Context, id string) (*OpenProposa
 		if o.Members != nil {
 			return nil, fmt.Errorf("ballot: stored proposal %s: members both inline and in chunks", id)
 		}
-		key := membersKey(id, o.MemberChunks)
-		if cached, e := s.members.get(key); cached != nil {
-			o.Members, o.shared = cached, e
-		} else {
-			data, err := getChunks(ctx, s.Records, id, o.MemberChunks, maxMemberChunks)
-			if err != nil {
-				return nil, fmt.Errorf("ballot: stored proposal %s's members: %w", id, err)
+		members, e, err := s.members.load(ctx, membersKey(id, o.MemberChunks), fresh, s.now,
+			func(ctx context.Context) (map[string]Member, error) {
+				data, err := getChunks(ctx, s.Records, id, o.MemberChunks, maxMemberChunks)
+				if err != nil {
+					return nil, err
+				}
+				var m map[string]Member
+				if err := json.Unmarshal(data, &m); err != nil {
+					return nil, err
+				}
+				return m, nil
+			})
+		if err != nil {
+			if chunkLost(err) {
+				s.chunkAlarm(id)
 			}
-			if err := json.Unmarshal(data, &o.Members); err != nil {
-				return nil, fmt.Errorf("ballot: stored proposal %s's members: %w", id, err)
-			}
-			o.shared = s.members.put(key, o.Members)
+			return nil, fmt.Errorf("ballot: stored proposal %s's members: %w", id, err)
 		}
+		o.Members, o.shared = members, e
 	}
 	// Never fewer (or more) members than the proposal names: a record
 	// that lost them is an error, not a vote no one may cast in.
@@ -410,4 +444,41 @@ func (m *MemCopy) List(_ context.Context, proposalID string) ([]CopyItem, error)
 		}
 	}
 	return out, nil
+}
+
+// chunkAlarmEvery bounds the vote_chunk_missing lines for one proposal:
+// every cast and status of it fails, and once per open would flood the
+// log.
+const chunkAlarmEvery = 10 * time.Minute
+
+// chunkAlarm logs a proposal whose stored member chunks are missing or
+// not the ones its record names, at most once per chunkAlarmEvery, with
+// how many opens failed since the last line. The vote can't go on until
+// the table is restored.
+func (s *RecordStore) chunkAlarm(id string) {
+	s.alarmMu.Lock()
+	defer s.alarmMu.Unlock()
+	if s.lostAt == nil {
+		s.lostAt = map[string]*heldAlarm{}
+	}
+	now := s.now()
+	for other, h := range s.lostAt {
+		// Logged with nothing held since, and due again: the same as
+		// none.
+		if h.n == 0 && now.Sub(h.at) >= chunkAlarmEvery {
+			delete(s.lostAt, other)
+		}
+	}
+	h := s.lostAt[id]
+	if h == nil {
+		h = &heldAlarm{}
+		s.lostAt[id] = h
+	}
+	h.n++
+	if h.at.IsZero() || now.Sub(h.at) >= chunkAlarmEvery {
+		if s.Log != nil {
+			s.Log.Error("a proposal's stored members are missing or changed: restore the table", "alarm", "vote_chunk_missing", "proposal_id", id, "opens", h.n)
+		}
+		h.at, h.n = now, 0
+	}
 }

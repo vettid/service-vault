@@ -96,6 +96,14 @@ destination.
 - `reconnect_slow`: such a reconnect is unanswered after a day. It
   stays open for 7 days, since a locked member vault answers when it is
   unlocked.
+- `vote_chunk_missing`: a proposal's stored members (its member chunks
+  in the table) are missing, or not the ones its record names (at most
+  one line per proposal per 10 minutes). Every cast, status, close,
+  publication and extension of it fails. A running service checks a
+  proposal's chunks again at least once a minute, and before every
+  close, publication and extension, so the alarm follows a loss within
+  about a minute of the proposal's next use. Restore the table from a
+  backup ("Restoring the table"); nothing else brings the members back.
 - `vote_unpublished`: members sent vote requests for a proposal the
   service holds but has not published, or its close was refused (at most
   one line per proposal per 10 minutes). They get no answer, and the vote
