@@ -92,11 +92,17 @@ func TestLambdaSigner(t *testing.T) {
 		t.Fatalf("deadline %v", f.deadline)
 	}
 	for name, fl := range map[string]*fakeLambda{
-		"function error": {out: &lambda.InvokeOutput{StatusCode: 200, FunctionError: aws.String("NotPublished"), Payload: []byte(`{"errorMessage":"x"}`)}},
-		"no answer":      {err: errors.New("dial tcp: timeout")},
-		"unknown field":  {out: &lambda.InvokeOutput{StatusCode: 200, Payload: []byte(`{"status":201,"anchor_key":"AA==","extra":1}`)}},
-		"trailing data":  {out: &lambda.InvokeOutput{StatusCode: 200, Payload: []byte(`{"status":201} {}`)}},
-		"too large":      {out: &lambda.InvokeOutput{StatusCode: 200, Payload: bytes.Repeat([]byte(" "), maxSignerAnswer+1)}},
+		"function error":  {out: &lambda.InvokeOutput{StatusCode: 200, FunctionError: aws.String("NotPublished"), Payload: []byte(`{"errorMessage":"x"}`)}},
+		"no answer":       {err: errors.New("dial tcp: timeout")},
+		"unknown field":   {out: &lambda.InvokeOutput{StatusCode: 200, Payload: []byte(`{"status":201,"anchor_key":"AA==","extra":1}`)}},
+		"trailing data":   {out: &lambda.InvokeOutput{StatusCode: 200, Payload: []byte(`{"status":201} {}`)}},
+		"too large":       {out: &lambda.InvokeOutput{StatusCode: 200, Payload: []byte(`{"status":400,"code":"` + strings.Repeat("x", maxSignerAnswer) + `"}`)}},
+		"a duplicate":     {out: &lambda.InvokeOutput{StatusCode: 200, Payload: []byte(`{"status":500,"status":201}`)}},
+		"a case variant":  {out: &lambda.InvokeOutput{StatusCode: 200, Payload: []byte(`{"STATUS":201}`)}},
+		"a brace after":   {out: &lambda.InvokeOutput{StatusCode: 200, Payload: []byte(`{"status":201} }`)}},
+		"a bracket after": {out: &lambda.InvokeOutput{StatusCode: 200, Payload: []byte(`{"status":201} ]`)}},
+		"a folded name":   {out: &lambda.InvokeOutput{StatusCode: 200, Payload: []byte(`{"\u017ftatus":201}`)}},
+		"not an object":   {out: &lambda.InvokeOutput{StatusCode: 200, Payload: []byte(`[]`)}},
 	} {
 		ls := &LambdaSigner{Client: fl, FunctionARN: "arn"}
 		if _, err := ls.Call(ctx, SignerRequest{}); !errors.Is(err, ErrSignerFailed) {
@@ -361,6 +367,7 @@ func TestVerifyBundleSignatureFields(t *testing.T) {
 		"a nested case variant": json.RawMessage(`{"messageSignature":{"messageDigest":{"algorithm":"SHA2_256","digest":"` + b64(d[:]) + `","Digest":"` + b64(other[:]) + `"},"signature":"` + b64(sig) + `"}}`),
 		"data after the object": json.RawMessage(`{` + ms + `} {}`),
 		"not an object":         json.RawMessage(`[]`),
+		"a folded twin":         json.RawMessage(`{` + ms + `,"me\u017f\u017fageSignature":{}}`),
 		"no message signature":  json.RawMessage(`{}`),
 	} {
 		if err := VerifyBundleSignature(&anchorPriv.PublicKey, doc, b); err == nil {
@@ -380,12 +387,37 @@ func TestPublishViaSignerErrorWithoutKey(t *testing.T) {
 	if _, err := p.PublishProposal(ctx, "p1", []byte("doc"), []byte("sig")); err == nil || errors.As(err, &ref) || strings.Contains(log.String(), "anchor_key_changed") {
 		t.Fatalf("503: %v %s", err, log.String())
 	}
-	f.r = SignerResult{Status: 422, Code: "too_late"}
-	if _, err := p.PublishExtension(ctx, "p1", 1, []byte("e"), []byte("s")); !errors.As(err, &ref) || strings.Contains(log.String(), "anchor_key_changed") {
-		t.Fatalf("422: %v %s", err, log.String())
+	f.r = SignerResult{Status: 429}
+	if _, err := p.PublishProposal(ctx, "p1", []byte("doc"), []byte("sig")); err == nil || errors.As(err, &ref) || strings.Contains(log.String(), "anchor_key_changed") {
+		t.Fatalf("429: %v %s", err, log.String())
 	}
+	// A refusal is acted on (reconcile drops a pending extension on
+	// too_late), so it needs the pinned key: without it, or under another
+	// key, it is the alarm, not a refusal.
+	_, otherPub, _ := ecdsaKey(t)
+	for name, key := range map[string][]byte{"no key": nil, "another key": otherPub} {
+		log.Reset()
+		f.r = SignerResult{Status: 422, Code: "too_late", AnchorKey: key}
+		if _, err := p.PublishExtension(ctx, "p1", 1, []byte("e"), []byte("s")); err == nil || errors.As(err, &ref) || !strings.Contains(log.String(), "anchor_key_changed") {
+			t.Fatalf("422 with %s: %v %s", name, err, log.String())
+		}
+	}
+	log.Reset()
 	f.r = SignerResult{Status: 201, Bundle: signedBundle(t, anchorPriv, []byte("doc"), "")}
 	if _, err := p.PublishProposal(ctx, "p1", []byte("doc"), []byte("sig")); err == nil || !strings.Contains(log.String(), "anchor_key_changed") {
 		t.Fatalf("a success without the key: %v", err)
 	}
+}
+
+// ecdsaKey makes a P-256 key, with its SPKI.
+func ecdsaKey(t *testing.T) (*ecdsa.PrivateKey, []byte, error) {
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spki, err := x509.MarshalPKIXPublicKey(&k.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k, spki, nil
 }

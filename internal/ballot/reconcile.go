@@ -164,8 +164,11 @@ func (m *Manager) reconcile(ctx context.Context, sr SiteReader, ep ExtensionPubl
 			var ref *ErrPublishRefused
 			switch rc, err := ep.PublishExtension(ctx, p.ProposalID, int64(k+1), pe.Doc, pe.Sig); {
 			case err == nil:
-				if own == nil {
-					own = rc.Bundle // the signer's answer, verified under the pinned key
+				if len(rc.Bundle) > 0 {
+					// The answer's bundle is what the site holds (with
+					// the signer, verified under the pinned key): it
+					// wins over one kept here earlier.
+					own = rc.Bundle
 				}
 				if err := adopt(int64(k+1), pe.Doc, pe.Sig, own); err != nil {
 					return err

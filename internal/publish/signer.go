@@ -129,11 +129,35 @@ func (l *LambdaSigner) invoke(ctx context.Context, payload []byte, timeout time.
 	if len(out.Payload) > maxSignerAnswer {
 		return SignerResult{}, fmt.Errorf("%w: an answer over %d bytes", ErrSignerFailed, maxSignerAnswer)
 	}
+	r, err := parseSignerAnswer(out.Payload)
+	if err != nil {
+		return SignerResult{}, fmt.Errorf("%w: the answer doesn't parse: %v", ErrSignerFailed, err)
+	}
+	return r, nil
+}
+
+// signerAnswerNames are the members an answer may carry, spelled exactly.
+var signerAnswerNames = map[string]bool{"status": true, "code": true, "bundle": true, "index_updated": true, "anchor_key": true}
+
+// parseSignerAnswer reads the signer's answer strictly: one object and
+// nothing after it, each name unique and spelled exactly as the signer
+// writes it (encoding/json alone takes the last of duplicates and any
+// case variant).
+func parseSignerAnswer(payload []byte) (SignerResult, error) {
+	members, err := strictObject(payload)
+	if err != nil {
+		return SignerResult{}, err
+	}
+	for name := range members {
+		if !signerAnswerNames[name] {
+			return SignerResult{}, fmt.Errorf("the member %q", name)
+		}
+	}
 	var r SignerResult
-	dec := json.NewDecoder(bytes.NewReader(out.Payload))
+	dec := json.NewDecoder(bytes.NewReader(payload))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&r); err != nil || dec.More() {
-		return SignerResult{}, fmt.Errorf("%w: the answer doesn't parse", ErrSignerFailed)
+	if err := dec.Decode(&r); err != nil {
+		return SignerResult{}, err
 	}
 	return r, nil
 }
@@ -230,11 +254,13 @@ func (p *Publisher) viaSigner(ctx context.Context, id, name string, doc, sig, ro
 		p.log().Warn("publish: the anchor signer failed; retried later", "proposal_id", id, "name", name, "err", err.Error())
 		return ballot.Receipt{}, err
 	}
-	// Every answer of the signer carries its key (refusals included); an
-	// error status without one is judged by its status alone, but a
-	// success needs the pinned key.
+	// Every answer of the signer carries its key (refusals included). A
+	// success or a refusal is acted on, so it needs the pinned key; an
+	// answer that is only retried (5xx, 429, an odd status) is judged by
+	// its status alone when it carries no key.
 	success := r.Status == http.StatusCreated || r.Status == http.StatusOK
-	if (success || len(r.AnchorKey) > 0) && !bytes.Equal(r.AnchorKey, p.AnchorKey) {
+	refusal := r.Status >= 400 && r.Status <= 499 && r.Status != http.StatusTooManyRequests
+	if (success || refusal || len(r.AnchorKey) > 0) && !bytes.Equal(r.AnchorKey, p.AnchorKey) {
 		p.log().Error("the anchor signer answered under another anchor key than the one pinned", "alarm", "anchor_key_changed",
 			"proposal_id", id, "name", name)
 		return ballot.Receipt{}, errors.New("publish: the anchor signer's key is not the pinned anchor key")
@@ -328,7 +354,9 @@ func VerifyBundleSignature(pub *ecdsa.PublicKey, doc []byte, bundle json.RawMess
 }
 
 // strictObject reads a JSON object's members, refusing anything but an
-// object, and a name that appears twice, also as a case variant.
+// object, a name that isn't ASCII (encoding/json folds some non-ASCII
+// letters onto ASCII ones), and a name that appears twice, also as a case
+// variant.
 func strictObject(data json.RawMessage) (map[string]json.RawMessage, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
@@ -342,6 +370,11 @@ func strictObject(data json.RawMessage) (map[string]json.RawMessage, error) {
 			return nil, err
 		}
 		name, _ := t.(string)
+		for i := 0; i < len(name); i++ {
+			if name[i] >= 0x80 {
+				return nil, fmt.Errorf("the name %q is not ASCII", name)
+			}
+		}
 		folded := strings.ToLower(name)
 		if seen[folded] {
 			return nil, fmt.Errorf("the name %q appears twice", name)

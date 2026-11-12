@@ -2,8 +2,11 @@ package ballot
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/vettid/service-vault/internal/ballot/ballottest"
 )
 
 // signerPublisher is the fake publisher with the anchor signer's
@@ -88,5 +91,45 @@ func TestCloseSiteExtensionSentToSigner(t *testing.T) {
 	}
 	if o := e.open(t); len(o.Extensions) != 1 || o.Pending != nil {
 		t.Fatalf("%d extensions, pending %v", len(o.Extensions), o.Pending != nil)
+	}
+}
+
+// answerPublisher answers every extension with its own bundle: the one
+// the signer returns, which the site holds.
+type answerPublisher struct {
+	*signerPublisher
+	answer json.RawMessage
+}
+
+func (a *answerPublisher) PublishExtension(context.Context, string, int64, []byte, []byte) (Receipt, error) {
+	a.calls++
+	return Receipt{Bundle: a.answer}, nil
+}
+
+// A pending extension asked again at the close takes the signer's bundle
+// over one kept here earlier: the signer's is what the site holds.
+func TestClosePendingPrefersSignerBundle(t *testing.T) {
+	ctx := context.Background()
+	e := newExtEnv(t)
+	sp := &signerPublisher{fakePublisher: e.pub, tried: map[string]bool{}}
+	e.pub.fail = true
+	if _, err := e.m.Extend(ctx, e.id, "apv", e.req(7200)); err == nil {
+		t.Fatal("expected the failure")
+	}
+	o := e.open(t)
+	if o.Pending == nil {
+		t.Fatal("not pending")
+	}
+	if e.pub.own == nil {
+		e.pub.own = map[string]json.RawMessage{}
+	}
+	late := e.in.ClosesAt + 600 // kept here, but not in time
+	e.pub.own[string(o.Pending.Doc)] = ballottest.Bundle(late, late)
+	signedAt := e.in.ClosesAt - 600
+	e.m.Publisher = &answerPublisher{signerPublisher: sp, answer: ballottest.Bundle(signedAt, signedAt)}
+	*e.clock = time.Unix(e.in.ClosesAt, 0).Add(2 * CollectMargin)
+	_, _ = e.m.Close(ctx, e.id)
+	if o := e.open(t); o.Pending != nil || len(o.Extensions) != 1 {
+		t.Fatalf("pending %v, %d extensions", o.Pending != nil, len(o.Extensions))
 	}
 }
