@@ -92,6 +92,8 @@ export const ALARMS = {
   rotate_conflict: 'A member identity rotation conflict suspended a connection (two vaults rotating, or a replayed copy; a member can also cause it on purpose, so it may be noise)',
   /** A webhook was given up after the outbox's MaxAge (internal/webhook/outbox.go): the application missed an event. */
   webhook_dropped: 'A webhook was dropped as undeliverable after 24 h: the application missed an event',
+  /** A stored outgoing hs.init names another identity key than the service's (internal/peer/state.go): dropped at start. */
+  outgoing_identity_changed: 'A stored handshake names another identity key than this service\'s: it was dropped at start. The service never rotates its key, so its keys or secrets are wrong, or the table is another service\'s (README "outgoing_identity_changed")',
   /** A reconnect after a restore could not complete (internal/peer/reconnect.go): the member must connect again. */
   reconnect_failed: 'A reconnect after a table restore failed: that member must connect again from a new invitation (README "Restoring the table")',
   /** A reconnect after a restore unanswered for a day (internal/peer/reconnect.go): the member's vault may be locked. */

@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -292,6 +293,13 @@ type Member struct {
 	rekey    *handshake.Initiator
 	recon    *handshake.Initiator
 	awaitFin *handshake.Responder
+	// HSFeatures is the inner features list the Member's rekey hs.init,
+	// hs.resp and hs.fin carry (0.86.0, §5.3), as a release-29 vault sends
+	// it.
+	HSFeatures []string
+	// RespRotations are identity links the Member puts in its hs.resp to
+	// the service's rekey (0.87.0 S8).
+	RespRotations []*handshake.Rotation
 	// Rotations are the identity.rotate links since the session's epoch
 	// (for a reconnect, §6.6).
 	Rotations []*handshake.Rotation
@@ -311,6 +319,10 @@ type Member struct {
 	// IgnoreStray drops a sealed message no handshake of ours matches
 	// (an hs.resp to a reconnect we replaced), as a vault does.
 	IgnoreStray bool
+
+	// IgnoreForeign drops a reconnect hs.init signed by another identity
+	// key than the service's, as a vault does.
+	IgnoreForeign bool
 
 	Got        []*envelope.Inner // messages received in the session
 	Challenges []*peerwire.ConnAuthChallenge
@@ -607,12 +619,19 @@ func (m *Member) SendInner(in *envelope.Inner) string {
 }
 
 // startRekey initiates a rekey (§6.5), as a Member vault does after 24 h.
-func (m *Member) StartRekey() {
+func (m *Member) StartRekey() { m.startRekey(nil) }
+
+// StartRekeyWithLinks initiates a rekey whose hs.init carries the
+// identity links in m.Rotations (VAULT-MESSAGING 0.87.0 S8), as a
+// release-29 vault does on every rekey once it has rotated.
+func (m *Member) StartRekeyWithLinks() { m.startRekey(m.Rotations) }
+
+func (m *Member) startRekey(links []*handshake.Rotation) {
 	m.t.Helper()
 	ini, err := handshake.NewInitiator(handshake.InitiatorConfig{
 		Purpose: handshake.PurposeRekey, Identity: m.IK, StaticKEM: m.kem.Public(), Relay: m.Addr,
 		ResponderIK: m.svc.IK, ResponderRelayKey: m.svc.Relay.PK, Current: m.KR.Current(),
-		Policy: handshake.PolicyVaultToVault, Now: m.clk.Now(),
+		Policy: handshake.PolicyVaultToVault, Rotations: links, Features: m.HSFeatures, Now: m.clk.Now(),
 	})
 	if err != nil {
 		m.t.Fatal(err)
@@ -630,7 +649,8 @@ func (m *Member) answerRekey(raw []byte, in *envelope.Inner, ep *handshake.Epoch
 		m.t.Fatalf("Member: accept rekey: %v", err)
 	}
 	resp, env, err := pi.Respond(handshake.ResponderConfig{Identity: m.IK, Policy: handshake.PolicyVaultToVault,
-		CollectSender: sender, RecordRelayKey: m.svc.Relay.PK, KnownInitiatorIK: m.svc.IK, Now: now})
+		CollectSender: sender, RecordRelayKey: m.svc.Relay.PK, KnownInitiatorIK: m.svc.IK, Features: m.HSFeatures,
+		Rotations: m.RespRotations, Now: now})
 	if err != nil {
 		m.t.Fatalf("Member: respond rekey: %v", err)
 	}
@@ -676,6 +696,9 @@ func (m *Member) answerReconnect(raw []byte, sender ed25519.PublicKey) {
 	resp, env, err := pi.Respond(handshake.ResponderConfig{Identity: m.IK, Policy: handshake.PolicyVaultToVault,
 		CollectSender: sender, RecordRelayKey: m.svc.Relay.PK, KnownInitiatorIK: m.svc.IK, ExpectedCtx: body.Ctx,
 		Token: m.Mint(peerwire.StandingMax), ReconnectToken: m.Mint(300 * 24 * time.Hour), Rotations: m.Rotations, Now: now})
+	if err != nil && m.IgnoreForeign && errors.Is(err, handshake.ErrIdentity) {
+		return
+	}
 	if err != nil {
 		m.t.Fatalf("Member: respond reconnect: %v", err)
 	}
