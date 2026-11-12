@@ -628,17 +628,20 @@ func (p *Peer) load(ctx context.Context) error {
 }
 
 // dropStale drops, once everything is loaded, the outgoing handshakes
-// whose hs.init names another identity key than this service's, as
-// dropOutgoing would: the tokens a reconnect's hs.init carries are
-// revoked and the reconnect ends.
+// whose hs.init names another identity key than this service's. The
+// service never rotates its identity key, so this means its keys or
+// secrets are wrong, or the table is another service's: an alarm, not an
+// audit. The tokens the hs.init carries are revoked, as dropOutgoing
+// does, but a reconnect is not ended: the connection stays reconnecting,
+// so resumeReconnects starts a fresh try at this start, and again at each
+// start (each one a try, within MaxReconnectTries and ReconnectTimeout)
+// until the keys are put right.
 func (p *Peer) dropStale(stale []*outgoing) {
 	for _, og := range stale {
-		p.audit("outgoing_identity_changed", og.ConnID)
+		p.log().Error("a stored hs.init names another identity key than this service's: dropped; check the service's keys and secrets",
+			"alarm", "outgoing_identity_changed", "connection_id", og.ConnID, "purpose", string(og.Init.Purpose))
 		for _, j := range og.Issued {
 			p.denyJTI(j, p.now())
-		}
-		if c := p.conns[og.ConnID]; c != nil && len(og.Issued) > 0 {
-			p.reconnectFailed(c) // only a reconnect's hs.init carries tokens
 		}
 		p.markDirty(kindOutgoing, og.ID)
 	}

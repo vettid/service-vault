@@ -90,6 +90,14 @@ destination.
   connection is suspended (see "When a member moves phones").
 - `webhook_dropped`: a webhook was given up after 24 hours, so the
   application missed an event.
+- `outgoing_identity_changed`: at start, a stored handshake this
+  service started (a rekey or a reconnect) names another identity key
+  than the one it now has. The service never rotates its identity key,
+  so its keys or secrets are wrong, or the table is another service's.
+  The handshake is dropped and the tokens it carried are revoked; a
+  rekey starts again later. A reconnect stays open and a new try starts
+  at once, and at each start after, within its limits (3 tries, 7
+  days), so put the keys right and restart before those run out.
 - `reconnect_failed`: after a table restore, a connection's reconnect
   could not start or complete, so that member must connect again (see
   "Restoring the table").

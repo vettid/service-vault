@@ -184,7 +184,9 @@ func TestRelease29RotatedMemberRekeyRefused(t *testing.T) {
 
 // An hs.resp to the service's rekey whose chain is forged (a link that
 // does not start at the member's key) aborts the rekey: no epoch move,
-// no hs.fin.
+// no hs.fin. This pins vettid-vault's own refusal of the chain (the
+// handshake fails before the service sees the links);
+// TestServiceRekeyRespWithLinksAborted pins the service's guard.
 func TestServiceRekeyRespForgedChain(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
@@ -224,8 +226,8 @@ func TestServiceRekeyRespForgedChain(t *testing.T) {
 }
 
 // A stored outgoing handshake whose hs.init names another identity key
-// than this service's is dropped at start, with an audit, instead of
-// stopping the service from starting.
+// than this service's is dropped at start, with an alarm, instead of
+// stopping the service from starting; the drop is stored.
 func TestStaleOutgoingDroppedAtStart(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
@@ -235,17 +237,76 @@ func TestStaleOutgoingDroppedAtStart(t *testing.T) {
 	if len(f.p.outgoing) != 1 {
 		t.Fatal("no rekey stored")
 	}
+	ik := f.keys.IK
 	f.keys.IK = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{88}, 32))
-	f.start() // fails the test if the load is refused
+	f.start() // fails the test if the load is refused; Start flushes
 	if len(f.p.outgoing) != 0 {
 		t.Fatal("the stale handshake was kept")
 	}
-	if !strings.Contains(f.logs.String(), "reason=outgoing_identity_changed") {
-		t.Fatalf("not audited:\n%s", f.logs.String())
+	if !strings.Contains(f.logs.String(), "level=ERROR") || !strings.Contains(f.logs.String(), "alarm=outgoing_identity_changed") {
+		t.Fatalf("no alarm:\n%s", f.logs.String())
 	}
-	f.p.Step(context.Background(), 0) // the drop is flushed
+	if recs, err := f.store.Load(context.Background(), kindOutgoing); err != nil || len(recs) != 0 {
+		t.Fatalf("%d outgoing records stored, %v", len(recs), err)
+	}
+	f.keys.IK = ik // the key put right: the record, had it stayed, would load
 	f.start()
 	if len(f.p.outgoing) != 0 {
 		t.Fatal("the stale handshake is back after a restart")
+	}
+}
+
+// A stored reconnect hs.init under another identity key is dropped at
+// start and its tokens revoked, but the reconnect stays open: a fresh try
+// starts at once, and once the key is put right, the next start's try
+// completes.
+func TestStaleReconnectDroppedAtStart(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	b := f.backup()
+	m.StartRekey()
+	f.pump()
+	f.restore(b, true) // the reconnect's hs.init is stored, with its tokens
+	var issued []string
+	for _, og := range f.p.outgoing {
+		issued = og.Issued
+	}
+	if len(issued) == 0 || f.p.conns[cid].ReconnectTries != 1 {
+		t.Fatalf("no reconnect stored: %d tokens, tries %d", len(issued), f.p.conns[cid].ReconnectTries)
+	}
+	ik := f.keys.IK
+	f.keys.IK = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{88}, 32))
+	f.start()
+	if !strings.Contains(f.logs.String(), "alarm=outgoing_identity_changed") {
+		t.Fatalf("no alarm:\n%s", f.logs.String())
+	}
+	if strings.Contains(f.logs.String(), "alarm=reconnect_failed") {
+		t.Fatal("the reconnect was ended")
+	}
+	for _, j := range issued {
+		if tk := f.p.issued[j]; tk == nil || !tk.Denied {
+			t.Fatalf("token %s of the dropped hs.init not revoked", j)
+		}
+	}
+	c := f.p.conns[cid]
+	if !c.Reconnecting || c.State != StateActive || c.ReconnectTries != 2 || len(f.p.outgoing) != 1 {
+		t.Fatalf("reconnecting %v, state %s, tries %d, %d outgoing", c.Reconnecting, c.State, c.ReconnectTries, len(f.p.outgoing))
+	}
+	f.keys.IK = ik // put right: the try made under the wrong key is dropped in turn
+	f.start()
+	c = f.p.conns[cid]
+	if !c.Reconnecting || c.ReconnectTries != 3 {
+		t.Fatalf("reconnecting %v, tries %d", c.Reconnecting, c.ReconnectTries)
+	}
+	m.IgnoreRevoked = true // its answer to the first hs.init is refused
+	m.IgnoreForeign = true // the one signed under the wrong key is dropped
+	f.pump()
+	c = f.p.conns[cid]
+	if c.Reconnecting || c.kr.Current().ID() != m.KR.Current().ID() {
+		t.Fatalf("not reconnected: reconnecting %v", c.Reconnecting)
+	}
+	if !f.signIn(m, cid) {
+		t.Fatal("sign-in after the reconnect")
 	}
 }
