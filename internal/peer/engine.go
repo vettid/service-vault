@@ -354,6 +354,7 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 			for _, m := range msgs {
 				p.leaveUnacked(m, p.now())
 			}
+			p.drained = false
 			return 0, err
 		}
 	}
@@ -363,7 +364,9 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 		if free && started.After(p.emptyAt) {
 			p.emptyAt = started
 		}
-		p.drained = true // a short collect, processed (RELEASE-29 §2)
+		if free {
+			p.drained = true // a short collect, nothing still leased (RELEASE-29 §2)
+		}
 		if len(p.outbox) == 0 {
 			return 0, nil
 		}
@@ -377,6 +380,7 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 		for _, m := range msgs {
 			p.leaveUnacked(m, now)
 		}
+		p.drained = false // the batch comes back: B waits for it (RELEASE-29 §2)
 		return 0, err
 	}
 	for _, m := range msgs {
@@ -407,7 +411,7 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 	if err := p.flush(ctx); err != nil {
 		return len(msgs), err
 	}
-	if len(msgs) < MaxBatch {
+	if len(msgs) < MaxBatch && free {
 		p.drained = true // a short collect, processed and written (RELEASE-29 §2)
 	}
 	for _, id := range acks {

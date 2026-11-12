@@ -134,8 +134,11 @@ func (p *Peer) drainOutbox(ctx context.Context) {
 		if e.Op == opDeposit && (blocked[e.Mailbox] || awaiting[e.Mailbox] && e.Token == "" && !e.Refresh) {
 			continue // a refresh passes the deposits awaiting a token (§8.4)
 		}
-		if c := p.conns[e.ConnID]; e.Op == opDeposit && e.Token == "" && !e.Handshake && c != nil && c.Reconnecting {
-			continue // nothing but the handshake while a reconnect is open (RELEASE-29 §3)
+		if c := p.conns[e.ConnID]; e.Op == opDeposit && e.Token == "" && !e.Handshake && c != nil && (c.Reconnecting || c.State == StateStale) {
+			// Nothing but the handshake while a reconnect is open (RELEASE-29
+			// §3); a stale connection's entries wait for a new epoch, which
+			// seals them again (§3.4.1: stale is not final).
+			continue
 		}
 		if !e.NotAfter.IsZero() && !now.Before(e.NotAfter) {
 			done[e] = true
@@ -300,6 +303,14 @@ func (p *Peer) depositOnce(ctx context.Context, e *outboxEntry, now time.Time) (
 				p.beginReconnect(c, now)
 			}
 			return false, err
+		}
+		if c != nil && c.Pending != nil && len(e.FinEpoch) > 0 && bytes.Equal(e.FinEpoch, c.Pending.ID) {
+			// A reconnect's hs.fin on the hs.resp's carried token, refused:
+			// the member dropped its answer. The epoch is abandoned (its
+			// carried tokens with it) and a new try goes on the held
+			// reconnect token, not counted as failed (§6.3.1 "A carried
+			// token refused").
+			p.abandonPending(c, "fin_revoked", true, now)
 		}
 		return true, err
 	case codeMailboxUnknown:

@@ -129,6 +129,7 @@ func (p *Peer) reconnectFailed(c *Connection) {
 		return
 	}
 	c.clearReconnect()
+	p.abandonPending(c, "stale", false, p.now()) // a pending epoch ends with the reconnect
 	if c.State == StateSuspended {
 		// Ended by the suspension, not failed: no reconnect_failed.
 		p.markDirty(kindConn, c.ID)
@@ -201,7 +202,7 @@ func (p *Peer) startReconnect(c *Connection, now time.Time) bool {
 		Named: bytes.Clone(c.LastEpochID), ini: ini}
 	p.outgoing[id] = og
 	p.markDirty(kindOutgoing, id)
-	if c.ReconnectTries == 0 {
+	if c.ReconnectSince.IsZero() {
 		c.ReconnectSince = now
 	}
 	c.Reconnecting = true
@@ -215,7 +216,8 @@ func (p *Peer) startReconnect(c *Connection, now time.Time) bool {
 }
 
 // finishReconnect processes a reconnect the service started, once its
-// hs.resp verified: the member's tokens replace the held ones, its
+// hs.resp verified: the member's tokens are kept with the pending epoch
+// (adopted at its confirmation), its
 // identity follows the rotation links it sent that we had not followed
 // (made while our state was older), and hs.fin goes out in the new
 // epoch, which is pending until the member confirms it (§6.3.1
@@ -270,10 +272,9 @@ func (p *Peer) finishReconnect(c *Connection, og *outgoing, res *handshake.Resul
 		return ackAfterFlush
 	}
 	c.Reconnecting = true
-	c.Standing, c.Reconnect = st, rt
-	c.State = StateActive
+	p.activeAgain(c)
 	p.markDirty(kindConn, c.ID)
-	p.makePending(c, og, res, now)
+	p.makePending(c, og, res, &PendingEpoch{Standing: st, Reconnect: rt}, now)
 	p.log().Info("reconnected: epoch pending", "connection_id", c.ID)
 	return ackAfterFlush
 }

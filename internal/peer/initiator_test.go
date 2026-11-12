@@ -98,7 +98,13 @@ func TestPendingAbandonedAtB(t *testing.T) {
 	if f.p.conns[cid].Pending == nil {
 		t.Fatal("B judged before a short collect")
 	}
-	f.step() // an empty collect sets the latch
+	f.step() // an empty collect within the start's lease window does not count
+	f.tick()
+	if f.p.conns[cid].Pending == nil {
+		t.Fatal("B judged while messages may still be leased")
+	}
+	f.clk.Advance(time.Hour) // past any lease
+	f.step()                 // an empty collect sets the latch
 	f.tick()
 	c := f.p.conns[cid]
 	if c.Pending != nil || !f.audited("pending_abandoned_b_passed") {
@@ -119,6 +125,7 @@ func TestFailedCollectClearsLatch(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
 	f.connect(m, "")
+	f.clk.Advance(time.Hour) // past any lease
 	f.step()
 	if !f.p.drained {
 		t.Fatal("an empty collect did not set the latch")
@@ -505,5 +512,75 @@ func TestStandingRefusalsReconnect(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// After a reconnect fails, what waited behind it stays in the outbox: the
+// stale connection's entries are not deposited under the old epoch.
+func TestStaleHoldsEntries(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	rt := f.p.conns[cid].Reconnect.Token
+	f.failDeposit = func(_, token string) error {
+		if token == rt {
+			return &relayclient.Error{Status: 429, Code: codeQuotaExceeded, Quota: relayclient.QuotaToken}
+		}
+		return nil
+	}
+	c := f.p.conns[cid]
+	c.Standing.Exp = f.clk.Now()
+	id := f.p.sendTo(c, "connection.note", []byte(`{}`), f.clk.Now())
+	f.tick() // a reconnect starts, its hs.init refused for quota: stale
+	f.clk.Advance(2 * time.Hour)
+	f.tick()
+	f.tick()
+	if c = f.p.conns[cid]; c.State != StateStale || f.p.outboxFor(cid) != 1 {
+		t.Fatalf("state %s, %d waiting", c.State, f.p.outboxFor(cid))
+	}
+	for _, g := range m.Got {
+		if g.ID == id {
+			t.Fatal("deposited under the old epoch")
+		}
+	}
+	if n := strings.Count(f.logs.String(), "alarm=reconnect_failed"); n != 1 {
+		t.Fatalf("reconnect_failed %d times", n)
+	}
+}
+
+// A reconnect's hs.fin goes on the hs.resp's carried standing token. When
+// it is refused token_revoked, the epoch is abandoned and the next try
+// goes on the held reconnect token, not counted, and completes; the
+// refused carried tokens are never adopted (§6.3.1 "A carried token
+// refused").
+func TestReconnectFinRevokedRetriesOnHeldToken(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	c := f.p.conns[cid]
+	held := c.Reconnect.Token
+	c.Standing.Exp = f.clk.Now()
+	m.StartRekey()
+	f.step() // rule J: our reconnect
+	var refused, onHeld []string
+	f.failDeposit = func(_, token string) error {
+		cc := f.p.conns[cid]
+		if cc.Pending != nil && token == cc.Pending.Standing.Token && len(refused) == 0 {
+			refused = append(refused, token)
+			return &relayclient.Error{Status: 403, Code: codeTokenRevoked}
+		}
+		if token == held {
+			onHeld = append(onHeld, token)
+		}
+		return nil
+	}
+	m.IgnoreStray, m.IgnoreRevoked = true, true
+	f.pump()
+	c = f.p.conns[cid]
+	if len(refused) != 1 || !f.audited("pending_abandoned_fin_revoked") || len(onHeld) != 1 {
+		t.Fatalf("refused %d, tries on the held token %d", len(refused), len(onHeld))
+	}
+	if c.Reconnecting || c.State != StateActive || epochOf(c) != m.KR.Current().ID() || c.Standing.Token == refused[0] {
+		t.Fatalf("reconnecting %v, state %s", c.Reconnecting, c.State)
 	}
 }

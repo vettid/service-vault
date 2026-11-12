@@ -40,6 +40,13 @@ type PendingEpoch struct {
 	// Issued are the jtis of the tokens a reconnect's hs.init carried,
 	// revoked when the epoch is abandoned (§6.6).
 	Issued []string `json:"issued,omitempty"`
+	// Standing and Reconnect are the tokens a reconnect's hs.resp carried:
+	// its hs.fin is deposited with Standing, and both are adopted at the
+	// confirmation, never before (§6.3.1 "A handshake's tokens are adopted
+	// at confirmation"); the held tokens stay until then, and a new try
+	// after an abandonment goes on the held reconnect token.
+	Standing  HeldToken `json:"standing,omitzero"`
+	Reconnect HeldToken `json:"reconnect,omitzero"`
 }
 
 // standingValid reports whether the service holds a standing token for
@@ -58,7 +65,7 @@ func (c *Connection) reconnectValid(now time.Time) bool {
 // pending and queues its hs.fin (a handshake message, marked with the
 // epoch so that an abandonment drops it unsent). An earlier pending epoch
 // is abandoned.
-func (p *Peer) makePending(c *Connection, og *outgoing, res *handshake.Result, now time.Time) {
+func (p *Peer) makePending(c *Connection, og *outgoing, res *handshake.Result, carried *PendingEpoch, now time.Time) {
 	if c.kr == nil {
 		c.kr = &handshake.Keyring{}
 	}
@@ -68,12 +75,16 @@ func (p *Peer) makePending(c *Connection, og *outgoing, res *handshake.Result, n
 	c.kr.SetPending(res.Epoch, now)
 	id := res.Epoch.ID()
 	pe := &PendingEpoch{ID: bytes.Clone(id[:]), Purpose: og.ini.Purpose(), FinAt: now, Issued: og.Issued}
+	if carried != nil {
+		pe.Standing, pe.Reconnect = carried.Standing, carried.Reconnect
+	}
 	if res.Inner != nil {
 		pe.RespTS = res.Inner.TS
 	}
 	c.Pending = pe
 	p.markDirty(kindConn, c.ID)
-	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: res.Fin, Handshake: true, FinEpoch: pe.ID}, now)
+	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Token: pe.Standing.Token, Payload: res.Fin,
+		Handshake: true, FinEpoch: pe.ID}, now)
 }
 
 // confirmPending makes the pending epoch current: a message from the
@@ -103,6 +114,15 @@ func (p *Peer) confirmPending(c *Connection, now time.Time) {
 		c.Suite = ep.Suite() // §13.4 pin
 	}
 	c.RekeyFailures, c.RekeyNotBefore = 0, time.Time{}
+	// The reconnect's carried tokens are adopted now: one replaces the
+	// held token of its kind if its exp is later (§6.3.1).
+	if pe.Standing.Token != "" && pe.Standing.Exp.After(c.Standing.Exp) {
+		c.Standing, c.RefreshID = pe.Standing, ""
+	}
+	if pe.Reconnect.Token != "" && pe.Reconnect.Exp.After(c.Reconnect.Exp) {
+		c.Reconnect = pe.Reconnect
+	}
+	p.activeAgain(c)
 	switch pe.Purpose {
 	case handshake.PurposeRekey:
 		for id, og := range p.outgoing {
@@ -186,6 +206,16 @@ func (p *Peer) outgoingReconnect(c *Connection) bool {
 	return false
 }
 
+// activeAgain makes a stale connection active when an epoch becomes
+// current (§3.4.1: stale is not final).
+func (p *Peer) activeAgain(c *Connection) {
+	if c.State == StateStale {
+		c.State = StateActive
+		p.markDirty(kindConn, c.ID)
+		p.log().Info("connection active again", "connection_id", c.ID)
+	}
+}
+
 // tickPending (housekeeping) applies B, judged only while the start latch
 // is set, and abandons a pending rekey when the service holds no valid
 // standing token for the member (R29-I6; a pending reconnect is not: it
@@ -207,8 +237,8 @@ func (p *Peer) tickPending(c *Connection, now time.Time) {
 // valid reconnect token) makes the connection stale (§3.4.1 "The
 // reconnect bound").
 func (p *Peer) beginReconnect(c *Connection, now time.Time) {
-	if c.State != StateActive && c.State != StateStale || c.Reconnecting {
-		return
+	if c.State != StateActive || c.Reconnecting {
+		return // a stale connection waits for a new epoch (the member's reconnect, or a new invitation)
 	}
 	c.ReconnectTries, c.ReconnectSlow, c.ReconnectSince, c.ReconnectRestore = 0, false, time.Time{}, false
 	c.Reconnecting = true

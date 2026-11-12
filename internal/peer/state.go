@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
@@ -582,8 +583,16 @@ func (p *Peer) flush(ctx context.Context) error {
 }
 
 // load reads every record into memory at start.
+// orphan is a pending epoch whose record and keys were not stored together.
+type orphan struct {
+	c      *Connection
+	id     []byte
+	issued []string
+}
+
 func (p *Peer) load(ctx context.Context) error {
 	var stale []*outgoing
+	var orphans []orphan
 	type target struct {
 		kind string
 		put  func([]byte) (string, error)
@@ -601,10 +610,14 @@ func (p *Peer) load(ctx context.Context) error {
 			c.kr = kr
 			c.initEpochs()
 			// The pending epoch's record and its keys are written together;
-			// one without the other is abandoned.
+			// one without the other is abandoned, after the load
+			// (orphanPending), with its hs.fin and tokens.
 			if c.Pending != nil && kr.Pending() == nil {
+				orphans = append(orphans, orphan{c, c.Pending.ID, c.Pending.Issued})
 				c.Pending = nil
 			} else if c.Pending == nil && kr.Pending() != nil {
+				id := kr.Pending().ID()
+				orphans = append(orphans, orphan{c, bytes.Clone(id[:]), nil})
 				kr.AbandonPending(p.now())
 			}
 			p.conns[c.ID] = c
@@ -726,6 +739,14 @@ func (p *Peer) load(ctx context.Context) error {
 		p.seq = max(p.seq, e.Seq)
 	}
 	p.dropStale(stale)
+	for _, o := range orphans {
+		p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == o.c.ID && bytes.Equal(e.FinEpoch, o.id) })
+		for _, j := range o.issued {
+			p.denyJTI(j, p.now())
+		}
+		p.markDirty(kindConn, o.c.ID)
+		p.log().Warn("a pending epoch stored incompletely was abandoned", "connection_id", o.c.ID)
+	}
 	return nil
 }
 

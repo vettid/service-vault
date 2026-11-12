@@ -433,12 +433,6 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 		p.beginReconnect(c, now)
 		return ackAfterFlush
 	}
-	if c.Pending != nil {
-		// A later rekey of the member's shows that its answer to ours
-		// ended without hs.fin: the pending epoch is abandoned and the
-		// rekey answered (§6.3.1 "Crossing").
-		p.abandonPending(c, "crossing", false, now)
-	}
 	// Crossing rekeys: the lower th1 wins (§6.5).
 	for id, og := range p.outgoing {
 		if og.ConnID != c.ID {
@@ -461,6 +455,12 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 	if err != nil {
 		p.audit("rekey_refused", c.ID)
 		return ackAfterFlush
+	}
+	if c.Pending != nil {
+		// A later rekey of the member's shows that its answer to ours
+		// ended without hs.fin: the pending epoch is abandoned and the
+		// rekey answered (§6.3.1 "Crossing").
+		p.abandonPending(c, "crossing", false, now)
 	}
 	id := p.newID(now)
 	th1 := pi.Th1()
@@ -572,6 +572,7 @@ func (p *Peer) handleFin(id string, raw []byte, sender ed25519.PublicKey, now ti
 	// comes first, R29-X2).
 	p.abandonPending(c, "peer_activated", false, now)
 	p.installEpoch(c, fr.Epoch, now)
+	p.activeAgain(c)
 	// The member's vault holds the epoch pending until a message from us
 	// opens under it (§6.3.1 Responder, R29-R1): hs.confirm, body {},
 	// never answered. A member vault from before release 29 answers it
@@ -808,7 +809,7 @@ func (p *Peer) handleResp(id string, raw []byte, sender ed25519.PublicKey, now t
 	// hs.fin goes out; the new epoch is pending until the member confirms
 	// it, and the service sends in the current one until then (§6.3.1
 	// Initiator).
-	p.makePending(c, og, res, now)
+	p.makePending(c, og, res, nil, now)
 	p.log().Info("rekeyed: epoch pending", "connection_id", c.ID)
 	return ackAfterFlush
 }
