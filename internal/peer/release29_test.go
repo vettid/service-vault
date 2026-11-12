@@ -27,11 +27,10 @@ func TestRekeyWithLinksRefused(t *testing.T) {
 		t.Fatal("no link queued")
 	}
 	m.StartRekeyWithLinks()
-	f.p.Step(context.Background(), 0)
-	if len(f.p.outbox) != 0 {
-		t.Fatalf("%d deposits queued: the rekey was answered", len(f.p.outbox))
-	}
 	f.pump()
+	if m.KR.Current().ID() != epoch {
+		t.Fatal("the member got an answer: its epoch moved")
+	}
 	c := f.p.conns[cid]
 	if c.kr.Current().ID() != epoch {
 		t.Fatal("the epoch moved on a rekey with links")
@@ -67,6 +66,9 @@ func TestServiceRekeyRespWithLinksAborted(t *testing.T) {
 	c := f.p.conns[cid]
 	if len(f.p.outgoing) != 0 {
 		t.Fatal("the rekey is still outgoing")
+	}
+	if m.KR.Current().ID() != epoch {
+		t.Fatal("the member got an hs.fin: its epoch moved")
 	}
 	if c.kr.Current().ID() != epoch {
 		t.Fatal("the epoch moved on an hs.resp with links")
