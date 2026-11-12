@@ -1,6 +1,6 @@
 # Release 29 in the service vault
 
-**Status:** 0.4.0, draft (2026-11-12). Against VAULT-MESSAGING 0.89.2.
+**Status:** 0.4.1, draft (2026-11-12). Against VAULT-MESSAGING 0.89.2.
 
 VAULT-MESSAGING §6.3.1 ("Lifetimes and activation on confirmation",
 release 29) asks a service vault to follow its rules "on either side as
@@ -13,8 +13,9 @@ text. Rule IDs are those of VAULT-MESSAGING §6.3.2.
 
 Choices are marked **(chosen; not in the spec)**. Everything else is the
 spec's own rule, restated for a service. The service runs as one task
-(`desiredCount: 1`); several of the rules below assume one process
-holds a connection's state at a time.
+(`desiredCount: 1`), and within it one lock (the peer's) covers the
+drain, key changes and every state change; several of the rules below
+assume one process holds a connection's state at a time.
 
 ## 1. What does not apply
 
@@ -78,8 +79,10 @@ current epoch unless stated:
 4. when `token_revoked` answers a deposit under its **held** standing
    token and it holds no other valid one (§8.6, 0.88.2), unless "No
    reconnect while carried tokens wait" holds. The answer ends that
-   token only, not the connection; today the service makes the
-   connection `stale`, which changes. A reconnect's own `hs.init`
+   token only, not the connection: the refused entry and the others to
+   the member wait in the outbox for a valid standing token. Today the
+   service makes the connection `stale` and drops its other entries,
+   which changes. A reconnect's own `hs.init`
    answered `token_revoked` is a failed try at once, as §8.6 says (it can
    never be answered); a carried token's refusal is not a try at all;
 5. after `quota_exceeded` on its standing token, at once and also while
@@ -171,7 +174,9 @@ message it deposits, and in the `features` of its `profile.update`
 `relay_follow` there too: it follows a member's relay-key rotation by
 `relay.address.update` already, and §3.4 "Receivers first" expects the
 capability. The `profile.update` body is the one §10.8 gives: a
-`version` (a counter per connection, 1 at activation), the invitation's
+`version` (stored per connection: 1 at activation, one more at each
+change of the profile, unchanged when an epoch is activated again), the
+invitation's
 profile names, the service's `ik`, `items: []`, and `features`
 (`["hs_confirm", "relay_follow"]`, sorted).
 Nothing in §6.3.1 depends on seeing `hs_confirm`, so a member that
@@ -249,20 +254,23 @@ invitations.
   tokens and outbox entries, stored as separate kinds).
 - **Records without it.** At every start, right after the state is
   loaded and before any reconnect (a restore's included), housekeeping,
-  drain or write, the service ends every
+  drain or any other write, the service ends every
   connection record that lacks the marker or holds a value below 29: it
   sends the member `connection.removed` (best effort), revokes every
   token it issued for the connection (its relay registrations), audits
   `connection_pre29_ended`, emits `connection.removed` to the
   application with the reason `pre29` (so that the application can tell
   it from an operator's removal and invite the member again), and logs
-  one alarm with the count. Its stored handshakes, tokens and outbox
-  entries end with it. Running it at every start covers a point-in-time
+  one alarm with the count. Its stored handshakes and tokens end with
+  it, and its waiting messages end audited `drop.undelivered_removed`. Running it at every start covers a point-in-time
   restore of older records.
 - **A rollback** to a version before the fourth change is an operator
   step that ends every connection first (runbook): code from before the
   marker could otherwise write records under a connection that still
-  carries it.
+  carries it. The deployment's circuit breaker can roll a failed deploy
+  back by itself, so the fourth change adds the runbook step: after a
+  `deploy_failed` rollback across the fourth change, end every
+  connection before deploying forward.
 - **Invitations** are not ended: one claimed under this version makes a
   connection under its rules, which carries the marker.
 - **On staging,** where every connection is ended this way, the deploy
@@ -305,7 +313,10 @@ best-effort notices (`connection.removed`) are not covered.
   can exist. A service has no clean end (§8.3 "A clean end": it is never
   locked), so **at every start every waiting session-mode deposit is
   marked tried**: a write that would have stored the mark after an
-  accepted deposit may have been lost.
+  accepted deposit may have been lost. Every deploy and every replaced
+  task is such an end, so a message that waited across one is noted late
+  rather than sealed again with a fresh `ts` (a clean end at `SIGTERM`
+  would avoid that; it is not built).
 - **At a key change.** Just before the current epoch is replaced (a
   responder's activation, and the initiator's confirmation of a pending
   epoch), every durable entry still waiting under it is sealed again
@@ -318,10 +329,18 @@ best-effort notices (`connection.removed`) are not covered.
   with the activation, in one write.
 - **At deposit.** Before each deposit of a waiting durable entry under
   the current epoch: an untried one whose `ts` is older than 2 days is
-  sealed again with a fresh `ts` (and written before it goes); a tried
-  one older than 16 days is not delivered (case 2); a tried one within
-  16 days goes as it is, noted once in the service's log
-  (`unconfirmed_late`) when older than 2 days.
+  sealed again with a fresh `ts` and a new `seq` (§8.4), written before
+  it goes, the member's later deposits waiting behind it in order; one
+  that cannot be sealed again goes as it is while within 16 days, and
+  ends `drop.held_unsealable` otherwise. A tried one older than 16 days
+  is not delivered (case 2); a tried one within 16 days goes as it is,
+  noted once in the service's log (`unconfirmed_late`) when older than 2
+  days.
+- **Told to whom** (chosen; not in the spec): the service audits and
+  logs these; the application is not told. A member vault tells its
+  member (`message.delivery_unconfirmed`); the service has no member to
+  tell, and its application learns of a failed delivery the way it does
+  today, from the missing answer.
 - **Not delivered**, each with its own audit entry (`ref` the inner
   `id`), never silently (§8.3 cases):
   1. an entry whose `exp` passed while it waited: `drop.held_expired`;
@@ -330,16 +349,27 @@ best-effort notices (`connection.removed`) are not covered.
   4. the connection is removed or replaced: `drop.undelivered_removed`;
   5. a deposit is answered `mailbox_unknown`: `drop.undelivered_mailbox_unknown`;
   7. the connection is suspended on fork evidence: `drop.undelivered_suspended`;
-  8. the relay refuses the deposit with a `4xx` other than `429`:
+  8. the relay refuses the deposit with a `4xx` other than `429` and
+     the codes §8.6's table handles (`token_expired`, `token_revoked`,
+     `quota_exceeded`, `token_used`, `mailbox_unknown`):
      `drop.undelivered_refused`. `timestamp_stale` and `replay_detected`
      are about the attempt, not the message: retried with the backoff,
-     never ended.
+     never ended; an entry refused `timestamp_stale` a third time is
+     logged once (`relay_clock_stale`), so that a stuck clock shows.
 
   (Case 6, a `stale` connection that can no longer come back, is
-  proposed in §8.3 and not built here yet.)
+  proposed in §8.3 and not built here yet. `drop.undelivered_unreadable`,
+  an entry under an epoch whose send key is gone, does not arise: every
+  key change re-seals what waits under the epoch it replaces, so nothing
+  waits under an older one; the records from before this release are
+  ended (section 11).)
 - **Held after a demotion** (§3.4.1, the fourth change): a durable
   message made while the current epoch is demoted waits unsealed in its
-  place and is sealed when an epoch is current again.
+  place and is sealed when an epoch is current again. So does one
+  already sealed under the demoted epoch and not yet deposited: it goes
+  back to held; a tried one keeps its `ts`; one whose `exp` passes ends
+  `drop.held_expired`, and one that cannot be sealed ends
+  `drop.held_unsealable`.
 
 ## 14. The work
 
@@ -404,6 +434,11 @@ separately. The README's release-29 status paragraph shrinks with each.
 
 ## Changes
 
+- **0.4.1 (2026-11-12):** the runbook step for a rollback by the
+  circuit breaker (change 4); case 8's codes; entries wait at a
+  `token_revoked` on a held token; held after a demotion covers sealed
+  entries; an untried entry that cannot be re-sealed; who is told;
+  `relay_clock_stale`; the stored `version`; unclean ends; one lock.
 - **0.4.0 (2026-11-12):** §13 restated as §8.3: the stored tried mark
   (one client attempt per deposit, every waiting deposit tried at each
   start), the check at deposit, and the not-delivered cases. §11: what
