@@ -361,7 +361,10 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 		// service follows links only from identity.rotate and a reconnect,
 		// and advertises no features, so a peer sends none here (0.86.2
 		// erratum 1). Answering it would move the epoch to the new key
-		// while the connection's stored key stays the old one.
+		// while the connection's stored key stays the old one. Before this
+		// service advertises any feature (relay_follow, §3.4 "Receivers
+		// first"), it must follow S8 links here and in handleResp instead:
+		// release-29 peers then send them on every rekey after a rotation.
 		pi.Discard()
 		p.audit("rekey_rejected", c.ID)
 		return ackAfterFlush
@@ -596,6 +599,17 @@ func (p *Peer) handleResp(id string, raw []byte, sender ed25519.PublicKey, now t
 		} else {
 			p.audit("hs_resp_dropped", og.ConnID)
 		}
+		return ackAfterFlush
+	}
+	if og.ini.Purpose() == handshake.PurposeRekey && len(res.Resp.Rotations) > 0 {
+		// An hs.resp to this service's rekey that carries identity links
+		// (0.85.0 S8) aborts it, as before vettid-vault's handshake parsed
+		// them: installing the epoch would leave the connection's stored
+		// key behind the one sig_R verified under. No hs.fin is sent; the
+		// rekey is started again later, as after any abort.
+		res.Epoch.Destroy()
+		p.audit("hs_resp_aborted", og.ConnID)
+		p.dropOutgoing(id)
 		return ackAfterFlush
 	}
 	delete(p.outgoing, id)

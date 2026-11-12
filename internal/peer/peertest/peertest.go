@@ -292,9 +292,13 @@ type Member struct {
 	rekey    *handshake.Initiator
 	recon    *handshake.Initiator
 	awaitFin *handshake.Responder
-	// HSFeatures is the inner features list the Member's hs.resp carries
-	// (0.86.0, §5.3), as a release-29 vault sends it.
+	// HSFeatures is the inner features list the Member's rekey hs.init,
+	// hs.resp and hs.fin carry (0.86.0, §5.3), as a release-29 vault sends
+	// it.
 	HSFeatures []string
+	// RespRotations are identity links the Member puts in its hs.resp to
+	// the service's rekey (0.85.0 S8).
+	RespRotations []*handshake.Rotation
 	// Rotations are the identity.rotate links since the session's epoch
 	// (for a reconnect, §6.6).
 	Rotations []*handshake.Rotation
@@ -622,7 +626,7 @@ func (m *Member) startRekey(links []*handshake.Rotation) {
 	ini, err := handshake.NewInitiator(handshake.InitiatorConfig{
 		Purpose: handshake.PurposeRekey, Identity: m.IK, StaticKEM: m.kem.Public(), Relay: m.Addr,
 		ResponderIK: m.svc.IK, ResponderRelayKey: m.svc.Relay.PK, Current: m.KR.Current(),
-		Policy: handshake.PolicyVaultToVault, Rotations: links, Now: m.clk.Now(),
+		Policy: handshake.PolicyVaultToVault, Rotations: links, Features: m.HSFeatures, Now: m.clk.Now(),
 	})
 	if err != nil {
 		m.t.Fatal(err)
@@ -640,7 +644,8 @@ func (m *Member) answerRekey(raw []byte, in *envelope.Inner, ep *handshake.Epoch
 		m.t.Fatalf("Member: accept rekey: %v", err)
 	}
 	resp, env, err := pi.Respond(handshake.ResponderConfig{Identity: m.IK, Policy: handshake.PolicyVaultToVault,
-		CollectSender: sender, RecordRelayKey: m.svc.Relay.PK, KnownInitiatorIK: m.svc.IK, Features: m.HSFeatures, Now: now})
+		CollectSender: sender, RecordRelayKey: m.svc.Relay.PK, KnownInitiatorIK: m.svc.IK, Features: m.HSFeatures,
+		Rotations: m.RespRotations, Now: now})
 	if err != nil {
 		m.t.Fatalf("Member: respond rekey: %v", err)
 	}

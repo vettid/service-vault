@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vettid/service-vault/internal/peer/peertest"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/peerwire"
@@ -15,8 +14,8 @@ import (
 
 // The service advertises no features, so a release-29 member vault sends
 // it no identity links in a rekey (VAULT-MESSAGING 0.86.2 erratum 1). One
-// that does is refused, as before the handshake library parsed them: the
-// epoch and the stored identity key don't move.
+// that does is refused, as before the handshake library parsed them: no
+// answer, and the epoch and the stored identity key don't move.
 func TestRekeyWithLinksRefused(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
@@ -28,6 +27,10 @@ func TestRekeyWithLinksRefused(t *testing.T) {
 		t.Fatal("no link queued")
 	}
 	m.StartRekeyWithLinks()
+	f.p.Step(context.Background(), 0)
+	if len(f.p.outbox) != 0 {
+		t.Fatalf("%d deposits queued: the rekey was answered", len(f.p.outbox))
+	}
 	f.pump()
 	c := f.p.conns[cid]
 	if c.kr.Current().ID() != epoch {
@@ -44,28 +47,53 @@ func TestRekeyWithLinksRefused(t *testing.T) {
 	}
 }
 
-// A rekey without links from a release-29-style member still works.
-func TestRekeyWithoutLinksFromRelease29(t *testing.T) {
+// An hs.resp to the service's own rekey that carries identity links
+// aborts the rekey, as before: no hs.fin, the epoch and the stored key
+// stay, and the rekey is dropped.
+func TestServiceRekeyRespWithLinksAborted(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	stored := f.p.conns[cid].Peer.IK
+	epoch := f.p.conns[cid].kr.Current().ID()
+	r := m.RotateIdentity(40, true) // a link the service has not followed
+	m.RespRotations = []*handshake.Rotation{r}
+	f.clk.Advance(handshake.PolicyVaultToVault.MaxAge + time.Second)
+	f.tick()
+	if len(f.p.outgoing) != 1 {
+		t.Fatalf("%d outgoing rekeys", len(f.p.outgoing))
+	}
+	f.pump()
+	c := f.p.conns[cid]
+	if len(f.p.outgoing) != 0 {
+		t.Fatal("the rekey is still outgoing")
+	}
+	if c.kr.Current().ID() != epoch {
+		t.Fatal("the epoch moved on an hs.resp with links")
+	}
+	if !ed25519.PublicKey(stored).Equal(c.Peer.IK) {
+		t.Fatal("the stored identity key changed")
+	}
+	if !strings.Contains(f.logs.String(), "reason=hs_resp_aborted") {
+		t.Fatalf("not audited:\n%s", f.logs.String())
+	}
+}
+
+// A rekey from a member whose handshake messages carry inner features, as
+// a release-29 vault's do, completes; so does the service's own rekey
+// when the member's hs.resp carries them.
+func TestRekeyWithFeaturesFromRelease29(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
 	m.HSFeatures = []string{"hs_confirm", "relay_follow", "vote"}
 	cid := f.connect(m, "")
 	old := m.KR.Current().ID()
-	m.StartRekeyWithLinks() // m.Rotations is empty: no links
+	m.StartRekey()
 	f.pump()
 	if m.KR.Current().ID() == old || f.p.conns[cid].kr.Current().ID() != m.KR.Current().ID() {
-		t.Fatal("the rekey did not complete")
+		t.Fatal("the member's rekey did not complete")
 	}
-}
-
-// The service's own rekey completes when the member's hs.resp carries an
-// inner features list (0.86.0, §5.3).
-func TestServiceRekeyRespWithFeatures(t *testing.T) {
-	f := newFixture(t)
-	m := f.member(10)
-	m.HSFeatures = []string{"hs_confirm", "relay_follow"}
-	cid := f.connect(m, "")
-	old := m.KR.Current().ID()
+	old = m.KR.Current().ID()
 	f.clk.Advance(handshake.PolicyVaultToVault.MaxAge + time.Second)
 	f.tick()
 	if len(f.p.outgoing) != 1 {
@@ -73,7 +101,7 @@ func TestServiceRekeyRespWithFeatures(t *testing.T) {
 	}
 	f.pump()
 	if len(f.p.outgoing) != 0 || m.KR.Current().ID() == old || f.p.conns[cid].kr.Current().ID() != m.KR.Current().ID() {
-		t.Fatal("the rekey did not complete")
+		t.Fatal("the service's rekey did not complete")
 	}
 	if _, err := f.p.Authenticate(context.Background(), cid, "after rekey", "", time.Minute); err != nil {
 		t.Fatal(err)
@@ -85,25 +113,36 @@ func TestServiceRekeyRespWithFeatures(t *testing.T) {
 }
 
 // An hs.confirm (0.86.0, §6.3.1), which this service does not implement,
-// and a message whose inner part carries features, leave the connection
-// working: the confirm is handled as any type the service does not know,
-// and the features list is ignored.
+// is answered unsupported_type like any type it does not know, and the
+// connection stays active. A message whose inner part carries a valid
+// features list is handled. (A malformed list is now refused by the
+// library, like any malformed known member, §5.3: vettid-vault's
+// envelope.TestInnerFeatures; this package's test member cannot encode
+// one.)
 func TestRelease29MessagesTolerated(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
 	cid := f.connect(m, "")
-	m.SendInner(&envelope.Inner{ID: m.NewID(), Type: handshake.TypeConfirm, TS: f.clk.Now(), Body: []byte("{}")})
+	confirm := m.NewID()
+	m.SendInner(&envelope.Inner{ID: confirm, Type: handshake.TypeConfirm, TS: f.clk.Now(), Body: []byte("{}")})
 	f.pump()
 	if c := f.p.conns[cid]; c.State != StateActive {
 		t.Fatalf("state %s after hs.confirm", c.State)
 	}
-	body := peerwire.ProfileUpdateBody(2, "Nora", "Renamed", m.IK.Public().(ed25519.PublicKey), nil)
-	m.SendInner(&envelope.Inner{ID: m.NewID(), Type: peerwire.TypeProfileUpdate, TS: f.clk.Now(), Body: body,
-		Features: []string{"hs_confirm", "relay_follow", "vote"}})
+	answered := false
+	for _, in := range m.Got {
+		if in.Re == confirm && in.Error != nil && in.Error.Code == "unsupported_type" {
+			answered = true
+		}
+	}
+	if !answered {
+		t.Fatal("hs.confirm not answered unsupported_type")
+	}
+	ik := m.IK.Public().(ed25519.PublicKey)
+	m.SendInner(&envelope.Inner{ID: m.NewID(), Type: peerwire.TypeProfileUpdate, TS: f.clk.Now(),
+		Body: peerwire.ProfileUpdateBody(2, "Nora", "Renamed", ik, nil), Features: []string{"hs_confirm", "relay_follow", "vote"}})
 	f.pump()
 	if got, _ := f.p.Connection(cid); got.Name != "Nora Renamed" {
 		t.Fatalf("name %q: a message with inner features was not handled", got.Name)
 	}
 }
-
-var _ = peertest.RelayURL
