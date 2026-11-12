@@ -21,6 +21,24 @@ The first deployment is vettid.org's own member service
 ([vettid/member-service](https://github.com/vettid/member-service)), which
 integrates exactly as a third party would.
 
+**Release 29 (VAULT-MESSAGING §6.3.1) is not yet implemented in full.**
+Toward a release-29 member vault the service:
+- follows identity links on rekeys both ways (0.87.0 S8);
+- sends `hs.confirm` (body `{}`) under the new epoch when it activates a
+  member's rekey or reconnect at its verified `hs.fin`, which confirms
+  the epoch the member holds pending;
+- acks an incoming `hs.confirm` and ignores it (it activated at `hs.fin`
+  already and holds no pending epoch);
+- after a rekey of its own fails (its `hs.resp` aborted it, or none came
+  within 16 days), waits an hour before the next, doubling to a day,
+  instead of starting one every minute.
+
+It does not yet hold its own rekey's epoch pending until the member
+confirms it, track a confirmed epoch, re-send `hs.confirm` (per batch or
+every 12 days), apply rule E, the crossing rule, rule J, the T1/T2 rules
+or the received flag, or advertise `hs_confirm`. That is the next piece
+of work.
+
 This repository replaces
 [vettid/vettid-service-vault](https://github.com/vettid/vettid-service-vault),
 a NATS-based prototype that is retired; none of its code is reused.
@@ -766,7 +784,26 @@ the move:
   service had started under the old keys is dropped. A member that
   rotated while the session was down reconnects with the chain in its
   `hs.init` (§6.6), and the service follows that the same way. Links it
-  already followed may come first. If two different
+  already followed may come first. A rekey may carry links too (S8,
+  0.85.0; a release-29 member vault sends its whole chain on every
+  rekey, to every peer, since 0.87.0): the service follows the links it
+  has not followed yet, at the rekey's verified `hs.fin` when the member
+  started it, and before installing the epoch when the service did. At
+  that `hs.fin` (a member's rekey or reconnect) the key the `hs.init` was
+  signed with is checked again against what was followed since: the
+  relay keeps no order, so `identity.rotate` statements may have moved
+  the stored key past it, and then the handshake is dropped
+  (`ancestor_ik`) instead of setting the key back. A member's rekey
+  answered under a key that a later rotation moved past is dropped at
+  that rotation. A second successor found while following links suspends
+  the connection, and the handshake that was being completed then
+  completes nothing. Links that would lead the identity back to a key it
+  already had (a cycle, such as A to B, then B to A) are refused, so
+  that "one successor per key" can still be judged. One gap: a second successor carried in an `hs.resp`
+  to the service's own rekey is refused by the handshake library before
+  the service sees it, so it shows only as failed rekeys (backed off),
+  not as `rotate_conflict`. `identity.rotate` itself still reads only its
+  one link, not the `rotations` chain S8 lets it carry. If two different
   successors of one key arrive ("one successor per key"), the connection
   is suspended: nothing is sent or accepted, its sign-ins and
   approvals can't be answered, an ERROR with `alarm: rotate_conflict` is

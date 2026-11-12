@@ -623,7 +623,7 @@ func TestReconnectRecordBadRetries(t *testing.T) {
 	b := f.backup()
 	f.yielded(m, cid, b)
 	for _, aw := range f.p.awaiting {
-		aw.Reconnect.Links = []json.RawMessage{json.RawMessage(`"x"`)}
+		aw.Reconnect.Signer.Links = []json.RawMessage{json.RawMessage(`"x"`)}
 	}
 	f.pump()
 	if !strings.Contains(f.logs.String(), "reason=reconnect_record_bad") {

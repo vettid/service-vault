@@ -222,8 +222,27 @@ func (p *Peer) finishReconnect(c *Connection, og *outgoing, res *handshake.Resul
 		p.reconnectFailed(c)
 		return ackAfterFlush
 	}
-	if fresh := res.Resp.Rotations[handshake.KnownPrefix(chainOf(c), res.Resp.Rotations):]; len(fresh) > 0 {
+	fresh := res.Resp.Rotations[handshake.KnownPrefix(chainOf(c), res.Resp.Rotations):]
+	if p.revisits(c, fresh) {
+		p.audit("bad_rotation", c.ID)
+		res.Epoch.Destroy()
+		for _, j := range og.Issued {
+			p.denyJTI(j, now)
+		}
+		p.reconnectFailed(c)
+		return ackAfterFlush
+	}
+	if len(fresh) > 0 {
 		p.followRotation(c, res.ResponderIK, res.ResponderKEM, fresh)
+	}
+	if c.State == StateSuspended {
+		// Following judged an answer's links: a fork. The suspension
+		// stands: no hs.fin, no epoch, our tokens revoked.
+		res.Epoch.Destroy()
+		for _, j := range og.Issued {
+			p.denyJTI(j, now)
+		}
+		return ackAfterFlush
 	}
 	c.Standing, c.Reconnect = st, rt
 	c.State = StateActive
