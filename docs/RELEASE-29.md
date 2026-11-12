@@ -406,7 +406,12 @@ separately. The README's release-29 status paragraph shrinks with each.
    kept for `L` (section 8); `token_revoked` ending one token; the
    handshakes a newer one ends that the initiator owns; re-sealing at the
    initiator's confirmation (section 13, with the tried mark of change
-   1); `relay_follow` no longer advertised (section 6). A pending epoch
+   1); `relay_follow` no longer advertised (section 6). The tokens of the
+   service's own reconnect's `hs.resp` are kept with its pending epoch,
+   its `hs.fin` going on the carried standing token, and adopted at its
+   confirmation (§6.3.1), so that a new try after an abandonment goes on
+   the held reconnect token; the rest of carried tokens is the third
+   change's. A pending epoch
    abandoned by a link (K2) is abandoned here; its demotion from the
    start, which refuses messages under it, comes with the fourth.
 3. **Forks and tokens.** Rule E (section 9) and its fork evidence; a
@@ -445,7 +450,9 @@ separately. The README's release-29 status paragraph shrinks with each.
 ## Changes
 
 - **0.5.0 (2026-11-12):** §6, `relay_follow` is not advertised
-  (VAULT-MESSAGING 0.90.0); §3 item 8, a `relay.address.update` restarts
+  (VAULT-MESSAGING 0.90.0); §14, the service's own reconnect adopts its
+  carried tokens at confirmation in the second change; §3 item 8, a
+  `relay.address.update` restarts
   an open try uncounted (chosen); §14, K2's demotion comes with the
   fourth change; §3, §4 and §8 describe the second change as done.
 - **0.4.2 (2026-11-12):** §5, a waiting `hs.confirm` older than 2 days
