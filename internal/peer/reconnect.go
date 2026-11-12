@@ -1,7 +1,6 @@
 package peer
 
 import (
-	"crypto/ed25519"
 	"encoding/hex"
 	"time"
 
@@ -48,7 +47,6 @@ func (p *Peer) reconnectAll(now time.Time) int {
 		// Per restore: counters that came back with the backup (taken
 		// while an earlier reconnect was open) start again.
 		c.Reconnecting, c.ReconnectTries, c.ReconnectSlow, c.ReconnectSince = false, 0, false, time.Time{}
-		c.ReconnectIK = nil // a restore starts the reconnect over
 		if p.startReconnect(c, now) {
 			n++
 		} else if c.State == StateActive || c.State == StateStale {
@@ -99,28 +97,9 @@ func (p *Peer) reconnectOpen(c *Connection) bool {
 // it is open any more (§6.6, 0.72.1: never while a member's hs.fin is
 // awaited, and never over our own hs.init in flight).
 func (p *Peer) reconnectIfIdle(c *Connection, now time.Time) {
-	if c.Reconnecting && c.State != StateSuspended && !p.reconnectOpen(c) && !p.reconnectHeld(c) {
+	if c.Reconnecting && c.State != StateSuspended && !p.reconnectOpen(c) {
 		p.retryReconnect(c, now)
 	}
-}
-
-// reconnectHeld reports whether a reconnect waits for this service's
-// identity key to be the one its dropped hs.init named (dropStale): a try
-// under another key would only spend one of the member's reconnect
-// token's messages on an hs.init it refuses. Once they match, the mark is
-// cleared and the reconnect resumes.
-func (p *Peer) reconnectHeld(c *Connection) bool {
-	if len(c.ReconnectIK) == 0 {
-		return false
-	}
-	if suite.EqualPublic(c.ReconnectIK, p.cfg.Keys.IK.Public().(ed25519.PublicKey)) {
-		c.ReconnectIK = nil
-		p.markDirty(kindConn, c.ID)
-		p.log().Info("reconnect resumed: the identity key matches again", "connection_id", c.ID)
-		return false
-	}
-	p.log().Warn("reconnect held: the identity key still differs from the one it was made under", "connection_id", c.ID)
-	return true
 }
 
 // retryReconnect starts a new try of an open reconnect, or ends it.
@@ -153,7 +132,6 @@ func (p *Peer) reconnectFailed(c *Connection) {
 		return
 	}
 	c.Reconnecting, c.ReconnectTries, c.ReconnectSlow, c.ReconnectSince = false, 0, false, time.Time{}
-	c.ReconnectIK = nil
 	p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == c.ID && e.Token != "" && e.Token == c.Reconnect.Token })
 	if c.State == StateActive {
 		c.State = StateStale
