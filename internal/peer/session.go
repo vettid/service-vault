@@ -209,7 +209,7 @@ func (p *Peer) sendInner(c *Connection, in *envelope.Inner, now time.Time) strin
 		return ""
 	}
 	if in.Features == nil {
-		in.Features = Features // §10.8, §6.3.1 Capability
+		in.Features = features() // §10.8, §6.3.1 Capability
 	}
 	if p.outboxFor(c.ID) >= MaxOutboxPerConn {
 		// The member's mailbox has not taken our deposits for a while: what
@@ -314,13 +314,14 @@ func (p *Peer) handleResponse(c *Connection, in *envelope.Inner, now time.Time) 
 // session keys and outbox entries are deleted.
 func (p *Peer) removeConnection(c *Connection, dir string, now time.Time) {
 	if dir == "out" && c.kr != nil && c.kr.Current() != nil && c.Standing.Token != "" && c.State == StateActive && !c.Reconnecting {
-		in := &envelope.Inner{ID: p.newID(now), Type: peerwire.TypeConnectionRemoved, TS: now, Body: peerwire.ConnectionRemovedBody()}
+		in := &envelope.Inner{ID: p.newID(now), Type: peerwire.TypeConnectionRemoved, TS: now, Body: peerwire.ConnectionRemovedBody(),
+			Features: features()}
 		if raw, err := c.kr.Current().Seal(in); err == nil {
-			p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == c.ID })
+			p.dropUndelivered(c, "undelivered_removed", nil)
 			p.queueDeposit(&outboxEntry{Mailbox: c.Peer.Relay.Mailbox, Token: c.Standing.Token, Payload: raw, BestEffort: true}, now)
 		}
 	} else {
-		p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == c.ID })
+		p.dropUndelivered(c, "undelivered_removed", nil)
 	}
 	p.denyConnTokens(c.ID, now)
 	c.Reconnecting = false // ended, not failed

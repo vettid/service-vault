@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"slices"
 	"time"
 
 	"github.com/vettid/vettid-vault/vms/envelope"
@@ -32,10 +33,13 @@ const ConfirmedKeysFor = 48 * 24 * time.Hour
 // unconfirmed (§6.3.1 "hs.confirm again"): 12 days, not scaled.
 const ConfirmResend = 12 * 24 * time.Hour
 
-// Features are the capabilities the service advertises, in every
+// serviceFeatures are the capabilities the service advertises, in every
 // message's inner features and in its profile.update (§10.8, §6.3.1
 // Capability; RELEASE-29 §6): sorted, each once.
-var Features = []string{handshake.CapConfirm, "relay_follow"}
+var serviceFeatures = []string{handshake.CapConfirm, "relay_follow"}
+
+// features returns a copy of serviceFeatures for one message.
+func features() []string { return slices.Clone(serviceFeatures) }
 
 // EpochMeta records one of a connection's epochs, in the order they
 // became current (§6.3.1).
@@ -130,7 +134,8 @@ func (p *Peer) pruneEpochs(c *Connection, now time.Time) {
 // hs.fin, that opened under ep and passed the sender and suspension
 // checks, before anything else is done with it: the received flag, the
 // confirmed epoch, and hs.confirm again for a message under a confirmed
-// epoch that is not current (queued once per batch, reconfirmAll).
+// epoch that is not current, while the current one is a member's the
+// service activated as responder (queued once per batch, reconfirmAll).
 func (p *Peer) noteFromMember(c *Connection, ep *handshake.Epoch) {
 	if ep == nil {
 		return
@@ -143,7 +148,8 @@ func (p *Peer) noteFromMember(c *Connection, ep *handshake.Epoch) {
 		p.markDirty(kindConn, c.ID)
 	}
 	p.setConfirmed(c, id, now)
-	if bytes.Equal(c.Confirmed, id) && !bytes.Equal(c.Confirmed, c.LastEpochID) {
+	cur := c.epochMeta(c.LastEpochID)
+	if cur != nil && !cur.Mine && bytes.Equal(c.Confirmed, id) && !bytes.Equal(c.Confirmed, c.LastEpochID) {
 		if p.reconfirm == nil {
 			p.reconfirm = map[string]bool{}
 		}
@@ -154,11 +160,25 @@ func (p *Peer) noteFromMember(c *Connection, ep *handshake.Epoch) {
 // reconfirmAll queues hs.confirm for each connection the batch marked.
 func (p *Peer) reconfirmAll(now time.Time) {
 	for id := range p.reconfirm {
-		if c := p.conns[id]; c != nil && !p.confirmQueued(c) {
-			p.queueConfirm(c, now)
+		if c := p.conns[id]; c != nil {
+			p.replaceStaleConfirm(c, now)
+			if !p.confirmQueued(c) {
+				p.queueConfirm(c, now)
+			}
 		}
 	}
 	p.reconfirm = nil
+}
+
+// replaceStaleConfirm drops a waiting hs.confirm queued more than
+// RestampAfter ago (it waited for a token or behind a quota, and keeps
+// its ts: the member would drop it past its 16-day window), so that a
+// fresh one takes its place.
+func (p *Peer) replaceStaleConfirm(c *Connection, now time.Time) {
+	if now.Sub(c.ConfirmAt) <= RestampAfter {
+		return
+	}
+	p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == c.ID && e.Confirm })
 }
 
 // queueConfirm queues hs.confirm (body {}, durable, never answered) to a
@@ -170,7 +190,7 @@ func (p *Peer) queueConfirm(c *Connection, now time.Time) bool {
 	if c.kr == nil || c.kr.Current() == nil || c.State != StateActive || c.Reconnecting {
 		return false
 	}
-	in := &envelope.Inner{ID: p.newID(now), Type: handshake.TypeConfirm, TS: now, Body: json.RawMessage(`{}`), Features: Features}
+	in := &envelope.Inner{ID: p.newID(now), Type: handshake.TypeConfirm, TS: now, Body: json.RawMessage(`{}`), Features: features()}
 	raw, err := c.kr.Current().Seal(in)
 	if err != nil {
 		return false
@@ -200,7 +220,15 @@ func (p *Peer) tickConfirm(c *Connection, now time.Time) {
 	if cur == nil || cur.Mine || c.epochIndex(c.Confirmed) >= c.epochIndex(c.LastEpochID) {
 		return
 	}
-	if now.Sub(c.ConfirmAt) < ConfirmResend || p.confirmQueued(c) {
+	if p.confirmQueued(c) {
+		p.replaceStaleConfirm(c, now)
+		if p.confirmQueued(c) {
+			return
+		}
+		p.queueConfirm(c, now)
+		return
+	}
+	if now.Sub(c.ConfirmAt) < ConfirmResend {
 		return
 	}
 	p.queueConfirm(c, now)
@@ -253,7 +281,7 @@ func (p *Peer) resealAtKeyChange(c *Connection, next *handshake.Epoch, now time.
 			in.Seq = 0
 			raw, err := next.Seal(in)
 			if err != nil {
-				drop = "undelivered_unreadable"
+				drop = "held_unsealable"
 			} else {
 				e.Payload = raw
 				p.markDirty(kindOutbox, e.ID)
@@ -262,7 +290,7 @@ func (p *Peer) resealAtKeyChange(c *Connection, next *handshake.Epoch, now time.
 			}
 		}
 		if drop != "-" {
-			p.log().Warn("drop", "reason", drop, "connection_id", c.ID, "type", in.Type)
+			p.logDrop(c, drop, in)
 		}
 		e.dropped = true
 		p.markDirty(kindOutbox, e.ID)
@@ -277,7 +305,7 @@ func rekeyKey(th1 [32]byte) string { return "rekey|" + hex.EncodeToString(th1[:]
 // profileExtras are the members the service adds to its profile.update
 // after the core (§10.8): no items, and its features.
 var profileExtras = func() []byte {
-	b, _ := json.Marshal(map[string]any{"items": []any{}, "features": Features})
+	b, _ := json.Marshal(map[string]any{"items": []any{}, "features": serviceFeatures})
 	return b
 }()
 
@@ -323,7 +351,7 @@ func (p *Peer) checkAtDeposit(e *outboxEntry, now time.Time) int {
 			return atDepositGo // as it is, while within the window
 		}
 		if err != nil {
-			p.log().Warn("drop", "reason", "held_unsealable", "connection_id", c.ID, "type", in.Type)
+			p.logDrop(c, "held_unsealable", in)
 			return atDepositDrop
 		}
 		e.Payload = raw
@@ -331,12 +359,43 @@ func (p *Peer) checkAtDeposit(e *outboxEntry, now time.Time) int {
 		p.markDirty(kindConn, c.ID) // the epoch's send count moved
 		return atDepositWait
 	case e.Tried && age >= DedupeRetention:
-		p.log().Warn("drop", "reason", "undelivered_window", "connection_id", c.ID, "type", in.Type)
+		p.logDrop(c, "undelivered_window", in)
 		return atDepositDrop
 	case e.Tried && age > RestampAfter && !e.Late:
 		e.Late = true
 		p.markDirty(kindOutbox, e.ID)
-		p.log().Warn("deposited late: it may not be delivered", "reason", "unconfirmed_late", "connection_id", c.ID, "type", in.Type)
+		p.log().Warn("deposited late: it may not be delivered", "reason", "unconfirmed_late", "connection_id", c.ID, "ref", in.ID, "type", in.Type)
 	}
 	return atDepositGo
+}
+
+// logDrop audits one waiting message that is not delivered (§8.3 "Not
+// delivered"): drop.<reason>, with the inner id as ref.
+func (p *Peer) logDrop(c *Connection, reason string, in *envelope.Inner) {
+	p.log().Warn("drop", "reason", reason, "connection_id", c.ID, "ref", in.ID, "type", in.Type)
+}
+
+// dropUndelivered ends every waiting durable message to c, each with its
+// own audit entry (drop.<reason>; §8.3 cases 4, 5 and 7): the connection
+// is removed or replaced, its mailbox is unknown, or it is suspended.
+// Handshake messages, hs.confirm and best-effort notices end without one.
+// keep spares an entry (the one being refused).
+func (p *Peer) dropUndelivered(c *Connection, reason string, keep *outboxEntry) {
+	var cur *handshake.Epoch
+	if c.kr != nil {
+		cur = c.kr.Current()
+	}
+	p.dropOutbox(func(e *outboxEntry) bool {
+		if e.ConnID != c.ID || e == keep {
+			return false
+		}
+		if cur != nil && e.Op == opDeposit && e.Token == "" && !e.BestEffort && !e.Confirm {
+			if env, err := envelope.Parse(e.Payload); err == nil {
+				if in, err := cur.OpenSent(env); err == nil && in.Type != handshake.TypeInit && in.Type != handshake.TypeFin {
+					p.logDrop(c, reason, in)
+				}
+			}
+		}
+		return true
+	})
 }

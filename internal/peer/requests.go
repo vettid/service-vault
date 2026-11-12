@@ -61,7 +61,7 @@ func (p *Peer) approveRequest(r *request, now time.Time) {
 		return
 	}
 	raw, err := r.ep.Seal(&envelope.Inner{ID: p.newID(now), Type: peerwire.TypeConnectionApproved, TS: now,
-		Body: peerwire.ConnectionApprovedBody(tok, rt)})
+		Body: peerwire.ConnectionApprovedBody(tok, rt), Features: features()})
 	if err != nil {
 		return
 	}

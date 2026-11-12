@@ -3,9 +3,13 @@ package peer
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -212,7 +216,7 @@ func TestFeaturesAdvertised(t *testing.T) {
 			prof = in
 		}
 	}
-	if prof == nil || !slices.Equal(prof.Features, Features) {
+	if prof == nil || !slices.Equal(prof.Features, serviceFeatures) {
 		t.Fatalf("inner features: %v", prof)
 	}
 	var b struct {
@@ -262,6 +266,9 @@ func TestResealedAtKeyChange(t *testing.T) {
 	in, err := f.p.conns[cid].kr.Current().OpenSent(env)
 	if err != nil || in.ID != id {
 		t.Fatalf("not sealed again under the new epoch: %v", err)
+	}
+	if !in.TS.Equal(f.clk.Now()) {
+		t.Fatalf("an untried entry kept its ts %v", in.TS)
 	}
 	f.failDeposit = nil
 	f.clk.Advance(time.Minute) // past the deposit backoff
@@ -361,10 +368,19 @@ func TestTriedAtLoad(t *testing.T) {
 // OneDepositAttempt makes deposits one attempt and leaves the client's
 // other calls alone.
 func TestOneDepositAttempt(t *testing.T) {
-	c := relayclient.New("https://relay.example", nil)
-	r := OneDepositAttempt(c).(oneDeposit)
-	if r.dep.MaxAttempts != 1 || c.MaxAttempts == 1 || r.Client != c {
-		t.Fatalf("deposit attempts %d, client %d", r.dep.MaxAttempts, c.MaxAttempts)
+	var n atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	c := relayclient.New(srv.URL, ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, 32)))
+	r := OneDepositAttempt(c)
+	if _, err := r.Deposit(context.Background(), "mb", "tok", []byte("x")); err == nil {
+		t.Fatal("no error from a 503")
+	}
+	if n.Load() != 1 || c.MaxAttempts == 1 {
+		t.Fatalf("%d requests for one deposit; client attempts %d", n.Load(), c.MaxAttempts)
 	}
 }
 
@@ -463,6 +479,222 @@ func TestDepositRefusals(t *testing.T) {
 		}
 		if tc.code == "timestamp_stale" && strings.Count(f.logs.String(), "reason=relay_clock_stale") != 1 {
 			t.Fatalf("relay_clock_stale logged %d times", strings.Count(f.logs.String(), "reason=relay_clock_stale"))
+		}
+	}
+}
+
+// A tried entry sealed again at a key change keeps its ts (§8.3), and a
+// waiting hs.confirm for the replaced epoch is dropped.
+func TestResealTriedKeepsTS(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	m.StartRekey()
+	if _, err := f.p.Step(context.Background(), 0); err != nil { // answered; hs.resp deposited
+		t.Fatal(err)
+	}
+	c := f.p.conns[cid]
+	if !f.p.queueConfirm(c, f.clk.Now()) {
+		t.Fatal("no hs.confirm")
+	}
+	sent := f.clk.Now()
+	id := f.p.sendTo(c, "connection.note", []byte(`{"x":1}`), sent)
+	for _, e := range f.p.outbox {
+		if e.ConnID == cid && !e.Confirm {
+			e.Tried = true // an earlier attempt may have reached the relay
+		}
+	}
+	f.clk.Advance(time.Minute)
+	f.failDeposit = func(string, string) error { return errUnavailable }
+	m.Step() // the member's hs.fin
+	if _, err := f.p.Step(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	c = f.p.conns[cid]
+	if epochOf(c) != m.KR.Current().ID() {
+		t.Fatal("the member's rekey did not complete")
+	}
+	confirmsWaiting, found := 0, false
+	for _, e := range f.p.outbox {
+		if e.ConnID != cid {
+			continue
+		}
+		if e.Confirm {
+			confirmsWaiting++
+		}
+		if env, err := envelope.Parse(e.Payload); err == nil {
+			if in, err := c.kr.Current().OpenSent(env); err == nil && in.ID == id {
+				found = true
+				if !in.TS.Equal(sent.Truncate(time.Millisecond)) {
+					t.Fatalf("a tried entry took a fresh ts: %v", in.TS)
+				}
+			}
+		}
+	}
+	if !found || confirmsWaiting != 1 {
+		t.Fatalf("re-sealed %v, %d hs.confirm waiting (the replaced one is dropped, the new epoch's queued)", found, confirmsWaiting)
+	}
+}
+
+// At the service's own rekey, waiting messages are not sealed again: its
+// hs.fin goes first, and they follow under the old epoch, which the member
+// still opens (RELEASE-29 §14: change 2 re-seals at the confirmation).
+func TestOwnRekeyLeavesWaitingUnderOldEpoch(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	c := f.p.conns[cid]
+	old := c.kr.Current()
+	f.clk.Advance(handshake.PolicyVaultToVault.MaxAge + time.Second)
+	f.tick() // our rekey hs.init goes
+	f.failDeposit = func(string, string) error { return errUnavailable }
+	id := f.p.sendTo(c, "connection.note", []byte(`{"x":1}`), f.clk.Now())
+	var before []byte
+	for _, e := range f.p.outbox {
+		if env, err := envelope.Parse(e.Payload); err == nil {
+			if in, err := old.OpenSent(env); err == nil && in.ID == id {
+				before = e.Payload
+			}
+		}
+	}
+	m.Step() // the member answers
+	if _, err := f.p.Step(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if epochOf(f.p.conns[cid]) == old.ID() {
+		t.Fatal("our rekey did not complete")
+	}
+	kept := false
+	for _, e := range f.p.outbox {
+		kept = kept || bytes.Equal(e.Payload, before)
+	}
+	if before == nil || !kept {
+		t.Fatal("the waiting message was sealed again under our new epoch")
+	}
+	f.failDeposit = nil
+	f.clk.Advance(time.Minute)
+	f.pump()
+	n := 0
+	for _, g := range m.Got {
+		if g.ID == id {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("the member got it %d times", n)
+	}
+}
+
+// A 429's retry_after holds the next attempt (§8.6).
+func TestRetryAfter429(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	f.failDeposit = func(string, string) error {
+		return &relayclient.Error{Status: 429, Code: "rate_limited", RetryAfter: 120}
+	}
+	f.p.sendTo(f.p.conns[cid], "connection.note", []byte(`{"x":1}`), f.clk.Now())
+	f.tick()
+	for _, e := range f.p.outbox {
+		if e.ConnID == cid && e.NotBefore.Before(f.clk.Now().Add(120*time.Second)) {
+			t.Fatalf("retried before retry_after: %v", e.NotBefore.Sub(f.clk.Now()))
+		}
+	}
+}
+
+// A waiting hs.confirm queued more than RestampAfter ago is replaced by a
+// fresh one (it would keep its ts past the member's window).
+func TestStaleConfirmReplaced(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	f.failDeposit = func(string, string) error { return errUnavailable }
+	memberRekeyNoPump(t, f, m, cid)
+	c := f.p.conns[cid]
+	if !f.p.confirmQueued(c) {
+		t.Fatal("no hs.confirm waiting")
+	}
+	first := c.ConfirmAt
+	f.clk.Advance(RestampAfter + time.Hour)
+	f.tick()
+	if !c.ConfirmAt.After(first) || !f.p.confirmQueued(c) {
+		t.Fatal("the stale hs.confirm was not replaced")
+	}
+	n := 0
+	for _, e := range f.p.outbox {
+		if e.ConnID == cid && e.Confirm {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d hs.confirm waiting", n)
+	}
+}
+
+// memberRekeyNoPump completes a member's rekey while the service's
+// deposits after its hs.resp fail (the hs.confirm waits).
+func memberRekeyNoPump(t *testing.T, f *fixture, m *peertest.Member, cid string) {
+	t.Helper()
+	fail := f.failDeposit
+	f.failDeposit = nil
+	m.StartRekey()
+	if _, err := f.p.Step(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	f.failDeposit = fail
+	m.Step()
+	if _, err := f.p.Step(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if epochOf(f.p.conns[cid]) != m.KR.Current().ID() {
+		t.Fatal("the member's rekey did not complete")
+	}
+}
+
+// After the service's own rekey, a member message under the older
+// confirmed epoch gets no hs.confirm: the service is the initiator there.
+func TestNoReconfirmAfterOwnRekey(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	late, err := m.KR.Current().Seal(&envelope.Inner{ID: m.NewID(), Type: peerwire.TypeProfileUpdate,
+		TS: f.clk.Now(), Body: m.ProfileBody(2)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.clk.Advance(handshake.PolicyVaultToVault.MaxAge + time.Second)
+	f.tick()
+	f.pump()
+	if cur := f.p.conns[cid].epochMeta(f.p.conns[cid].LastEpochID); cur == nil || !cur.Mine {
+		t.Fatal("our rekey did not complete")
+	}
+	got := confirms(m)
+	m.DepositTo(m.SvcStand, late)
+	f.pump()
+	if confirms(m) != got {
+		t.Fatal("hs.confirm sent after our own rekey")
+	}
+}
+
+// A connection's waiting messages end with one audit entry each, the
+// inner id as ref, when it is removed or suspended (§8.3 cases 4, 7).
+func TestUndeliveredAudited(t *testing.T) {
+	for _, tc := range []struct {
+		reason string
+		end    func(*fixture, *Connection)
+	}{
+		{"undelivered_removed", func(f *fixture, c *Connection) { f.p.removeConnection(c, "in", f.clk.Now()) }},
+		{"undelivered_suspended", func(f *fixture, c *Connection) { f.p.suspend(c, f.clk.Now()) }},
+	} {
+		f := newFixture(t)
+		m := f.member(10)
+		cid := f.connect(m, "")
+		c := f.p.conns[cid]
+		f.failDeposit = func(string, string) error { return errUnavailable }
+		id := f.p.sendTo(c, "connection.note", []byte(`{"x":1}`), f.clk.Now())
+		tc.end(f, c)
+		if !strings.Contains(f.logs.String(), "reason="+tc.reason) || !strings.Contains(f.logs.String(), "ref="+id) {
+			t.Fatalf("%s: not audited with its ref:\n%s", tc.reason, f.logs.String())
 		}
 	}
 }

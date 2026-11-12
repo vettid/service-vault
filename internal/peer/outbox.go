@@ -176,8 +176,12 @@ func (p *Peer) drainOutbox(ctx context.Context) {
 			continue
 		}
 		e.Attempts++
-		d := time.Duration(250*(1<<min(e.Attempts, 7))) * time.Millisecond
-		e.NotBefore = now.Add(min(d, outboxMaxBackoff))
+		d := min(time.Duration(250*(1<<min(e.Attempts, 7)))*time.Millisecond, outboxMaxBackoff)
+		var re *relayclient.Error
+		if errors.As(err, &re) && re.Status == 429 && re.RetryAfter > 0 {
+			d = max(d, time.Duration(re.RetryAfter)*time.Second) // §8.6: not before a 429's retry_after
+		}
+		e.NotBefore = now.Add(d)
 		p.log().Warn("deposit retry", "op", e.Op, "connection_id", e.ConnID, "attempts", e.Attempts, "err", errCode(err))
 	}
 	if len(done) > 0 {
@@ -256,7 +260,11 @@ func (p *Peer) depositOnce(ctx context.Context, e *outboxEntry, now time.Time) (
 			c.State = StateStale
 			p.markDirty(kindConn, c.ID)
 			p.audit("peer_stale", c.ID)
-			p.dropOutbox(func(o *outboxEntry) bool { return o != e && o.ConnID == c.ID })
+			reason := "undelivered_removed"
+			if re.Code == codeMailboxUnknown {
+				reason = "undelivered_mailbox_unknown"
+			}
+			p.dropUndelivered(c, reason, e)
 		}
 		return true, err
 	case codeQuotaExceeded:

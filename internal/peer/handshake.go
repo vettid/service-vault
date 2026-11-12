@@ -173,7 +173,7 @@ func (p *Peer) respondFirst(pi *handshake.PendingInit, inv *InviteRecord, sender
 		return
 	}
 	resp, env, err := pi.Respond(handshake.ResponderConfig{Identity: p.cfg.Keys.IK, Token: tok,
-		Policy: handshake.PolicyVaultToVault, CollectSender: sender, Features: Features, Now: now})
+		Policy: handshake.PolicyVaultToVault, CollectSender: sender, Features: features(), Now: now})
 	if err != nil {
 		p.audit("respond_failed", "")
 		p.denyConnTokens(id, now)
@@ -241,7 +241,7 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 	cfg := handshake.ResponderConfig{
 		Identity: p.cfg.Keys.IK, Policy: handshake.PolicyVaultToVault, PinnedSuite: c.Suite,
 		CollectSender: sender, RecordRelayKey: c.Peer.Relay.PK, KnownInitiatorIK: start,
-		ExpectedCtx: handshake.EpochCtx(eid), Features: Features, Now: now,
+		ExpectedCtx: handshake.EpochCtx(eid), Features: features(), Now: now,
 	}
 	st, err1 := p.heldToken(body.Token, &c.Peer)
 	rt, err2 := p.heldToken(body.ReconnectToken, &c.Peer)
@@ -431,7 +431,7 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 	resp, env, err := pi.Respond(handshake.ResponderConfig{
 		Identity: p.cfg.Keys.IK, Policy: handshake.PolicyVaultToVault, PinnedSuite: c.Suite,
 		CollectSender: sender, RecordRelayKey: c.Peer.Relay.PK, KnownInitiatorIK: c.Peer.IK,
-		KnownInitiatorChain: known, Features: Features, Now: now,
+		KnownInitiatorChain: known, Features: features(), Now: now,
 	})
 	if err != nil {
 		p.audit("rekey_refused", c.ID)
@@ -534,10 +534,10 @@ func (p *Peer) handleFin(id string, raw []byte, sender ed25519.PublicKey, now ti
 		// rekeys, and starts none while the reconnect is open; a late
 		// hs.fin for one would otherwise move the service to an epoch the
 		// member left. A member's reconnect is never a restore's.
-		for id, o := range p.awaiting {
+		for aid, o := range p.awaiting {
 			if o.ConnID == c.ID && o.New == nil && o.Purpose == handshake.PurposeRekey {
 				p.audit("rekey_answer_ended", c.ID)
-				p.dropAwaiting(id, now)
+				p.dropAwaiting(aid, now)
 			}
 		}
 	}
@@ -550,7 +550,10 @@ func (p *Peer) handleFin(id string, raw []byte, sender ed25519.PublicKey, now ti
 	// "No upgrade"). Not queued now, it goes out at the next batch under
 	// this epoch or after ConfirmResend (tickConfirm).
 	if !p.queueConfirm(c, now) {
-		p.log().Warn("hs.confirm not queued: the member confirms at our next message", "connection_id", c.ID)
+		// Sent by tickConfirm as soon as it can be (ConfirmAt cleared).
+		c.ConfirmAt = time.Time{}
+		p.markDirty(kindConn, c.ID)
+		p.log().Warn("hs.confirm not queued yet", "connection_id", c.ID)
 	}
 	p.log().Info("epoch installed", "connection_id", c.ID, "purpose", string(aw.Purpose))
 	return ackAfterFlush
@@ -567,7 +570,13 @@ func (p *Peer) installEpoch(c *Connection, ep *handshake.Epoch, mine bool, now t
 	if c.kr == nil {
 		c.kr = &handshake.Keyring{}
 	}
-	p.resealAtKeyChange(c, ep, now)
+	if !mine {
+		// At a responder's activation (§8.3). At the service's own rekey
+		// or reconnect the hs.fin must precede anything in the new epoch;
+		// its waiting messages stay under the old one, which the member
+		// still opens (change 2 re-seals them at the confirmation).
+		p.resealAtKeyChange(c, ep, now)
+	}
 	if !mine && len(c.LastEpochID) > 0 && bytes.Equal(c.Confirmed, c.LastEpochID) {
 		c.kr.ActivateKeeping(ep, now, now.Add(ConfirmedKeysFor), handshake.KeepRK)
 	} else {
@@ -698,7 +707,7 @@ func (p *Peer) startRekey(c *Connection, now time.Time) {
 	ini, err := handshake.NewInitiator(handshake.InitiatorConfig{
 		Purpose: handshake.PurposeRekey, Identity: p.cfg.Keys.IK, StaticKEM: p.cfg.Keys.KEM.Public(), Relay: p.ownAddr(),
 		ResponderIK: c.Peer.IK, KnownResponderChain: chainOf(c), ResponderRelayKey: c.Peer.Relay.PK,
-		Current: c.kr.Current(), PinnedSuite: c.Suite, Policy: handshake.PolicyVaultToVault, Features: Features, Now: now,
+		Current: c.kr.Current(), PinnedSuite: c.Suite, Policy: handshake.PolicyVaultToVault, Features: features(), Now: now,
 	})
 	if err != nil {
 		return

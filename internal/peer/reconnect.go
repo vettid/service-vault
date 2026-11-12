@@ -182,7 +182,7 @@ func (p *Peer) startReconnect(c *Connection, now time.Time) bool {
 		Identity: p.cfg.Keys.IK, StaticKEM: p.cfg.Keys.KEM.Public(), Relay: p.ownAddr(),
 		Token: st, ReconnectToken: rt,
 		ResponderIK: c.Peer.IK, KnownResponderChain: chainOf(c), ResponderEK: kem, ResponderRelayKey: c.Peer.Relay.PK,
-		PinnedSuite: c.Suite, Policy: handshake.PolicyVaultToVault, Features: Features, Now: now,
+		PinnedSuite: c.Suite, Policy: handshake.PolicyVaultToVault, Features: features(), Now: now,
 	})
 	var s handshake.InitiatorState
 	if err == nil {
