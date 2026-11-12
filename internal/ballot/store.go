@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/vettid/service-vault/internal/peer"
 	"github.com/vettid/service-vault/vote"
@@ -67,11 +68,20 @@ type CopyItem struct {
 type RecordStore struct {
 	Records peer.Store
 	Copy    Copy
+	// Now is the clock of the members cache (nil: time.Now).
+	Now func() time.Time
 
 	members membersCache
 }
 
 var _ BoxStore = (*RecordStore)(nil)
+
+func (s *RecordStore) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
+}
 
 func ballotID(proposalID string, tag []byte) string {
 	return BallotID(proposalID, tag)
@@ -107,7 +117,8 @@ func (s *RecordStore) OpenProposal(ctx context.Context, id string) (*OpenProposa
 			return nil, fmt.Errorf("ballot: stored proposal %s: members both inline and in chunks", id)
 		}
 		key := membersKey(id, o.MemberChunks)
-		if cached, e := s.members.get(key); cached != nil {
+		readAt := s.now()
+		if cached, e := s.members.get(key, readAt); cached != nil {
 			o.Members, o.shared = cached, e
 		} else {
 			data, err := getChunks(ctx, s.Records, id, o.MemberChunks, maxMemberChunks)
@@ -117,7 +128,7 @@ func (s *RecordStore) OpenProposal(ctx context.Context, id string) (*OpenProposa
 			if err := json.Unmarshal(data, &o.Members); err != nil {
 				return nil, fmt.Errorf("ballot: stored proposal %s's members: %w", id, err)
 			}
-			o.shared = s.members.put(key, o.Members)
+			o.shared = s.members.put(key, o.Members, readAt)
 		}
 	}
 	// Never fewer (or more) members than the proposal names: a record

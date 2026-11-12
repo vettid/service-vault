@@ -7,6 +7,7 @@ import (
 	"maps"
 	"slices"
 	"sync"
+	"time"
 )
 
 // membersCached is how many proposals' members are kept decoded: each
@@ -15,11 +16,16 @@ import (
 // are written once, to fresh chunks, and never change, so a proposal's
 // members are cached by the chunks its record names, each with its
 // SHA-256: a record that names other chunks, or other sums, is a miss
-// and is read again (and checked) from the store. The cache is the
-// process's, and a restore of the table needs a fresh one (-rebuild):
-// the cache starts empty, so the first open of each proposal after it
-// reads and checks its chunks again (RebuildAll does not).
+// and is read again (and checked) from the store.
 const membersCached = 8
+
+// membersRecheck is how long a cached proposal's members are used before
+// its chunks are read and checked again. The members never change, but
+// the store can lose a chunk (a deletion, a restore that lacks it): the
+// cache must not hide that from a running process. Within this time of
+// the loss, the next open reads the chunks and fails, as it would
+// without the cache.
+const membersRecheck = time.Minute
 
 // membersKey is the cache key of a proposal's member chunks: each field
 // is written with its length first, so no two lists share a key.
@@ -55,6 +61,7 @@ type membersCache struct {
 // copies (vote.Tree).
 type membersEntry struct {
 	members  map[string]Member
+	read     time.Time // when its chunks were read and checked
 	treeOnce sync.Once
 	tree     *recordTree
 }
@@ -65,10 +72,16 @@ func (e *membersEntry) recordTree() *recordTree {
 	return e.tree
 }
 
-// get returns a copy of key's members and its entry, or nil.
-func (c *membersCache) get(key string) (map[string]Member, *membersEntry) {
+// get returns a copy of key's members and its entry, or nil. An entry
+// read membersRecheck ago or more (by now) is dropped, so its chunks are
+// read and checked again.
+func (c *membersCache) get(key string, now time.Time) (map[string]Member, *membersEntry) {
 	c.mu.Lock()
 	e, ok := c.byKey[key]
+	if ok && !now.Before(e.read.Add(membersRecheck)) {
+		c.drop(key)
+		ok = false
+	}
 	if ok {
 		// Most recently used last: a proposal in use stays.
 		if i := slices.Index(c.order, key); i >= 0 {
@@ -82,9 +95,9 @@ func (c *membersCache) get(key string) (map[string]Member, *membersEntry) {
 	return maps.Clone(e.members), e
 }
 
-// put keeps a copy of m under key, and returns key's entry (the one kept
-// before, if another caller put it first).
-func (c *membersCache) put(key string, m map[string]Member) *membersEntry {
+// put keeps a copy of m, read and checked at now, under key, and returns
+// key's entry (the one kept before, if another caller put it first).
+func (c *membersCache) put(key string, m map[string]Member, now time.Time) *membersEntry {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.byKey == nil {
@@ -93,7 +106,7 @@ func (c *membersCache) put(key string, m map[string]Member) *membersEntry {
 	if e, ok := c.byKey[key]; ok {
 		return e
 	}
-	e := &membersEntry{members: maps.Clone(m)}
+	e := &membersEntry{members: maps.Clone(m), read: now}
 	c.byKey[key] = e
 	c.order = append(c.order, key)
 	if len(c.order) > membersCached {
@@ -101,4 +114,12 @@ func (c *membersCache) put(key string, m map[string]Member) *membersEntry {
 		c.order = c.order[1:]
 	}
 	return e
+}
+
+// drop removes key's entry; c.mu is held.
+func (c *membersCache) drop(key string) {
+	delete(c.byKey, key)
+	if i := slices.Index(c.order, key); i >= 0 {
+		c.order = slices.Delete(c.order, i, i+1)
+	}
 }

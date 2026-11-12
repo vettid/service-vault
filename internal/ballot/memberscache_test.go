@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/vettid/service-vault/internal/peer"
 )
@@ -100,11 +102,11 @@ func TestMembersCache(t *testing.T) {
 	// Bounded: the least recently used is dropped; a get keeps one.
 	var c membersCache
 	for i := 0; i < membersCached; i++ {
-		c.put(fmt.Sprint(i), map[string]Member{"c": {}})
+		c.put(fmt.Sprint(i), map[string]Member{"c": {}}, t0)
 	}
-	_, _ = c.get("0")
-	c.put("new", map[string]Member{"c": {}})
-	has := func(k string) bool { m, _ := c.get(k); return m != nil }
+	_, _ = c.get("0", t0)
+	c.put("new", map[string]Member{"c": {}}, t0)
+	has := func(k string) bool { m, _ := c.get(k, t0); return m != nil }
 	if !has("0") || has("1") || !has("new") || len(c.byKey) != membersCached {
 		t.Fatalf("bound: %d kept", len(c.byKey))
 	}
@@ -169,12 +171,12 @@ func TestMembersCacheSharesTheTree(t *testing.T) {
 // members (not the second map), so callers share one record tree.
 func TestMembersCachePutKeepsTheFirst(t *testing.T) {
 	var c membersCache
-	first := c.put("k", map[string]Member{"a": {}})
-	second := c.put("k", map[string]Member{"b": {}})
+	first := c.put("k", map[string]Member{"a": {}}, t0)
+	second := c.put("k", map[string]Member{"b": {}}, t0)
 	if first == nil || second != first {
 		t.Fatal("another entry")
 	}
-	m, e := c.get("k")
+	m, e := c.get("k", t0)
 	if e != first || len(m) != 1 {
 		t.Fatalf("got %v", m)
 	}
@@ -182,3 +184,52 @@ func TestMembersCachePutKeepsTheFirst(t *testing.T) {
 		t.Fatal("the second put's members kept")
 	}
 }
+
+// A cached proposal's chunks are read and checked again after
+// membersRecheck: a chunk lost while the process runs fails the open
+// within that time, as it would without the cache, and keeps failing.
+func TestMembersCacheRecheck(t *testing.T) {
+	if membersRecheck > time.Minute {
+		t.Fatalf("members rechecked only every %v", membersRecheck)
+	}
+	ctx := context.Background()
+	f := newBoxFixture(t)
+	st := &countingStore{MemStore: peer.NewMemStore()}
+	now := time.Unix(1_800_000_000, 0)
+	rs := &RecordStore{Records: st, Copy: &MemCopy{}, Now: func() time.Time { return now }}
+	if err := rs.SaveProposal(ctx, f.open, true); err != nil {
+		t.Fatal(err)
+	}
+	id := f.p.ProposalID
+	o, err := rs.OpenProposal(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(o.MemberChunks) == 0 {
+		t.Fatal("members inline: no cache")
+	}
+	reads := st.chunkGets
+	now = now.Add(membersRecheck - time.Second)
+	if _, err := rs.OpenProposal(ctx, id); err != nil || st.chunkGets != reads {
+		t.Fatalf("within the time: %v, %d chunk reads", err, st.chunkGets-reads)
+	}
+	now = now.Add(time.Second)
+	if _, err := rs.OpenProposal(ctx, id); err != nil || st.chunkGets == reads {
+		t.Fatalf("after the time: %v, no chunk read", err)
+	}
+	if err := st.Apply(ctx, []peer.Change{{Kind: KindChunk, ID: o.MemberChunks[0].ID}}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(membersRecheck)
+	for i := 0; i < 2; i++ {
+		if o, err := rs.OpenProposal(ctx, id); o != nil || !errors.Is(err, ErrChunkMissing) {
+			t.Fatalf("open %d with a chunk lost: %v", i+1, err)
+		}
+	}
+	if len(rs.members.byKey) != 0 || len(rs.members.order) != 0 {
+		t.Fatal("the lost proposal is still cached")
+	}
+}
+
+// t0 is a fixed time for the cache's own tests.
+var t0 = time.Unix(1_800_000_000, 0)
