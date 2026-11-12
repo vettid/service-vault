@@ -206,7 +206,7 @@ func (p *Peer) startReconnect(c *Connection, now time.Time) bool {
 	c.Reconnecting = true
 	c.ReconnectTries++
 	p.markDirty(kindConn, c.ID)
-	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Token: c.Reconnect.Token, Payload: ini.Envelope()}, now)
+	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Token: c.Reconnect.Token, Payload: ini.Envelope(), Handshake: true}, now)
 	p.log().Info("reconnect started", "connection_id", c.ID)
 	return true
 }
@@ -255,7 +255,7 @@ func (p *Peer) finishReconnect(c *Connection, og *outgoing, res *handshake.Resul
 	c.Standing, c.Reconnect = st, rt
 	c.State = StateActive
 	p.markDirty(kindConn, c.ID)
-	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: res.Fin}, now)
+	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: res.Fin, Handshake: true}, now)
 	p.installEpoch(c, res.Epoch, true, now) // and retries the connection's outbox
 	p.log().Info("reconnected", "connection_id", c.ID)
 	return ackAfterFlush

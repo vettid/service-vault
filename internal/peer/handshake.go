@@ -183,7 +183,7 @@ func (p *Peer) respondFirst(pi *handshake.PendingInit, inv *InviteRecord, sender
 		Created: now, Expires: now.Add(ConnectionPending), r: resp}
 	p.awaiting[id] = aw
 	p.markDirty(kindAwait, id)
-	p.queueDeposit(&outboxEntry{ConnID: id, Mailbox: np.Relay.Mailbox, Token: body.Token, Payload: env}, now)
+	p.queueDeposit(&outboxEntry{ConnID: id, Mailbox: np.Relay.Mailbox, Token: body.Token, Payload: env, Handshake: true}, now)
 	p.log().Info("hs.resp", "connection_id", id, "invite_id", inv.ID)
 }
 
@@ -304,7 +304,7 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 		Expires: exp, Reconnect: pend, r: resp}
 	p.markDirty(kindAwait, id)
 	// On the standing token the hs.init brought: ours may have expired.
-	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Token: st.Token, Payload: env}, now)
+	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Token: st.Token, Payload: env, Handshake: true}, now)
 }
 
 // applyReconnect applies a member's reconnect once its hs.fin verified.
@@ -439,7 +439,8 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 	}
 	id := p.newID(now)
 	th1 := pi.Th1()
-	// Answered once (R29-T3): a copy delivered again later is not.
+	// Answered once (R29-T3): a copy delivered again later is not
+	// (dispatch, rekey_init_replayed).
 	p.mark(kindInner, rekeyKey(th1), []byte{1}, now.Add(DedupeRetention+envelope.MaxClockSkewFuture))
 	aw := &awaiting{ID: id, ConnID: c.ID, Purpose: handshake.PurposeRekey, Th1: th1[:], Created: now,
 		Expires: now.Add(HandshakeTTL), r: resp}
@@ -447,7 +448,7 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 	p.awaiting[id] = aw
 	p.markDirty(kindAwait, id)
 	p.markDirty(kindConn, c.ID) // the epoch's receive count moved
-	e := &outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: env}
+	e := &outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: env, Handshake: true}
 	p.queueDeposit(e, now)
 	aw.RespEntry = e.ID
 	p.log().Info("rekey answered", "connection_id", c.ID)
@@ -721,7 +722,7 @@ func (p *Peer) startRekey(c *Connection, now time.Time) {
 	p.outgoing[id] = &outgoing{ID: id, ConnID: c.ID, EphKid: kid[:], Th1: th1[:], Init: s, Created: now, ini: ini}
 	p.markDirty(kindOutgoing, id)
 	p.markDirty(kindConn, c.ID) // the epoch's send count moved
-	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: ini.Envelope()}, now)
+	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: ini.Envelope(), Handshake: true}, now)
 	p.log().Info("rekey started", "connection_id", c.ID)
 }
 
@@ -775,7 +776,7 @@ func (p *Peer) handleResp(id string, raw []byte, sender ed25519.PublicKey, now t
 		return ackAfterFlush
 	}
 	// hs.fin goes first; what follows is sealed in the new epoch.
-	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: res.Fin}, now)
+	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: res.Fin, Handshake: true}, now)
 	p.installEpoch(c, res.Epoch, true, now)
 	p.log().Info("rekeyed", "connection_id", c.ID)
 	return ackAfterFlush

@@ -351,6 +351,9 @@ type outboxEntry struct {
 	// Late: the entry was noted as deposited more than RestampAfter after
 	// its ts (unconfirmed_late), once.
 	Late bool `json:"late,omitempty"`
+	// Handshake marks a handshake message (hs.init, hs.resp, hs.fin):
+	// never sealed again, exempt from MaxOutboxPerConn.
+	Handshake bool `json:"handshake,omitempty"`
 	// StaleTS counts the relay's timestamp_stale refusals of it.
 	StaleTS int `json:"stale_ts,omitempty"`
 	// Vote is a deposit SendMessage queued: only these count toward

@@ -59,8 +59,8 @@ func TestConfirmedEpochMovesOnMemberMessage(t *testing.T) {
 	m := f.member(10)
 	cid := f.connect(m, "")
 	c := f.p.conns[cid]
-	if e := epochOf(c); !bytes.Equal(c.Confirmed, e[:]) || len(c.Epochs) != 1 {
-		t.Fatalf("first epoch not confirmed: %d epochs", len(c.Epochs))
+	if e := epochOf(c); !bytes.Equal(c.Confirmed, e[:]) || len(c.Epochs) != 1 || !c.Epochs[0].Received {
+		t.Fatalf("first epoch not confirmed, or its flag clear: %+v", c.Epochs)
 	}
 	got := confirms(m)
 	e1, e2 := memberRekey(t, f, m, cid)
@@ -166,7 +166,7 @@ func TestRekeyInitAnsweredOnce(t *testing.T) {
 	if _, err := f.p.Step(context.Background(), 0); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.p.awaiting) != 0 || !strings.Contains(f.logs.String(), "reason=rekey_replay") {
+	if len(f.p.awaiting) != 0 || !strings.Contains(f.logs.String(), "reason=rekey_init_replayed") {
 		t.Fatalf("answered again: %d awaiting", len(f.p.awaiting))
 	}
 }
@@ -254,6 +254,7 @@ func TestResealedAtKeyChange(t *testing.T) {
 	if e == nil {
 		t.Fatal("the message is not waiting")
 	}
+	f.clk.Advance(time.Minute) // a fresh ts differs from the first
 	f.failDeposit = func(string, string) error { return errUnavailable }
 	m.Step() // the member's hs.fin
 	if _, err := f.p.Step(context.Background(), 0); err != nil {
@@ -419,7 +420,7 @@ func TestReconnectEndedBySuspension(t *testing.T) {
 	}
 }
 
-// hs.confirm does not count toward MaxOutboxPerConn.
+// hs.confirm and handshake messages do not count toward MaxOutboxPerConn.
 func TestConfirmExemptFromOutboxBound(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
@@ -427,6 +428,10 @@ func TestConfirmExemptFromOutboxBound(t *testing.T) {
 	c := f.p.conns[cid]
 	if !f.p.queueConfirm(c, f.clk.Now()) {
 		t.Fatal("hs.confirm not queued")
+	}
+	f.p.startRekey(c, f.clk.Now()) // our rekey hs.init waits too
+	if len(f.p.outgoing) != 1 {
+		t.Fatal("no rekey started")
 	}
 	for i := 0; i < MaxOutboxPerConn; i++ {
 		if f.p.sendTo(c, "connection.note", []byte(`{"x":1}`), f.clk.Now()) == "" {
@@ -696,5 +701,217 @@ func TestUndeliveredAudited(t *testing.T) {
 		if !strings.Contains(f.logs.String(), "reason="+tc.reason) || !strings.Contains(f.logs.String(), "ref="+id) {
 			t.Fatalf("%s: not audited with its ref:\n%s", tc.reason, f.logs.String())
 		}
+	}
+}
+
+// The check runs before the ts window, dedupe and the rate limit: a
+// member message under the new epoch that those refuse still confirms it
+// and sets the received flag.
+func TestConfirmBeforeTimeWindowAndDedupe(t *testing.T) {
+	for _, tc := range []string{"stale", "duplicate"} {
+		f := newFixture(t)
+		m := f.member(10)
+		cid := f.connect(m, "")
+		_, e2 := memberRekey(t, f, m, cid)
+		in := &envelope.Inner{ID: m.NewID(), Type: peerwire.TypeProfileUpdate, TS: f.clk.Now(), Body: m.ProfileBody(2)}
+		if tc == "stale" {
+			in.TS = f.clk.Now().Add(-30 * 24 * time.Hour)
+		} else {
+			f.p.mark(kindInner, cid+"|"+in.ID, []byte{1}, f.clk.Now().Add(time.Hour)) // seen already
+			if err := f.p.flush(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		m.SendInner(in)
+		f.pump()
+		c := f.p.conns[cid]
+		if !bytes.Equal(c.Confirmed, e2[:]) || !c.epochMeta(e2[:]).Received {
+			t.Fatalf("%s: a message the later checks refuse did not confirm", tc)
+		}
+	}
+}
+
+// A superseded epoch that is not the confirmed one keeps no rk; the
+// service's own activation never keeps one either.
+func TestKeepOnlyTheConfirmed(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	e1, e2 := memberRekey(t, f, m, cid) // confirmed e1, current e2
+	m.IgnoreStray = true
+	m.Reconnect() // sealed mode: confirms nothing; e3, with e2 never confirmed
+	f.pump()
+	c := f.p.conns[cid]
+	if epochOf(c) == e2 {
+		t.Fatal("the reconnect did not complete")
+	}
+	if k := c.kr.Find(e2); k != nil && k.HasRK() {
+		t.Fatal("an unconfirmed superseded epoch kept its rk")
+	}
+	if k := c.kr.Find(e1); k == nil || !k.HasRK() {
+		t.Fatal("the confirmed epoch lost its rk")
+	}
+	m.Send(peerwire.TypeProfileUpdate, m.ProfileBody(2)) // confirms e3
+	f.pump()
+	e3 := epochOf(c)
+	f.clk.Advance(handshake.PolicyVaultToVault.MaxAge + time.Second)
+	f.tick()
+	f.pump() // our own rekey: e4
+	if epochOf(c) == e3 {
+		t.Fatal("our rekey did not complete")
+	}
+	if k := c.kr.Find(e3); k != nil && k.HasRK() {
+		t.Fatal("our own activation kept the old epoch's rk")
+	}
+}
+
+// One hs.confirm per batch, however many messages under the confirmed
+// epoch it holds.
+func TestOneConfirmPerBatch(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	var late [][]byte
+	for i := 0; i < 3; i++ {
+		raw, err := m.KR.Current().Seal(&envelope.Inner{ID: m.NewID(), Type: peerwire.TypeProfileUpdate,
+			TS: f.clk.Now(), Body: m.ProfileBody(uint64(2 + i))})
+		if err != nil {
+			t.Fatal(err)
+		}
+		late = append(late, raw)
+	}
+	memberRekey(t, f, m, cid)
+	got := confirms(m)
+	for _, raw := range late {
+		m.DepositTo(m.SvcStand, raw)
+	}
+	f.pump()
+	if confirms(m) != got+1 {
+		t.Fatalf("%d hs.confirm for one batch", confirms(m)-got)
+	}
+}
+
+// A handshake message waiting in the outbox (our rekey hs.init) is never
+// sealed again at a key change; a session message is.
+func TestResealSkipsHandshake(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	c := f.p.conns[cid]
+	f.failDeposit = func(string, string) error { return errUnavailable }
+	f.p.startRekey(c, f.clk.Now())
+	f.p.sendTo(c, "connection.note", []byte(`{"x":1}`), f.clk.Now())
+	before := map[string][]byte{}
+	for _, e := range f.p.outbox {
+		before[e.ID] = e.Payload
+	}
+	f.p.resealAtKeyChange(c, c.kr.Current(), f.clk.Now().Add(time.Minute))
+	for _, e := range f.p.outbox {
+		same := bytes.Equal(before[e.ID], e.Payload)
+		if e.Handshake && !same {
+			t.Fatal("a handshake message was sealed again")
+		}
+		if !e.Handshake && same {
+			t.Fatal("a session message was not sealed again")
+		}
+	}
+}
+
+// At a key change, a tried entry past the 16-day window and an expired
+// one are not delivered, each audited.
+func TestResealDrops(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	c := f.p.conns[cid]
+	f.failDeposit = func(string, string) error { return errUnavailable }
+	old := f.p.sendTo(c, "connection.note", []byte(`{"x":1}`), f.clk.Now())
+	exp := f.p.sendInner(c, &envelope.Inner{ID: f.p.newID(f.clk.Now()), Type: "connection.note", TS: f.clk.Now(),
+		Exp: f.clk.Now().Add(time.Hour), Body: []byte(`{"x":2}`)}, f.clk.Now())
+	for _, e := range f.p.outbox {
+		e.Tried = true
+	}
+	later := f.clk.Now().Add(DedupeRetention)
+	f.p.resealAtKeyChange(c, c.kr.Current(), later)
+	for _, want := range []string{"reason=undelivered_window ", "ref=" + old, "reason=held_expired ", "ref=" + exp} {
+		if !strings.Contains(f.logs.String()+" ", want) {
+			t.Fatalf("missing %q:\n%s", want, f.logs.String())
+		}
+	}
+	for _, e := range f.p.outbox {
+		if e.ConnID == cid && !e.Handshake {
+			t.Fatal("a dropped entry is still waiting")
+		}
+	}
+}
+
+// A re-stamped entry is not deposited in the pass that re-stamps it: it
+// waits for the write. Every due entry to the mailbox is re-stamped in
+// the same pass.
+func TestRestampWaitsForWrite(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	c := f.p.conns[cid]
+	ids := []string{f.p.sendTo(c, "connection.note", []byte(`{"x":1}`), f.clk.Now()),
+		f.p.sendTo(c, "connection.note", []byte(`{"x":2}`), f.clk.Now())}
+	deposits := 0
+	f.failDeposit = func(string, string) error { deposits++; return nil }
+	f.clk.Advance(RestampAfter + time.Hour)
+	f.p.mu.Lock()
+	f.p.drainOutbox(context.Background())
+	f.p.mu.Unlock()
+	if deposits != 0 {
+		t.Fatalf("%d deposited in the pass that re-stamped", deposits)
+	}
+	for _, e := range f.p.outbox {
+		if env, err := envelope.Parse(e.Payload); err == nil {
+			if in, err := c.kr.Current().OpenSent(env); err == nil && slices.Contains(ids, in.ID) && !in.TS.Equal(f.clk.Now().Truncate(time.Millisecond)) {
+				t.Fatalf("%s not re-stamped in the same pass", in.ID)
+			}
+		}
+	}
+	f.tick()
+	for _, e := range f.p.outbox {
+		if env, err := envelope.Parse(e.Payload); err == nil {
+			if in, err := c.kr.Current().OpenSent(env); err == nil && slices.Contains(ids, in.ID) {
+				t.Fatalf("%s not deposited after the write", in.ID)
+			}
+		}
+	}
+}
+
+// A 5xx and a transport error both mark the entry tried.
+func TestTriedOnFailure(t *testing.T) {
+	for name, err := range map[string]error{"5xx": errUnavailable, "transport": context.DeadlineExceeded} {
+		f := newFixture(t)
+		m := f.member(10)
+		cid := f.connect(m, "")
+		f.failDeposit = func(string, string) error { return err }
+		f.p.sendTo(f.p.conns[cid], "connection.note", []byte(`{"x":1}`), f.clk.Now())
+		f.tick()
+		for _, e := range f.p.outbox {
+			if e.ConnID == cid && !e.Tried {
+				t.Fatalf("%s: not marked tried", name)
+			}
+		}
+	}
+}
+
+// A tried entry deposited more than RestampAfter after its ts is noted
+// once (unconfirmed_late).
+func TestUnconfirmedLate(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	f.failDeposit = func(string, string) error { return errUnavailable }
+	f.p.sendTo(f.p.conns[cid], "connection.note", []byte(`{"x":1}`), f.clk.Now())
+	f.tick() // tried
+	f.clk.Advance(RestampAfter + time.Hour)
+	f.tick()
+	f.clk.Advance(time.Minute)
+	f.tick()
+	if n := strings.Count(f.logs.String(), "reason=unconfirmed_late"); n != 1 {
+		t.Fatalf("noted %d times", n)
 	}
 }

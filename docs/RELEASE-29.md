@@ -1,6 +1,6 @@
 # Release 29 in the service vault
 
-**Status:** 0.4.1, draft (2026-11-12). Against VAULT-MESSAGING 0.89.2.
+**Status:** 0.4.2, draft (2026-11-12). Against VAULT-MESSAGING 0.89.2.
 
 VAULT-MESSAGING §6.3.1 ("Lifetimes and activation on confirmation",
 release 29) asks a service vault to follow its rules "on either side as
@@ -152,6 +152,9 @@ this changes.)
 - **The last one's time is stored** with the connection, in the same
   write as its outbox entry, so a restart does not reset the 12 days of
   "`hs.confirm` again".
+- **A waiting one older than 2 days is replaced** by a fresh one
+  (chosen; not in the spec): it keeps its `ts` while it waits, and the
+  member would drop it past its 16-day window.
 - **At most one is queued per connection.** `hs.confirm` and the
   handshake's own messages are exempt from the per-connection outbox
   bound `MaxOutboxPerConn` (chosen; not in the spec): one dropped
@@ -175,8 +178,8 @@ message it deposits, and in the `features` of its `profile.update`
 `relay.address.update` already, and §3.4 "Receivers first" expects the
 capability. The `profile.update` body is the one §10.8 gives: a
 `version` (stored per connection: 1 at activation, one more at each
-change of the profile, unchanged when an epoch is activated again), the
-invitation's
+change of the profile, unchanged when an epoch is activated again; the
+service's profile cannot change yet, so it stays 1), the invitation's
 profile names, the service's `ik`, `items: []`, and `features`
 (`["hs_confirm", "relay_follow"]`, sorted).
 Nothing in §6.3.1 depends on seeing `hs_confirm`, so a member that
@@ -434,6 +437,9 @@ separately. The README's release-29 status paragraph shrinks with each.
 
 ## Changes
 
+- **0.4.2 (2026-11-12):** §5, a waiting `hs.confirm` older than 2 days
+  is replaced (chosen); §6, `version` stays 1 while the profile cannot
+  change.
 - **0.4.1 (2026-11-12):** the runbook step for a rollback by the
   circuit breaker (change 4); case 8's codes; entries wait at a
   `token_revoked` on a held token; held after a demotion covers sealed

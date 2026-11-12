@@ -136,11 +136,10 @@ func (p *Peer) pruneEpochs(c *Connection, now time.Time) {
 // confirmed epoch, and hs.confirm again for a message under a confirmed
 // epoch that is not current, while the current one is a member's the
 // service activated as responder (queued once per batch, reconfirmAll).
-func (p *Peer) noteFromMember(c *Connection, ep *handshake.Epoch) {
+func (p *Peer) noteFromMember(c *Connection, ep *handshake.Epoch, now time.Time) {
 	if ep == nil {
 		return
 	}
-	now := p.now()
 	eid := ep.ID()
 	id := eid[:]
 	if e := c.epochMeta(id); e != nil && !e.Received {
@@ -258,6 +257,10 @@ func (p *Peer) resealAtKeyChange(c *Connection, next *handshake.Epoch, now time.
 		env, err := envelope.Parse(e.Payload)
 		if err != nil {
 			keep = append(keep, e)
+			continue
+		}
+		if e.Handshake {
+			keep = append(keep, e) // a handshake message is never sealed again
 			continue
 		}
 		in, err := cur.OpenSent(env)
@@ -398,4 +401,19 @@ func (p *Peer) dropUndelivered(c *Connection, reason string, keep *outboxEntry) 
 		}
 		return true
 	})
+}
+
+// auditRefused audits an entry the relay refused for good (§8.3 cases 5
+// and 8): a durable message to a connection with its inner id as ref, any
+// other entry by its reason alone.
+func (p *Peer) auditRefused(e *outboxEntry, reason string) {
+	if c := p.conns[e.ConnID]; c != nil && c.kr != nil && c.kr.Current() != nil && !e.Handshake && !e.BestEffort && !e.Confirm {
+		if env, err := envelope.Parse(e.Payload); err == nil {
+			if in, err := c.kr.Current().OpenSent(env); err == nil {
+				p.logDrop(c, reason, in)
+				return
+			}
+		}
+	}
+	p.audit(reason, e.ConnID)
 }

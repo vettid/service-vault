@@ -110,6 +110,7 @@ func (p *Peer) drainOutbox(ctx context.Context) {
 	now := p.now()
 	blocked := map[string]bool{}
 	awaiting := map[string]bool{}
+	restamping := map[string]bool{}
 	done := map[*outboxEntry]bool{}
 	// A deposit can change the outbox (a failed one ends a handshake,
 	// which may start a reconnect): the drain runs over a copy, skips what
@@ -119,6 +120,14 @@ func (p *Peer) drainOutbox(ctx context.Context) {
 			break
 		}
 		if e.dropped {
+			continue
+		}
+		if e.Op == opDeposit && restamping[e.Mailbox] {
+			// The mailbox waits for a write; what else comes due to it is
+			// re-stamped in this pass too, and goes after that write.
+			if !now.Before(e.NotBefore) && p.checkAtDeposit(e, now) == atDepositDrop {
+				done[e] = true
+			}
 			continue
 		}
 		if e.Op == opDeposit && (blocked[e.Mailbox] || awaiting[e.Mailbox] && e.Token == "") {
@@ -137,7 +146,7 @@ func (p *Peer) drainOutbox(ctx context.Context) {
 				done[e] = true
 				continue
 			case atDepositWait:
-				blocked[e.Mailbox] = true // re-sealed: deposited once written, in order
+				restamping[e.Mailbox] = true // re-sealed: deposited once written, in order
 				continue
 			}
 		}
@@ -260,11 +269,14 @@ func (p *Peer) depositOnce(ctx context.Context, e *outboxEntry, now time.Time) (
 			c.State = StateStale
 			p.markDirty(kindConn, c.ID)
 			p.audit("peer_stale", c.ID)
-			reason := "undelivered_removed"
+			// TODO(change 2, RELEASE-29 §3 item 4): token_revoked on a
+			// held token ends that token only; the entries then wait.
+			reason := "undelivered_refused"
 			if re.Code == codeMailboxUnknown {
 				reason = "undelivered_mailbox_unknown"
 			}
 			p.dropUndelivered(c, reason, e)
+			p.auditRefused(e, reason)
 		}
 		return true, err
 	case codeQuotaExceeded:
@@ -290,7 +302,7 @@ func (p *Peer) depositOnce(ctx context.Context, e *outboxEntry, now time.Time) (
 	}
 	if re.Status < 500 && re.Status != 429 {
 		// §8.3 case 8: not delivered, audited.
-		p.audit("undelivered_refused", e.ConnID)
+		p.auditRefused(e, "undelivered_refused")
 		return true, err
 	}
 	return false, err

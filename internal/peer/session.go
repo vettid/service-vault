@@ -38,14 +38,14 @@ func (p *Peer) dispatch(ctx context.Context, c *Connection, in *envelope.Inner, 
 	// §6.3.1 before anything else is done with the message (the rate
 	// limit, the ts window, dedupe, its handler): the received flag and
 	// the confirmed epoch (RELEASE-29 §13, change 1).
-	p.noteFromMember(c, ep)
+	p.noteFromMember(c, ep, now)
 	if in.Type == handshake.TypeInit {
 		_, seen, err := p.cfg.Store.Get(ctx, kindInner, rekeyKey(handshake.Th1(raw)))
 		if err != nil {
 			return 0, err
 		}
 		if seen {
-			p.audit("rekey_replay", c.ID) // answered once (R29-T3)
+			p.audit("rekey_init_replayed", c.ID) // answered once (R29-T3, §6.5)
 			return ackAfterFlush, nil
 		}
 		return p.handleRekeyInit(c, in, ep, raw, sender, now), nil
@@ -234,7 +234,7 @@ const MaxOutboxPerConn = 256
 func (p *Peer) outboxFor(connID string) int {
 	n := 0
 	for _, e := range p.outbox {
-		if e.ConnID == connID && e.Op == opDeposit && !e.Confirm { // hs.confirm is exempt (RELEASE-29 §5)
+		if e.ConnID == connID && e.Op == opDeposit && !e.Confirm && !e.Handshake { // exempt (RELEASE-29 §5)
 			n++
 		}
 	}

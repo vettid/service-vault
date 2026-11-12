@@ -526,6 +526,7 @@ func (p *Peer) visibility() time.Duration {
 // discard forgets unflushed changes after a store error; the process
 // restarts from the stored state.
 func (p *Peer) discard() {
+	p.reconfirm = nil
 	clear(p.dirty)
 	p.extra = p.extra[:0]
 }
