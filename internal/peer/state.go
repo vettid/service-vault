@@ -633,9 +633,11 @@ func (p *Peer) load(ctx context.Context) error {
 // secrets are wrong, or the table is another service's: an alarm, not an
 // audit. The tokens the hs.init carries are revoked, as dropOutgoing
 // does, but a reconnect is not ended: the connection stays reconnecting,
-// so resumeReconnects starts a fresh try at this start, and again at each
-// start (each one a try, within MaxReconnectTries and ReconnectTimeout)
-// until the keys are put right.
+// so resumeReconnects starts a fresh try at this start, under the current
+// key. Starts under that same key keep that try; the start after the keys
+// are put right drops it in turn and spends another. Each key change thus
+// costs one try (MaxReconnectTries); ReconnectTimeout still counts from
+// the reconnect's start.
 func (p *Peer) dropStale(stale []*outgoing) {
 	for _, og := range stale {
 		p.log().Error("a stored hs.init names another identity key than this service's: dropped; check the service's keys and secrets",

@@ -258,8 +258,9 @@ func TestStaleOutgoingDroppedAtStart(t *testing.T) {
 
 // A stored reconnect hs.init under another identity key is dropped at
 // start and its tokens revoked, but the reconnect stays open: a fresh try
-// starts at once, and once the key is put right, the next start's try
-// completes.
+// starts at once, a second start under the same key keeps it, and once
+// the key is put right, that try is dropped in turn (a second alarm) and
+// the next one completes.
 func TestStaleReconnectDroppedAtStart(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
@@ -293,11 +294,16 @@ func TestStaleReconnectDroppedAtStart(t *testing.T) {
 	if !c.Reconnecting || c.State != StateActive || c.ReconnectTries != 2 || len(f.p.outgoing) != 1 {
 		t.Fatalf("reconnecting %v, state %s, tries %d, %d outgoing", c.Reconnecting, c.State, c.ReconnectTries, len(f.p.outgoing))
 	}
+	f.start() // still the wrong key: its own try loads and is kept
+	c = f.p.conns[cid]
+	if n := strings.Count(f.logs.String(), "alarm=outgoing_identity_changed"); n != 1 || !c.Reconnecting || c.ReconnectTries != 2 || len(f.p.outgoing) != 1 {
+		t.Fatalf("%d alarms, reconnecting %v, tries %d, %d outgoing", n, c.Reconnecting, c.ReconnectTries, len(f.p.outgoing))
+	}
 	f.keys.IK = ik // put right: the try made under the wrong key is dropped in turn
 	f.start()
 	c = f.p.conns[cid]
-	if !c.Reconnecting || c.ReconnectTries != 3 {
-		t.Fatalf("reconnecting %v, tries %d", c.Reconnecting, c.ReconnectTries)
+	if n := strings.Count(f.logs.String(), "alarm=outgoing_identity_changed"); n != 2 || !c.Reconnecting || c.ReconnectTries != 3 {
+		t.Fatalf("%d alarms, reconnecting %v, tries %d", n, c.Reconnecting, c.ReconnectTries)
 	}
 	m.IgnoreRevoked = true // its answer to the first hs.init is refused
 	m.IgnoreForeign = true // the one signed under the wrong key is dropped
@@ -308,5 +314,35 @@ func TestStaleReconnectDroppedAtStart(t *testing.T) {
 	}
 	if !f.signIn(m, cid) {
 		t.Fatal("sign-in after the reconnect")
+	}
+}
+
+// A reconnect already on its second try when the key goes wrong spends
+// its last try under the wrong key, so once the key is put right it
+// cannot start another and ends: the member must connect again.
+func TestStaleReconnectLastTryEnds(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	b := f.backup()
+	m.StartRekey()
+	f.pump()
+	f.restore(b, true)
+	f.p.conns[cid].ReconnectTries = 2 // as after a second try
+	f.p.markDirty(kindConn, cid)
+	if err := f.p.flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ik := f.keys.IK
+	f.keys.IK = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{88}, 32))
+	f.start()
+	if c := f.p.conns[cid]; !c.Reconnecting || c.ReconnectTries != 3 {
+		t.Fatalf("reconnecting %v, tries %d", c.Reconnecting, c.ReconnectTries)
+	}
+	f.keys.IK = ik
+	f.start()
+	c := f.p.conns[cid]
+	if c.Reconnecting || c.State != StateStale || !strings.Contains(f.logs.String(), "alarm=reconnect_failed") {
+		t.Fatalf("reconnecting %v, state %s:\n%s", c.Reconnecting, c.State, f.logs.String())
 	}
 }
