@@ -121,7 +121,10 @@ epoch reaches `B`. A try counts as failed when it expires unanswered,
 or when its `hs.init` is answered `token_revoked` (item 4). §3.4.1 says
 a refused try counts only if it then expires unanswered, and §8.6 that
 this refusal is a failed try; the service follows §8.6, and the
-difference is flagged for an erratum. `stale` is not final (0.88.7): the outbox is kept, and the
+difference is flagged for an erratum. A new try after a pending
+epoch's `hs.fin` is refused `token_revoked` is not a failed try
+(§6.3.1); repeated, it is bounded by the reconnect token's 4 deposits,
+whose `quota_exceeded` makes the connection `stale`. `stale` is not final (0.88.7): the outbox is kept, and the
 next epoch established makes the connection active again.
 
 **While a reconnect is open** (from its first `hs.init` until it is
