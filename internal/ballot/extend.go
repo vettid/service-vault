@@ -125,7 +125,7 @@ func (m *Manager) Extend(ctx context.Context, id, approvalID string, in Extensio
 	if m.Publisher == nil || !ok || !ok2 {
 		return nil, ErrNoPublisher
 	}
-	o, err := m.Store.OpenProposal(ctx, id)
+	o, err := m.Store.OpenProposalFresh(ctx, id)
 	if err != nil {
 		return nil, err
 	}

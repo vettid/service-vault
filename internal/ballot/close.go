@@ -190,7 +190,7 @@ func (m *Manager) Close(ctx context.Context, id string) (*ResultsSummary, error)
 	if m.Publisher == nil || !ok || !ok2 || !ok3 || !ok4 {
 		return nil, ErrNoPublisher
 	}
-	o, err := m.Store.OpenProposal(ctx, id)
+	o, err := m.Store.OpenProposalFresh(ctx, id)
 	if err != nil {
 		return nil, err
 	}

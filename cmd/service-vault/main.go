@@ -472,7 +472,7 @@ func serve(args []string) error {
 		case err != nil:
 			return err
 		default:
-			ballots = &ballot.RecordStore{Records: records, Copy: &ballot.SealedCopy{Inner: raw, Seal: cs.Seal, Open: cs.Open}}
+			ballots = &ballot.RecordStore{Records: records, Copy: &ballot.SealedCopy{Inner: raw, Seal: cs.Seal, Open: cs.Open}, Log: log}
 			pc.Votes = &ballot.Box{Store: ballots, Sign: signIK, Log: log}
 		}
 	}

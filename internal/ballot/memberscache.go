@@ -1,9 +1,11 @@
 package ballot
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"maps"
 	"slices"
 	"sync"
@@ -24,7 +26,8 @@ const membersCached = 8
 // the store can lose a chunk (a deletion, a restore that lacks it): the
 // cache must not hide that from a running process. Within this time of
 // the loss, the next open reads the chunks and fails, as it would
-// without the cache.
+// without the cache. A close, a publication and an extension never use
+// the cache (OpenProposalFresh).
 const membersRecheck = time.Minute
 
 // membersKey is the cache key of a proposal's member chunks: each field
@@ -46,12 +49,22 @@ func membersKey(proposalID string, refs []chunkRef) string {
 // membersCache keeps the decoded members of the proposals used last.
 // Each caller gets its own copy of the map, so that no two proposals read
 // share one (a Member's byte slices are shared, and never written). A map
-// in the cache is never changed after put, so it is copied outside the
-// lock.
+// in the cache is never changed after it is kept, so it is copied
+// outside the lock.
+//
+// One read per key runs at a time for the openers that use the cache
+// (the others wait for it), so an expiry is one read, not one per
+// concurrent cast. A read that finds the chunks lost or changed is
+// recorded: no read that started before it is kept after it, so a
+// failed check stays failed until a read that started after it
+// succeeds.
 type membersCache struct {
-	mu    sync.Mutex
-	order []string // least recently used first
-	byKey map[string]*membersEntry
+	mu       sync.Mutex
+	order    []string // least recently used first
+	byKey    map[string]*membersEntry
+	inflight map[string]*membersFlight
+	seq      uint64            // counts the failed checks
+	failed   map[string]uint64 // a key's last failed check, by seq
 }
 
 // membersEntry is one proposal's cached members, and its record tree,
@@ -61,9 +74,16 @@ type membersCache struct {
 // copies (vote.Tree).
 type membersEntry struct {
 	members  map[string]Member
-	read     time.Time // when its chunks were read and checked
+	read     time.Time // when the read of its chunks started
 	treeOnce sync.Once
 	tree     *recordTree
+}
+
+// membersFlight is a read of a key's chunks in progress.
+type membersFlight struct {
+	done  chan struct{}
+	entry *membersEntry // when it succeeded
+	err   error
 }
 
 // recordTree returns the entry's record tree, building it the first time.
@@ -72,41 +92,99 @@ func (e *membersEntry) recordTree() *recordTree {
 	return e.tree
 }
 
-// get returns a copy of key's members and its entry, or nil. An entry
-// read membersRecheck ago or more (by now) is dropped, so its chunks are
-// read and checked again.
-func (c *membersCache) get(key string, now time.Time) (map[string]Member, *membersEntry) {
-	c.mu.Lock()
-	e, ok := c.byKey[key]
-	if ok && !now.Before(e.read.Add(membersRecheck)) {
-		c.drop(key)
-		ok = false
-	}
-	if ok {
-		// Most recently used last: a proposal in use stays.
-		if i := slices.Index(c.order, key); i >= 0 {
-			c.order = append(append(c.order[:i:i], c.order[i+1:]...), key)
-		}
-	}
-	c.mu.Unlock()
-	if !ok {
-		return nil, nil
-	}
-	return maps.Clone(e.members), e
+// chunkLost is whether err says the stored chunks are not the ones named
+// (missing or changed), as opposed to a store that didn't answer.
+func chunkLost(err error) bool {
+	return errors.Is(err, ErrChunkMissing) || errors.Is(err, ErrChunkBad)
 }
 
-// put keeps a copy of m, read and checked at now, under key, and returns
-// key's entry (the one kept before, if another caller put it first).
-func (c *membersCache) put(key string, m map[string]Member, now time.Time) *membersEntry {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.byKey == nil {
-		c.byKey = map[string]*membersEntry{}
+// load returns a copy of key's members and their entry. With fresh, the
+// chunks are always read (and the cache is not used); otherwise an entry
+// read less than membersRecheck before now is used, or the read in
+// progress for key is waited for. read reads and checks the chunks;
+// now() is taken before it starts.
+func (c *membersCache) load(ctx context.Context, key string, fresh bool, now func() time.Time,
+	read func(context.Context) (map[string]Member, error)) (map[string]Member, *membersEntry, error) {
+	for {
+		c.mu.Lock()
+		if c.byKey == nil {
+			c.byKey, c.inflight, c.failed = map[string]*membersEntry{}, map[string]*membersFlight{}, map[string]uint64{}
+		}
+		start := now()
+		if !fresh {
+			if e, ok := c.byKey[key]; ok {
+				if start.Before(e.read.Add(membersRecheck)) {
+					c.touch(key)
+					c.mu.Unlock()
+					return maps.Clone(e.members), e, nil
+				}
+				c.drop(key)
+			}
+			if f, ok := c.inflight[key]; ok {
+				c.mu.Unlock()
+				select {
+				case <-f.done:
+				case <-ctx.Done():
+					return nil, nil, ctx.Err()
+				}
+				if f.err != nil && !chunkLost(f.err) && ctx.Err() == nil {
+					continue // the reader's own failure (its context): read again
+				}
+				if f.err != nil {
+					return nil, nil, f.err
+				}
+				return maps.Clone(f.entry.members), f.entry, nil
+			}
+		}
+		var f *membersFlight
+		if !fresh {
+			f = &membersFlight{done: make(chan struct{})}
+			c.inflight[key] = f
+		}
+		token := c.seq
+		c.mu.Unlock()
+
+		m, err := read(ctx)
+
+		c.mu.Lock()
+		var e *membersEntry
+		switch {
+		case err != nil && chunkLost(err):
+			c.seq++
+			c.failed[key] = c.seq
+			c.drop(key)
+		case err == nil:
+			e = c.keep(key, m, start, token)
+		}
+		if f != nil {
+			f.entry, f.err = e, err
+			delete(c.inflight, key)
+			close(f.done)
+		}
+		c.mu.Unlock()
+		if err != nil {
+			return nil, nil, err
+		}
+		return maps.Clone(e.members), e, nil
 	}
-	if e, ok := c.byKey[key]; ok {
+}
+
+// keep caches m, read from start, under key, unless a check that failed
+// after the read began says otherwise; it returns the entry the caller
+// uses (the one cached, or its own). c.mu is held.
+func (c *membersCache) keep(key string, m map[string]Member, start time.Time, token uint64) *membersEntry {
+	if c.failed[key] > token {
+		// Another check found the chunks lost while this read ran: this
+		// caller has what it read, and the cache keeps nothing.
+		return &membersEntry{members: maps.Clone(m), read: start}
+	}
+	if e, ok := c.byKey[key]; ok && start.Before(e.read.Add(membersRecheck)) {
+		// Kept by another reader: share its tree.
+		c.touch(key)
 		return e
 	}
-	e := &membersEntry{members: maps.Clone(m), read: now}
+	c.drop(key)
+	e := &membersEntry{members: maps.Clone(m), read: start}
 	c.byKey[key] = e
 	c.order = append(c.order, key)
 	if len(c.order) > membersCached {
@@ -114,6 +192,13 @@ func (c *membersCache) put(key string, m map[string]Member, now time.Time) *memb
 		c.order = c.order[1:]
 	}
 	return e
+}
+
+// touch makes key the most recently used; c.mu is held.
+func (c *membersCache) touch(key string) {
+	if i := slices.Index(c.order, key); i >= 0 {
+		c.order = append(append(c.order[:i:i], c.order[i+1:]...), key)
+	}
 }
 
 // drop removes key's entry; c.mu is held.
