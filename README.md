@@ -21,6 +21,24 @@ The first deployment is vettid.org's own member service
 ([vettid/member-service](https://github.com/vettid/member-service)), which
 integrates exactly as a third party would.
 
+**Release 29 (VAULT-MESSAGING §6.3.1) is not yet implemented in full.**
+Toward a release-29 member vault the service:
+- follows identity links on rekeys both ways (0.87.0 S8);
+- sends `hs.confirm` (body `{}`) under the new epoch when it activates a
+  member's rekey or reconnect at its verified `hs.fin`, which confirms
+  the epoch the member holds pending;
+- acks an incoming `hs.confirm` and ignores it (it activated at `hs.fin`
+  already and holds no pending epoch);
+- after a rekey of its own fails (its `hs.resp` aborted it, or none came
+  within 16 days), waits an hour before the next, doubling to a day,
+  instead of starting one every minute.
+
+It does not yet hold its own rekey's epoch pending until the member
+confirms it, track a confirmed epoch, re-send `hs.confirm` (per batch or
+every 12 days), apply rule E, the crossing rule, rule J, the T1/T2 rules
+or the received flag, or advertise `hs_confirm`. That is the next piece
+of work.
+
 This repository replaces
 [vettid/vettid-service-vault](https://github.com/vettid/vettid-service-vault),
 a NATS-based prototype that is retired; none of its code is reused.
@@ -753,7 +771,11 @@ the move:
   service had started under the old keys is dropped. A member that
   rotated while the session was down reconnects with the chain in its
   `hs.init` (§6.6), and the service follows that the same way. Links it
-  already followed may come first. If two different
+  already followed may come first. A release-29 member vault also sends
+  its whole chain on every rekey, either way (0.87.0 S8): the service
+  follows the links it has not followed yet, at the rekey's verified
+  `hs.fin` when the member started it, and before installing the epoch
+  when the service did. If two different
   successors of one key arrive ("one successor per key"), the connection
   is suspended: nothing is sent or accepted, its sign-ins and
   approvals can't be answered, an ERROR with `alarm: rotate_conflict` is

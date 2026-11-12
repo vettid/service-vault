@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-vault/vms/handshake"
+	"github.com/vettid/vettid-vault/vms/suite"
 )
 
 // Record kinds in the Store.
@@ -106,6 +107,11 @@ type Connection struct {
 	// ReconnectSlow is set once the reconnect_slow alarm was raised.
 	ReconnectSince time.Time `json:"reconnect_since,omitzero"`
 	ReconnectSlow  bool      `json:"reconnect_slow,omitempty"`
+	// RekeyFailures counts the rekeys of ours that ended without an
+	// epoch since the last epoch installed; none starts before
+	// RekeyNotBefore (rekeyFailed).
+	RekeyFailures  int       `json:"rekey_failures,omitempty"`
+	RekeyNotBefore time.Time `json:"rekey_not_before,omitzero"`
 
 	Created   time.Time `json:"created"`
 	Activated time.Time `json:"activated"`
@@ -200,6 +206,9 @@ type awaiting struct {
 	// A member's reconnect changes nothing until sig_I verifies at hs.fin
 	// (VAULT-MESSAGING §6.6, 0.72.0): what it brings waits here.
 	Reconnect *pendingReconnect `json:"reconnect,omitempty"`
+	// Follow is what a member's rekey brought (0.87.0 S8): the links not
+	// yet followed and the key they lead to, followed at its hs.fin.
+	Follow *pendingFollow `json:"follow,omitempty"`
 
 	r *handshake.Responder
 }
@@ -215,6 +224,33 @@ type pendingReconnect struct {
 	KEM       []byte            `json:"kem,omitempty"`
 	Links     []json.RawMessage `json:"links,omitempty"`
 	Issued    []string          `json:"issued,omitempty"`
+}
+
+// pendingFollow is a rekey's identity links not yet followed, with the
+// key and KEM they lead to.
+type pendingFollow struct {
+	IK    ed25519.PublicKey `json:"ik"`
+	KEM   []byte            `json:"kem"`
+	Links []json.RawMessage `json:"links"`
+}
+
+func (f *pendingFollow) parse() (ed25519.PublicKey, *suite.PublicKey, []*handshake.Rotation, error) {
+	kem, err := suite.ParsePublicKey(f.KEM)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	var links []*handshake.Rotation
+	for _, raw := range f.Links {
+		r, err := handshake.ParseRotation(raw)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		links = append(links, r)
+	}
+	if len(f.IK) != ed25519.PublicKeySize || len(links) == 0 {
+		return nil, nil, nil, errors.New("peer: bad pending follow")
+	}
+	return f.IK, kem, links, nil
 }
 
 // request is a first-contact connection after hs.fin, before activation

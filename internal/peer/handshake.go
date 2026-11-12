@@ -355,21 +355,19 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 		p.audit("rekey_rejected", c.ID)
 		return ackAfterFlush
 	}
-	if len(pi.Init().Rotations) > 0 {
-		// A rekey that carries identity links (VAULT-MESSAGING 0.87.0
-		// S8) is refused, as before vettid-vault's handshake parsed them:
-		// this service follows links only from identity.rotate and a
-		// reconnect. Answering it would move the epoch to the new key
-		// while the connection's stored key stays the old one. A
-		// release-29 member vault sends its whole chain on every rekey to
-		// every peer, so once such a member has rotated, its rekeys with
-		// this service fail both ways (and this service starts a new one
-		// each tick, NeedsRekey) until a reconnect, as with the old
-		// library, until this service follows S8 links here and in
-		// handleResp (its release-29 work).
-		pi.Discard()
-		p.audit("rekey_rejected", c.ID)
-		return ackAfterFlush
+	// A rekey may carry identity links (VAULT-MESSAGING 0.87.0 S8): a
+	// release-29 member vault sends its whole chain on every rekey. As
+	// for a reconnect, a valid link that gives a key a second successor
+	// suspends the connection (§3.4); the rest are checked by the
+	// handshake (from.ik is the stored key, or reached from it through
+	// links not yet followed, after those already followed), and followed
+	// at the verified hs.fin, never before.
+	body := pi.Init()
+	for _, r := range body.Rotations {
+		if r.Verify() == nil && p.rotationConflict(c, r, now) {
+			pi.Discard()
+			return ackAfterFlush
+		}
 	}
 	if !p.admitHandshake(c.ID, handshake.PurposeRekey, pi.Th1()) {
 		pi.Discard()
@@ -388,9 +386,11 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 		}
 		p.dropOutgoing(id)
 	}
+	known := chainOf(c)
 	resp, env, err := pi.Respond(handshake.ResponderConfig{
 		Identity: p.cfg.Keys.IK, Policy: handshake.PolicyVaultToVault, PinnedSuite: c.Suite,
-		CollectSender: sender, RecordRelayKey: c.Peer.Relay.PK, KnownInitiatorIK: c.Peer.IK, Now: now,
+		CollectSender: sender, RecordRelayKey: c.Peer.Relay.PK, KnownInitiatorIK: c.Peer.IK,
+		KnownInitiatorChain: known, Now: now,
 	})
 	if err != nil {
 		p.audit("rekey_refused", c.ID)
@@ -398,8 +398,15 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 	}
 	id := p.newID(now)
 	th1 := pi.Th1()
-	p.awaiting[id] = &awaiting{ID: id, ConnID: c.ID, Purpose: handshake.PurposeRekey, Th1: th1[:], Created: now,
+	aw := &awaiting{ID: id, ConnID: c.ID, Purpose: handshake.PurposeRekey, Th1: th1[:], Created: now,
 		Expires: now.Add(HandshakeTTL), r: resp}
+	if fresh := body.Rotations[handshake.KnownPrefix(known, body.Rotations):]; len(fresh) > 0 {
+		aw.Follow = &pendingFollow{IK: body.From.IK, KEM: body.From.KEM.Bytes()}
+		for _, r := range fresh {
+			aw.Follow.Links = append(aw.Follow.Links, r.Marshal())
+		}
+	}
+	p.awaiting[id] = aw
 	p.markDirty(kindAwait, id)
 	p.markDirty(kindConn, c.ID) // the epoch's receive count moved
 	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: env}, now)
@@ -470,7 +477,22 @@ func (p *Peer) handleFin(id string, raw []byte, sender ed25519.PublicKey, now ti
 			return ackAfterFlush
 		}
 	}
+	if aw.Follow != nil {
+		// The rekey's links, now that sig_I verified under the key they
+		// lead to (S8).
+		ik, kem, links, err := aw.Follow.parse()
+		if err != nil {
+			p.audit("rekey_record_bad", c.ID)
+			fr.Epoch.Destroy()
+			return ackAfterFlush
+		}
+		p.followRotation(c, ik, kem, links)
+	}
 	p.installEpoch(c, fr.Epoch, now)
+	// The member's vault holds the epoch pending until a message from us
+	// opens under it (§6.3.1 Responder, R29-R1): hs.confirm, body {},
+	// never answered.
+	p.sendTo(c, handshake.TypeConfirm, json.RawMessage(`{}`), now)
 	p.log().Info("epoch installed", "connection_id", c.ID, "purpose", string(aw.Purpose))
 	return ackAfterFlush
 }
@@ -487,8 +509,35 @@ func (p *Peer) installEpoch(c *Connection, ep *handshake.Epoch, now time.Time) {
 	if ep.Suite() > c.Suite {
 		c.Suite = ep.Suite() // §13.4 pin
 	}
+	c.RekeyFailures, c.RekeyNotBefore = 0, time.Time{}
 	p.markDirty(kindConn, c.ID)
 	p.retryConn(c.ID)
+}
+
+// RekeyBackoff is the wait after a rekey of ours failed, doubled at each
+// further failure up to RekeyBackoffMax (chosen; not in the spec): a
+// rekey the member's vault cannot complete is not started again every
+// minute while the epoch keeps needing one.
+const (
+	RekeyBackoff    = time.Hour
+	RekeyBackoffMax = 24 * time.Hour
+)
+
+// rekeyFailed records that a rekey of ours ended without an epoch (its
+// hs.resp aborted it, or none came in time), so the next one waits.
+func (p *Peer) rekeyFailed(og *outgoing, now time.Time) {
+	c := p.conns[og.ConnID]
+	if c == nil || og.ini == nil || og.ini.Purpose() != handshake.PurposeRekey {
+		return
+	}
+	wait := RekeyBackoff
+	for i := 0; i < c.RekeyFailures && wait < RekeyBackoffMax; i++ {
+		wait *= 2
+	}
+	c.RekeyFailures++
+	c.RekeyNotBefore = now.Add(min(wait, RekeyBackoffMax))
+	p.markDirty(kindConn, c.ID)
+	p.log().Warn("rekey failed: backing off", "connection_id", c.ID, "failures", c.RekeyFailures, "until", c.RekeyNotBefore)
 }
 
 // dropAwaiting ends a first-contact handshake that has not completed:
@@ -558,6 +607,9 @@ func (p *Peer) startRekey(c *Connection, now time.Time) {
 	if c.kr == nil || c.kr.Current() == nil || c.Standing.Token == "" || c.State != StateActive {
 		return
 	}
+	if now.Before(c.RekeyNotBefore) {
+		return // a rekey of ours failed lately: backing off
+	}
 	for _, og := range p.outgoing {
 		if og.ConnID == c.ID {
 			return
@@ -570,8 +622,8 @@ func (p *Peer) startRekey(c *Connection, now time.Time) {
 	}
 	ini, err := handshake.NewInitiator(handshake.InitiatorConfig{
 		Purpose: handshake.PurposeRekey, Identity: p.cfg.Keys.IK, StaticKEM: p.cfg.Keys.KEM.Public(), Relay: p.ownAddr(),
-		ResponderIK: c.Peer.IK, ResponderRelayKey: c.Peer.Relay.PK, Current: c.kr.Current(), PinnedSuite: c.Suite,
-		Policy: handshake.PolicyVaultToVault, Now: now,
+		ResponderIK: c.Peer.IK, KnownResponderChain: chainOf(c), ResponderRelayKey: c.Peer.Relay.PK,
+		Current: c.kr.Current(), PinnedSuite: c.Suite, Policy: handshake.PolicyVaultToVault, Now: now,
 	})
 	if err != nil {
 		return
@@ -597,22 +649,11 @@ func (p *Peer) handleResp(id string, raw []byte, sender ed25519.PublicKey, now t
 	if err != nil {
 		if _, xerr := og.ini.Export(); errors.Is(xerr, handshake.ErrDone) {
 			p.audit("hs_resp_aborted", og.ConnID)
+			p.rekeyFailed(og, now)
 			p.dropOutgoing(id)
 		} else {
 			p.audit("hs_resp_dropped", og.ConnID)
 		}
-		return ackAfterFlush
-	}
-	if og.ini.Purpose() == handshake.PurposeRekey && len(res.Resp.Rotations) > 0 {
-		// An hs.resp to this service's rekey that carries identity links
-		// (0.87.0 S8) aborts it, as before vettid-vault's handshake parsed
-		// them: installing the epoch would leave the connection's stored
-		// key behind the one sig_R verified under. No hs.fin is sent; the
-		// rekey is started again later, as after any abort (see
-		// handleRekeyInit for what that means for a release-29 member).
-		res.Epoch.Destroy()
-		p.audit("hs_resp_aborted", og.ConnID)
-		p.dropOutgoing(id)
 		return ackAfterFlush
 	}
 	delete(p.outgoing, id)
@@ -624,6 +665,13 @@ func (p *Peer) handleResp(id string, raw []byte, sender ed25519.PublicKey, now t
 	}
 	if og.ini.Purpose() == handshake.PurposeReconnect {
 		return p.finishReconnect(c, og, res, now)
+	}
+	// The member's links (S8), which the handshake resolved from the
+	// stored key after those already followed and verified sig_R under:
+	// followed before the epoch is installed, so the stored key is the
+	// one the epoch was made with.
+	if fresh := res.Resp.Rotations[handshake.KnownPrefix(chainOf(c), res.Resp.Rotations):]; len(fresh) > 0 {
+		p.followRotation(c, res.ResponderIK, res.ResponderKEM, fresh)
 	}
 	// hs.fin goes first; what follows is sealed in the new epoch.
 	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: res.Fin}, now)

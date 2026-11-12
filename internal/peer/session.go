@@ -92,6 +92,11 @@ func (p *Peer) dispatch(ctx context.Context, c *Connection, in *envelope.Inner, 
 		// The service has no member credential to sign with (§10.4); a
 		// challenge to it is never answered (chosen; not in the spec).
 		p.audit("challenge_unsupported", c.ID)
+	case handshake.TypeConfirm:
+		// A member's vault confirms an epoch it activated as responder
+		// (§6.3.1, R29-R1). This service activates at hs.fin already and
+		// holds no pending epoch, so it confirms nothing here: acked and
+		// ignored, without audit; it is not a request, so never answered.
 	default:
 		if isVoteType(in.Type) && p.cfg.Votes != nil {
 			if err := p.vote(ctx, c, in, ikey, msgID, now); errors.Is(err, ErrNoAnswer) {
@@ -446,6 +451,7 @@ func (p *Peer) housekeeping(now time.Time) {
 	p.expireChallenges(now)
 	for id, og := range p.outgoing {
 		if now.Sub(og.Created) >= HandshakeTTL {
+			p.rekeyFailed(og, now)
 			p.dropOutgoing(id) // an hs.resp that never came (or can no longer be accepted)
 		}
 	}
