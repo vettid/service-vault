@@ -330,6 +330,9 @@ func (p *Peer) applyReconnect(c *Connection, pend *pendingReconnect) error {
 		if len(fresh) > 0 {
 			p.followRotation(c, ik, kem, fresh)
 		}
+		if c.State == StateSuspended {
+			return errSuspended // following judged another answer's links: a fork
+		}
 		c.Standing, c.Reconnect = pend.Standing, pend.Reconnect
 		c.State = StateActive
 		p.markDirty(kindConn, c.ID)
@@ -352,12 +355,23 @@ func (p *Peer) applyReconnect(c *Connection, pend *pendingReconnect) error {
 			return err
 		}
 	}
+	if len(links) > 0 {
+		// Checked against what was followed since, as for a newer record.
+		fresh, ok := p.checkSigner(c, pend.IK, kem, links, p.now())
+		if !ok {
+			return errSignerMoved
+		}
+		links = fresh
+	}
 	if c.Reconnecting {
 		c.Reconnecting, c.ReconnectTries, c.ReconnectSlow, c.ReconnectSince = false, 0, false, time.Time{}
 		p.dropConnOutgoing(c)
 	}
 	if len(links) > 0 {
 		p.followRotation(c, pend.IK, kem, links)
+	}
+	if c.State == StateSuspended {
+		return errSuspended
 	}
 	c.Standing, c.Reconnect = pend.Standing, pend.Reconnect
 	c.State = StateActive
@@ -431,7 +445,9 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 	p.awaiting[id] = aw
 	p.markDirty(kindAwait, id)
 	p.markDirty(kindConn, c.ID) // the epoch's receive count moved
-	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: env}, now)
+	e := &outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: env}
+	p.queueDeposit(e, now)
+	aw.RespEntry = e.ID
 	p.log().Info("rekey answered", "connection_id", c.ID)
 	return ackAfterFlush
 }
@@ -490,7 +506,9 @@ func (p *Peer) handleFin(id string, raw []byte, sender ed25519.PublicKey, now ti
 	}
 	if aw.Reconnect != nil {
 		if err := p.applyReconnect(c, aw.Reconnect); err != nil {
-			p.audit("reconnect_record_bad", c.ID)
+			if !errors.Is(err, errSuspended) && !errors.Is(err, errSignerMoved) {
+				p.audit("reconnect_record_bad", c.ID)
+			}
 			fr.Epoch.Destroy()
 			for _, j := range aw.Reconnect.Issued {
 				p.denyJTI(j, now)
@@ -585,6 +603,11 @@ func (p *Peer) dropAwaiting(id string, now time.Time) {
 		p.dropOutbox(func(e *outboxEntry) bool {
 			return e.ConnID == aw.ConnID && e.Op == opDeposit && e.Token != "" && e.Token == aw.Reconnect.Standing.Token
 		})
+	}
+	if aw.RespEntry != "" {
+		// Its hs.resp, if not yet deposited, answers a handshake that is
+		// over: it is not sent.
+		p.dropOutbox(func(e *outboxEntry) bool { return e.ID == aw.RespEntry })
 	}
 	aw.r.Abort()
 	delete(p.awaiting, id)
@@ -688,15 +711,11 @@ func (p *Peer) handleResp(id string, raw []byte, sender ed25519.PublicKey, now t
 		res.Epoch.Destroy()
 		return ackAfterFlush
 	}
-	// A valid link that gives a key a second successor suspends the
-	// connection (§3.4), before anything is followed. (One off the
-	// resolved path makes the handshake refuse the hs.resp first.)
-	for _, r := range res.Resp.Rotations {
-		if r.Verify() == nil && p.rotationConflict(c, r, now) {
-			res.Epoch.Destroy()
-			return ackAfterFlush
-		}
-	}
+	// No rule C check on the hs.resp's links here: a link that gives a
+	// key a second successor is off the path the handshake resolves, so
+	// HandleResp has refused the hs.resp already (an abort, above), and
+	// the fork shows only as failed rekeys. Judging it needs the refused
+	// hs.resp's links, which the handshake library does not return.
 	if og.ini.Purpose() == handshake.PurposeReconnect {
 		return p.finishReconnect(c, og, res, now)
 	}
@@ -706,6 +725,11 @@ func (p *Peer) handleResp(id string, raw []byte, sender ed25519.PublicKey, now t
 	// one the epoch was made with.
 	if fresh := res.Resp.Rotations[handshake.KnownPrefix(chainOf(c), res.Resp.Rotations):]; len(fresh) > 0 {
 		p.followRotation(c, res.ResponderIK, res.ResponderKEM, fresh)
+	}
+	if c.State == StateSuspended {
+		// Following judged an answer's links: a fork. No hs.fin, no epoch.
+		res.Epoch.Destroy()
+		return ackAfterFlush
 	}
 	// hs.fin goes first; what follows is sealed in the new epoch.
 	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: res.Fin}, now)

@@ -782,8 +782,13 @@ the move:
   the stored key past it, and then the handshake is dropped
   (`ancestor_ik`) instead of setting the key back. A member's rekey
   answered under a key that a later rotation moved past is dropped at
-  that rotation. `identity.rotate` itself still reads only its one link,
-  not the `rotations` chain S8 lets it carry. If two different
+  that rotation. A second successor found while following links suspends
+  the connection, and the handshake that was being completed then
+  completes nothing. One gap: a second successor carried in an `hs.resp`
+  to the service's own rekey is refused by the handshake library before
+  the service sees it, so it shows only as failed rekeys (backed off),
+  not as `rotate_conflict`. `identity.rotate` itself still reads only its
+  one link, not the `rotations` chain S8 lets it carry. If two different
   successors of one key arrive ("one successor per key"), the connection
   is suspended: nothing is sent or accepted, its sign-ins and
   approvals can't be answered, an ERROR with `alarm: rotate_conflict` is

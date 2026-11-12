@@ -209,6 +209,9 @@ type awaiting struct {
 	// Follow is what a member's rekey named (S8): its signer and links,
 	// checked again and followed at its hs.fin (checkSigner).
 	Follow *pendingFollow `json:"follow,omitempty"`
+	// RespEntry is the outbox entry of a rekey answer's hs.resp, dropped
+	// with the answer if not yet deposited.
+	RespEntry string `json:"resp_entry,omitempty"`
 
 	r *handshake.Responder
 }

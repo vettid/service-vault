@@ -99,28 +99,33 @@ func (p *Peer) followRotation(c *Connection, ik ed25519.PublicKey, kem *suite.Pu
 	p.log().Info("member identity rotated", "connection_id", c.ID)
 }
 
-// dropStaleAnswers drops the member's rekeys we answered whose hs.init
-// was signed with another key than the one now stored (§3.4.1 H5): the
-// member abandons a rekey at its own rotation, and its hs.fin could only
-// come from a copy holding the older key (checkSigner refuses it there
-// too). Their links are judged first: one that gives a key a second
+// dropStaleAnswers drops the member's rekeys we answered whose signer
+// the stored key and links no longer lead to (§3.4.1 H5): the stored key
+// moved past it, so its hs.fin could only come from a copy holding an
+// older key (checkSigner refuses it there too). An answer whose signer is
+// still the stored key, or reached from it through the links it carries,
+// stays. Their links are judged first: one that gives a key a second
 // successor, now that more of the chain is followed, suspends the
-// connection (§3.4).
+// connection (§3.4). An answer stored before signers were kept (no
+// Follow) is dropped: its signer is unknown.
 func (p *Peer) dropStaleAnswers(c *Connection) {
 	now := p.now()
 	for id, aw := range p.awaiting {
-		if aw.ConnID != c.ID || aw.New != nil || aw.Purpose != handshake.PurposeRekey || aw.Follow == nil {
+		if aw.ConnID != c.ID || aw.New != nil || aw.Purpose != handshake.PurposeRekey {
 			continue
 		}
-		ik, _, links, err := aw.Follow.parse()
-		if err == nil {
-			for _, r := range links {
-				if r.Verify() == nil && p.rotationConflict(c, r, now) {
-					return // suspended: every answer is dropped
+		if aw.Follow != nil {
+			ik, kem, links, err := aw.Follow.parse()
+			if err == nil {
+				for _, r := range links {
+					if r.Verify() == nil && p.rotationConflict(c, r, now) {
+						return // suspended: every answer is dropped
+					}
 				}
-			}
-			if suite.EqualPublic(ik, c.Peer.IK) {
-				continue
+				final, fkem, _, err := handshake.ResolveChainKnown(c.Peer.IK, chainOf(c), links)
+				if err == nil && suite.EqualPublic(final, ik) && (fkem == nil || fkem.Equal(kem)) {
+					continue
+				}
 			}
 		}
 		p.audit("rekey_answer_dropped", c.ID)
@@ -131,6 +136,11 @@ func (p *Peer) dropStaleAnswers(c *Connection) {
 // errSignerMoved: a member's handshake answered under a key and links
 // that what was followed since no longer leads to (checkSigner).
 var errSignerMoved = errors.New("peer: the member's identity moved since its hs.init was answered")
+
+// errSuspended: following a handshake's links suspended the connection
+// (another answer's links gave a key a second successor); the handshake
+// does not complete.
+var errSuspended = errors.New("peer: the connection was suspended")
 
 // newPendingFollow keeps what a member's rekey or reconnect hs.init
 // named: its signer (from.ik and kem) and its whole chain, to be checked
@@ -161,7 +171,7 @@ func (p *Peer) followAtFin(c *Connection, f *pendingFollow, now time.Time) bool 
 	if len(fresh) > 0 {
 		p.followRotation(c, ik, kem, fresh)
 	}
-	return true
+	return c.State != StateSuspended // following judged another answer's links
 }
 
 // checkSigner checks, at a member's verified hs.fin, that the key its

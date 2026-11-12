@@ -737,8 +737,6 @@ func TestRekeyCrossingWithLinks(t *testing.T) {
 	}
 }
 
-// The members
-
 // The member's identity.rotate A->B arrives after its rekey from B
 // (carrying A->B) was answered: following it moves the stored key to the
 // one the answer was signed with, so the answer stays, and its hs.fin
@@ -759,5 +757,234 @@ func TestRekeyAnswerKeptWhenRotationCatchesUp(t *testing.T) {
 	c := f.p.conns[cid]
 	if c.kr.Current().ID() == epoch || c.kr.Current().ID() != m.KR.Current().ID() || len(c.Chain) != 1 {
 		t.Fatalf("rekey not completed: chain %d", len(c.Chain))
+	}
+}
+
+// Two copies of a member: one reconnects from B with [A->B], the other
+// rekeys from X with [A->X]; both are answered. At the reconnect's hs.fin,
+// following A->B judges the rekey answer's A->X: a second successor of A
+// suspends the connection, and the reconnect does not undo it (no epoch,
+// state stays suspended).
+func TestForkJudgedAtReconnectFinStaysSuspended(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	epoch := f.p.conns[cid].kr.Current().ID()
+	orig := m.IK
+	m.RotateIdentity(50, true) // A->B
+	m.Reconnect()
+	if _, err := f.p.Step(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	m.IK, m.Rotations = orig, nil
+	m.RotateIdentity(40, true) // A->X, the other copy
+	m.StartRekeyWithLinks()
+	if _, err := f.p.Step(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.p.awaiting) != 2 {
+		t.Fatalf("%d awaiting", len(f.p.awaiting))
+	}
+	m.IgnoreStray, m.IgnoreRevoked = true, true
+	m.Step() // both hs.fin, the reconnect's first
+	if _, err := f.p.Step(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	c := f.p.conns[cid]
+	if c.State != StateSuspended || c.kr.Current().ID() != epoch || len(f.p.awaiting) != 0 {
+		t.Fatalf("state %s, %d awaiting", c.State, len(f.p.awaiting))
+	}
+	if strings.Contains(f.logs.String(), "reason=reconnect_record_bad") {
+		t.Fatal("a suspension reported as a bad record")
+	}
+}
+
+// The same fork judged at a rekey's hs.fin: two rekey answers, from B
+// with [A->B] and from X with [A->X]; the first hs.fin suspends the
+// connection and installs no epoch.
+func TestForkJudgedAtRekeyFinStaysSuspended(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	epoch := f.p.conns[cid].kr.Current().ID()
+	orig := m.IK
+	m.RotateIdentity(50, true) // A->B
+	m.StartRekeyWithLinks()
+	if _, err := f.p.Step(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	m.IK, m.Rotations = orig, nil
+	m.RotateIdentity(40, true) // A->X
+	m.StartRekeyWithLinks()
+	if _, err := f.p.Step(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.p.awaiting) != 2 {
+		t.Fatalf("%d awaiting", len(f.p.awaiting))
+	}
+	m.IgnoreStray, m.IgnoreRevoked = true, true
+	m.Step()
+	if _, err := f.p.Step(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	c := f.p.conns[cid]
+	if c.State != StateSuspended || c.kr.Current().ID() != epoch {
+		t.Fatalf("state %s", c.State)
+	}
+}
+
+// A rekey from C carrying [A->B, B->C] is answered; the late
+// identity.rotate statements A->B, then B->C, move the stored key toward
+// its signer, so the answer stays, and its hs.fin completes the rekey.
+func TestRekeyAnswerReachedKeptAcrossRotations(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	r1 := m.RotateIdentity(40, true) // A->B
+	r2 := m.RotateIdentity(50, true) // B->C
+	m.StartRekeyWithLinks()
+	if _, err := f.p.Step(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range []*handshake.Rotation{r1, r2} {
+		m.SendRotation(r)
+		if _, err := f.p.Step(context.Background(), 0); err != nil {
+			t.Fatal(err)
+		}
+		if len(f.p.awaiting) != 1 {
+			t.Fatal("a legitimate answer was dropped")
+		}
+	}
+	f.pump()
+	c := f.p.conns[cid]
+	if c.kr.Current().ID() != m.KR.Current().ID() || !m.IK.Public().(ed25519.PublicKey).Equal(c.Peer.IK) || len(c.Chain) != 2 {
+		t.Fatalf("rekey not completed: chain %d", len(c.Chain))
+	}
+}
+
+// A rekey answer stored before signers were kept (no Follow) is dropped
+// when the service follows a rotation: its signer is unknown.
+func TestLegacyRekeyAnswerDroppedAtRotation(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	m.StartRekey()
+	if _, err := f.p.Step(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	for _, aw := range f.p.awaiting {
+		aw.Follow = nil // as stored by the previous release
+	}
+	m.SendRotation(m.RotateIdentity(40, true))
+	if _, err := f.p.Step(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.p.awaiting) != 0 || len(f.p.conns[cid].Chain) != 1 {
+		t.Fatalf("%d awaiting", len(f.p.awaiting))
+	}
+}
+
+// A member's reconnect from A without links, answered; its identity.rotate
+// A->B is then followed, and the reconnect's late hs.fin, signed with A, is
+// refused (ancestor_ik, audited once): the stored key stays B.
+func TestLateLinklessReconnectFinRefused(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	m.Reconnect() // from A, no links
+	if _, err := f.p.Step(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	m.SendRotation(m.RotateIdentity(40, true))
+	m.Rotations = nil
+	if _, err := f.p.Step(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	keyB := m.IK.Public().(ed25519.PublicKey)
+	m.IgnoreStray, m.IgnoreRevoked = true, true
+	f.pump()
+	c := f.p.conns[cid]
+	if !keyB.Equal(c.Peer.IK) || len(c.Chain) != 1 {
+		t.Fatalf("chain %d", len(c.Chain))
+	}
+	if !strings.Contains(f.logs.String(), "reason=ancestor_ik") || strings.Contains(f.logs.String(), "reason=reconnect_record_bad") {
+		t.Fatalf("audit:\n%s", f.logs.String())
+	}
+}
+
+// A reconnect answer stored by the previous build (no Signer, its links
+// as computed then) goes through the same check at its hs.fin.
+func TestLegacyReconnectRecordChecked(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	r1 := m.RotateIdentity(40, true) // A->B
+	m.Reconnect()                    // from B, carrying A->B
+	if _, err := f.p.Step(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	for _, aw := range f.p.awaiting {
+		if aw.Reconnect == nil || len(aw.Reconnect.Links) != 1 {
+			t.Fatal("no legacy links recorded")
+		}
+		aw.Reconnect.Signer = nil // as stored by the previous build
+	}
+	m.SendRotation(r1)
+	m.Rotations = nil
+	m.SendRotation(m.RotateIdentity(50, true)) // B->C
+	if _, err := f.p.Step(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	keyC := m.IK.Public().(ed25519.PublicKey)
+	m.IgnoreStray, m.IgnoreRevoked = true, true
+	f.pump()
+	c := f.p.conns[cid]
+	if !keyC.Equal(c.Peer.IK) || len(c.Chain) != 2 || !strings.Contains(f.logs.String(), "reason=ancestor_ik") {
+		t.Fatalf("legacy record rolled back: chain %d", len(c.Chain))
+	}
+}
+
+// A rekey answer dropped at a rotation takes its hs.resp with it when that
+// is not yet deposited.
+func TestDroppedAnswerTakesItsResp(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	mb := f.p.conns[cid].Peer.Relay.Mailbox
+	f.failDeposit = func(mailbox, _ string) error {
+		if mailbox == mb {
+			return errUnavailable
+		}
+		return nil
+	}
+	r1 := m.RotateIdentity(40, true) // A->B
+	m.StartRekeyWithLinks()          // from B
+	r2 := m.RotateIdentity(50, true) // B->C
+	if _, err := f.p.Step(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	var entry string
+	for _, aw := range f.p.awaiting {
+		entry = aw.RespEntry
+	}
+	held := false
+	for _, e := range f.p.outbox {
+		held = held || e.ID == entry
+	}
+	if entry == "" || !held {
+		t.Fatal("the hs.resp is not waiting in the outbox")
+	}
+	m.SendRotation(r1)
+	m.SendRotation(r2) // the stored key moves past B
+	if _, err := f.p.Step(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.p.awaiting) != 0 {
+		t.Fatal("the answer was kept")
+	}
+	for _, e := range f.p.outbox {
+		if e.ID == entry {
+			t.Fatal("the dropped answer's hs.resp is still in the outbox")
+		}
 	}
 }
