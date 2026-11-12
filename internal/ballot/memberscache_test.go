@@ -479,3 +479,118 @@ func TestMembersFreshForCloseAndPublish(t *testing.T) {
 		}
 	}
 }
+
+// An opener that joins a read in progress, after another check found
+// the chunks lost, reads again instead of taking what the read in
+// progress found (it may be from before the loss).
+func TestMembersCacheWaiterAfterLoss(t *testing.T) {
+	ctx := context.Background()
+	var c membersCache
+	now := func() time.Time { return t0 }
+	started, release := make(chan struct{}), make(chan struct{})
+	go func() {
+		_, _, _ = c.load(ctx, "k", false, now, func(context.Context) (map[string]Member, error) {
+			close(started)
+			<-release
+			return map[string]Member{"before": {}}, nil // read before the loss
+		})
+	}()
+	<-started
+	if _, _, err := c.load(ctx, "k", true, now, func(context.Context) (map[string]Member, error) {
+		return nil, ErrChunkMissing
+	}); !errors.Is(err, ErrChunkMissing) {
+		t.Fatal(err)
+	}
+	res := make(chan error)
+	go func() {
+		_, _, err := c.load(ctx, "k", false, now, func(context.Context) (map[string]Member, error) {
+			return nil, ErrChunkMissing // the chunks, read now
+		})
+		res <- err
+	}()
+	for {
+		c.mu.Lock()
+		f := c.inflight["k"]
+		c.mu.Unlock()
+		if f != nil {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond) // the waiter joins the read in progress
+	close(release)
+	if err := <-res; !errors.Is(err, ErrChunkMissing) {
+		t.Fatalf("a waiter after the loss: %v", err)
+	}
+}
+
+// A read that panics completes its flight: the openers waiting for it
+// read again, and later ones don't wait.
+func TestMembersCacheReadPanics(t *testing.T) {
+	ctx := context.Background()
+	var c membersCache
+	now := func() time.Time { return t0 }
+	started, release := make(chan struct{}), make(chan struct{})
+	panicked := make(chan any)
+	go func() {
+		defer func() { panicked <- recover() }()
+		_, _, _ = c.load(ctx, "k", false, now, func(context.Context) (map[string]Member, error) {
+			close(started)
+			<-release
+			panic("read")
+		})
+	}()
+	<-started
+	res := make(chan error)
+	go func() {
+		m, _, err := c.load(ctx, "k", false, now, func(context.Context) (map[string]Member, error) {
+			return map[string]Member{"a": {}}, nil
+		})
+		if err == nil && len(m) != 1 {
+			err = errors.New("no members")
+		}
+		res <- err
+	}()
+	time.Sleep(20 * time.Millisecond) // the waiter joins
+	close(release)
+	if r := <-panicked; r != "read" {
+		t.Fatalf("the panic: %v", r)
+	}
+	tctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	select {
+	case err := <-res:
+		if err != nil {
+			t.Fatalf("the waiter: %v", err)
+		}
+	case <-tctx.Done():
+		t.Fatal("the waiter still waits")
+	}
+	if _, ok := c.inflight["k"]; ok {
+		t.Fatal("the flight is left")
+	}
+}
+
+// A successful read after a failure clears its record; a lost chunk's
+// alarm records that are due again with nothing held are pruned.
+func TestMembersCachePrunes(t *testing.T) {
+	var c membersCache
+	ctx := context.Background()
+	now := func() time.Time { return t0 }
+	_, _, _ = c.load(ctx, "k", false, now, func(context.Context) (map[string]Member, error) { return nil, ErrChunkMissing })
+	if c.failed["k"] == 0 {
+		t.Fatal("no failure recorded")
+	}
+	cacheLoad(t, &c, "k", false, t0, map[string]Member{"a": {}})
+	if _, ok := c.failed["k"]; ok {
+		t.Fatal("the failure record kept")
+	}
+	at := t0
+	rs := &RecordStore{Now: func() time.Time { return at }}
+	rs.chunkAlarm("p1")
+	at = at.Add(chunkAlarmEvery)
+	rs.chunkAlarm("p2")
+	if _, ok := rs.lostAt["p1"]; ok || rs.lostAt["p2"] == nil {
+		t.Fatalf("pruned: %v", rs.lostAt)
+	}
+}

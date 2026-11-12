@@ -461,13 +461,21 @@ func (s *RecordStore) chunkAlarm(id string) {
 	if s.lostAt == nil {
 		s.lostAt = map[string]*heldAlarm{}
 	}
+	now := s.now()
+	for other, h := range s.lostAt {
+		// Logged with nothing held since, and due again: the same as
+		// none.
+		if h.n == 0 && now.Sub(h.at) >= chunkAlarmEvery {
+			delete(s.lostAt, other)
+		}
+	}
 	h := s.lostAt[id]
 	if h == nil {
 		h = &heldAlarm{}
 		s.lostAt[id] = h
 	}
 	h.n++
-	if now := s.now(); h.at.IsZero() || now.Sub(h.at) >= chunkAlarmEvery {
+	if h.at.IsZero() || now.Sub(h.at) >= chunkAlarmEvery {
 		if s.Log != nil {
 			s.Log.Error("a proposal's stored members are missing or changed: restore the table", "alarm", "vote_chunk_missing", "proposal_id", id, "opens", h.n)
 		}

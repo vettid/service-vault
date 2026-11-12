@@ -82,9 +82,14 @@ type membersEntry struct {
 // membersFlight is a read of a key's chunks in progress.
 type membersFlight struct {
 	done  chan struct{}
+	token uint64        // c.seq when the read began
 	entry *membersEntry // when it succeeded
 	err   error
 }
+
+// errReadPanicked completes the flight of a read that panicked: its
+// waiters read again.
+var errReadPanicked = errors.New("ballot: a members read panicked")
 
 // recordTree returns the entry's record tree, building it the first time.
 func (e *membersEntry) recordTree() *recordTree {
@@ -128,23 +133,31 @@ func (c *membersCache) load(ctx context.Context, key string, fresh bool, now fun
 					return nil, nil, ctx.Err()
 				}
 				if f.err != nil && !chunkLost(f.err) && ctx.Err() == nil {
-					continue // the reader's own failure (its context): read again
+					continue // the reader's own failure (its context, a panic): read again
 				}
 				if f.err != nil {
 					return nil, nil, f.err
 				}
+				c.mu.Lock()
+				stale := c.failed[key] > f.token
+				c.mu.Unlock()
+				if stale {
+					// A check failed while the read ran: what it read may be
+					// from before the loss, so this opener reads again.
+					continue
+				}
 				return maps.Clone(f.entry.members), f.entry, nil
 			}
 		}
+		token := c.seq
 		var f *membersFlight
 		if !fresh {
-			f = &membersFlight{done: make(chan struct{})}
+			f = &membersFlight{done: make(chan struct{}), token: token}
 			c.inflight[key] = f
 		}
-		token := c.seq
 		c.mu.Unlock()
 
-		m, err := read(ctx)
+		m, err := c.read(ctx, key, f, read)
 
 		c.mu.Lock()
 		var e *membersEntry
@@ -169,6 +182,26 @@ func (c *membersCache) load(ctx context.Context, key string, fresh bool, now fun
 	}
 }
 
+// read runs the read for flight f (nil for a fresh read). If it panics,
+// f is completed with errReadPanicked before the panic goes on, so its
+// waiters don't wait for it.
+func (c *membersCache) read(ctx context.Context, key string, f *membersFlight, read func(context.Context) (map[string]Member, error)) (map[string]Member, error) {
+	ok := false
+	defer func() {
+		if ok || f == nil {
+			return
+		}
+		c.mu.Lock()
+		f.err = errReadPanicked
+		delete(c.inflight, key)
+		close(f.done)
+		c.mu.Unlock()
+	}()
+	m, err := read(ctx)
+	ok = true
+	return m, err
+}
+
 // keep caches m, read from start, under key, unless a check that failed
 // after the read began says otherwise; it returns the entry the caller
 // uses (the one cached, or its own). c.mu is held.
@@ -184,6 +217,9 @@ func (c *membersCache) keep(key string, m map[string]Member, start time.Time, to
 		return e
 	}
 	c.drop(key)
+	// This read began after any failed check of key: the chunks are
+	// back, and the record of the failure is no longer needed.
+	delete(c.failed, key)
 	e := &membersEntry{members: maps.Clone(m), read: start}
 	c.byKey[key] = e
 	c.order = append(c.order, key)
