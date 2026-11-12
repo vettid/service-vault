@@ -61,9 +61,22 @@ npx cdk deploy \
   -c envName=prod \
   -c image=ghcr.io/vettid/service-vault@sha256:<digest> \
   -c webhookUrl=https://<application>/webhooks/service-vault \
-  -c apiClientSecurityGroupId=sg-<member API task> \
   -c alarmTopicArn=arn:aws:sns:<region>:<account>:<topic>
 ```
+
+**Who may reach the API port.** vettid.org's member service adds that
+rule itself: its stack (vettid/member-service, `ServiceVaultFromApi`)
+reads this stack's `security-group-id` parameter and adds an ingress rule
+on the API port from its task's security group. So for it, set neither
+`apiClientSecurityGroupId` nor `apiClientCidr`. Setting
+`apiClientSecurityGroupId` to the same group as well makes a second copy
+of that rule, and the deploy fails with a duplicate rule. The rule
+belongs to the member service's stack, so it is added and removed with
+that stack. If this stack's security group is ever replaced, the
+parameter changes and the member service's stack must be deployed again
+to put the rule on the new group; until then the member API cannot reach
+this service. `apiClientSecurityGroupId` is for a client whose own
+deploy doesn't add the rule.
 
 | Context | Required | Meaning |
 |---|---|---|
@@ -72,7 +85,7 @@ npx cdk deploy \
 | `envName` | no (`prod`) | Part of every name and export: stack `ServiceVault-<envName>`. |
 | `relayUrl` | no (`https://relay.vettid.org`) | The relay. |
 | `serviceName` | no (`VettID Member Service`) | The name members see. |
-| `apiClientSecurityGroupId` / `apiClientCidr` | no | Who may reach the API port. Neither: nobody until a rule is added. `apiClientCidr` is a private (RFC 1918) IPv4 range, /16 or narrower: the task has a public IP, so a public range would expose the API port. For an operator's direct access, one public address (`/32`) is allowed with `-c apiClientCidrPublic=true`, still behind the pinned TLS key and an API key. Drop it once the application is the only client. |
+| `apiClientSecurityGroupId` / `apiClientCidr` | no | Who may reach the API port, besides a rule the client's own stack adds (vettid.org's member service does: see above, and leave both unset for it). Neither, and no client rule: nobody. `apiClientCidr` is a private (RFC 1918) IPv4 range, /16 or narrower: the task has a public IP, so a public range would expose the API port. For an operator's direct access, one public address (`/32`) is allowed with `-c apiClientCidrPublic=true`, still behind the pinned TLS key and an API key. Drop it once the application is the only client. |
 | `vpcCidr` | no (`10.60.0.0/24`) | The VPC (two /26 public subnets). |
 | `adminBootstrapEmail` | no | `SV_ADMIN_BOOTSTRAP_EMAIL` (see "Admin approvals"). It is plain text in the task definition and stays in that definition's revisions after a redeploy without it: use an address you don't mind being kept there (a staging test member), or arm the bootstrap with `service-vault admin bootstrap` instead |
 | `adminThreshold` | no (1) | `SV_ADMIN_THRESHOLD` |
