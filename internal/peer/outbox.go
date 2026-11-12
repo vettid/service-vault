@@ -17,10 +17,32 @@ const (
 	codeMailboxUnknown = "mailbox_unknown"
 	codeClaimUnknown   = "claim_unknown"
 	codeQuotaExceeded  = "quota_exceeded"
+	codeReplayDetected = "replay_detected"
+	codeTimestampStale = "timestamp_stale"
 )
 
+// OneDepositAttempt wraps a relay client so that each deposit is one
+// attempt, its other calls keeping the client's retries (§8.3, a deposit
+// is one client attempt; RELEASE-29 §13).
+func OneDepositAttempt(c *relayclient.Client) Relay {
+	d := *c
+	d.MaxAttempts = 1
+	return oneDeposit{Client: c, dep: &d}
+}
+
+type oneDeposit struct {
+	*relayclient.Client
+	dep *relayclient.Client
+}
+
+func (o oneDeposit) Deposit(ctx context.Context, mailboxID, token string, payload []byte) (string, error) {
+	return o.dep.Deposit(ctx, mailboxID, token, payload)
+}
+
 // outboxMaxBackoff caps the outbox retry backoff (§8.6: 0.25 s × 2ⁿ,
-// capped at 30 s; relayclient retries within one attempt).
+// capped at 30 s). A deposit is one client attempt (OneDepositAttempt),
+// so that the tried mark covers every copy that can reach the relay
+// (§8.3; RELEASE-29 §13).
 const outboxMaxBackoff = 30 * time.Second
 
 func (p *Peer) queue(e *outboxEntry, now time.Time) {
@@ -109,6 +131,16 @@ func (p *Peer) drainOutbox(ctx context.Context) {
 			done[e] = true
 			continue
 		}
+		if e.Op == opDeposit && !now.Before(e.NotBefore) {
+			switch p.checkAtDeposit(e, now) {
+			case atDepositDrop:
+				done[e] = true
+				continue
+			case atDepositWait:
+				blocked[e.Mailbox] = true // re-sealed: deposited once written, in order
+				continue
+			}
+		}
 		if now.Before(e.NotBefore) {
 			if e.Op == opDeposit && e.AwaitToken {
 				awaiting[e.Mailbox] = true
@@ -192,7 +224,18 @@ func (p *Peer) depositOnce(ctx context.Context, e *outboxEntry, now time.Time) (
 	}
 	var re *relayclient.Error
 	if !errors.As(err, &re) {
-		return false, err // transport, after relayclient's own retries
+		e.Tried = true // no answer: it may have reached the relay
+		return false, err
+	}
+	if re.Status >= 500 || re.Code == codeReplayDetected {
+		e.Tried = true // §8.3: possibly stored
+	}
+	if re.Code == codeTimestampStale {
+		// About the attempt, not the message: retried. A third refusal
+		// is logged once, so that a stuck clock shows (§8.3 case 8).
+		if e.StaleTS++; e.StaleTS == 3 {
+			p.log().Warn("relay refuses our timestamps", "reason", "relay_clock_stale", "connection_id", e.ConnID)
+		}
 	}
 	switch re.Code {
 	case codeTokenExpired:
@@ -232,9 +275,14 @@ func (p *Peer) depositOnce(ctx context.Context, e *outboxEntry, now time.Time) (
 	case codeTokenUsed:
 		p.audit("open_token_used", e.ConnID)
 		return true, err
+	case codeTimestampStale, codeReplayDetected:
+		// About the attempt, not the message (§8.3 case 8): retried
+		// with the backoff, freshly signed, never ended.
+		return false, err
 	}
 	if re.Status < 500 && re.Status != 429 {
-		p.audit("deposit_refused", e.ConnID)
+		// §8.3 case 8: not delivered, audited.
+		p.audit("undelivered_refused", e.ConnID)
 		return true, err
 	}
 	return false, err

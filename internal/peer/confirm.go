@@ -1,0 +1,342 @@
+package peer
+
+import (
+	"bytes"
+	"encoding/hex"
+	"encoding/json"
+	"time"
+
+	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/handshake"
+	"github.com/vettid/vettid-vault/vms/suite"
+)
+
+// Release 29, the responder half (VAULT-MESSAGING 0.89.2 §6.3.1;
+// docs/RELEASE-29.md). The service activates a member's rekey or reconnect
+// at its verified hs.fin and sends hs.confirm under the new epoch. Its
+// confirmed epoch with a member is the newest, in the order epochs became
+// current, in which the member sent it anything but hs.fin, or the
+// member's first epoch; it never moves back. While it is not current it
+// keeps its rk and receive keys (up to ConfirmedKeysFor), and hs.confirm
+// goes out again for each collected batch holding a message under it, and
+// every ConfirmResend while the current epoch, one the service activated
+// as responder, is not confirmed.
+
+// ConfirmedKeysFor is how long a responder's confirmed epoch keeps its
+// keys while not current, from the activation that superseded it
+// (§6.3.1 Lifetimes).
+const ConfirmedKeysFor = 48 * 24 * time.Hour
+
+// ConfirmResend is how long after the last hs.confirm the service queues
+// one again while the current epoch it activated as responder is
+// unconfirmed (§6.3.1 "hs.confirm again"): 12 days, not scaled.
+const ConfirmResend = 12 * 24 * time.Hour
+
+// Features are the capabilities the service advertises, in every
+// message's inner features and in its profile.update (§10.8, §6.3.1
+// Capability; RELEASE-29 §6): sorted, each once.
+var Features = []string{handshake.CapConfirm, "relay_follow"}
+
+// EpochMeta records one of a connection's epochs, in the order they
+// became current (§6.3.1).
+type EpochMeta struct {
+	ID []byte `json:"id"`
+	// Mine is set for an epoch the service began (its own rekey or
+	// reconnect).
+	Mine bool `json:"mine,omitempty"`
+	// Superseded is when a later epoch became current.
+	Superseded time.Time `json:"superseded,omitzero"`
+	// Received is §6.3.1's received flag (R29-F3): a message from the
+	// member other than hs.fin opened under the epoch and was accepted.
+	Received bool `json:"received,omitempty"`
+}
+
+func (c *Connection) epochIndex(id []byte) int {
+	for i := range c.Epochs {
+		if bytes.Equal(c.Epochs[i].ID, id) {
+			return i
+		}
+	}
+	return -1
+}
+
+func (c *Connection) epochMeta(id []byte) *EpochMeta {
+	if i := c.epochIndex(id); i >= 0 {
+		return &c.Epochs[i]
+	}
+	return nil
+}
+
+// initEpochs gives a connection stored before the epoch list one: its
+// current epoch, confirmed.
+func (c *Connection) initEpochs() {
+	if c.Epochs == nil && len(c.LastEpochID) > 0 {
+		c.Epochs = []EpochMeta{{ID: bytes.Clone(c.LastEpochID)}}
+		c.Confirmed = bytes.Clone(c.LastEpochID)
+	}
+}
+
+// recordActivated records id as the connection's current epoch: the
+// previous ones are superseded now. A connection's first epoch is its
+// confirmed epoch.
+func (p *Peer) recordActivated(c *Connection, id []byte, mine bool, now time.Time) {
+	for i := range c.Epochs {
+		if e := &c.Epochs[i]; e.Superseded.IsZero() && !bytes.Equal(e.ID, id) {
+			e.Superseded = now
+		}
+	}
+	if e := c.epochMeta(id); e != nil {
+		e.Superseded = time.Time{}
+	} else {
+		c.Epochs = append(c.Epochs, EpochMeta{ID: bytes.Clone(id), Mine: mine})
+	}
+	if c.Confirmed == nil {
+		c.Confirmed = bytes.Clone(id)
+	}
+	p.pruneEpochs(c, now)
+}
+
+// setConfirmed moves the confirmed epoch to id if id became current after
+// it (it never moves back). The epoch it leaves, if not current, keeps its
+// keys 16 days from now, as any previous epoch's.
+func (p *Peer) setConfirmed(c *Connection, id []byte, now time.Time) {
+	old := c.Confirmed
+	if bytes.Equal(old, id) || c.epochIndex(id) <= c.epochIndex(old) {
+		return
+	}
+	c.Confirmed = bytes.Clone(id)
+	p.markDirty(kindConn, c.ID)
+	if old != nil && !bytes.Equal(old, c.LastEpochID) && c.kr != nil {
+		var eid [suite.EpochIDSize]byte
+		copy(eid[:], old)
+		c.kr.Release(eid, now.Add(handshake.ReceiveKeyRetention))
+	}
+}
+
+// pruneEpochs drops the records nothing needs any more: superseded more
+// than ConfirmedKeysFor plus 16 days ago, neither current nor confirmed.
+func (p *Peer) pruneEpochs(c *Connection, now time.Time) {
+	keep := c.Epochs[:0]
+	for _, e := range c.Epochs {
+		if e.Superseded.IsZero() || bytes.Equal(e.ID, c.Confirmed) || bytes.Equal(e.ID, c.LastEpochID) ||
+			now.Sub(e.Superseded) < ConfirmedKeysFor+handshake.ReceiveKeyRetention {
+			keep = append(keep, e)
+		}
+	}
+	c.Epochs = keep
+}
+
+// noteFromMember applies §6.3.1 to a message from the member, other than
+// hs.fin, that opened under ep and passed the sender and suspension
+// checks, before anything else is done with it: the received flag, the
+// confirmed epoch, and hs.confirm again for a message under a confirmed
+// epoch that is not current (queued once per batch, reconfirmAll).
+func (p *Peer) noteFromMember(c *Connection, ep *handshake.Epoch) {
+	if ep == nil {
+		return
+	}
+	now := p.now()
+	eid := ep.ID()
+	id := eid[:]
+	if e := c.epochMeta(id); e != nil && !e.Received {
+		e.Received = true
+		p.markDirty(kindConn, c.ID)
+	}
+	p.setConfirmed(c, id, now)
+	if bytes.Equal(c.Confirmed, id) && !bytes.Equal(c.Confirmed, c.LastEpochID) {
+		if p.reconfirm == nil {
+			p.reconfirm = map[string]bool{}
+		}
+		p.reconfirm[c.ID] = true
+	}
+}
+
+// reconfirmAll queues hs.confirm for each connection the batch marked.
+func (p *Peer) reconfirmAll(now time.Time) {
+	for id := range p.reconfirm {
+		if c := p.conns[id]; c != nil && !p.confirmQueued(c) {
+			p.queueConfirm(c, now)
+		}
+	}
+	p.reconfirm = nil
+}
+
+// queueConfirm queues hs.confirm (body {}, durable, never answered) to a
+// connection under its current epoch. It is exempt from MaxOutboxPerConn,
+// and waits, not queued, while a reconnect of the service's is open
+// (ConfirmAt then keeps the last one's time, so tickConfirm sends it
+// later).
+func (p *Peer) queueConfirm(c *Connection, now time.Time) bool {
+	if c.kr == nil || c.kr.Current() == nil || c.State != StateActive || c.Reconnecting {
+		return false
+	}
+	in := &envelope.Inner{ID: p.newID(now), Type: handshake.TypeConfirm, TS: now, Body: json.RawMessage(`{}`), Features: Features}
+	raw, err := c.kr.Current().Seal(in)
+	if err != nil {
+		return false
+	}
+	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: raw, Confirm: true}, now)
+	c.ConfirmAt = now
+	p.markDirty(kindConn, c.ID)
+	return true
+}
+
+// confirmQueued reports whether an hs.confirm to c is still in the outbox.
+func (p *Peer) confirmQueued(c *Connection) bool {
+	for _, e := range p.outbox {
+		if e.ConnID == c.ID && e.Confirm {
+			return true
+		}
+	}
+	return false
+}
+
+// tickConfirm (housekeeping): while c's current epoch is one the service
+// activated as responder and the confirmed epoch has not reached it,
+// hs.confirm is queued again ConfirmResend after the last one, unless one
+// is still in the outbox.
+func (p *Peer) tickConfirm(c *Connection, now time.Time) {
+	cur := c.epochMeta(c.LastEpochID)
+	if cur == nil || cur.Mine || c.epochIndex(c.Confirmed) >= c.epochIndex(c.LastEpochID) {
+		return
+	}
+	if now.Sub(c.ConfirmAt) < ConfirmResend || p.confirmQueued(c) {
+		return
+	}
+	p.queueConfirm(c, now)
+}
+
+// resealAtKeyChange is §8.3 "Re-sealed at a key change" (0.88.7;
+// RELEASE-29 §13): just before c's current epoch is replaced by next,
+// every durable entry to c still waiting in the outbox under the current
+// epoch is sealed again under next, in its place, with the same inner id
+// and a fresh ts; one that may already have reached the relay (a deposit
+// tried) keeps its ts, and is not delivered once that is past the durable
+// window. A waiting hs.confirm for the replaced epoch is dropped (the new
+// epoch gets its own); an expired entry is dropped (drop.held_expired).
+// Handshake messages, and entries sealed under another epoch, are left as
+// they are.
+func (p *Peer) resealAtKeyChange(c *Connection, next *handshake.Epoch, now time.Time) {
+	if c.kr == nil || c.kr.Current() == nil {
+		return
+	}
+	cur := c.kr.Current()
+	keep := p.outbox[:0]
+	for _, e := range p.outbox {
+		if e.ConnID != c.ID || e.Op != opDeposit || e.BestEffort || len(e.Payload) == 0 {
+			keep = append(keep, e)
+			continue
+		}
+		env, err := envelope.Parse(e.Payload)
+		if err != nil {
+			keep = append(keep, e)
+			continue
+		}
+		in, err := cur.OpenSent(env)
+		if err != nil || in.Type == handshake.TypeInit || in.Type == handshake.TypeFin {
+			keep = append(keep, e) // not ours under this epoch, or a handshake message
+			continue
+		}
+		drop := ""
+		switch {
+		case e.Confirm:
+			drop = "-" // superseded, without audit
+		case !in.Exp.IsZero() && !now.Before(in.Exp):
+			drop = "held_expired"
+		case e.Tried && now.Sub(in.TS) >= DedupeRetention:
+			drop = "undelivered_window"
+		}
+		if drop == "" {
+			if !e.Tried {
+				in.TS = now
+			}
+			in.Seq = 0
+			raw, err := next.Seal(in)
+			if err != nil {
+				drop = "undelivered_unreadable"
+			} else {
+				e.Payload = raw
+				p.markDirty(kindOutbox, e.ID)
+				keep = append(keep, e)
+				continue
+			}
+		}
+		if drop != "-" {
+			p.log().Warn("drop", "reason", drop, "connection_id", c.ID, "type", in.Type)
+		}
+		e.dropped = true
+		p.markDirty(kindOutbox, e.ID)
+	}
+	p.outbox = keep
+}
+
+// rekeyKey is the dedupe key (kindInner) of a member's rekey hs.init we
+// answered, by its th1 (R29-T3): it is answered once.
+func rekeyKey(th1 [32]byte) string { return "rekey|" + hex.EncodeToString(th1[:]) }
+
+// profileExtras are the members the service adds to its profile.update
+// after the core (§10.8): no items, and its features.
+var profileExtras = func() []byte {
+	b, _ := json.Marshal(map[string]any{"items": []any{}, "features": Features})
+	return b
+}()
+
+// RestampAfter is how old an untried waiting message may be before it is
+// sealed again with a fresh ts at deposit: §8.4's 16 days less the
+// relay's 14-day hold (§8.3 "At deposit").
+const RestampAfter = 2 * 24 * time.Hour
+
+const (
+	atDepositGo = iota
+	atDepositWait
+	atDepositDrop
+)
+
+// checkAtDeposit is §8.3 "At deposit" for a waiting durable message to a
+// connection, sealed under its current epoch (not a handshake message,
+// an hs.confirm or a best-effort notice): an untried one older than
+// RestampAfter is sealed again with a fresh ts and a new seq and waits
+// for the write, the mailbox's later deposits behind it (one that cannot
+// be sealed again goes as it is within the 16-day window, and is not
+// delivered past it, held_unsealable); a
+// tried one past the 16-day window is not delivered; a tried one older
+// than RestampAfter goes as it is, noted once (unconfirmed_late).
+func (p *Peer) checkAtDeposit(e *outboxEntry, now time.Time) int {
+	c := p.conns[e.ConnID]
+	if c == nil || e.Confirm || e.BestEffort || e.Token != "" || len(e.Payload) == 0 || c.kr == nil || c.kr.Current() == nil {
+		return atDepositGo
+	}
+	env, err := envelope.Parse(e.Payload)
+	if err != nil {
+		return atDepositGo
+	}
+	in, err := c.kr.Current().OpenSent(env)
+	if err != nil || in.Type == handshake.TypeInit || in.Type == handshake.TypeFin {
+		return atDepositGo // another epoch's, or a handshake message
+	}
+	age := now.Sub(in.TS)
+	switch {
+	case !e.Tried && age > RestampAfter:
+		in.TS, in.Seq = now, 0
+		raw, err := c.kr.Current().Seal(in)
+		if err != nil && age < DedupeRetention {
+			return atDepositGo // as it is, while within the window
+		}
+		if err != nil {
+			p.log().Warn("drop", "reason", "held_unsealable", "connection_id", c.ID, "type", in.Type)
+			return atDepositDrop
+		}
+		e.Payload = raw
+		p.markDirty(kindOutbox, e.ID)
+		p.markDirty(kindConn, c.ID) // the epoch's send count moved
+		return atDepositWait
+	case e.Tried && age >= DedupeRetention:
+		p.log().Warn("drop", "reason", "undelivered_window", "connection_id", c.ID, "type", in.Type)
+		return atDepositDrop
+	case e.Tried && age > RestampAfter && !e.Late:
+		e.Late = true
+		p.markDirty(kindOutbox, e.ID)
+		p.log().Warn("deposited late: it may not be delivered", "reason", "unconfirmed_late", "connection_id", c.ID, "type", in.Type)
+	}
+	return atDepositGo
+}

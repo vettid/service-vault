@@ -199,9 +199,9 @@ func (p *Peer) activateRequest(r *request, now time.Time) {
 	}
 	p.replaceOlderConnections(c, now)
 	p.conns[c.ID] = c
-	p.installEpoch(c, r.ep, now)
+	p.installEpoch(c, r.ep, false, now)
 	p.sendTo(c, peerwire.TypeProfileUpdate, peerwire.ProfileUpdateBody(1, p.cfg.Profile.FirstName, p.cfg.Profile.LastName,
-		p.cfg.Keys.IKPublic(), nil), now)
+		p.cfg.Keys.IKPublic(), profileExtras), now)
 	p.endInvite(r.InviteID, InviteConnected, now)
 	p.emit(&Event{Type: EventConnectionAdded, ConnectionID: c.ID, InviteID: c.InviteID, Name: c.Name(), Tag: c.Tag}, now)
 }

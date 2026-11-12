@@ -22,22 +22,27 @@ The first deployment is vettid.org's own member service
 integrates exactly as a third party would.
 
 **Release 29 (VAULT-MESSAGING §6.3.1) is not yet implemented in full.**
-Toward a release-29 member vault the service:
-- follows identity links on rekeys both ways (0.87.0 S8);
-- sends `hs.confirm` (body `{}`) under the new epoch when it activates a
-  member's rekey or reconnect at its verified `hs.fin`, which confirms
-  the epoch the member holds pending;
-- acks an incoming `hs.confirm` and ignores it (it activated at `hs.fin`
-  already and holds no pending epoch);
-- after a rekey of its own fails (its `hs.resp` aborted it, or none came
-  within 16 days), waits an hour before the next, doubling to a day,
-  instead of starting one every minute.
+[docs/RELEASE-29.md](docs/RELEASE-29.md) states how its rules read for a
+service vault, in four changes, deployed to staging together after the
+fourth. Done so far:
+- identity links on rekeys are followed both ways (0.87.0 S8);
+- **the responder** (change 1): the service activates a member's rekey
+  or reconnect at its verified `hs.fin` and sends `hs.confirm`; it keeps
+  a confirmed epoch per connection, which keeps its keys while not
+  current, and sends `hs.confirm` again for a batch holding a message
+  under it and every 12 days while the current epoch is unconfirmed; a
+  member's reconnect ends the service's open answers to that member's
+  rekeys; a rekey `hs.init` is answered once; it records the received
+  flag; it advertises `hs_confirm` and `relay_follow`; waiting messages
+  are sealed again at a key change, and checked at deposit (§8.3), each
+  deposit being one attempt;
+- after a rekey of its own fails, it waits an hour before the next,
+  doubling to a day.
 
-It does not yet hold its own rekey's epoch pending until the member
-confirms it, track a confirmed epoch, re-send `hs.confirm` (per batch or
-every 12 days), apply rule E, the crossing rule, rule J, the T1/T2 rules
-or the received flag, or advertise `hs_confirm`. That is the next piece
-of work.
+Not yet: holding its own new epochs pending until confirmed, `B`,
+crossings and rule J, reconnects outside a restore (change 2); rule E,
+fork by `ctx` and a handshake's carried tokens (change 3); the `ik`
+demotion rules and the release marker (change 4).
 
 This repository replaces
 [vettid/vettid-service-vault](https://github.com/vettid/vettid-service-vault),
