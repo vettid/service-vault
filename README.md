@@ -1387,6 +1387,7 @@ Emails are sent as given and are not printed back.
 | Document | Contents |
 |---|---|
 | [docs/SERVICE-VAULT.md](docs/SERVICE-VAULT.md) | Architecture and trust model |
+| [docs/RELEASE-29.md](docs/RELEASE-29.md) | How VAULT-MESSAGING §6.3.1 (release 29) reads for a service vault |
 | [docs/BALLOT-PROTOCOL.md](docs/BALLOT-PROTOCOL.md) | Secret-ballot protocol (to be written before ballot code) |
 | [docs/SOURCE.md](docs/SOURCE.md) | Pinned vettid-vault and vettid-relay commits |
 
