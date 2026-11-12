@@ -97,16 +97,27 @@ type Connection struct {
 
 	Keyring     handshake.KeyringState `json:"keyring"`
 	LastEpochID []byte                 `json:"last_epoch_id,omitempty"`
-	// Reconnecting is set while a reconnect we started awaits its hs.resp:
-	// the session is the restored one, which the member may no longer
-	// hold, so nothing is sent in it. ReconnectTries counts the attempts
-	// (each spends one of the member's reconnect token's 4 messages).
+	// Reconnecting is set while a reconnect we started is open, from its
+	// first hs.init until its epoch is confirmed or it ends: nothing but
+	// the handshake is sent (RELEASE-29 §3). ReconnectTries counts the
+	// tries (each spends one of the member's reconnect token's 4
+	// deposits).
 	Reconnecting   bool `json:"reconnecting,omitempty"`
 	ReconnectTries int  `json:"reconnect_tries,omitempty"`
-	// ReconnectSince is when the restore's first reconnect started;
+	// ReconnectSince is when the reconnect's first try started;
 	// ReconnectSlow is set once the reconnect_slow alarm was raised.
 	ReconnectSince time.Time `json:"reconnect_since,omitzero"`
 	ReconnectSlow  bool      `json:"reconnect_slow,omitempty"`
+	// ReconnectRestore marks a restore's reconnect: each try waits
+	// ReconnectTimeout for its hs.resp instead of HandshakeTTL
+	// (RELEASE-29 §4).
+	ReconnectRestore bool `json:"reconnect_restore,omitempty"`
+	// ReconnectRestartIK is the member's ik a restarted reconnect last
+	// spent a deposit for (§3.4.1 H5: at most once per change).
+	ReconnectRestartIK ed25519.PublicKey `json:"reconnect_restart_ik,omitempty"`
+	// Pending is the service's own rekey or reconnect epoch awaiting
+	// confirmation (§6.3.1 Initiator; initiator.go).
+	Pending *PendingEpoch `json:"pending,omitempty"`
 	// RekeyFailures counts the rekeys of ours that ended without an
 	// epoch since the last epoch installed; none starts before
 	// RekeyNotBefore (rekeyFailed).
@@ -297,6 +308,11 @@ type outgoing struct {
 	// Issued are the jtis of the tokens a reconnect's hs.init carries,
 	// revoked if it is abandoned.
 	Issued []string `json:"issued,omitempty"`
+	// Named is the epoch a reconnect's ctx names.
+	Named []byte `json:"named,omitempty"`
+	// InitEntry is the outbox entry of its hs.init, dropped unsent when
+	// the handshake is abandoned.
+	InitEntry string `json:"init_entry,omitempty"`
 
 	ini *handshake.Initiator
 }
@@ -352,8 +368,15 @@ type outboxEntry struct {
 	// its ts (unconfirmed_late), once.
 	Late bool `json:"late,omitempty"`
 	// Handshake marks a handshake message (hs.init, hs.resp, hs.fin):
-	// never sealed again, exempt from MaxOutboxPerConn.
+	// never sealed again, exempt from MaxOutboxPerConn, and sent while a
+	// reconnect is open.
 	Handshake bool `json:"handshake,omitempty"`
+	// FinEpoch marks the service's hs.fin for its pending epoch with that
+	// epoch's id: dropped unsent when the epoch is abandoned (§6.3.1).
+	FinEpoch []byte `json:"fin_epoch,omitempty"`
+	// Refresh marks our relay.token.refresh: it passes the deposits that
+	// wait for a fresh standing token (§8.4, §8.6).
+	Refresh bool `json:"refresh,omitempty"`
 	// StaleTS counts the relay's timestamp_stale refusals of it.
 	StaleTS int `json:"stale_ts,omitempty"`
 	// Vote is a deposit SendMessage queued: only these count toward
@@ -577,6 +600,13 @@ func (p *Peer) load(ctx context.Context) error {
 			}
 			c.kr = kr
 			c.initEpochs()
+			// The pending epoch's record and its keys are written together;
+			// one without the other is abandoned.
+			if c.Pending != nil && kr.Pending() == nil {
+				c.Pending = nil
+			} else if c.Pending == nil && kr.Pending() != nil {
+				kr.AbandonPending(p.now())
+			}
 			p.conns[c.ID] = c
 			return c.ID, nil
 		}},
@@ -708,8 +738,7 @@ func (p *Peer) load(ctx context.Context) error {
 // so resumeReconnects starts a fresh try at this start, under the current
 // key. Starts under that same key keep that try; the start after the keys
 // are put right drops it in turn and spends another. Each key change thus
-// costs one try (MaxReconnectTries); ReconnectTimeout still counts from
-// the reconnect's start.
+// costs one try (MaxReconnectTries).
 func (p *Peer) dropStale(stale []*outgoing) {
 	for _, og := range stale {
 		p.log().Error("a stored hs.init names another identity key than this service's: dropped; check the service's keys and secrets",

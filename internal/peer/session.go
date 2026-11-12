@@ -204,8 +204,11 @@ func (p *Peer) sendTo(c *Connection, typ string, body json.RawMessage, now time.
 	return p.sendInner(c, &envelope.Inner{ID: p.newID(now), Type: typ, TS: now, Body: body}, now)
 }
 
+// While a reconnect of the service's is open the message waits in the
+// outbox (RELEASE-29 §3), and is sealed again under the reconnect's epoch
+// at its confirmation.
 func (p *Peer) sendInner(c *Connection, in *envelope.Inner, now time.Time) string {
-	if c.kr == nil || c.kr.Current() == nil || c.State != StateActive || c.Reconnecting {
+	if c.kr == nil || c.kr.Current() == nil || c.State != StateActive {
 		return ""
 	}
 	if in.Features == nil {
@@ -473,17 +476,37 @@ func (p *Peer) housekeeping(now time.Time) {
 	p.expireRequests(now)
 	p.expireChallenges(now)
 	for id, og := range p.outgoing {
-		if now.Sub(og.Created) >= HandshakeTTL {
-			p.rekeyFailed(og, now)
-			p.dropOutgoing(id) // an hs.resp that never came (or can no longer be accepted)
+		c := p.conns[og.ConnID]
+		reconnect := og.ini != nil && og.ini.Purpose() == handshake.PurposeReconnect
+		life := HandshakeTTL
+		if reconnect && c != nil && c.ReconnectRestore {
+			life = ReconnectTimeout // a restore's try (RELEASE-29 §4)
+		}
+		if now.Sub(og.Created) < life {
+			continue
+		}
+		p.rekeyFailed(og, now)
+		p.dropOutgoing(id) // an hs.resp that never came (or can no longer be accepted)
+		if reconnect && c != nil {
+			// A failed try: the next one, or stale after the last (§3.4.1
+			// "The reconnect bound").
+			p.audit("reconnect_try_expired", c.ID)
+			p.reconnectIfIdle(c, now)
 		}
 	}
 	for _, c := range p.conns {
+		p.tickPending(c, now)
 		if c.Reconnecting {
 			p.checkReconnect(c, now)
 			continue
 		}
 		if c.State != StateActive {
+			continue
+		}
+		if !c.standingValid(now) && p.standingWaiting(c) {
+			// A waiting entry and no valid standing token: the service
+			// reconnects (RELEASE-29 §3 items 2 and 5).
+			p.beginReconnect(c, now)
 			continue
 		}
 		if c.kr != nil && c.kr.Current() != nil && c.kr.Current().NeedsRekey(now) {

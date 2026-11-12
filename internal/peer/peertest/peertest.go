@@ -321,6 +321,12 @@ type Member struct {
 	// (an hs.resp to a reconnect we replaced), as a vault does.
 	IgnoreStray bool
 
+	// NoConfirm stops the Member from sending hs.confirm when it activates
+	// the service's rekey or reconnect at its hs.fin (§6.3.1 Responder), as
+	// a release-29 vault does; Confirms counts those sent.
+	NoConfirm bool
+	Confirms  int
+
 	// IgnoreForeign drops a reconnect hs.init signed by another identity
 	// key than the service's, as a vault does.
 	IgnoreForeign bool
@@ -442,6 +448,10 @@ func (m *Member) handle(msg relayclient.Message) bool {
 			m.DepositTo(m.SvcReq, res.Fin)
 		case m.recon != nil && env.RecipientKid().Equal(m.recon.EphKid()):
 			res, err := m.recon.HandleResp(msg.Payload, sender, now)
+			if err != nil && m.IgnoreStray {
+				m.recon = nil // past its window: the reconnect ended, as a vault's does
+				return true
+			}
 			if err != nil {
 				m.t.Fatalf("Member: reconnect hs.resp: %v", err)
 			}
@@ -505,6 +515,10 @@ func (m *Member) handle(msg relayclient.Message) bool {
 					m.SvcStand, m.SvcRecon, m.pendTokens = m.pendTokens[0], m.pendTokens[1], [2]string{}
 				}
 				m.activate(fr.Epoch, now)
+				if !m.NoConfirm {
+					m.Confirms++
+					m.Send(handshake.TypeConfirm, []byte(`{}`))
+				}
 				return true
 			}
 		}
@@ -682,6 +696,9 @@ func (m *Member) answerReconnect(raw []byte, sender ed25519.PublicKey) {
 	m.t.Helper()
 	now := m.clk.Now()
 	pi, err := handshake.OpenInit(raw, m.ownKEM, now)
+	if err != nil && m.IgnoreStray {
+		return // an earlier try's hs.init, past its window: dropped, as a vault does
+	}
 	if err != nil {
 		m.t.Fatalf("Member: reconnect hs.init: %v", err)
 	}

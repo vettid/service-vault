@@ -82,6 +82,10 @@ type Peer struct {
 	// reconfirm marks the connections the current batch owes an
 	// hs.confirm (§6.3.1 Responder; noteFromMember).
 	reconfirm map[string]bool
+	// drained is the start latch for B (RELEASE-29 §2): clear at every
+	// start and at a failed collect, set once a collect with fewer than
+	// MaxBatch messages has been processed and written.
+	drained bool
 
 	cfg    Config
 	limits relayclient.Limits
@@ -188,6 +192,7 @@ func (p *Peer) Start(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.limits = reg.Limits
+	p.drained = false // B waits for this start's first short collect (RELEASE-29 §2)
 	// An earlier process, or this one before a restart, may have left
 	// messages leased.
 	p.leasedUntil(p.now())
@@ -205,6 +210,11 @@ func (p *Peer) Start(ctx context.Context) error {
 			}
 		} else {
 			p.resumeReconnects(p.now())
+		}
+	}
+	for _, c := range p.conns {
+		if c.State == StateActive && !c.standingValid(p.now()) {
+			p.beginReconnect(c, p.now()) // §7.2 "On unlock" step 3 (RELEASE-29 §3 item 2)
 		}
 	}
 	p.housekeeping(p.now())
@@ -336,6 +346,7 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 	defer p.mu.Unlock()
 	if err != nil {
 		p.leasedUntil(p.now()) // the relay may have leased a batch we never saw
+		p.drained = false      // a failed collect clears the latch (RELEASE-29 §2)
 		return 0, err
 	}
 	if len(msgs) > 0 {
@@ -352,6 +363,7 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 		if free && started.After(p.emptyAt) {
 			p.emptyAt = started
 		}
+		p.drained = true // a short collect, processed (RELEASE-29 §2)
 		if len(p.outbox) == 0 {
 			return 0, nil
 		}
@@ -394,6 +406,9 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 	p.reconfirmAll(now)
 	if err := p.flush(ctx); err != nil {
 		return len(msgs), err
+	}
+	if len(msgs) < MaxBatch {
+		p.drained = true // a short collect, processed and written (RELEASE-29 §2)
 	}
 	for _, id := range acks {
 		delete(p.unacked, id)

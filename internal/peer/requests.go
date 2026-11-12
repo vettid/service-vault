@@ -199,7 +199,7 @@ func (p *Peer) activateRequest(r *request, now time.Time) {
 	}
 	p.replaceOlderConnections(c, now)
 	p.conns[c.ID] = c
-	p.installEpoch(c, r.ep, false, now)
+	p.installEpoch(c, r.ep, now)
 	// The member's connection.approved, which activates it, opened under
 	// this epoch (§6.3.1 "The received flag").
 	if e := c.epochMeta(c.LastEpochID); e != nil {
@@ -272,9 +272,6 @@ func (p *Peer) expireRequests(now time.Time) {
 		p.endInvite(r.InviteID, InviteExpired, now)
 		p.emit(&Event{Type: EventConnectionExpired, ConnectionID: r.ID, InviteID: r.InviteID}, now)
 	}
-	for id, og := range p.outgoing {
-		if now.Sub(og.Created) > HandshakeTTL {
-			p.dropOutgoing(id)
-		}
-	}
+	// Our handshakes awaiting hs.resp expire in housekeeping, each by its
+	// own lifetime.
 }

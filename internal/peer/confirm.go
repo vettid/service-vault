@@ -35,8 +35,9 @@ const ConfirmResend = 12 * 24 * time.Hour
 
 // serviceFeatures are the capabilities the service advertises, in every
 // message's inner features and in its profile.update (§10.8, §6.3.1
-// Capability; RELEASE-29 §6): sorted, each once.
-var serviceFeatures = []string{handshake.CapConfirm, "relay_follow"}
+// Capability; RELEASE-29 §6): sorted, each once. relay_follow is not
+// advertised until the spec settles what it asks of a service vault.
+var serviceFeatures = []string{handshake.CapConfirm}
 
 // features returns a copy of serviceFeatures for one message.
 func features() []string { return slices.Clone(serviceFeatures) }
@@ -132,7 +133,8 @@ func (p *Peer) pruneEpochs(c *Connection, now time.Time) {
 
 // noteFromMember applies §6.3.1 to a message from the member, other than
 // hs.fin, that opened under ep and passed the sender and suspension
-// checks, before anything else is done with it: the received flag, the
+// checks, before anything else is done with it: the confirmation of the
+// service's pending epoch, the received flag, the
 // confirmed epoch, and hs.confirm again for a message under a confirmed
 // epoch that is not current, while the current one is a member's the
 // service activated as responder (queued once per batch, reconfirmAll).
@@ -142,6 +144,9 @@ func (p *Peer) noteFromMember(c *Connection, ep *handshake.Epoch, now time.Time)
 	}
 	eid := ep.ID()
 	id := eid[:]
+	if pe := c.Pending; pe != nil && bytes.Equal(pe.ID, id) {
+		p.confirmPending(c, now) // §6.3.1 Initiator: first, in this write
+	}
 	if e := c.epochMeta(id); e != nil && !e.Received {
 		e.Received = true
 		p.markDirty(kindConn, c.ID)
@@ -405,9 +410,9 @@ func (p *Peer) dropUndelivered(c *Connection, reason string, keep *outboxEntry) 
 
 // auditRefused audits an entry the relay refused for good (§8.3 cases 5
 // and 8): a durable message to a connection with its inner id as ref, any
-// other entry by its reason alone. TODO(change 2): an entry still sealed
-// under an older epoch gets no ref until the initiator's re-seal at
-// confirmation leaves none there.
+// other entry by its reason alone. Every waiting durable message is
+// sealed under the current epoch: the service's own new epoch is pending
+// until its confirmation, which seals them again (confirmPending).
 func (p *Peer) auditRefused(e *outboxEntry, reason string) {
 	if c := p.conns[e.ConnID]; c != nil && c.kr != nil && c.kr.Current() != nil && !e.Handshake && !e.BestEffort && !e.Confirm {
 		if env, err := envelope.Parse(e.Payload); err == nil {

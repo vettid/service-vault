@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"bytes"
 	"encoding/hex"
 	"time"
 
@@ -28,9 +29,10 @@ func reconnectKey(th1 [32]byte) string { return "reconnect|" + hex.EncodeToStrin
 // the member's reconnect token (§6.6).
 const MaxReconnectTries = 3
 
-// ReconnectTimeout ends a reconnect not completed in time (§6.6: 7 days,
-// the idle lock's): the connection becomes stale and needs a new
-// invitation.
+// ReconnectTimeout is how long each try of a restore's reconnect waits
+// for its hs.resp (§6.3.1 Lifetimes, §6.6 "After a restore": 7 days, per
+// try, RELEASE-29 §4); another reconnect's try waits HandshakeTTL. Once
+// its hs.fin is sent, B governs (initiator.go).
 const ReconnectTimeout = 7 * 24 * time.Hour
 
 // ReconnectSlowAfter is when an unanswered reconnect raises
@@ -46,7 +48,8 @@ func (p *Peer) reconnectAll(now time.Time) int {
 	for _, c := range p.conns {
 		// Per restore: counters that came back with the backup (taken
 		// while an earlier reconnect was open) start again.
-		c.Reconnecting, c.ReconnectTries, c.ReconnectSlow, c.ReconnectSince = false, 0, false, time.Time{}
+		c.clearReconnect()
+		c.ReconnectRestore = true
 		if p.startReconnect(c, now) {
 			n++
 		} else if c.State == StateActive || c.State == StateStale {
@@ -56,11 +59,6 @@ func (p *Peer) reconnectAll(now time.Time) int {
 	}
 	return n
 }
-
-// YieldWait is how long a reconnect that yielded to a member's waits for
-// that one's hs.fin, which the member sends at once on our hs.resp; then
-// a new try starts (chosen; not in the spec).
-const YieldWait = time.Hour
 
 // resumeReconnects runs at a start without a restore (§6.6, 0.72.1): a
 // reconnect still open keeps its stored initiator, and an hs.init whose
@@ -90,7 +88,7 @@ func (p *Peer) reconnectOpen(c *Connection) bool {
 			return true
 		}
 	}
-	return false
+	return c.pendingReconnect()
 }
 
 // reconnectIfIdle starts a new try of an open reconnect when nothing of
@@ -110,18 +108,17 @@ func (p *Peer) retryReconnect(c *Connection, now time.Time) {
 	}
 }
 
-// checkReconnect raises reconnect_slow after a day and ends the reconnect
-// after ReconnectTimeout (housekeeping).
+// checkReconnect (housekeeping) raises reconnect_slow after a day, and
+// starts the next try of an open reconnect of which nothing is open any
+// more. Each try ends at its own expiry (housekeeping), a pending one at
+// B (tickPending).
 func (p *Peer) checkReconnect(c *Connection, now time.Time) {
-	switch age := now.Sub(c.ReconnectSince); {
-	case age >= ReconnectTimeout:
-		p.dropConnOutgoing(c)
-		p.reconnectFailed(c)
-	case age >= ReconnectSlowAfter && !c.ReconnectSlow:
+	if now.Sub(c.ReconnectSince) >= ReconnectSlowAfter && !c.ReconnectSlow {
 		c.ReconnectSlow = true
 		p.markDirty(kindConn, c.ID)
 		p.log().Error("reconnect unanswered for a day: the member's vault may be locked", "alarm", "reconnect_slow", "connection_id", c.ID)
 	}
+	p.reconnectIfIdle(c, now)
 }
 
 // reconnectFailed ends a reconnect that cannot complete: the connection
@@ -131,7 +128,7 @@ func (p *Peer) reconnectFailed(c *Connection) {
 	if !c.Reconnecting {
 		return
 	}
-	c.Reconnecting, c.ReconnectTries, c.ReconnectSlow, c.ReconnectSince = false, 0, false, time.Time{}
+	c.clearReconnect()
 	if c.State == StateSuspended {
 		// Ended by the suspension, not failed: no reconnect_failed.
 		p.markDirty(kindConn, c.ID)
@@ -161,14 +158,16 @@ func (p *Peer) startReconnect(c *Connection, now time.Time) bool {
 	if err != nil {
 		return false
 	}
-	c.Reconnecting = false // a reconnect replaced is not a failure
+	c.Reconnecting = false // a try replaced is not a failure
+	// A reconnect names the current epoch, never a pending one (§6.6): a
+	// pending epoch is abandoned, and so are our rekeys in flight.
+	p.abandonPending(c, "reconnect", false, now)
 	p.dropConnOutgoing(c)
-	// What waits in the outbox is not sent: an earlier hs.init is replaced
-	// (§6.6), and the rest is sealed in a session the member may no
-	// longer hold (deposits on the standing token, and the hs.resp of a
-	// member's reconnect, on its own, stay).
+	// An earlier try's hs.init is replaced (§6.6). What else waits stays:
+	// nothing in the session goes while the reconnect is open, and it is
+	// sealed again under the reconnect's epoch at its confirmation (§8.3).
 	p.dropOutbox(func(e *outboxEntry) bool {
-		return e.ConnID == c.ID && e.Op == opDeposit && (e.Token == "" || e.Token == c.Reconnect.Token)
+		return e.ConnID == c.ID && e.Op == opDeposit && e.Token != "" && e.Token == c.Reconnect.Token
 	})
 	st, rt, jtis, err := p.mintReconnectPair(c.ID, &c.Peer, now)
 	if err != nil {
@@ -198,7 +197,9 @@ func (p *Peer) startReconnect(c *Connection, now time.Time) bool {
 	}
 	id := p.newID(now)
 	kid, th1 := ini.EphKid(), ini.Th1()
-	p.outgoing[id] = &outgoing{ID: id, ConnID: c.ID, EphKid: kid[:], Th1: th1[:], Init: s, Created: now, Issued: jtis, ini: ini}
+	og := &outgoing{ID: id, ConnID: c.ID, EphKid: kid[:], Th1: th1[:], Init: s, Created: now, Issued: jtis,
+		Named: bytes.Clone(c.LastEpochID), ini: ini}
+	p.outgoing[id] = og
 	p.markDirty(kindOutgoing, id)
 	if c.ReconnectTries == 0 {
 		c.ReconnectSince = now
@@ -206,15 +207,19 @@ func (p *Peer) startReconnect(c *Connection, now time.Time) bool {
 	c.Reconnecting = true
 	c.ReconnectTries++
 	p.markDirty(kindConn, c.ID)
-	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Token: c.Reconnect.Token, Payload: ini.Envelope(), Handshake: true}, now)
+	e := &outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Token: c.Reconnect.Token, Payload: ini.Envelope(), Handshake: true}
+	p.queueDeposit(e, now)
+	og.InitEntry = e.ID
 	p.log().Info("reconnect started", "connection_id", c.ID)
 	return true
 }
 
-// finishReconnect completes a reconnect the service started, once its
+// finishReconnect processes a reconnect the service started, once its
 // hs.resp verified: the member's tokens replace the held ones, its
 // identity follows the rotation links it sent that we had not followed
-// (made while our state was older), and hs.fin goes out in the new epoch.
+// (made while our state was older), and hs.fin goes out in the new
+// epoch, which is pending until the member confirms it (§6.3.1
+// Initiator). The reconnect stays open until then.
 func (p *Peer) finishReconnect(c *Connection, og *outgoing, res *handshake.Result, now time.Time) disposition {
 	st, err1 := p.heldToken(res.Resp.Token, &c.Peer)
 	rt, err2 := p.heldToken(res.Resp.ReconnectToken, &c.Peer)
@@ -237,27 +242,39 @@ func (p *Peer) finishReconnect(c *Connection, og *outgoing, res *handshake.Resul
 		p.reconnectFailed(c)
 		return ackAfterFlush
 	}
-	// The reconnect is settled before the links are followed: an answer
-	// following them drops (dropStaleAnswers) must not start another try.
-	c.Reconnecting, c.ReconnectTries, c.ReconnectSlow, c.ReconnectSince = false, 0, false, time.Time{}
+	// §6.3.1 "I's rekeys end at its reconnect's hs.resp" (R29-T2): before
+	// the reconnect's epoch becomes pending, our open rekeys are
+	// abandoned (an hs.init not yet deposited is not sent).
+	for id, o := range p.outgoing {
+		if o.ConnID == c.ID && o.ini != nil && o.ini.Purpose() == handshake.PurposeRekey {
+			p.audit("rekey_ended_by_reconnect", c.ID)
+			p.dropOutgoing(id)
+		}
+	}
+	// Not open while the links are followed: an answer following them
+	// drops (dropStaleAnswers) must not start another try, nor H5 restart
+	// this one, whose message makes the change.
+	c.Reconnecting = false
 	if len(fresh) > 0 {
 		p.followRotation(c, res.ResponderIK, res.ResponderKEM, fresh)
 	}
 	if c.State == StateSuspended {
 		// Following judged an answer's links: a fork. The suspension
 		// stands: no hs.fin, no epoch, our tokens revoked.
+		c.clearReconnect()
 		res.Epoch.Destroy()
 		for _, j := range og.Issued {
 			p.denyJTI(j, now)
 		}
+		p.markDirty(kindConn, c.ID)
 		return ackAfterFlush
 	}
+	c.Reconnecting = true
 	c.Standing, c.Reconnect = st, rt
 	c.State = StateActive
 	p.markDirty(kindConn, c.ID)
-	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: res.Fin, Handshake: true}, now)
-	p.installEpoch(c, res.Epoch, true, now) // and retries the connection's outbox
-	p.log().Info("reconnected", "connection_id", c.ID)
+	p.makePending(c, og, res, now)
+	p.log().Info("reconnected: epoch pending", "connection_id", c.ID)
 	return ackAfterFlush
 }
 

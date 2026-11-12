@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
@@ -113,9 +114,25 @@ func (p *Peer) followRotation(c *Connection, ik ed25519.PublicKey, kem *suite.Pu
 		// still in use; the chain a peer may send is at most this long.
 		c.Chain = c.Chain[len(c.Chain)-handshake.MaxRotations:]
 	}
+	// §3.4.1 H5: the service's open handshakes pinned to the member's
+	// previous ik are abandoned: its rekeys and reconnect awaiting hs.resp,
+	// and its pending epoch ("Pending epochs at a link", R29-K2). Its open
+	// reconnect starts again under the new ik, spending a deposit but not a
+	// try, at most once per change (RELEASE-29 §3 item 8); its rekeys
+	// start again when the epoch next needs one. Then its answers whose
+	// signer the links no longer reach are dropped.
+	now := p.now()
+	// Only a try of ours is restarted; a member's reconnect we yielded to
+	// is not ours to start again.
+	ownTry := c.Reconnecting && (p.outgoingReconnect(c) || c.pendingReconnect())
 	p.dropConnOutgoing(c)
-	p.dropStaleAnswers(c)
+	p.abandonPending(c, "link", false, now)
 	p.markDirty(kindConn, c.ID)
+	if ownTry && c.State != StateSuspended && !suite.EqualPublic(c.ReconnectRestartIK, ik) {
+		c.ReconnectRestartIK = bytes.Clone(ik)
+		p.restartReconnect(c, now)
+	}
+	p.dropStaleAnswers(c)
 	p.log().Info("member identity rotated", "connection_id", c.ID)
 }
 
@@ -283,6 +300,8 @@ func (p *Peer) suspend(c *Connection, now time.Time) {
 	c.State = StateSuspended
 	p.dropUndelivered(c, "undelivered_suspended", nil)
 	p.dropConnOutgoing(c)
+	p.abandonPending(c, "suspended", false, now)
+	p.reconnectFailed(c) // ended by the suspension: no reconnect_failed
 	for id, aw := range p.awaiting {
 		if aw.ConnID == c.ID {
 			p.dropAwaiting(id, now) // and revokes a pending reconnect's tokens
@@ -379,7 +398,11 @@ func (p *Peer) relayAddressUpdate(c *Connection, sender ed25519.PublicKey, body 
 	p.log().Info("member relay address updated", "connection_id", c.ID)
 	// Tokens we issued for the old key stop at the relay's grace; issue
 	// fresh ones for the new key, which also acknowledges the update.
+	rc := p.outgoingReconnect(c)
 	p.dropConnOutgoing(c)
+	if rc {
+		p.restartReconnect(c, now) // its hs.init went to the old mailbox; not a failed try
+	}
 	p.issueTo(c, tokStanding, now)
 	p.issueTo(c, tokReconnect, now)
 	p.retryConn(c.ID)

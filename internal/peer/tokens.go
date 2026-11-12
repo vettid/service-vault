@@ -174,7 +174,7 @@ const refreshWait = time.Hour
 // we hold has less than 3 days left (§7.2), or at once (force) after
 // token_expired.
 func (p *Peer) refreshHeld(c *Connection, now time.Time, force bool) {
-	if c.State != StateActive || c.Standing.Token == "" || now.Before(c.RefreshAfter) {
+	if c.State != StateActive || c.Reconnecting || c.Standing.Token == "" || now.Before(c.RefreshAfter) {
 		return
 	}
 	if !force && c.Standing.Exp.Sub(now) >= peerwire.HolderRefreshBelow {
@@ -183,9 +183,17 @@ func (p *Peer) refreshHeld(c *Connection, now time.Time, force bool) {
 	if c.RefreshID != "" {
 		return
 	}
+	for _, e := range p.outbox {
+		if e.ConnID == c.ID && e.Refresh {
+			return // not while one is still queued (§8.6)
+		}
+	}
 	if id := p.sendTo(c, peerwire.TypeTokenRefresh, peerwire.TokenRefreshBody(), now); id != "" {
 		c.RefreshID, c.RefreshAfter = id, now.Add(refreshWait)
 		p.markDirty(kindConn, c.ID)
+		if e := p.outbox[len(p.outbox)-1]; e.ConnID == c.ID {
+			e.Refresh = true // sendTo queued it last
+		}
 	}
 }
 
