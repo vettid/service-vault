@@ -1001,8 +1001,13 @@ func TestLegacyLinklessReconnectDroppedAtRotation(t *testing.T) {
 	if _, err := f.p.Step(context.Background(), 0); err != nil {
 		t.Fatal(err)
 	}
+	var issued []string
 	for _, aw := range f.p.awaiting {
 		aw.Reconnect.Signer = nil // as stored by the previous build
+		issued = aw.Reconnect.Issued
+	}
+	if len(issued) == 0 {
+		t.Fatal("no tokens minted for the answer")
 	}
 	m.SendRotation(m.RotateIdentity(40, true))
 	m.Rotations = nil
@@ -1011,6 +1016,11 @@ func TestLegacyLinklessReconnectDroppedAtRotation(t *testing.T) {
 	}
 	if len(f.p.awaiting) != 0 || !strings.Contains(f.logs.String(), "reason=reconnect_answer_dropped") {
 		t.Fatalf("%d awaiting", len(f.p.awaiting))
+	}
+	for _, j := range issued {
+		if tk := f.p.issued[j]; tk == nil || !tk.Denied {
+			t.Fatalf("token %s of the dropped answer not revoked", j)
+		}
 	}
 	m.IgnoreStray, m.IgnoreRevoked = true, true
 	f.pump()
@@ -1065,6 +1075,12 @@ func TestForkJudgedAtOurReconnectRespStaysSuspended(t *testing.T) {
 		if tk := f.p.issued[j]; tk == nil || !tk.Denied {
 			t.Fatalf("token %s of our reconnect not revoked", j)
 		}
+	}
+	if strings.Contains(f.logs.String(), "alarm=reconnect_failed") {
+		t.Fatal("reconnect_failed on a suspended connection")
+	}
+	if n := strings.Count(f.logs.String(), `msg="reconnect started"`); n != 1 {
+		t.Fatalf("%d reconnects started", n)
 	}
 }
 
@@ -1246,5 +1262,35 @@ func TestLateLinklessRekeyFinAfterRotation(t *testing.T) {
 	f.pump()
 	if c := f.p.conns[cid]; c.kr.Current().ID() != epoch || len(c.Chain) != 1 {
 		t.Fatalf("the late hs.fin installed: chain %d", len(c.Chain))
+	}
+}
+
+// A cycle back past the stored key's predecessor (A->B, B->C followed,
+// then C->A) is refused as well: the check covers the whole chain.
+func TestRotationCycleTwoBack(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	orig := m.IK
+	m.SendRotation(m.RotateIdentity(40, true)) // A->B
+	m.SendRotation(m.RotateIdentity(50, true)) // B->C
+	m.Rotations = nil
+	f.pump()
+	if len(f.p.conns[cid].Chain) != 2 {
+		t.Fatalf("chain %d", len(f.p.conns[cid].Chain))
+	}
+	akem, err := suite.NewPrivateKey(bytes.Repeat([]byte{11}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := handshake.NewRotation(m.IK, orig, akem.Public()) // C->A
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.SendRotation(back)
+	f.pump()
+	c := f.p.conns[cid]
+	if !m.IK.Public().(ed25519.PublicKey).Equal(c.Peer.IK) || len(c.Chain) != 2 || !strings.Contains(f.logs.String(), "reason=bad_rotation") {
+		t.Fatalf("a cycle was followed: chain %d", len(c.Chain))
 	}
 }

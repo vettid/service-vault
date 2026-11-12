@@ -28,7 +28,26 @@ func (p *Peer) dispatch(ctx context.Context, c *Connection, in *envelope.Inner, 
 		p.audit("connection_suspended", c.ID) // §3.4: nothing is accepted
 		return ackAfterFlush, nil
 	}
+	if in.Type == handshake.TypeFin {
+		// An hs.fin whose answer is gone (a duplicate, or one for an
+		// answer dropped or expired) opening under an epoch we hold: acked
+		// and ignored. It moves no confirmed epoch and sets no flag
+		// (R29-T3; RELEASE-29 §5).
+		return ackAfterFlush, nil
+	}
+	// §6.3.1 before anything else is done with the message (the rate
+	// limit, the ts window, dedupe, its handler): the received flag and
+	// the confirmed epoch (RELEASE-29 §13, change 1).
+	p.noteFromMember(c, ep, now)
 	if in.Type == handshake.TypeInit {
+		_, seen, err := p.cfg.Store.Get(ctx, kindInner, rekeyKey(handshake.Th1(raw)))
+		if err != nil {
+			return 0, err
+		}
+		if seen {
+			p.audit("rekey_init_replayed", c.ID) // answered once (R29-T3, §6.5)
+			return ackAfterFlush, nil
+		}
 		return p.handleRekeyInit(c, in, ep, raw, sender, now), nil
 	}
 	if err := in.CheckTime(now, true); err != nil {
@@ -94,9 +113,9 @@ func (p *Peer) dispatch(ctx context.Context, c *Connection, in *envelope.Inner, 
 		p.audit("challenge_unsupported", c.ID)
 	case handshake.TypeConfirm:
 		// A member's vault confirms an epoch it activated as responder
-		// (§6.3.1, R29-R1). This service activates at hs.fin already and
-		// holds no pending epoch, so it confirms nothing here: acked and
-		// ignored, without audit; it is not a request, so never answered.
+		// (§6.3.1, R29-R1): noteFromMember has moved the confirmed epoch
+		// already. The service holds no pending epoch of its own yet, so
+		// nothing more: acked, without audit, never answered.
 	default:
 		if isVoteType(in.Type) && p.cfg.Votes != nil {
 			if err := p.vote(ctx, c, in, ikey, msgID, now); errors.Is(err, ErrNoAnswer) {
@@ -189,6 +208,9 @@ func (p *Peer) sendInner(c *Connection, in *envelope.Inner, now time.Time) strin
 	if c.kr == nil || c.kr.Current() == nil || c.State != StateActive || c.Reconnecting {
 		return ""
 	}
+	if in.Features == nil {
+		in.Features = features() // §10.8, §6.3.1 Capability
+	}
 	if p.outboxFor(c.ID) >= MaxOutboxPerConn {
 		// The member's mailbox has not taken our deposits for a while: what
 		// would pile up is dropped, not kept without bound.
@@ -212,7 +234,7 @@ const MaxOutboxPerConn = 256
 func (p *Peer) outboxFor(connID string) int {
 	n := 0
 	for _, e := range p.outbox {
-		if e.ConnID == connID && e.Op == opDeposit {
+		if e.ConnID == connID && e.Op == opDeposit && !e.Confirm && !e.Handshake { // exempt (RELEASE-29 §5)
 			n++
 		}
 	}
@@ -292,13 +314,14 @@ func (p *Peer) handleResponse(c *Connection, in *envelope.Inner, now time.Time) 
 // session keys and outbox entries are deleted.
 func (p *Peer) removeConnection(c *Connection, dir string, now time.Time) {
 	if dir == "out" && c.kr != nil && c.kr.Current() != nil && c.Standing.Token != "" && c.State == StateActive && !c.Reconnecting {
-		in := &envelope.Inner{ID: p.newID(now), Type: peerwire.TypeConnectionRemoved, TS: now, Body: peerwire.ConnectionRemovedBody()}
+		in := &envelope.Inner{ID: p.newID(now), Type: peerwire.TypeConnectionRemoved, TS: now, Body: peerwire.ConnectionRemovedBody(),
+			Features: features()}
 		if raw, err := c.kr.Current().Seal(in); err == nil {
-			p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == c.ID })
+			p.dropUndelivered(c, "undelivered_removed", nil)
 			p.queueDeposit(&outboxEntry{Mailbox: c.Peer.Relay.Mailbox, Token: c.Standing.Token, Payload: raw, BestEffort: true}, now)
 		}
 	} else {
-		p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == c.ID })
+		p.dropUndelivered(c, "undelivered_removed", nil)
 	}
 	p.denyConnTokens(c.ID, now)
 	c.Reconnecting = false // ended, not failed
@@ -466,6 +489,7 @@ func (p *Peer) housekeeping(now time.Time) {
 		if c.kr != nil && c.kr.Current() != nil && c.kr.Current().NeedsRekey(now) {
 			p.startRekey(c, now)
 		}
+		p.tickConfirm(c, now)
 		if c.RefreshID != "" && !now.Before(c.RefreshAfter) {
 			c.RefreshID = "" // unanswered: ask again
 			p.markDirty(kindConn, c.ID)

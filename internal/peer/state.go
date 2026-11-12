@@ -112,6 +112,12 @@ type Connection struct {
 	// RekeyNotBefore (rekeyFailed).
 	RekeyFailures  int       `json:"rekey_failures,omitempty"`
 	RekeyNotBefore time.Time `json:"rekey_not_before,omitzero"`
+	// Epochs are the connection's epochs in the order they became
+	// current, pruned; Confirmed is the confirmed epoch, and ConfirmAt
+	// when the last hs.confirm was queued (§6.3.1 Responder; confirm.go).
+	Epochs    []EpochMeta `json:"epochs,omitempty"`
+	Confirmed []byte      `json:"confirmed,omitempty"`
+	ConfirmAt time.Time   `json:"confirm_at,omitzero"`
 
 	Created   time.Time `json:"created"`
 	Activated time.Time `json:"activated"`
@@ -336,6 +342,20 @@ type outboxEntry struct {
 	Attempts   int       `json:"attempts,omitempty"`
 	AwaitToken bool      `json:"await_token,omitempty"`
 	BestEffort bool      `json:"best_effort,omitempty"`
+	// Confirm marks an hs.confirm (§6.3.1): at most one waits per
+	// connection, exempt from MaxOutboxPerConn.
+	Confirm bool `json:"confirm,omitempty"`
+	// Tried: an attempt to deposit it may have reached the relay (§8.3;
+	// RELEASE-29 §13). Every waiting deposit is marked at load.
+	Tried bool `json:"tried,omitempty"`
+	// Late: the entry was noted as deposited more than RestampAfter after
+	// its ts (unconfirmed_late), once.
+	Late bool `json:"late,omitempty"`
+	// Handshake marks a handshake message (hs.init, hs.resp, hs.fin):
+	// never sealed again, exempt from MaxOutboxPerConn.
+	Handshake bool `json:"handshake,omitempty"`
+	// StaleTS counts the relay's timestamp_stale refusals of it.
+	StaleTS int `json:"stale_ts,omitempty"`
 	// Vote is a deposit SendMessage queued: only these count toward
 	// MaxSendOutbox and MaxSendOutboxBytes.
 	Vote bool `json:"vote,omitempty"`
@@ -556,6 +576,7 @@ func (p *Peer) load(ctx context.Context) error {
 				return "", err
 			}
 			c.kr = kr
+			c.initEpochs()
 			p.conns[c.ID] = c
 			return c.ID, nil
 		}},
@@ -660,6 +681,13 @@ func (p *Peer) load(ctx context.Context) error {
 		}
 	}
 	sort.Slice(p.outbox, func(i, j int) bool { return p.outbox[i].Seq < p.outbox[j].Seq })
+	for _, e := range p.outbox {
+		// A service has no clean end (§8.3 "A clean end"): a write that
+		// would have stored the mark after an accepted deposit may be lost.
+		if e.Op == opDeposit {
+			e.Tried = true
+		}
+	}
 	sort.Slice(p.events, func(i, j int) bool { return p.events[i].Seq < p.events[j].Seq })
 	for _, e := range p.outbox {
 		p.seq = max(p.seq, e.Seq)

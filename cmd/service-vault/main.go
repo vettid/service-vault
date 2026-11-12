@@ -457,7 +457,7 @@ func serve(args []string) error {
 		return fmt.Errorf("approvals: %w", err)
 	}
 	svc.Approvals = approvals
-	pc := peer.Config{Keys: keys, Relay: rc, RelayURL: cfg.RelayURL, Profile: cfg.Profile, Store: records,
+	pc := peer.Config{Keys: keys, Relay: peer.OneDepositAttempt(rc), RelayURL: cfg.RelayURL, Profile: cfg.Profile, Store: records,
 		Events: svc, Log: log}
 	var ballots *ballot.RecordStore
 	signIK := func(label string, msg []byte) ([]byte, error) { return suite.Sign(keys.IK, label, msg) }

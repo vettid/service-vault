@@ -132,6 +132,11 @@ func (p *Peer) reconnectFailed(c *Connection) {
 		return
 	}
 	c.Reconnecting, c.ReconnectTries, c.ReconnectSlow, c.ReconnectSince = false, 0, false, time.Time{}
+	if c.State == StateSuspended {
+		// Ended by the suspension, not failed: no reconnect_failed.
+		p.markDirty(kindConn, c.ID)
+		return
+	}
 	p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == c.ID && e.Token != "" && e.Token == c.Reconnect.Token })
 	if c.State == StateActive {
 		c.State = StateStale
@@ -177,7 +182,7 @@ func (p *Peer) startReconnect(c *Connection, now time.Time) bool {
 		Identity: p.cfg.Keys.IK, StaticKEM: p.cfg.Keys.KEM.Public(), Relay: p.ownAddr(),
 		Token: st, ReconnectToken: rt,
 		ResponderIK: c.Peer.IK, KnownResponderChain: chainOf(c), ResponderEK: kem, ResponderRelayKey: c.Peer.Relay.PK,
-		PinnedSuite: c.Suite, Policy: handshake.PolicyVaultToVault, Now: now,
+		PinnedSuite: c.Suite, Policy: handshake.PolicyVaultToVault, Features: features(), Now: now,
 	})
 	var s handshake.InitiatorState
 	if err == nil {
@@ -201,7 +206,7 @@ func (p *Peer) startReconnect(c *Connection, now time.Time) bool {
 	c.Reconnecting = true
 	c.ReconnectTries++
 	p.markDirty(kindConn, c.ID)
-	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Token: c.Reconnect.Token, Payload: ini.Envelope()}, now)
+	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Token: c.Reconnect.Token, Payload: ini.Envelope(), Handshake: true}, now)
 	p.log().Info("reconnect started", "connection_id", c.ID)
 	return true
 }
@@ -232,6 +237,9 @@ func (p *Peer) finishReconnect(c *Connection, og *outgoing, res *handshake.Resul
 		p.reconnectFailed(c)
 		return ackAfterFlush
 	}
+	// The reconnect is settled before the links are followed: an answer
+	// following them drops (dropStaleAnswers) must not start another try.
+	c.Reconnecting, c.ReconnectTries, c.ReconnectSlow, c.ReconnectSince = false, 0, false, time.Time{}
 	if len(fresh) > 0 {
 		p.followRotation(c, res.ResponderIK, res.ResponderKEM, fresh)
 	}
@@ -246,10 +254,9 @@ func (p *Peer) finishReconnect(c *Connection, og *outgoing, res *handshake.Resul
 	}
 	c.Standing, c.Reconnect = st, rt
 	c.State = StateActive
-	c.Reconnecting, c.ReconnectTries, c.ReconnectSlow, c.ReconnectSince = false, 0, false, time.Time{}
 	p.markDirty(kindConn, c.ID)
-	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: res.Fin}, now)
-	p.installEpoch(c, res.Epoch, now) // and retries the connection's outbox
+	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: res.Fin, Handshake: true}, now)
+	p.installEpoch(c, res.Epoch, true, now) // and retries the connection's outbox
 	p.log().Info("reconnected", "connection_id", c.ID)
 	return ackAfterFlush
 }

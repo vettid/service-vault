@@ -281,7 +281,7 @@ func (p *Peer) suspend(c *Connection, now time.Time) {
 		return
 	}
 	c.State = StateSuspended
-	p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == c.ID })
+	p.dropUndelivered(c, "undelivered_suspended", nil)
 	p.dropConnOutgoing(c)
 	for id, aw := range p.awaiting {
 		if aw.ConnID == c.ID {

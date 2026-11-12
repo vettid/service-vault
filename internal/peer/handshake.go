@@ -173,7 +173,7 @@ func (p *Peer) respondFirst(pi *handshake.PendingInit, inv *InviteRecord, sender
 		return
 	}
 	resp, env, err := pi.Respond(handshake.ResponderConfig{Identity: p.cfg.Keys.IK, Token: tok,
-		Policy: handshake.PolicyVaultToVault, CollectSender: sender, Now: now})
+		Policy: handshake.PolicyVaultToVault, CollectSender: sender, Features: features(), Now: now})
 	if err != nil {
 		p.audit("respond_failed", "")
 		p.denyConnTokens(id, now)
@@ -183,7 +183,7 @@ func (p *Peer) respondFirst(pi *handshake.PendingInit, inv *InviteRecord, sender
 		Created: now, Expires: now.Add(ConnectionPending), r: resp}
 	p.awaiting[id] = aw
 	p.markDirty(kindAwait, id)
-	p.queueDeposit(&outboxEntry{ConnID: id, Mailbox: np.Relay.Mailbox, Token: body.Token, Payload: env}, now)
+	p.queueDeposit(&outboxEntry{ConnID: id, Mailbox: np.Relay.Mailbox, Token: body.Token, Payload: env, Handshake: true}, now)
 	p.log().Info("hs.resp", "connection_id", id, "invite_id", inv.ID)
 }
 
@@ -241,7 +241,7 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 	cfg := handshake.ResponderConfig{
 		Identity: p.cfg.Keys.IK, Policy: handshake.PolicyVaultToVault, PinnedSuite: c.Suite,
 		CollectSender: sender, RecordRelayKey: c.Peer.Relay.PK, KnownInitiatorIK: start,
-		ExpectedCtx: handshake.EpochCtx(eid), Now: now,
+		ExpectedCtx: handshake.EpochCtx(eid), Features: features(), Now: now,
 	}
 	st, err1 := p.heldToken(body.Token, &c.Peer)
 	rt, err2 := p.heldToken(body.ReconnectToken, &c.Peer)
@@ -304,7 +304,7 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 		Expires: exp, Reconnect: pend, r: resp}
 	p.markDirty(kindAwait, id)
 	// On the standing token the hs.init brought: ours may have expired.
-	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Token: st.Token, Payload: env}, now)
+	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Token: st.Token, Payload: env, Handshake: true}, now)
 }
 
 // applyReconnect applies a member's reconnect once its hs.fin verified.
@@ -431,7 +431,7 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 	resp, env, err := pi.Respond(handshake.ResponderConfig{
 		Identity: p.cfg.Keys.IK, Policy: handshake.PolicyVaultToVault, PinnedSuite: c.Suite,
 		CollectSender: sender, RecordRelayKey: c.Peer.Relay.PK, KnownInitiatorIK: c.Peer.IK,
-		KnownInitiatorChain: known, Now: now,
+		KnownInitiatorChain: known, Features: features(), Now: now,
 	})
 	if err != nil {
 		p.audit("rekey_refused", c.ID)
@@ -439,13 +439,16 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 	}
 	id := p.newID(now)
 	th1 := pi.Th1()
+	// Answered once (R29-T3): a copy delivered again later is not
+	// (dispatch, rekey_init_replayed).
+	p.mark(kindInner, rekeyKey(th1), []byte{1}, now.Add(DedupeRetention+envelope.MaxClockSkewFuture))
 	aw := &awaiting{ID: id, ConnID: c.ID, Purpose: handshake.PurposeRekey, Th1: th1[:], Created: now,
 		Expires: now.Add(HandshakeTTL), r: resp}
 	aw.Follow = newPendingFollow(body)
 	p.awaiting[id] = aw
 	p.markDirty(kindAwait, id)
 	p.markDirty(kindConn, c.ID) // the epoch's receive count moved
-	e := &outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: env}
+	e := &outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: env, Handshake: true}
 	p.queueDeposit(e, now)
 	aw.RespEntry = e.ID
 	p.log().Info("rekey answered", "connection_id", c.ID)
@@ -526,29 +529,63 @@ func (p *Peer) handleFin(id string, raw []byte, sender ed25519.PublicKey, now ti
 			return ackAfterFlush
 		}
 	}
-	p.installEpoch(c, fr.Epoch, now)
+	if aw.Reconnect != nil {
+		// §6.3.1 "A reconnect ends R's rekey answers" (R29-T2): the
+		// member processed the reconnect's hs.resp, so abandoned its
+		// rekeys, and starts none while the reconnect is open; a late
+		// hs.fin for one would otherwise move the service to an epoch the
+		// member left. A member's reconnect is never a restore's.
+		for aid, o := range p.awaiting {
+			if o.ConnID == c.ID && o.New == nil && o.Purpose == handshake.PurposeRekey {
+				p.audit("rekey_answer_ended", c.ID)
+				p.dropAwaiting(aid, now)
+			}
+		}
+	}
+	p.installEpoch(c, fr.Epoch, false, now)
 	// The member's vault holds the epoch pending until a message from us
 	// opens under it (§6.3.1 Responder, R29-R1): hs.confirm, body {},
 	// never answered. A member vault from before release 29 answers it
 	// unsupported_type, which this service ignores as an answer to no
 	// request; release 29 has no path toward such a peer anyway (§6.3.1
-	// "No upgrade").
-	if p.sendTo(c, handshake.TypeConfirm, json.RawMessage(`{}`), now) == "" {
-		p.log().Warn("hs.confirm not queued: the member confirms at our next message", "connection_id", c.ID)
+	// "No upgrade"). Not queued now, it goes out at the next batch under
+	// this epoch or after ConfirmResend (tickConfirm).
+	if !p.queueConfirm(c, now) {
+		// Sent by tickConfirm as soon as it can be (ConfirmAt cleared).
+		c.ConfirmAt = time.Time{}
+		p.markDirty(kindConn, c.ID)
+		p.log().Warn("hs.confirm not queued yet", "connection_id", c.ID)
 	}
 	p.log().Info("epoch installed", "connection_id", c.ID, "purpose", string(aw.Purpose))
 	return ackAfterFlush
 }
 
-// installEpoch makes ep the connection's current epoch; the previous
-// send key and rk are deleted at once, its receive key kept (§6.5).
-func (p *Peer) installEpoch(c *Connection, ep *handshake.Epoch, now time.Time) {
+// installEpoch makes ep the connection's current epoch (mine: one the
+// service began). What waits in the outbox under the epoch it replaces
+// is sealed again under ep first (§8.3, resealAtKeyChange). The previous
+// epoch's send key is deleted at once and its receive key kept (§6.5);
+// when the service activates a member's epoch as responder and the
+// previous one is the confirmed epoch, that one keeps its rk too, up to
+// ConfirmedKeysFor (§6.3.1).
+func (p *Peer) installEpoch(c *Connection, ep *handshake.Epoch, mine bool, now time.Time) {
 	if c.kr == nil {
 		c.kr = &handshake.Keyring{}
 	}
-	c.kr.Activate(ep, now)
+	if !mine {
+		// At a responder's activation (§8.3). At the service's own rekey
+		// or reconnect the hs.fin must precede anything in the new epoch;
+		// its waiting messages stay under the old one, which the member
+		// still opens (change 2 re-seals them at the confirmation).
+		p.resealAtKeyChange(c, ep, now)
+	}
+	if !mine && len(c.LastEpochID) > 0 && bytes.Equal(c.Confirmed, c.LastEpochID) {
+		c.kr.ActivateKeeping(ep, now, now.Add(ConfirmedKeysFor), handshake.KeepRK)
+	} else {
+		c.kr.Activate(ep, now)
+	}
 	eid := ep.ID()
 	c.LastEpochID = eid[:]
+	p.recordActivated(c, eid[:], mine, now)
 	if ep.Suite() > c.Suite {
 		c.Suite = ep.Suite() // §13.4 pin
 	}
@@ -671,7 +708,7 @@ func (p *Peer) startRekey(c *Connection, now time.Time) {
 	ini, err := handshake.NewInitiator(handshake.InitiatorConfig{
 		Purpose: handshake.PurposeRekey, Identity: p.cfg.Keys.IK, StaticKEM: p.cfg.Keys.KEM.Public(), Relay: p.ownAddr(),
 		ResponderIK: c.Peer.IK, KnownResponderChain: chainOf(c), ResponderRelayKey: c.Peer.Relay.PK,
-		Current: c.kr.Current(), PinnedSuite: c.Suite, Policy: handshake.PolicyVaultToVault, Now: now,
+		Current: c.kr.Current(), PinnedSuite: c.Suite, Policy: handshake.PolicyVaultToVault, Features: features(), Now: now,
 	})
 	if err != nil {
 		return
@@ -685,7 +722,7 @@ func (p *Peer) startRekey(c *Connection, now time.Time) {
 	p.outgoing[id] = &outgoing{ID: id, ConnID: c.ID, EphKid: kid[:], Th1: th1[:], Init: s, Created: now, ini: ini}
 	p.markDirty(kindOutgoing, id)
 	p.markDirty(kindConn, c.ID) // the epoch's send count moved
-	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: ini.Envelope()}, now)
+	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: ini.Envelope(), Handshake: true}, now)
 	p.log().Info("rekey started", "connection_id", c.ID)
 }
 
@@ -739,8 +776,8 @@ func (p *Peer) handleResp(id string, raw []byte, sender ed25519.PublicKey, now t
 		return ackAfterFlush
 	}
 	// hs.fin goes first; what follows is sealed in the new epoch.
-	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: res.Fin}, now)
-	p.installEpoch(c, res.Epoch, now)
+	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: res.Fin, Handshake: true}, now)
+	p.installEpoch(c, res.Epoch, true, now)
 	p.log().Info("rekeyed", "connection_id", c.ID)
 	return ackAfterFlush
 }

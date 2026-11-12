@@ -311,6 +311,7 @@ type Member struct {
 	Reconnects int
 	retired    []*suite.PrivateKey // static KEM keys before a rotation (§6.6 "Retired keys")
 	lastRecon  []byte              // the last reconnect hs.init sent
+	lastRekey  []byte              // the last rekey hs.init sent
 	pendTokens [2]string           // a reconnect's tokens, taken at its hs.fin
 	// IgnoreRevoked lets a deposit fail (an answer on a token the service
 	// revoked when it replaced the handshake), as a vault's outbox does.
@@ -636,7 +637,7 @@ func (m *Member) startRekey(links []*handshake.Rotation) {
 	if err != nil {
 		m.t.Fatal(err)
 	}
-	m.rekey = ini
+	m.rekey, m.lastRekey = ini, ini.Envelope()
 	m.DepositTo(m.SvcStand, ini.Envelope())
 }
 
@@ -806,6 +807,10 @@ func (m *Member) ReconnectNaming(id [suite.EpochIDSize]byte) {
 	m.recon, m.lastRecon = ini, ini.Envelope()
 	m.DepositTo(m.SvcRecon, ini.Envelope())
 }
+
+// LastRekeyInit is the last rekey hs.init the Member sent, to deliver
+// again.
+func (m *Member) LastRekeyInit() []byte { return m.lastRekey }
 
 // SvcMailbox is the service's mailbox.
 func (m *Member) SvcMailbox() string { return m.svc.Relay.Mailbox }

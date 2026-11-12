@@ -61,7 +61,7 @@ func (p *Peer) approveRequest(r *request, now time.Time) {
 		return
 	}
 	raw, err := r.ep.Seal(&envelope.Inner{ID: p.newID(now), Type: peerwire.TypeConnectionApproved, TS: now,
-		Body: peerwire.ConnectionApprovedBody(tok, rt)})
+		Body: peerwire.ConnectionApprovedBody(tok, rt), Features: features()})
 	if err != nil {
 		return
 	}
@@ -199,9 +199,14 @@ func (p *Peer) activateRequest(r *request, now time.Time) {
 	}
 	p.replaceOlderConnections(c, now)
 	p.conns[c.ID] = c
-	p.installEpoch(c, r.ep, now)
+	p.installEpoch(c, r.ep, false, now)
+	// The member's connection.approved, which activates it, opened under
+	// this epoch (§6.3.1 "The received flag").
+	if e := c.epochMeta(c.LastEpochID); e != nil {
+		e.Received = true
+	}
 	p.sendTo(c, peerwire.TypeProfileUpdate, peerwire.ProfileUpdateBody(1, p.cfg.Profile.FirstName, p.cfg.Profile.LastName,
-		p.cfg.Keys.IKPublic(), nil), now)
+		p.cfg.Keys.IKPublic(), profileExtras), now)
 	p.endInvite(r.InviteID, InviteConnected, now)
 	p.emit(&Event{Type: EventConnectionAdded, ConnectionID: c.ID, InviteID: c.InviteID, Name: c.Name(), Tag: c.Tag}, now)
 }

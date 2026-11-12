@@ -79,6 +79,10 @@ type Config struct {
 // and reconnects only after a restore), never answers
 // challenges (it has no credential) and never rotates its identity.
 type Peer struct {
+	// reconfirm marks the connections the current batch owes an
+	// hs.confirm (§6.3.1 Responder; noteFromMember).
+	reconfirm map[string]bool
+
 	cfg    Config
 	limits relayclient.Limits
 
@@ -387,6 +391,10 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 			p.lastMsgMS, p.lastMsgAt = ms, started
 		}
 	}
+	p.reconfirmAll(now)
+	if err := p.flush(ctx); err != nil {
+		return len(msgs), err
+	}
 	for _, id := range acks {
 		delete(p.unacked, id)
 		delete(p.gaveUp, id)
@@ -518,6 +526,7 @@ func (p *Peer) visibility() time.Duration {
 // discard forgets unflushed changes after a store error; the process
 // restarts from the stored state.
 func (p *Peer) discard() {
+	p.reconfirm = nil
 	clear(p.dirty)
 	p.extra = p.extra[:0]
 }
