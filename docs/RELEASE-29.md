@@ -1,6 +1,6 @@
 # Release 29 in the service vault
 
-**Status:** 0.3.0, draft (2026-11-12). Against VAULT-MESSAGING 0.89.2.
+**Status:** 0.4.0, draft (2026-11-12). Against VAULT-MESSAGING 0.89.2.
 
 VAULT-MESSAGING §6.3.1 ("Lifetimes and activation on confirmation",
 release 29) asks a service vault to follow its rules "on either side as
@@ -80,8 +80,8 @@ current epoch unless stated:
    reconnect while carried tokens wait" holds. The answer ends that
    token only, not the connection; today the service makes the
    connection `stale`, which changes. A reconnect's own `hs.init`
-   answered `token_revoked` is a failed try; a carried token's refusal
-   is not;
+   answered `token_revoked` is a failed try at once, as §8.6 says (it can
+   never be answered); a carried token's refusal is not a try at all;
 5. after `quota_exceeded` on its standing token, at once and also while
    its own rekey is pending (which the reconnect abandons), when the
    refresh itself is refused for the token's quota, when a deposit is
@@ -110,8 +110,11 @@ current epoch unless stated:
 one named epoch, when a try's `hs.init` is refused `quota_exceeded`,
 when no try can start for want of a reconnect token (not judged while
 "No reconnect while carried tokens wait" holds), or when a try's pending
-epoch reaches `B`. A try counts as failed only when it expires
-unanswered. `stale` is not final (0.88.7): the outbox is kept, and the
+epoch reaches `B`. A try counts as failed when it expires unanswered,
+or when its `hs.init` is answered `token_revoked` (item 4). §3.4.1 says
+a refused try counts only if it then expires unanswered, and §8.6 that
+this refusal is a failed try; the service follows §8.6, and the
+difference is flagged for an erratum. `stale` is not final (0.88.7): the outbox is kept, and the
 next epoch established makes the connection active again.
 
 **While a reconnect is open** (from its first `hs.init` until it is
@@ -119,9 +122,11 @@ confirmed or ends) the connection sends nothing but the handshake: no
 messages, rekeys, token refreshes or re-mints **(chosen; not in the
 spec** beyond §6.6 "After a restore" for a restore's reconnect and
 §6.3.1 Initiator for a pending one). What the application sends waits
-in the outbox. A member's rekey `hs.init` is not answered while a
-reconnect of the service's is open (the reconnect settles the session,
-as today). One reconnect at a time per member (R29-X4); crossing
+in the outbox. A member's rekey `hs.init` that arrives while a reconnect
+of the service's is open is acked and dropped, audited
+`rekey_while_reconnecting`, as today: the reconnect settles the session,
+and the member's rekey stays open on its side for its lifetime (16 days)
+unless the reconnect ends it first. One reconnect at a time per member (R29-X4); crossing
 reconnects are settled as today, the service yielding (§6.6).
 
 ## 4. The restore reconnect's 7 days (chosen how)
@@ -165,8 +170,10 @@ message it deposits, and in the `features` of its `profile.update`
 (§10.8), sent when a connection becomes active. It advertises
 `relay_follow` there too: it follows a member's relay-key rotation by
 `relay.address.update` already, and §3.4 "Receivers first" expects the
-capability. The `profile.update` body is the one §10.8 gives: the
-invitation's profile names, the service's `ik`, and `items: []`.
+capability. The `profile.update` body is the one §10.8 gives: a
+`version` (a counter per connection, 1 at activation), the invitation's
+profile names, the service's `ik`, `items: []`, and `features`
+(`["hs_confirm", "relay_follow"]`, sorted).
 Nothing in §6.3.1 depends on seeing `hs_confirm`, so a member that
 misses it loses nothing.
 
@@ -214,7 +221,9 @@ way, a member that abandoned a pending epoch and came back to the
 current one, then reconnected naming it while it was not yet confirmed,
 would have that current epoch destroyed at the reconnect's `hs.fin`; its
 next message under it, with a later `ts`, would be taken as fork
-evidence and an honest pair suspended.
+evidence and an honest pair suspended. The residual 0.89.2 accepts for
+this scope (§3.4.1 Residuals, "A copy using an unconfirmed epoch a
+reconnect passed over") is accepted for the service too.
 
 ## 10. The received flag (R29-F3)
 
@@ -235,18 +244,27 @@ invitations.
 - **The marker.** From the fourth change on, when the rules are
   complete, the service writes `messaging_release: 29` on every
   connection record it writes.
-- **Records without it.** At every start, before any reconnect is
-  resumed or started (a restore's included), the service ends every
+- **What it vouches for.** The marker is on the connection record; it
+  vouches for the connection's other records too (its handshakes,
+  tokens and outbox entries, stored as separate kinds).
+- **Records without it.** At every start, right after the state is
+  loaded and before any reconnect (a restore's included), housekeeping,
+  drain or write, the service ends every
   connection record that lacks the marker or holds a value below 29: it
   sends the member `connection.removed` (best effort), revokes every
   token it issued for the connection (its relay registrations), audits
   `connection_pre29_ended`, emits `connection.removed` to the
   application with the reason `pre29` (so that the application can tell
   it from an operator's removal and invite the member again), and logs
-  one alarm with the count. Its stored handshakes end with it. Running
-  it at every start covers a rolling deploy and a point-in-time restore
-  of older records; a rollback to an earlier version and back ends the
-  records that version wrote, which is accepted.
+  one alarm with the count. Its stored handshakes, tokens and outbox
+  entries end with it. Running it at every start covers a point-in-time
+  restore of older records.
+- **A rollback** to a version before the fourth change is an operator
+  step that ends every connection first (runbook): code from before the
+  marker could otherwise write records under a connection that still
+  carries it.
+- **Invitations** are not ended: one claimed under this version makes a
+  connection under its rules, which carries the marker.
 - **On staging,** where every connection is ended this way, the deploy
   of that version needs the owner's go of its own, and the runbook says
   to re-invite the staging test members after it.
@@ -268,34 +286,60 @@ re-minted at a confirmation ("The prompt to adopt"); or any token newer
 than the one the refresh was deposited under. The others it may still
 revoke.
 
-## 13. Re-sealed at a key change (§8.3, 0.88.7)
+## 13. Waiting messages: re-sealed, re-stamped, or not delivered (§8.3)
 
 Today an outbox entry is sealed once, when it is queued. One that waits
 long (for a token, behind an open reconnect, through a quota wait) is
 deposited under an epoch the member may have dropped (`unknown_kid`), or
 with a `ts` past 16 days (`stale_or_future`); the relay accepts it and
-the member drops it, unseen by the service. So, as §8.3 "Re-sealed at a
-key change" says:
+the member drops it, unseen by the service. The service follows §8.3
+("Re-sealed at a key change", "Not delivered", "At deposit") for its
+durable messages to a connection; handshake messages, `hs.confirm` and
+best-effort notices (`connection.removed`) are not covered.
 
-- **Just before the current epoch is replaced** (a responder's
-  activation, and the initiator's confirmation of a pending epoch),
-  every durable entry to the member still waiting in the outbox is
-  sealed again under the new epoch, in its place, with the same inner
-  `id`. The outbox keeps each such entry's inner message for that.
-- **Its `ts` is fresh,** except for an entry the relay may already have
-  stored (a deposit tried, with a `5xx` or no answer: one client attempt
-  per deposit), which keeps its `ts`, so that the member's 16-day `ts`
-  window ends it no later than its inner-`id` dedupe forgets the first
-  copy.
-- **Handshake messages are never sealed again**; a waiting `hs.confirm`
-  for the replaced epoch is dropped (the new epoch gets its own).
-- **What cannot be re-sealed ends, audited, never silently** (§8.3 "Not
-  delivered"): an entry sent once that is not durable ends; an expired
-  one is dropped with `drop.held_expired`; when the connection ends
-  (removed, replaced, suspended for a fork), its waiting entries end
-  with a `drop.undelivered_*` audit.
-- **The re-sealed entries are written before any is deposited**, with
-  the activation, in one write.
+- **Tried.** An entry is *tried* once an attempt to deposit it may have
+  reached the relay: a `201`, a `5xx`, no answer, or `replay_detected`
+  (an earlier copy reached the relay). The mark is stored with the
+  entry. A deposit is one client attempt: the relay client's own
+  retries are off for deposits, so that the mark covers every copy that
+  can exist. A service has no clean end (§8.3 "A clean end": it is never
+  locked), so **at every start every waiting session-mode deposit is
+  marked tried**: a write that would have stored the mark after an
+  accepted deposit may have been lost.
+- **At a key change.** Just before the current epoch is replaced (a
+  responder's activation, and the initiator's confirmation of a pending
+  epoch), every durable entry still waiting under it is sealed again
+  under the new epoch, in its place, with the same inner `id`: with a
+  fresh `ts` if untried, keeping its `ts` if tried (so that the member's
+  16-day `ts` window ends it no later than its inner-`id` dedupe forgets
+  the first copy). A waiting `hs.confirm` for the replaced epoch is
+  dropped (the new epoch gets its own). An ephemeral entry ends
+  silently. The re-sealed entries are written before any is deposited,
+  with the activation, in one write.
+- **At deposit.** Before each deposit of a waiting durable entry under
+  the current epoch: an untried one whose `ts` is older than 2 days is
+  sealed again with a fresh `ts` (and written before it goes); a tried
+  one older than 16 days is not delivered (case 2); a tried one within
+  16 days goes as it is, noted once in the service's log
+  (`unconfirmed_late`) when older than 2 days.
+- **Not delivered**, each with its own audit entry (`ref` the inner
+  `id`), never silently (§8.3 cases):
+  1. an entry whose `exp` passed while it waited: `drop.held_expired`;
+  2. a tried entry past the 16-day window: `drop.undelivered_window`;
+  3. one that cannot be sealed under the new epoch: `drop.held_unsealable`;
+  4. the connection is removed or replaced: `drop.undelivered_removed`;
+  5. a deposit is answered `mailbox_unknown`: `drop.undelivered_mailbox_unknown`;
+  7. the connection is suspended on fork evidence: `drop.undelivered_suspended`;
+  8. the relay refuses the deposit with a `4xx` other than `429`:
+     `drop.undelivered_refused`. `timestamp_stale` and `replay_detected`
+     are about the attempt, not the message: retried with the backoff,
+     never ended.
+
+  (Case 6, a `stale` connection that can no longer come back, is
+  proposed in §8.3 and not built here yet.)
+- **Held after a demotion** (§3.4.1, the fourth change): a durable
+  message made while the current epoch is demoted waits unsealed in its
+  place and is sealed when an epoch is current again.
 
 ## 14. The work
 
@@ -312,8 +356,10 @@ separately. The README's release-29 status paragraph shrinks with each.
    never for an `hs.fin`); the received flag (section 10); `hs.confirm`
    (section 5); the 48 and 16 days a responder keeps keys; "A reconnect
    ends R's rekey answers"; a rekey `hs.init` answered once (a `th1`
-   mark); advertising `hs_confirm` and `relay_follow` (section 6);
-   re-sealing at the responder's activation (section 13).
+   mark); advertising `hs_confirm` and `relay_follow` (section 6); the
+   tried mark, re-sealing at the responder's activation, the check at
+   deposit, and the not-delivered cases that need no other change
+   (section 13).
 2. **The initiator.** Pending epochs until confirmed and every
    abandonment; `B` (section 2); crossings; rule J; the reconnects of
    section 3 that need no carried tokens (items 1, 2 without the
@@ -321,7 +367,8 @@ separately. The README's release-29 status paragraph shrinks with each.
    while one is open; the 7 days per try (section 4); the yielded answer
    kept for `L` (section 8); `token_revoked` ending one token; the
    handshakes a newer one ends that the initiator owns; re-sealing at the
-   initiator's confirmation (section 13).
+   initiator's confirmation (section 13, with the tried mark of change
+   1).
 3. **Forks and tokens.** Rule E (section 9) and its fork evidence; a
    handshake naming the confirmed epoch; fork by `ctx`; a handshake's
    tokens adopted at confirmation, on both sides, with the refresh's
@@ -332,8 +379,9 @@ separately. The README's release-29 status paragraph shrinks with each.
    demotion by position and the held outbox; strict F1 and the
    reconnects of section 3 item 9; seen links; epochs abandoned while
    pending at the member's `identity.rotate`; the links of a refused
-   reconnect still applied (X4's second half); the marker and the end of
-   records without it (section 11).
+   reconnect still applied (X4's second half); messages held after a
+   demotion (section 13); the marker and the end of records without it
+   (section 11).
 
 | Rule | Change | Rule | Change |
 |---|---|---|---|
@@ -356,6 +404,13 @@ separately. The README's release-29 status paragraph shrinks with each.
 
 ## Changes
 
+- **0.4.0 (2026-11-12):** §13 restated as §8.3: the stored tried mark
+  (one client attempt per deposit, every waiting deposit tried at each
+  start), the check at deposit, and the not-delivered cases. §11: what
+  the marker vouches for, when it runs, a rollback as a runbook step,
+  invitations. §3: a `token_revoked` try fails at once (flagged), and a
+  member's rekey during our open reconnect. §6's `version`; §9's
+  accepted residual.
 - **0.3.0 (2026-11-12):** pinned to VAULT-MESSAGING 0.89.2. §13, new:
   re-sealing at a key change. The marker moves to change 4, and §11
   runs at every start before any reconnect, with a `pre29` reason. The
