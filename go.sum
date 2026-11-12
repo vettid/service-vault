@@ -225,6 +225,8 @@ github.com/vettid/vettid-relay v0.0.0-20261027144202-528df9b0bf76 h1:BsK+Zzjjbok
 github.com/vettid/vettid-relay v0.0.0-20261027144202-528df9b0bf76/go.mod h1:d+zS5Kxndcr/zEndHaDVEZaWeuGWFuE9Mh45k3PiCxg=
 github.com/vettid/vettid-vault v0.0.0-20261104162927-4e1750f37928 h1:WUTDVIjiX1Lz2WoPxxidBryZipt5Iq3k341biIYmAyg=
 github.com/vettid/vettid-vault v0.0.0-20261104162927-4e1750f37928/go.mod h1:/O9fPHzrLzsp1lpgMENRRl2civR+mHRHkEbs1ETO5lo=
+github.com/vettid/vettid-vault v0.0.0-20261112163356-425a5aeaef1b h1:PruGOUiHb4+ayWZmcwEJIdhYfhwdp0Ljb2Ccb6qZ9Y0=
+github.com/vettid/vettid-vault v0.0.0-20261112163356-425a5aeaef1b/go.mod h1:/O9fPHzrLzsp1lpgMENRRl2civR+mHRHkEbs1ETO5lo=
 github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 h1:ilQV1hzziu+LLM3zUTJ0trRztfwgjqKnBWNtSRkbmwM=
 github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78/go.mod h1:aL8wCCfTfSfmXjznFBSZNN13rSJjlIOI1fUNAtF7rmI=
 go.opentelemetry.io/auto/sdk v1.2.1 h1:jXsnJ4Lmnqd11kwkBV2LgLoFMZKizbCi5fNZ/ipaZ64=

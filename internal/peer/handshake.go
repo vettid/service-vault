@@ -355,6 +355,17 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 		p.audit("rekey_rejected", c.ID)
 		return ackAfterFlush
 	}
+	if len(pi.Init().Rotations) > 0 {
+		// A rekey that carries identity links (VAULT-MESSAGING 0.85.0 S8)
+		// is refused, as before vettid-vault's handshake parsed them: this
+		// service follows links only from identity.rotate and a reconnect,
+		// and advertises no features, so a peer sends none here (0.86.2
+		// erratum 1). Answering it would move the epoch to the new key
+		// while the connection's stored key stays the old one.
+		pi.Discard()
+		p.audit("rekey_rejected", c.ID)
+		return ackAfterFlush
+	}
 	if !p.admitHandshake(c.ID, handshake.PurposeRekey, pi.Th1()) {
 		pi.Discard()
 		return ackAfterFlush
