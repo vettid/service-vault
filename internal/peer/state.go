@@ -206,8 +206,8 @@ type awaiting struct {
 	// A member's reconnect changes nothing until sig_I verifies at hs.fin
 	// (VAULT-MESSAGING §6.6, 0.72.0): what it brings waits here.
 	Reconnect *pendingReconnect `json:"reconnect,omitempty"`
-	// Follow is what a member's rekey brought (0.87.0 S8): the links not
-	// yet followed and the key they lead to, followed at its hs.fin.
+	// Follow is what a member's rekey named (S8): its signer and links,
+	// checked again and followed at its hs.fin (checkSigner).
 	Follow *pendingFollow `json:"follow,omitempty"`
 
 	r *handshake.Responder
@@ -224,10 +224,15 @@ type pendingReconnect struct {
 	KEM       []byte            `json:"kem,omitempty"`
 	Links     []json.RawMessage `json:"links,omitempty"`
 	Issued    []string          `json:"issued,omitempty"`
+	// Signer is the hs.init's signer and whole chain, checked again at
+	// hs.fin (checkSigner); IK, KEM and Links are kept for a record from
+	// before it.
+	Signer *pendingFollow `json:"signer,omitempty"`
 }
 
-// pendingFollow is a rekey's identity links not yet followed, with the
-// key and KEM they lead to.
+// pendingFollow is what a member's rekey or reconnect hs.init named: the
+// key it was signed with (from.ik) and its kem, and every identity link
+// it carried, checked again and followed at its hs.fin (checkSigner).
 type pendingFollow struct {
 	IK    ed25519.PublicKey `json:"ik"`
 	KEM   []byte            `json:"kem"`
@@ -247,7 +252,7 @@ func (f *pendingFollow) parse() (ed25519.PublicKey, *suite.PublicKey, []*handsha
 		}
 		links = append(links, r)
 	}
-	if len(f.IK) != ed25519.PublicKeySize || len(links) == 0 {
+	if len(f.IK) != ed25519.PublicKeySize {
 		return nil, nil, nil, errors.New("peer: bad pending follow")
 	}
 	return f.IK, kem, links, nil

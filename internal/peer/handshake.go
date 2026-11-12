@@ -287,7 +287,7 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 		}
 		p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == c.ID && e.Token != "" && e.Token == c.Reconnect.Token })
 	}
-	pend := &pendingReconnect{Standing: st, Reconnect: rt, Issued: jtis}
+	pend := &pendingReconnect{Standing: st, Reconnect: rt, Issued: jtis, Signer: newPendingFollow(body)}
 	if len(fresh) > 0 {
 		pend.IK, pend.KEM = body.From.IK, body.From.KEM.Bytes()
 		for _, r := range fresh {
@@ -311,6 +311,32 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 // A reconnect of ours still open is settled by it: the session is
 // common again.
 func (p *Peer) applyReconnect(c *Connection, pend *pendingReconnect) error {
+	if pend.Signer != nil {
+		// The signer and its chain, checked again against what was
+		// followed meanwhile (checkSigner), then the links not yet
+		// followed.
+		ik, kem, all, err := pend.Signer.parse()
+		if err != nil {
+			return err
+		}
+		fresh, ok := p.checkSigner(c, ik, kem, all, p.now())
+		if !ok {
+			return errSignerMoved
+		}
+		if c.Reconnecting {
+			c.Reconnecting, c.ReconnectTries, c.ReconnectSlow, c.ReconnectSince = false, 0, false, time.Time{}
+			p.dropConnOutgoing(c)
+		}
+		if len(fresh) > 0 {
+			p.followRotation(c, ik, kem, fresh)
+		}
+		c.Standing, c.Reconnect = pend.Standing, pend.Reconnect
+		c.State = StateActive
+		p.markDirty(kindConn, c.ID)
+		return nil
+	}
+	// A record from before Signer was kept: its links as computed when
+	// the hs.init was answered.
 	var links []*handshake.Rotation
 	var kem *suite.PublicKey
 	if len(pend.Links) > 0 {
@@ -355,13 +381,14 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 		p.audit("rekey_rejected", c.ID)
 		return ackAfterFlush
 	}
-	// A rekey may carry identity links (VAULT-MESSAGING 0.87.0 S8): a
-	// release-29 member vault sends its whole chain on every rekey. As
-	// for a reconnect, a valid link that gives a key a second successor
-	// suspends the connection (§3.4); the rest are checked by the
-	// handshake (from.ik is the stored key, or reached from it through
-	// links not yet followed, after those already followed), and followed
-	// at the verified hs.fin, never before.
+	// A rekey may carry identity links (VAULT-MESSAGING S8, 0.85.0; on
+	// every rekey to every peer since 0.87.0, as a release-29 member
+	// vault sends them). As for a reconnect, a valid link that gives a
+	// key a second successor suspends the connection (§3.4); the rest are
+	// checked by the handshake (from.ik is the stored key, or reached
+	// from it through links not yet followed, after those already
+	// followed), and checked again and followed at the verified hs.fin,
+	// never before (checkSigner).
 	body := pi.Init()
 	for _, r := range body.Rotations {
 		if r.Verify() == nil && p.rotationConflict(c, r, now) {
@@ -400,12 +427,7 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 	th1 := pi.Th1()
 	aw := &awaiting{ID: id, ConnID: c.ID, Purpose: handshake.PurposeRekey, Th1: th1[:], Created: now,
 		Expires: now.Add(HandshakeTTL), r: resp}
-	if fresh := body.Rotations[handshake.KnownPrefix(known, body.Rotations):]; len(fresh) > 0 {
-		aw.Follow = &pendingFollow{IK: body.From.IK, KEM: body.From.KEM.Bytes()}
-		for _, r := range fresh {
-			aw.Follow.Links = append(aw.Follow.Links, r.Marshal())
-		}
-	}
+	aw.Follow = newPendingFollow(body)
 	p.awaiting[id] = aw
 	p.markDirty(kindAwait, id)
 	p.markDirty(kindConn, c.ID) // the epoch's receive count moved
@@ -478,21 +500,24 @@ func (p *Peer) handleFin(id string, raw []byte, sender ed25519.PublicKey, now ti
 		}
 	}
 	if aw.Follow != nil {
-		// The rekey's links, now that sig_I verified under the key they
-		// lead to (S8).
-		ik, kem, links, err := aw.Follow.parse()
-		if err != nil {
-			p.audit("rekey_record_bad", c.ID)
+		// The rekey's signer, checked again against the key and links
+		// followed meanwhile, and its links not yet followed, now that
+		// sig_I verified under it.
+		if !p.followAtFin(c, aw.Follow, now) {
 			fr.Epoch.Destroy()
 			return ackAfterFlush
 		}
-		p.followRotation(c, ik, kem, links)
 	}
 	p.installEpoch(c, fr.Epoch, now)
 	// The member's vault holds the epoch pending until a message from us
 	// opens under it (§6.3.1 Responder, R29-R1): hs.confirm, body {},
-	// never answered.
-	p.sendTo(c, handshake.TypeConfirm, json.RawMessage(`{}`), now)
+	// never answered. A member vault from before release 29 answers it
+	// unsupported_type, which this service ignores as an answer to no
+	// request; release 29 has no path toward such a peer anyway (§6.3.1
+	// "No upgrade").
+	if p.sendTo(c, handshake.TypeConfirm, json.RawMessage(`{}`), now) == "" {
+		p.log().Warn("hs.confirm not queued: the member confirms at our next message", "connection_id", c.ID)
+	}
 	p.log().Info("epoch installed", "connection_id", c.ID, "purpose", string(aw.Purpose))
 	return ackAfterFlush
 }
@@ -607,8 +632,8 @@ func (p *Peer) startRekey(c *Connection, now time.Time) {
 	if c.kr == nil || c.kr.Current() == nil || c.Standing.Token == "" || c.State != StateActive {
 		return
 	}
-	if now.Before(c.RekeyNotBefore) {
-		return // a rekey of ours failed lately: backing off
+	if now.Before(c.RekeyNotBefore) && c.RekeyNotBefore.Sub(now) <= RekeyBackoffMax {
+		return // a rekey of ours failed lately: backing off (a wait longer than the most: the clock went back)
 	}
 	for _, og := range p.outgoing {
 		if og.ConnID == c.ID {
@@ -662,6 +687,15 @@ func (p *Peer) handleResp(id string, raw []byte, sender ed25519.PublicKey, now t
 	if c == nil {
 		res.Epoch.Destroy()
 		return ackAfterFlush
+	}
+	// A valid link that gives a key a second successor suspends the
+	// connection (§3.4), before anything is followed. (One off the
+	// resolved path makes the handshake refuse the hs.resp first.)
+	for _, r := range res.Resp.Rotations {
+		if r.Verify() == nil && p.rotationConflict(c, r, now) {
+			res.Epoch.Destroy()
+			return ackAfterFlush
+		}
 	}
 	if og.ini.Purpose() == handshake.PurposeReconnect {
 		return p.finishReconnect(c, og, res, now)

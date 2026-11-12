@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"strings"
 	"time"
 
@@ -93,8 +94,96 @@ func (p *Peer) followRotation(c *Connection, ik ed25519.PublicKey, kem *suite.Pu
 		c.Chain = c.Chain[len(c.Chain)-handshake.MaxRotations:]
 	}
 	p.dropConnOutgoing(c)
+	p.dropStaleAnswers(c)
 	p.markDirty(kindConn, c.ID)
 	p.log().Info("member identity rotated", "connection_id", c.ID)
+}
+
+// dropStaleAnswers drops the member's rekeys we answered whose hs.init
+// was signed with another key than the one now stored (§3.4.1 H5): the
+// member abandons a rekey at its own rotation, and its hs.fin could only
+// come from a copy holding the older key (checkSigner refuses it there
+// too). Their links are judged first: one that gives a key a second
+// successor, now that more of the chain is followed, suspends the
+// connection (§3.4).
+func (p *Peer) dropStaleAnswers(c *Connection) {
+	now := p.now()
+	for id, aw := range p.awaiting {
+		if aw.ConnID != c.ID || aw.New != nil || aw.Purpose != handshake.PurposeRekey || aw.Follow == nil {
+			continue
+		}
+		ik, _, links, err := aw.Follow.parse()
+		if err == nil {
+			for _, r := range links {
+				if r.Verify() == nil && p.rotationConflict(c, r, now) {
+					return // suspended: every answer is dropped
+				}
+			}
+			if suite.EqualPublic(ik, c.Peer.IK) {
+				continue
+			}
+		}
+		p.audit("rekey_answer_dropped", c.ID)
+		p.dropAwaiting(id, now)
+	}
+}
+
+// errSignerMoved: a member's handshake answered under a key and links
+// that what was followed since no longer leads to (checkSigner).
+var errSignerMoved = errors.New("peer: the member's identity moved since its hs.init was answered")
+
+// newPendingFollow keeps what a member's rekey or reconnect hs.init
+// named: its signer (from.ik and kem) and its whole chain, to be checked
+// again at its hs.fin.
+func newPendingFollow(body *handshake.Init) *pendingFollow {
+	f := &pendingFollow{IK: body.From.IK, KEM: body.From.KEM.Bytes()}
+	for _, r := range body.Rotations {
+		f.Links = append(f.Links, r.Marshal())
+	}
+	return f
+}
+
+// followAtFin checks a member's handshake again at its verified hs.fin
+// and follows its links not yet followed (checkSigner). It reports
+// whether the handshake may complete; when not, the connection may be
+// suspended (a second successor) or the handshake is audited and
+// dropped.
+func (p *Peer) followAtFin(c *Connection, f *pendingFollow, now time.Time) bool {
+	ik, kem, links, err := f.parse()
+	if err != nil {
+		p.audit("hs_record_bad", c.ID)
+		return false
+	}
+	fresh, ok := p.checkSigner(c, ik, kem, links, now)
+	if !ok {
+		return false
+	}
+	if len(fresh) > 0 {
+		p.followRotation(c, ik, kem, fresh)
+	}
+	return true
+}
+
+// checkSigner checks, at a member's verified hs.fin, that the key its
+// hs.init was signed with (from.ik, with its kem) is still the stored
+// key, or reached from it through the links that hs.init carried after
+// those followed since: identity.rotate statements, or another
+// handshake's links, may have been followed while it awaited hs.fin
+// (the relay keeps no order, S8). A valid link that gives a key a second
+// successor suspends the connection first (§3.4). It returns the links
+// not yet followed.
+func (p *Peer) checkSigner(c *Connection, ik ed25519.PublicKey, kem *suite.PublicKey, links []*handshake.Rotation, now time.Time) ([]*handshake.Rotation, bool) {
+	for _, r := range links {
+		if r.Verify() == nil && p.rotationConflict(c, r, now) {
+			return nil, false
+		}
+	}
+	final, fkem, n, err := handshake.ResolveChainKnown(c.Peer.IK, chainOf(c), links)
+	if err != nil || !suite.EqualPublic(final, ik) || fkem != nil && !fkem.Equal(kem) {
+		p.audit("ancestor_ik", c.ID) // Table B, an hs.fin to our answer
+		return nil, false
+	}
+	return links[n:], true
 }
 
 // dropConnOutgoing abandons a rekey the service started on a connection:

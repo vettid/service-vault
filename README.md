@@ -771,11 +771,19 @@ the move:
   service had started under the old keys is dropped. A member that
   rotated while the session was down reconnects with the chain in its
   `hs.init` (§6.6), and the service follows that the same way. Links it
-  already followed may come first. A release-29 member vault also sends
-  its whole chain on every rekey, either way (0.87.0 S8): the service
-  follows the links it has not followed yet, at the rekey's verified
-  `hs.fin` when the member started it, and before installing the epoch
-  when the service did. If two different
+  already followed may come first. A rekey may carry links too (S8,
+  0.85.0; a release-29 member vault sends its whole chain on every
+  rekey, to every peer, since 0.87.0): the service follows the links it
+  has not followed yet, at the rekey's verified `hs.fin` when the member
+  started it, and before installing the epoch when the service did. At
+  that `hs.fin` (a member's rekey or reconnect) the key the `hs.init` was
+  signed with is checked again against what was followed since: the
+  relay keeps no order, so `identity.rotate` statements may have moved
+  the stored key past it, and then the handshake is dropped
+  (`ancestor_ik`) instead of setting the key back. A member's rekey
+  answered under a key that a later rotation moved past is dropped at
+  that rotation. `identity.rotate` itself still reads only its one link,
+  not the `rotations` chain S8 lets it carry. If two different
   successors of one key arrive ("one successor per key"), the connection
   is suspended: nothing is sent or accepted, its sign-ins and
   approvals can't be answered, an ERROR with `alarm: rotate_conflict` is
