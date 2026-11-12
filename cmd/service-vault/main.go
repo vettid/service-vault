@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -32,6 +33,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -42,6 +44,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
+	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
@@ -144,7 +147,26 @@ type Config struct {
 	// RecordKeyVersion is the lowest record key version to use
 	// (SV_RECORD_KEY_VERSION, default 1; README "Rotating the record key").
 	RecordKeyVersion uint32
+	// AnchorSigner is the AnchorSigner function's unqualified ARN, in the
+	// signer's own account (SV_ANCHOR_SIGNER; key protection, GC #7406):
+	// with it, documents are published through the signer and this service
+	// never holds the anchor key.
+	AnchorSigner string
+	// AnchorMovedParam is the SSM parameter that marks the anchor key as
+	// moved to the signer (SV_ANCHOR_MOVED_PARAM). Once it exists, the
+	// daemon refuses to start without AnchorSigner, and never reads the
+	// anchor-key blob. Required with ballots unless AnchorSigner is set.
+	AnchorMovedParam string
+	// AnchorKey pins the anchor key: its SubjectPublicKeyInfo, DER
+	// (SV_ANCHOR_KEY, standard base64, set by the owner). Required with
+	// AnchorSigner: only this key is certified and listed, and every
+	// answer and bundle of the signer is checked against it. Without the
+	// signer, if set, the stored key must be this one.
+	AnchorKey []byte
 }
+
+// anchorSignerARN is a Lambda function's unqualified ARN.
+var anchorSignerARN = regexp.MustCompile(`^arn:aws[a-z-]*:lambda:[a-z0-9-]+:[0-9]{12}:function:[A-Za-z0-9_-]+$`)
 
 // Bounds of the approval settings (chosen; not in the spec).
 const (
@@ -273,6 +295,29 @@ func configFromEnv(getenv func(string) string) (*Config, error) {
 	}
 	if err := approval.CheckServiceName(c.ServiceName); err != nil {
 		return nil, fmt.Errorf("SV_SERVICE_NAME: %w", err)
+	}
+	c.AnchorSigner = strings.TrimSpace(getenv("SV_ANCHOR_SIGNER"))
+	c.AnchorMovedParam = strings.TrimSpace(getenv("SV_ANCHOR_MOVED_PARAM"))
+	if c.AnchorSigner != "" && (c.VotesURL == "" || !anchorSignerARN.MatchString(c.AnchorSigner)) {
+		return nil, errors.New("SV_ANCHOR_SIGNER: a Lambda function's unqualified ARN, with SV_VOTES_URL")
+	}
+	if v := strings.TrimSpace(getenv("SV_ANCHOR_KEY")); v != "" {
+		spki, err := base64.StdEncoding.DecodeString(v)
+		if err != nil {
+			return nil, errors.New("SV_ANCHOR_KEY: not standard base64")
+		}
+		if _, err := p256(spki); err != nil {
+			return nil, fmt.Errorf("SV_ANCHOR_KEY: %w", err)
+		}
+		c.AnchorKey = spki
+	}
+	if c.AnchorSigner != "" && c.AnchorKey == nil {
+		return nil, errors.New("SV_ANCHOR_KEY is required with SV_ANCHOR_SIGNER: the anchor key is pinned, never learned from the signer")
+	}
+	if c.BallotsTable != "" && c.AnchorSigner == "" && c.AnchorMovedParam == "" {
+		// Without the marker's name, a moved key couldn't be told from one
+		// never moved: fail closed.
+		return nil, errors.New("SV_ANCHOR_MOVED_PARAM is required with SV_BALLOTS_TABLE unless SV_ANCHOR_SIGNER is set")
 	}
 	return c, nil
 }
@@ -456,24 +501,22 @@ func serve(args []string) error {
 	if ballots != nil {
 		// Publishing (BALLOT-PROTOCOL §3.3) needs SV_VOTES_URL; without it,
 		// creating a proposal answers publication_not_configured.
-		ak, err := keystore.LoadOrCreate(ctx, &keystore.AWSKMS{Client: ac.kms}, cfg.KMSKeyID, tbl.Blobs(), keystore.AnchorKeyName, keystore.NewAnchorKey)
-		if err != nil {
-			return fmt.Errorf("anchor key: %w", err)
-		}
-		akPriv, err := ak.Private()
+		ls := &publish.LambdaSigner{Client: ac.lambda, FunctionARN: cfg.AnchorSigner}
+		as, err := setupAnchor(ctx, cfg, ls, ac.ssm, &keystore.AWSKMS{Client: ac.kms}, tbl.Blobs())
 		if err != nil {
 			return err
 		}
-		spki, err := x509.MarshalPKIXPublicKey(&akPriv.PublicKey)
-		if err != nil {
-			return err
+		if as.signer != nil {
+			go watchSigner(ctx, ls, as.spki, log)
 		}
-		h := sha256.Sum256(spki)
+		// Only the pinned key (or the stored one, before the signer) is
+		// certified.
+		h := sha256.Sum256(as.spki)
 		cert, err := signIK(vote.LabelAnchorKey, h[:])
 		if err != nil {
 			return err
 		}
-		anchorInfo = &api.AnchorKey{Key: spki, Cert: cert, IK: keys.IKPublic(), Sigstore: cfg.Sigstore}
+		anchorInfo = &api.AnchorKey{Key: as.spki, Cert: cert, IK: keys.IKPublic(), Sigstore: cfg.Sigstore}
 		mgr := &ballot.Manager{Store: ballots, Sign: signIK, IK: keys.IKPublic(), Roster: p, Sender: p, Background: sendsCtx,
 			Catcher: p, Approvals: approvals, NewID: envelope.NewULID, Now: time.Now, Log: log}
 		waitSends, stopQueueing = mgr.Wait, mgr.StopSends
@@ -487,15 +530,11 @@ func serve(args []string) error {
 			return pr.Title, true, nil
 		}
 		if cfg.VotesURL != "" {
-			anc, err := anchor.New(cfg.Sigstore, akPriv)
-			if err != nil {
-				return err
-			}
 			mgr.Timestamp = func(bundle json.RawMessage, doc []byte) (int64, error) {
 				return anchor.TimestampTime(cfg.Sigstore, bundle, doc)
 			}
-			mgr.AuthorityTime = authorityTime(anc, cfg.Sigstore)
-			mgr.Publisher = votesPublisher(cfg.VotesURL, anc, records, mgr, log)
+			mgr.AuthorityTime = authorityTime(as.anc, cfg.Sigstore)
+			mgr.Publisher = votesPublisher(cfg.VotesURL, as, records, mgr, log)
 		}
 		if rebuild {
 			// The table was restored: ballots it lost are in the copy (§6).
@@ -668,9 +707,10 @@ func heartbeat(ctx context.Context, write func(context.Context, time.Time) error
 
 // awsClients are the AWS clients the daemon uses.
 type awsClients struct {
-	ddb *dynamodb.Client
-	kms *kms.Client
-	ssm *ssm.Client
+	ddb    *dynamodb.Client
+	kms    *kms.Client
+	ssm    *ssm.Client
+	lambda *lambda.Client // the anchor signer, in its own account
 }
 
 // newAWSClients loads the default AWS configuration; endpoint, when set,
@@ -689,6 +729,12 @@ func newAWSClients(ctx context.Context, endpoint string) (*awsClients, error) {
 		ddb: dynamodb.NewFromConfig(awsCfg, func(o *dynamodb.Options) { setEndpoint(&o.BaseEndpoint, ep) }),
 		kms: kms.NewFromConfig(awsCfg, func(o *kms.Options) { setEndpoint(&o.BaseEndpoint, ep) }),
 		ssm: ssm.NewFromConfig(awsCfg, func(o *ssm.Options) { setEndpoint(&o.BaseEndpoint, ep) }),
+		// The signer's retries are this service's (the claim makes them a
+		// resume), so the SDK makes one attempt.
+		lambda: lambda.NewFromConfig(awsCfg, func(o *lambda.Options) {
+			setEndpoint(&o.BaseEndpoint, ep)
+			o.RetryMaxAttempts = 1
+		}),
 	}, nil
 }
 
@@ -972,9 +1018,17 @@ func authorityTime(anc *anchor.Anchorer, instance string) func(context.Context) 
 
 // votesPublisher is the ballot manager's publisher: its results checked by
 // the manager's Timestamp, its re-anchors waiting on its AuthorityTime.
-func votesPublisher(url string, anc *anchor.Anchorer, records peer.Store, mgr *ballot.Manager, log *slog.Logger) *publish.Publisher {
-	return &publish.Publisher{URL: url, Anchor: anc, Client: anchor.Client(time.Minute), Records: records,
+// With the signer, the signer anchors and uploads; this service keeps
+// the bundles and reads the site (its Client).
+func votesPublisher(url string, as *anchorSetup, records peer.Store, mgr *ballot.Manager, log *slog.Logger) *publish.Publisher {
+	p := &publish.Publisher{URL: url, Client: anchor.Client(time.Minute), Records: records,
 		Timestamp: mgr.Timestamp, AuthorityTime: mgr.AuthorityTime, Log: log}
+	if as.signer != nil {
+		p.Signer, p.AnchorKey = as.signer, as.spki
+	} else {
+		p.Anchor = as.anc
+	}
+	return p
 }
 
 // recordKinds is every kind the service vault stores.

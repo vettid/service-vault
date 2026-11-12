@@ -148,7 +148,7 @@ describe('compute', () => {
     const c = container();
     const env = Object.fromEntries(c.Environment.map((e: any) => [e.Name, e.Value]));
     expect(Object.keys(env).sort()).toEqual(
-      ['AWS_REGION', 'SV_BALLOTS_TABLE', 'SV_CHANNEL', 'SV_KMS_KEY_ID', 'SV_LISTEN', 'SV_RELAY_URL', 'SV_SERVICE_NAME', 'SV_SIGSTORE', 'SV_TABLE', 'SV_TLS_NAME', 'SV_TLS_PIN_PARAM', 'SV_WEBHOOK_URL'],
+      ['AWS_REGION', 'SV_ANCHOR_MOVED_PARAM', 'SV_BALLOTS_TABLE', 'SV_CHANNEL', 'SV_KMS_KEY_ID', 'SV_LISTEN', 'SV_RELAY_URL', 'SV_SERVICE_NAME', 'SV_SIGSTORE', 'SV_TABLE', 'SV_TLS_NAME', 'SV_TLS_PIN_PARAM', 'SV_WEBHOOK_URL'],
     );
     expect(env.SV_RELAY_URL).toBe('https://relay.vettid.org');
     expect(env.SV_SIGSTORE).toBe('staging'); // the test stack's envName is not prod
@@ -305,12 +305,16 @@ describe('data', () => {
     expect(kmsStatements[0].Resource).toEqual({ 'Fn::GetAtt': [keyId, 'Arn'] });
   });
 
-  test('task role: only ssm:PutParameter, on the TLS pin parameter', () => {
+  test('task role: ssm:PutParameter only on the TLS pin, ssm:GetParameter only on the anchor marker', () => {
     const paramId = Object.keys(t.findResources('AWS::SSM::Parameter'))[0];
     const ssmStatements = taskRoleStatements().filter((s) => asList(s.Action).some((a: string) => a.startsWith('ssm:')));
-    expect(ssmStatements).toHaveLength(1);
-    expect(asList(ssmStatements[0].Action)).toEqual(['ssm:PutParameter']);
-    expect(JSON.stringify(ssmStatements[0].Resource)).toContain(paramId);
+    expect(ssmStatements).toHaveLength(2);
+    const put = ssmStatements.find((x) => asList(x.Action).includes('ssm:PutParameter'));
+    expect(asList(put.Action)).toEqual(['ssm:PutParameter']);
+    expect(JSON.stringify(put.Resource)).toContain(paramId);
+    const get = ssmStatements.find((x) => x.Sid === 'ReadAnchorMovedMarker');
+    expect(asList(get.Action)).toEqual(['ssm:GetParameter']);
+    expect(JSON.stringify(get.Resource)).toContain(`parameter${ssmPrefix('test')}/anchor_key_moved`);
   });
 
   test('the API client\'s values are published in SSM under the env prefix', () => {
@@ -569,7 +573,7 @@ describe('alarms', () => {
       t.resourceCountIs('AWS::Logs::ResourcePolicy', 1);
       t.hasResourceProperties('AWS::Logs::ResourcePolicy', { PolicyName: 'vettid-service-vault-test-security-events' });
       expect(s(Object.values<any>(t.findResources('AWS::Logs::ResourcePolicy'))[0].Properties.PolicyDocument)).toContain('ArnEquals');
-      expect(taskRoleStatements().map((st: any) => st.Sid)).toEqual(['Table', 'Ballots', 'KeystoreKey', 'PublishTlsPin']);
+      expect(taskRoleStatements().map((st: any) => st.Sid)).toEqual(['Table', 'Ballots', 'KeystoreKey', 'ReadAnchorMovedMarker', 'PublishTlsPin']);
     });
   });
 

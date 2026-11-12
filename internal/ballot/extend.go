@@ -37,6 +37,22 @@ type BundleSource interface {
 	StoredBundle(ctx context.Context, doc []byte) (json.RawMessage, error)
 }
 
+// AttemptSource says whether a document was ever sent to be anchored,
+// even if no bundle came back: with the anchor signer (key protection,
+// GC #7406), a lost answer leaves a document the signer may have signed
+// and published, so it is asked again, never taken as never anchored.
+type AttemptSource interface {
+	Attempted(ctx context.Context, doc []byte) (bool, error)
+}
+
+// attempted is bs's Attempted, or false for a source without it.
+func attempted(ctx context.Context, bs BundleSource, doc []byte) (bool, error) {
+	if a, ok := bs.(AttemptSource); ok {
+		return a.Attempted(ctx, doc)
+	}
+	return false, nil
+}
+
 // ErrPublishRefused is the site refusing a document with a code it gave:
 // no retry changes it.
 type ErrPublishRefused struct {

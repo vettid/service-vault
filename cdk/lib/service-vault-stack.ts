@@ -67,6 +67,13 @@ export { KEY_ADMIN_ACTIONS } from './kms-actions';
  */
 export const ssmPrefix = (envName: string) => `/vettid/service-vault/${envName}`;
 
+/**
+ * The marker that the anchor key has moved to the AnchorSigner (key
+ * protection, GC #7406 §7 step 1): created by the owner at the cutover,
+ * never by this stack; the task reads it.
+ */
+export const anchorMovedParameterName = (envName: string) => `${ssmPrefix(envName)}/anchor_key_moved`;
+
 /** The parameters published for the API client (besides tls-pin). */
 export const CLIENT_PARAMS = [
   'vpc-id',
@@ -101,6 +108,12 @@ export const ALARMS = {
   results_stamped_early: 'A vote\'s results were timestamped before their close: the service\'s clock is more than a minute ahead of the timestamp authority\'s. They are not published; check both clocks (the task\'s and the authority\'s), then close again (POST /v1/proposals/{id}/close) (README "results_stamped_early")',
   /** The results' bundle failed its timestamp check (internal/publish/publish.go): not published. */
   results_bundle_unverified: 'A vote\'s results bundle failed its timestamp check (TSA signature, trusted root or validity): the results are not published; look at the ERROR line, then close again (README "results_bundle_unverified")',
+  /** The anchor signer doesn't answer the background probe (cmd/service-vault anchorsource.go): documents wait, calls are retried. */
+  anchor_signer_unavailable: 'The anchor signer does not answer the service\'s probe: documents are not published until it does (calls fail and are retried); sign-ins and approvals go on. Check the signer (its account\'s alarms) and the invoke permission (README "anchor_signer_unavailable")',
+  /** The anchor signer answered under a key other than the one listed (internal/publish/signer.go): nothing is kept from that answer. */
+  anchor_key_changed: 'The anchor signer answered under another anchor key than the pinned one (SV_ANCHOR_KEY): nothing from that answer is used. Treat it as a security event: check the signer account and its key (README "anchor_key_changed")',
+  /** The signer returned a bundle not signed by the pinned key over the document (internal/publish/signer.go): not kept. */
+  signer_bundle_unverified: 'The anchor signer returned a bundle whose signature is not the pinned anchor key\'s over the document: it is not kept, and the document is not taken as published. Treat it as a security event (README "signer_bundle_unverified")',
   /** A stored ballot failed the count's re-check and was left out (internal/ballot/close.go): the results may differ from what members were told. */
   ballot_not_counted: 'A stored ballot was not counted: it failed the count\'s re-check (tag, credential signature or time); look at the ERROR line for the proposal and tag',
   /** An admin's governance key can't be pinned yet: the peer doesn't know the admin's connection (internal/approval/approval.go, a WARN, at most hourly per admin). Until it can, that admin's governance approvals don't count. */
@@ -212,6 +225,14 @@ export interface ServiceVaultStackProps extends cdk.StackProps {
    * the signer account. Left out, the task anchors as before.
    */
   readonly anchorSignerFunctionArn?: string;
+  /**
+   * The anchor key, pinned: its SubjectPublicKeyInfo (DER) in standard
+   * base64 (SV_ANCHOR_KEY). Required with anchorSignerFunctionArn: the
+   * service certifies and lists only this key, and checks every answer
+   * and bundle of the signer against it. The owner takes it from the
+   * signer account (`aws kms get-public-key` on the key's alias).
+   */
+  readonly anchorKeySpki?: string;
 }
 
 /**
@@ -503,10 +524,27 @@ export class ServiceVaultStack extends cdk.Stack {
       if (props.anchorSignerFunctionArn.split(':')[4] === this.account) {
         throw new Error('anchorSignerFunctionArn must be in the signer account, not in this one');
       }
+      if (!props.votesUrl) {
+        throw new Error('anchorSignerFunctionArn needs votesUrl: the signer publishes to the votes site');
+      }
+      if (!props.anchorKeySpki || !/^MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE[A-Za-z0-9+/]{86}==$/.test(props.anchorKeySpki)) {
+        throw new Error('anchorSignerFunctionArn needs anchorKeySpki: the P-256 anchor key\'s SPKI in standard base64 (the key is pinned, never learned from the signer)');
+      }
       taskDef.taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
         sid: 'InvokeAnchorSigner', actions: ['lambda:InvokeFunction'], resources: [props.anchorSignerFunctionArn],
       }));
     }
+    // The marker that the anchor key has moved to the signer
+    // (SV_ANCHOR_MOVED_PARAM; GC #7406 §7 step 1). The owner creates it at
+    // the cutover (the runbook); this stack never does, and the task may
+    // read it but never write or delete it. Once it exists, the daemon
+    // refuses to start without the signer.
+    const anchorMovedParam = anchorMovedParameterName(envName);
+    taskDef.taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
+      sid: 'ReadAnchorMovedMarker',
+      actions: ['ssm:GetParameter'],
+      resources: [cdk.Arn.format({ service: 'ssm', resource: 'parameter', resourceName: anchorMovedParam.slice(1) }, this)],
+    }));
     taskDef.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: 'PublishTlsPin',
@@ -551,6 +589,8 @@ export class ServiceVaultStack extends cdk.Stack {
         // (BALLOT-PROTOCOL §3.3; owner decision 2026-10-29).
         SV_SIGSTORE: envName === 'prod' ? 'production' : 'staging',
         ...(props.votesUrl ? { SV_VOTES_URL: props.votesUrl } : {}),
+        ...(props.anchorSignerFunctionArn ? { SV_ANCHOR_SIGNER: props.anchorSignerFunctionArn, SV_ANCHOR_KEY: props.anchorKeySpki! } : {}),
+        SV_ANCHOR_MOVED_PARAM: anchorMovedParam,
         SV_KMS_KEY_ID: this.key.keyArn,
         SV_LISTEN: `:${API_PORT}`,
         SV_WEBHOOK_URL: props.webhookUrl,

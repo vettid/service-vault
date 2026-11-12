@@ -3,32 +3,21 @@ package keystore
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/x509"
 	"errors"
 )
 
 // AnchorKeyName is the record holding the service's anchor key
 // (BALLOT-PROTOCOL §3.3): the long-lived ECDSA P-256 key every vote
-// document is anchored in Rekor under.
+// document is anchored in Rekor under. Release builds only ever open it;
+// a new one is made by devsigner builds alone (NewAnchorKey; key
+// protection, GC #7406 §7 step 1), and the anchor signer holds the key in
+// KMS.
 const AnchorKeyName = "anchor-key"
 
 // AnchorKey is the anchor key as the keystore keeps it.
 type AnchorKey struct {
 	PKCS8 []byte `json:"pkcs8"`
-}
-
-// NewAnchorKey makes a fresh P-256 key.
-func NewAnchorKey() (*AnchorKey, error) {
-	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, err
-	}
-	der, err := x509.MarshalPKCS8PrivateKey(k)
-	if err != nil {
-		return nil, err
-	}
-	return &AnchorKey{PKCS8: der}, nil
 }
 
 // Private returns the key, refusing anything but P-256.
