@@ -105,6 +105,8 @@ export const ALARMS = {
   pre29_ended: 'Connections made before release 29 were ended at start (one line with the count): their members must connect again from new invitations; expected once, at the first start of the release-29 version (README "pre29_ended")',
   /** Every connection was ended by the one-shot SV_END_ALL_CONNECTIONS (internal/peer/pre29.go). */
   connections_ended: 'Every connection was ended at start by SV_END_ALL_CONNECTIONS (the runbook step after a rollback across the release-29 marker): the members must connect again; unset it with the next deploy (README "Rolling back")',
+  /** SV_END_ALL_CONNECTIONS names a date that already ran (internal/peer/pre29.go): nothing was ended. */
+  end_all_reused: 'SV_END_ALL_CONNECTIONS names a date that already ran, so nothing was ended at this start: if the runbook step was meant, deploy again with a date not used before; otherwise unset it (README "Rolling back across release 29")',
   /** A webhook was given up after the outbox's MaxAge (internal/webhook/outbox.go): the application missed an event. */
   webhook_dropped: 'A webhook was dropped as undeliverable after 24 h: the application missed an event',
   /** A stored outgoing hs.init names another identity key than the service's (internal/peer/state.go): dropped at start. */

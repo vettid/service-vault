@@ -427,8 +427,14 @@ func (s *Service) Deliver(ctx context.Context, e *peer.Event) error {
 	switch e.Type {
 	case peer.EventConnectionPending:
 		data = map[string]string{"invite_id": e.InviteID, "sas": e.SAS, "name": e.Name}
-	case peer.EventConnectionDeclined, peer.EventConnectionExpired:
+	case peer.EventConnectionDeclined:
 		data = map[string]string{"invite_id": e.InviteID}
+	case peer.EventConnectionExpired:
+		m := map[string]string{"invite_id": e.InviteID}
+		if e.Reason != "" {
+			m["reason"] = e.Reason // pre29 | ended_all (RELEASE-29 §11): a claim ended at a start
+		}
+		data = m
 	case peer.EventConnectionRemoved:
 		m := map[string]string{"direction": e.Direction}
 		if e.Reason != "" {

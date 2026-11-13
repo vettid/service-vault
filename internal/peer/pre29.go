@@ -29,26 +29,78 @@ const RemovedPre29 = "pre29"
 // gives the count. Invitations are not ended: one claimed later makes a
 // connection under these rules.
 func (p *Peer) endPre29(ctx context.Context, now time.Time) error {
-	var old []*Connection
-	for _, c := range p.conns {
-		// A record from a later release (above 29, after a rollback to
-		// this one) is kept: its rules include these.
-		if c.MessagingRelease < MessagingRelease {
-			old = append(old, c)
-		}
-	}
-	if len(old) == 0 {
-		return nil
-	}
-	sort.Slice(old, func(i, j int) bool { return old[i].ID < old[j].ID })
-	for _, c := range old {
-		if err := p.endConnection(ctx, c, "connection_pre29_ended", RemovedPre29, now); err != nil {
-			return err
-		}
+	n, err := p.endEvery(ctx, func(release int) bool { return release < MessagingRelease }, "pre29_ended", RemovedPre29, now)
+	if err != nil || n == 0 {
+		return err
 	}
 	p.log().Error("connections from before release 29 ended: the members must connect again from new invitations",
-		"alarm", "pre29_ended", "count", len(old))
+		"alarm", "pre29_ended", "count", n)
 	return nil
+}
+
+// endEvery ends, at a start, every connection, request (a connection
+// between hs.fin and activation) and first contact's awaiting whose marker
+// end selects: connections as endConnection does; requests and awaitings
+// with their tokens denied and their invitation ended (connection.expired
+// with the reason, for a request or an awaiting whose invitation the
+// application knows). Each is stored in two writes, the record's deletion
+// last. It returns how many it ended.
+func (p *Peer) endEvery(ctx context.Context, end func(release int) bool, audit, reason string, now time.Time) (int, error) {
+	var conns, reqs, aws []string
+	for id, c := range p.conns {
+		if end(c.MessagingRelease) {
+			conns = append(conns, id)
+		}
+	}
+	for id, r := range p.requests {
+		if end(r.MessagingRelease) {
+			reqs = append(reqs, id)
+		}
+	}
+	for id, aw := range p.awaiting {
+		if aw.New != nil && end(aw.MessagingRelease) {
+			aws = append(aws, id)
+		}
+	}
+	sort.Strings(conns)
+	sort.Strings(reqs)
+	sort.Strings(aws)
+	for _, id := range conns {
+		if c := p.conns[id]; c != nil {
+			if err := p.endConnection(ctx, c, "connection_"+audit, reason, now); err != nil {
+				return 0, err
+			}
+		}
+	}
+	for _, id := range reqs {
+		r := p.requests[id]
+		if r == nil {
+			continue
+		}
+		err := p.endInTwoWrites(ctx, key{kindRequest, id}, func() {
+			p.audit("request_"+audit, id)
+			p.dropRequest(r, now)
+			p.endInvite(r.InviteID, InviteExpired, now)
+			p.emit(&Event{Type: EventConnectionExpired, ConnectionID: r.ID, InviteID: r.InviteID, Reason: reason}, now)
+		})
+		if err != nil {
+			return 0, err
+		}
+	}
+	for _, id := range aws {
+		aw := p.awaiting[id]
+		if aw == nil {
+			continue
+		}
+		err := p.endInTwoWrites(ctx, key{kindAwait, id}, func() {
+			p.audit("awaiting_"+audit, aw.ConnID)
+			p.dropAwaiting(id, now) // its tokens denied, its invitation ended
+		})
+		if err != nil {
+			return 0, err
+		}
+	}
+	return len(conns) + len(reqs) + len(aws), nil
 }
 
 // endConnection ends one connection at a start (endPre29, endAllOnce) and
@@ -61,15 +113,26 @@ func (p *Peer) endPre29(ctx context.Context, now time.Time) error {
 // tokens were never denied; this way, a write that fails leaves the record
 // in place, and the next start ends that connection again.
 func (p *Peer) endConnection(ctx context.Context, c *Connection, audit, reason string, now time.Time) error {
-	p.audit(audit, c.ID)
-	p.removeConnectionFor(c, "out", reason, now)
-	k := key{kindConn, c.ID}
-	_, conn := p.dirty[k]
+	return p.endInTwoWrites(ctx, key{kindConn, c.ID}, func() {
+		p.audit(audit, c.ID)
+		p.removeConnectionFor(c, "out", reason, now)
+	})
+}
+
+// endInTwoWrites runs end, then stores what it changed in two writes: all
+// but record k first, k (its deletion) last. A write that fails leaves k,
+// so the next start ends it again. If a start stops between the two
+// writes, that next start repeats the notice to the member and the
+// application's event (README: applications treat a repeated
+// connection.removed or connection.expired as one).
+func (p *Peer) endInTwoWrites(ctx context.Context, k key, end func()) error {
+	end()
+	_, rec := p.dirty[k]
 	delete(p.dirty, k)
 	if err := p.flush(ctx); err != nil {
 		return err
 	}
-	if conn {
+	if rec {
 		p.markDirty(k.kind, k.id)
 	}
 	return p.flush(ctx)
@@ -101,25 +164,22 @@ func (p *Peer) endAllOnce(ctx context.Context, now time.Time) error {
 		return err
 	}
 	if ran {
-		p.log().Warn("EndAllConnections already ran for this date: nothing done; unset it", "date", date)
+		// The date identifies one run: a date used before does nothing. The
+		// operator meant a run, so this is an alarm, not a note.
+		p.log().Error("SV_END_ALL_CONNECTIONS names a date that already ran: nothing was ended; use a date not used before, or unset it",
+			"alarm", "end_all_reused", "date", date)
 		return nil
 	}
-	var all []*Connection
-	for _, c := range p.conns {
-		all = append(all, c)
+	n, err := p.endEvery(ctx, func(int) bool { return true }, "ended_all", RemovedEndAll, now)
+	if err != nil {
+		return err // the run is not recorded: the next start ends the rest
 	}
-	sort.Slice(all, func(i, j int) bool { return all[i].ID < all[j].ID })
-	for _, c := range all {
-		if err := p.endConnection(ctx, c, "connection_ended_all", RemovedEndAll, now); err != nil {
-			return err // the run is not recorded: the next start ends the rest
-		}
-	}
-	rec, _ := json.Marshal(map[string]any{"date": date, "at": now.UTC(), "count": len(all)})
+	rec, _ := json.Marshal(map[string]any{"date": date, "at": now.UTC(), "count": n})
 	p.mark(kindOnce, id, rec, time.Time{})
 	if err := p.flush(ctx); err != nil { // recorded once every connection is ended
 		return err
 	}
 	p.log().Error("every connection ended by EndAllConnections: the members must connect again from new invitations",
-		"alarm", "connections_ended", "date", date, "count", len(all))
+		"alarm", "connections_ended", "date", date, "count", n)
 	return nil
 }

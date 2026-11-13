@@ -262,8 +262,9 @@ invitations.
   vouches for the connection's other records too (its handshakes,
   tokens and outbox entries, stored as separate kinds).
 - **Records without it.** At every start, right after the state is
-  loaded and before any reconnect (a restore's included), housekeeping,
-  drain or any other write, the service ends every
+  loaded (the load's own clean-up of expired handshakes of ours comes
+  first) and before any reconnect (a restore's included), housekeeping
+  or drain, the service ends every
   connection record that lacks the marker or holds a value below 29: it
   sends the member `connection.removed` (best effort), revokes every
   token it issued for the connection (its relay registrations), audits
@@ -272,14 +273,22 @@ invitations.
   it from an operator's removal and invite the member again), and logs
   one alarm with the count. Its stored handshakes and tokens end with
   it, and its waiting messages end audited `drop.undelivered_removed`. Running it at every start covers a point-in-time
-  restore of older records.
+  restore of older records. (Lead's decision, GC #10114.) The marker is
+  also written on a claim's records, a request (a connection between
+  `hs.fin` and activation) and a first contact's answer awaiting
+  `hs.fin`; one without it is ended the same way, its tokens revoked,
+  its invitation ended as expired (the application's
+  `connection.expired` carries the reason), so that a handshake begun
+  under an older version never becomes a connection under this one.
+  Each record ends in two writes, its deletion last, so a failed write
+  leaves it to the next start.
 - **A rollback** to a version before the fourth change is an operator
   step that ends every connection first (runbook): code from before the
   marker could otherwise write records under a connection that still
   carries it. The deployment's circuit breaker can roll a failed deploy
   back by itself, so the fourth change adds the runbook step: after a
   `deploy_failed` rollback across the fourth change, end every
-  connection before deploying forward. (Owner decision a, GC #10082:
+  connection before deploying forward (and every claim, as above). (Owner decision a, GC #10082:
   the operator does so with a one-shot setting, `SV_END_ALL_CONNECTIONS`
   set to a date, which ends every connection as this section ends a
   record without the marker, with the reason `ended_all`, records that
@@ -488,7 +497,8 @@ separately. The README's release-29 status paragraph shrinks with each.
 ## Changes
 
 - **0.9.0 (2026-11-13):** §11, the runbook step's one-shot setting
-  (owner decision a, GC #10082); §14 item 4c is built.
+  (owner decision a, GC #10082); claims carry the marker and are ended
+  too (lead's decision, GC #10114); §14 item 4c is built.
 - **0.8.0 (2026-11-13):** §14 item 4 in three parts: 4b (the demotion
   rules, K2's demotion, K9, X4's refused-reconnect links) is built; the
   marker and the end of older records (section 11, U1) move to 4c; §13,

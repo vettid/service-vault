@@ -248,12 +248,15 @@ type InviteRecord struct {
 
 // awaiting is a handshake we answered with hs.resp, awaiting hs.fin.
 type awaiting struct {
-	ID       string            `json:"id"`
-	ConnID   string            `json:"conn_id"` // the connection it is for (new or existing)
-	New      *peerInfo         `json:"new,omitempty"`
-	Purpose  handshake.Purpose `json:"purpose"`
-	InviteID string            `json:"invite_id,omitempty"`
-	Held     HeldToken         `json:"held"` // the peer's token from hs.init
+	ID string `json:"id"`
+	// MessagingRelease: the marker (RELEASE-29 §11), as on a connection: a
+	// first contact's awaiting without it is ended at start.
+	MessagingRelease int               `json:"messaging_release,omitempty"`
+	ConnID           string            `json:"conn_id"` // the connection it is for (new or existing)
+	New              *peerInfo         `json:"new,omitempty"`
+	Purpose          handshake.Purpose `json:"purpose"`
+	InviteID         string            `json:"invite_id,omitempty"`
+	Held             HeldToken         `json:"held"` // the peer's token from hs.init
 	// Th1 identifies the hs.init answered, so that a copy of it (an
 	// outbox retry re-deposits the same bytes) is not answered twice.
 	Th1     []byte                   `json:"th1,omitempty"`
@@ -333,18 +336,21 @@ func (f *pendingFollow) parse() (ed25519.PublicKey, *suite.PublicKey, []*handsha
 // request is a first-contact connection after hs.fin, before activation
 // (§6.4, 0.10.3).
 type request struct {
-	ID           string               `json:"id"` // the connection's id
-	InviteID     string               `json:"invite_id"`
-	Peer         peerInfo             `json:"peer"`
-	SAS          string               `json:"sas"`
-	Epoch        handshake.EpochState `json:"epoch"`
-	Approved     bool                 `json:"approved"`
-	PeerApproved bool                 `json:"peer_approved"`
-	HeldRequest  HeldToken            `json:"held_request"`
-	Standing     HeldToken            `json:"standing"`
-	Reconnect    HeldToken            `json:"reconnect"`
-	Created      time.Time            `json:"created"`
-	Expires      time.Time            `json:"expires"`
+	ID string `json:"id"` // the connection's id
+	// MessagingRelease: the marker (RELEASE-29 §11), as on a connection: a
+	// request without it is ended at start.
+	MessagingRelease int                  `json:"messaging_release,omitempty"`
+	InviteID         string               `json:"invite_id"`
+	Peer             peerInfo             `json:"peer"`
+	SAS              string               `json:"sas"`
+	Epoch            handshake.EpochState `json:"epoch"`
+	Approved         bool                 `json:"approved"`
+	PeerApproved     bool                 `json:"peer_approved"`
+	HeldRequest      HeldToken            `json:"held_request"`
+	Standing         HeldToken            `json:"standing"`
+	Reconnect        HeldToken            `json:"reconnect"`
+	Created          time.Time            `json:"created"`
+	Expires          time.Time            `json:"expires"`
 
 	ep *handshake.Epoch
 }
@@ -542,6 +548,7 @@ func (p *Peer) recordData(k key) ([]byte, time.Time, error) {
 			}
 			aw.Resp = s
 		}
+		aw.MessagingRelease = MessagingRelease // RELEASE-29 §11
 		v = aw
 	case kindRequest:
 		r := p.requests[k.id]
@@ -551,6 +558,7 @@ func (p *Peer) recordData(k key) ([]byte, time.Time, error) {
 		if r.ep != nil {
 			r.Epoch = r.ep.Export()
 		}
+		r.MessagingRelease = MessagingRelease // RELEASE-29 §11
 		v = r
 	case kindOutgoing:
 		og := p.outgoing[k.id]
