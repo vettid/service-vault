@@ -1,6 +1,6 @@
 # Release 29 in the service vault
 
-**Status:** 0.7.0, draft (2026-11-13). Against VAULT-MESSAGING 0.90.6.
+**Status:** 0.8.0, draft (2026-11-13). Against VAULT-MESSAGING 0.90.6.
 
 VAULT-MESSAGING §6.3.1 ("Lifetimes and activation on confirmation",
 release 29) asks a service vault to follow its rules "on either side as
@@ -372,13 +372,17 @@ best-effort notices (`connection.removed`) are not covered.
   key change re-seals what waits under the epoch it replaces, so nothing
   waits under an older one; the records from before this release are
   ended (section 11).)
-- **Held after a demotion** (§3.4.1, the fourth change): a durable
-  message made while the current epoch is demoted waits unsealed in its
-  place and is sealed when an epoch is current again. So does one
-  already sealed under the demoted epoch and not yet deposited: it goes
-  back to held; a tried one keeps its `ts`; one whose `exp` passes ends
-  `drop.held_expired`, and one that cannot be sealed ends
-  `drop.held_unsealable`.
+- **Held after a demotion** (§3.4.1, change 4b): nothing but handshake
+  messages is deposited while the current epoch is demoted (no
+  `hs.confirm` is queued, no rekey starts). A durable message made then
+  waits in its place, sealed under the demoted epoch but never deposited
+  under it (chosen; the spec says it waits unsealed: the effect is the
+  same, as the service holds that epoch's send key only to seal it again);
+  so does one sealed under it before the demotion and not yet deposited.
+  When an epoch is current again, each is sealed again under it, as at
+  any key change (section 13): a tried one keeps its `ts`; one whose
+  `exp` passes ends `drop.held_expired`, and one that cannot be sealed
+  ends `drop.held_unsealable`.
 
 ## 14. The work
 
@@ -453,29 +457,36 @@ separately. The README's release-29 status paragraph shrinks with each.
    reconnects of section 3 item 9; epochs abandoned while pending at the
    member's `identity.rotate`; the links of a refused reconnect still
    applied (X4's second half); messages held after a demotion (section
-   13); the marker and the end of records without it (section 11).
+   13). "Fork by `ctx`" skips an epoch demoted with its received flag
+   clear. **4c:** the marker and the end of records without it (section
+   11), with the runbook step.
 
 | Rule | Change | Rule | Change |
 |---|---|---|---|
 | G1 | 1 | R6 | 3 |
 | G2 | n/a (a device's) | X1 crossing | 2 |
-| U1 | 4 | X2 a verified `hs.fin` first | 2 |
+| U1 | 4c | X2 a verified `hs.fin` first | 2 |
 | L1 | 1 (the responder's keys), 2 (`B`, the initiator's 16 days) | X3 rule J | 2 |
-| I1 to I7 | 2 | X4 one reconnect at a time | 2; a refused reconnect's links 4 |
+| I1 to I7 | 2 | X4 one reconnect at a time | 2; a refused reconnect's links 4b |
 | R1 | done (service-vault #147), its abandonment part 2 | X5 the reconnect's `ctx` | 2 (while a reconnect is pending), 3 (the rest) |
 | R2, R3 | 1 | X6 a sealed-mode rekey refused | done (before release 29) |
 | R4 | 3 | K1 | 4a |
-| R5 rule E | 3 | K2 a pending epoch at a link | 2 |
+| R5 rule E | 3 | K2 a pending epoch at a link | 2; its demotion from the start 4b |
 | F1 | 3 | K3 | n/a (section 1) |
-| F3 | 1 | K4, K5, K7 | 4 |
+| F3 | 1 | K4, K5, K7 | 4b |
 | T1 | 3 | K6 the reconnect bound | 2 |
 | T2 items 1 to 3 | 2 | K8 | 4a |
-| T2 item 4 | 1 | K9 | 4 |
+| T2 item 4 | 1 | K9 | 4b |
 | T2 item 5 (0.88.9) | 3 | D1 to D4 | n/a (section 1) |
 | T3 `th1` mark; `hs.fin` ignored | 1 | | |
 
 ## Changes
 
+- **0.8.0 (2026-11-13):** §14 item 4 in three parts: 4b (the demotion
+  rules, K2's demotion, K9, X4's refused-reconnect links) is built; the
+  marker and the end of older records (section 11, U1) move to 4c; §13,
+  held messages wait sealed under the demoted epoch, never deposited,
+  and are sealed again at the next epoch (chosen).
 - **0.7.0 (2026-11-13):** pinned to VAULT-MESSAGING 0.90.6; §14 item 4
   in two parts: 4a (K1, K8) is built; 4b carries strict F1 at `hs.fin`
   (0.90.4) and its exclusions (0.90.6).

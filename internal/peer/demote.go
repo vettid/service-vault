@@ -372,3 +372,61 @@ func initEpochID(ep *handshake.Epoch) []byte {
 	id := ep.ID()
 	return bytes.Clone(id[:])
 }
+
+// refusedReconnectLinks is §6.6 "The links of a refused reconnect" (X4's
+// second half, 0.88.2): a member's reconnect hs.init refused only because
+// the service's own reconnect is pending still has its identity links
+// applied, in the write that refuses it, as vettid-vault does. The caller
+// made the replay, sender and second-successor checks; here the whole
+// chain must resolve from the stored key to from.ik with from.kem its last
+// new_kem, no link may be one Table B refuses (a new key that is the
+// stored key, an ancestor or one the chain passed: then none is
+// followed), and its ctx must be one that would otherwise be accepted and
+// is not fork evidence. The links are followed as an identity.rotate's
+// would be, strict F1's E being the epoch the ctx names; nothing is
+// answered, nothing restarts beside our own reconnect, and neither K9 nor
+// "Fork by ctx" is run. When following ended our pending reconnect, it is
+// started again under the new key.
+func (p *Peer) refusedReconnectLinks(c *Connection, body *handshake.Init, now time.Time) {
+	pe := c.Pending
+	if pe == nil || pe.Purpose != handshake.PurposeReconnect || len(body.Rotations) == 0 || c.State != StateActive {
+		return
+	}
+	final, kem, n, err := handshake.ResolveChainKnown(c.Peer.IK, chainOf(c), body.Rotations)
+	if err != nil || !suite.EqualPublic(final, body.From.IK) || kem == nil || body.From.KEM == nil || !kem.Equal(body.From.KEM) ||
+		n >= len(body.Rotations) {
+		return
+	}
+	links := body.Rotations[n:]
+	for _, r := range links {
+		if suite.EqualPublic(r.NewIK, c.Peer.IK) || isAncestor(c, r.NewIK) {
+			p.audit("refused_reconnect_links_none", c.ID) // all or nothing
+			return
+		}
+	}
+	if p.revisits(c, links) {
+		p.audit("refused_reconnect_links_none", c.ID)
+		return
+	}
+	c.Pending = nil
+	named, _, forkEp, ok := p.classifyCtx(c, body.Ctx, links)
+	c.Pending = pe
+	if !ok || forkEp {
+		return
+	}
+	var e []byte
+	if c.epochMeta(named) != nil {
+		e = named
+	}
+	p.followRotation(c, final, kem, links, e, false)
+	p.audit("refused_reconnect_links", c.ID)
+	if c.Pending == nil && c.State == StateActive {
+		// Following ended our pending reconnect: it starts again, under the
+		// new key (naming as reconnectTarget says).
+		if c.Reconnecting {
+			p.restartReconnect(c, now)
+		} else {
+			p.beginReconnect(c, now)
+		}
+	}
+}

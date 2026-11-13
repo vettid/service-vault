@@ -241,6 +241,7 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 	named, namedConf, forkEp, ok := p.classifyCtx(c, body.Ctx, fresh)
 	if !ok {
 		p.audit("reconnect_refused", c.ID)
+		p.refusedReconnectLinks(c, body, now) // §6.6 "The links of a refused reconnect" (X4)
 		pi.Discard()
 		return
 	}

@@ -3,12 +3,14 @@ package peer
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"testing"
 	"time"
 
 	"github.com/vettid/service-vault/internal/peer/peertest"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
+	"github.com/vettid/vettid-vault/vms/suite"
 )
 
 // sendUnder deposits a message from the member sealed under a saved epoch
@@ -356,5 +358,69 @@ func TestStrictF1AtFin(t *testing.T) {
 	}
 	if c.currentDemoted() || c.Reconnecting {
 		t.Fatal("a reconnect beside the member's handshake")
+	}
+}
+
+// §6.6 "The links of a refused reconnect" (X4): while our own reconnect is
+// pending, a member's reconnect naming another epoch is refused, but its
+// identity links are applied; following them ends our pending reconnect
+// (pinned to the old key), which starts again.
+func TestRefusedReconnectLinksApplied(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	c := f.p.conns[cid]
+	f.beginReconnectNow(cid)
+	m.Step()  // the member answers our reconnect
+	f.stepP() // our reconnect's epoch is pending
+	if !c.pendingReconnect() {
+		t.Fatal("our reconnect is not pending")
+	}
+	r := m.RotateIdentity(40, true) // A->B
+	m.Reconnect()                   // naming E1, the member's current: refused while ours is pending
+	f.stepP()
+	if !f.audited("reconnect_refused") || !f.audited("refused_reconnect_links") {
+		t.Fatal("not refused with its links applied")
+	}
+	if !suite.EqualPublic(c.Peer.IK, r.NewIK) || len(c.Chain) != 1 {
+		t.Fatalf("links not followed: chain %d", len(c.Chain))
+	}
+	if c.pendingReconnect() || !p2Outgoing(f, cid) {
+		t.Fatal("our reconnect was not started again")
+	}
+}
+
+func p2Outgoing(f *fixture, cid string) bool {
+	for _, og := range f.p.outgoing {
+		if og.ConnID == cid && og.ini != nil && og.ini.Purpose() == handshake.PurposeReconnect {
+			return true
+		}
+	}
+	return false
+}
+
+// "Fork by ctx" skips an epoch demoted with its received flag clear
+// (0.88.2): only a used epoch signed by an ancestor is evidence.
+func TestForkByCtxSkipsDemotedUnused(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	c := f.p.conns[cid]
+	orig := m.IK.Public().(ed25519.PublicKey)
+	r := m.RotateIdentity(40, true)
+	f.p.followRotation(c, r.NewIK, r.NewKEM, []*handshake.Rotation{r}, nil, false) // no position: no demotion
+	id := func(b byte) []byte { return bytes.Repeat([]byte{b}, 16) }
+	c.Epochs = []EpochMeta{{ID: id(1), Signer: orig}, {ID: id(2), Signer: orig, Demoted: true}, {ID: id(3), Signer: r.NewIK}}
+	c.Confirmed = id(3)
+	if f.p.forkEpoch(c, id(1), nil) {
+		t.Fatal("a demoted, unused epoch taken as evidence")
+	}
+	c.Epochs[1].Received = true
+	if !f.p.forkEpoch(c, id(1), nil) {
+		t.Fatal("a demoted epoch that was used is evidence")
+	}
+	c.Epochs[1].Demoted, c.Epochs[1].Received = false, false
+	if !f.p.forkEpoch(c, id(1), nil) {
+		t.Fatal("an epoch signed by an ancestor is evidence")
 	}
 }
