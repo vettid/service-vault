@@ -204,8 +204,9 @@ func TestReconnectEndsRekeyAnswers(t *testing.T) {
 	}
 }
 
-// The service advertises hs_confirm and relay_follow: in its messages'
-// inner features and in its profile.update (§10.8; RELEASE-29 §6).
+// The service advertises hs_confirm, and not relay_follow: in its
+// messages' inner features and in its profile.update (§10.8; RELEASE-29
+// §6).
 func TestFeaturesAdvertised(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
@@ -223,7 +224,7 @@ func TestFeaturesAdvertised(t *testing.T) {
 		Version  uint64   `json:"version"`
 		Features []string `json:"features"`
 	}
-	if err := json.Unmarshal(prof.Body, &b); err != nil || b.Version != 1 || !slices.Equal(b.Features, []string{"hs_confirm", "relay_follow"}) {
+	if err := json.Unmarshal(prof.Body, &b); err != nil || b.Version != 1 || !slices.Equal(b.Features, []string{"hs_confirm"}) {
 		t.Fatalf("profile.update: %s", prof.Body)
 	}
 }
@@ -442,8 +443,9 @@ func TestConfirmExemptFromOutboxBound(t *testing.T) {
 
 // A deposit refused about the attempt (timestamp_stale, replay_detected)
 // is retried, never ended; replay_detected marks it tried, and a third
-// timestamp_stale is logged once (relay_clock_stale). Another 4xx ends it,
-// audited (§8.3 case 8).
+// timestamp_stale is logged once (relay_clock_stale). token_revoked on the
+// held token ends that token, not the entry (RELEASE-29 §3 item 4).
+// Another 4xx ends it, audited (§8.3 case 8).
 func TestDepositRefusals(t *testing.T) {
 	for _, tc := range []struct {
 		code   string
@@ -455,7 +457,7 @@ func TestDepositRefusals(t *testing.T) {
 		{"replay_detected", 409, false, true},
 		{"bad_request", 400, true, false},
 		{"mailbox_unknown", 404, true, false},
-		{"token_revoked", 403, true, false},
+		{"token_revoked", 403, false, false},
 	} {
 		f := newFixture(t)
 		m := f.member(10)
@@ -549,10 +551,10 @@ func TestResealTriedKeepsTS(t *testing.T) {
 	}
 }
 
-// At the service's own rekey, waiting messages are not sealed again: its
-// hs.fin goes first, and they follow under the old epoch, which the member
-// still opens (RELEASE-29 §14: change 2 re-seals at the confirmation).
-func TestOwnRekeyLeavesWaitingUnderOldEpoch(t *testing.T) {
+// At the service's own rekey, waiting messages stay under the current
+// epoch while the new one is pending, and are sealed again under it at its
+// confirmation, the member getting each once (§6.3.1 Initiator, §8.3).
+func TestOwnRekeyWaitingSealedAtConfirmation(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
 	cid := f.connect(m, "")
@@ -560,7 +562,13 @@ func TestOwnRekeyLeavesWaitingUnderOldEpoch(t *testing.T) {
 	old := c.kr.Current()
 	f.clk.Advance(handshake.PolicyVaultToVault.MaxAge + time.Second)
 	f.tick() // our rekey hs.init goes
-	f.failDeposit = func(string, string) error { return errUnavailable }
+	mb := c.Peer.Relay.Mailbox
+	f.failDeposit = func(mailbox, _ string) error {
+		if mailbox == mb {
+			return errUnavailable
+		}
+		return nil
+	}
 	id := f.p.sendTo(c, "connection.note", []byte(`{"x":1}`), f.clk.Now())
 	var before []byte
 	for _, e := range f.p.outbox {
@@ -574,19 +582,22 @@ func TestOwnRekeyLeavesWaitingUnderOldEpoch(t *testing.T) {
 	if _, err := f.p.Step(context.Background(), 0); err != nil {
 		t.Fatal(err)
 	}
-	if epochOf(f.p.conns[cid]) == old.ID() {
-		t.Fatal("our rekey did not complete")
+	if c = f.p.conns[cid]; epochOf(c) != old.ID() || c.Pending == nil {
+		t.Fatal("our rekey's epoch is not pending")
 	}
 	kept := false
 	for _, e := range f.p.outbox {
 		kept = kept || bytes.Equal(e.Payload, before)
 	}
 	if before == nil || !kept {
-		t.Fatal("the waiting message was sealed again under our new epoch")
+		t.Fatal("the waiting message was sealed again while our epoch is pending")
 	}
 	f.failDeposit = nil
 	f.clk.Advance(time.Minute)
 	f.pump()
+	if c = f.p.conns[cid]; epochOf(c) == old.ID() || c.Pending != nil {
+		t.Fatal("our rekey was not confirmed")
+	}
 	n := 0
 	for _, g := range m.Got {
 		if g.ID == id {

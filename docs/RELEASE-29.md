@@ -1,6 +1,6 @@
 # Release 29 in the service vault
 
-**Status:** 0.4.2, draft (2026-11-12). Against VAULT-MESSAGING 0.89.2.
+**Status:** 0.5.1, draft (2026-11-13). Against VAULT-MESSAGING 0.90.1.
 
 VAULT-MESSAGING §6.3.1 ("Lifetimes and activation on confirmation",
 release 29) asks a service vault to follow its rules "on either side as
@@ -80,12 +80,13 @@ current epoch unless stated:
    token and it holds no other valid one (§8.6, 0.88.2), unless "No
    reconnect while carried tokens wait" holds. The answer ends that
    token only, not the connection: the refused entry and the others to
-   the member wait in the outbox for a valid standing token. Today the
-   service makes the connection `stale` and drops its other entries,
-   which changes with the second change (until then the refused and
-   dropped entries are audited `undelivered_refused`). A reconnect's own `hs.init`
+   the member wait in the outbox for a valid standing token. (Before
+   the second change the service made the connection `stale` and
+   dropped its other entries.) A reconnect's own `hs.init`
    answered `token_revoked` is a failed try at once, as §8.6 says (it can
-   never be answered); a carried token's refusal is not a try at all;
+   never be answered), and as the service then holds no other reconnect
+   token, the connection becomes `stale` at once (no try can start); a
+   carried token's refusal is not a try at all;
 5. after `quota_exceeded` on its standing token, at once and also while
    its own rekey is pending (which the reconnect abandons), when the
    refresh itself is refused for the token's quota, when a deposit is
@@ -101,7 +102,10 @@ current epoch unless stated:
    rekeys and reconnects under the new `ik`. A restarted reconnect spends
    one of the reconnect token's deposits, not a failed try, at most once
    per change of the member's `ik`; the change it was spent for is
-   stored, so a restart of the process does not spend another;
+   stored, so a restart of the process does not spend another. **(Chosen;
+   not in the spec)** a `relay.address.update` from the member while a
+   try's `hs.init` awaits its `hs.resp` starts that try again the same
+   way, uncounted: the `hs.init` went to the old mailbox;
 9. after a demotion of its current epoch by position, naming the newest
    epoch that has been current and is neither demoted nor destroyed
    (with none, the connection becomes `stale`); after strict F1, naming
@@ -118,7 +122,10 @@ epoch reaches `B`. A try counts as failed when it expires unanswered,
 or when its `hs.init` is answered `token_revoked` (item 4). §3.4.1 says
 a refused try counts only if it then expires unanswered, and §8.6 that
 this refusal is a failed try; the service follows §8.6, and the
-difference is flagged for an erratum. `stale` is not final (0.88.7): the outbox is kept, and the
+difference is flagged for an erratum. A new try after a pending
+epoch's `hs.fin` is refused `token_revoked` is not a failed try
+(§6.3.1); repeated, it is bounded by the reconnect token's 4 deposits,
+whose `quota_exceeded` makes the connection `stale`. `stale` is not final (0.88.7): the outbox is kept, and the
 next epoch established makes the connection active again.
 
 **While a reconnect is open** (from its first `hs.init` until it is
@@ -141,8 +148,8 @@ restore". The service applies the 7 days **per try**, from that try's
 `hs.init`, as the table does; a restore reconnect has at most 3 tries
 (§6.6). Once the service has sent `hs.fin`, the reconnect is a pending
 reconnect like any other: it ends at its confirmation, or at `B` with
-`stale` (R29-I5). (Today the 7 days run from the first try to the end;
-this changes.)
+`stale` (R29-I5). (Before the second change the 7 days ran from the first try to the
+end.)
 
 ## 5. `hs.confirm` (R29-R1 to R3)
 
@@ -170,19 +177,20 @@ this changes.)
   when it opens under the current one. No `hs.fin` ever moves the
   confirmed epoch or sets the received flag (R29-T3).
 
-## 6. Advertising `hs_confirm` and `relay_follow` (R29-G1; chosen how)
+## 6. Advertising `hs_confirm` (R29-G1; chosen how)
 
 The service advertises `hs_confirm` in the inner `features` of every
 message it deposits, and in the `features` of its `profile.update`
-(§10.8), sent when a connection becomes active. It advertises
-`relay_follow` there too: it follows a member's relay-key rotation by
-`relay.address.update` already, and §3.4 "Receivers first" expects the
-capability. The `profile.update` body is the one §10.8 gives: a
+(§10.8), sent when a connection becomes active. It does not advertise
+`relay_follow`: VAULT-MESSAGING 0.90.0 (vettid.org #584) lets a vault
+advertise it only once it implements both §3.4.1 and §3.4.2, and the
+service's §3.4.2 is later work (GC #9442). The first change advertised
+it; the second stops. The `profile.update` body is the one §10.8 gives: a
 `version` (stored per connection: 1 at activation, one more at each
 change of the profile, unchanged when an epoch is activated again; the
 service's profile cannot change yet, so it stays 1), the invitation's
 profile names, the service's `ik`, `items: []`, and `features`
-(`["hs_confirm", "relay_follow"]`, sorted).
+(`["hs_confirm"]`).
 Nothing in §6.3.1 depends on seeing `hs_confirm`, so a member that
 misses it loses nothing.
 
@@ -211,9 +219,8 @@ replaces a suspended one, as for a rotation conflict.
   member's (§6.6), its answer to the member's is kept for `L`, 16 days,
   like any answer, and no new try starts while it is open (§6.6 "After a
   restore"). When it expires unanswered, a new try starts; a try
-  abandoned before it expires is not counted. Today it waits 1 hour
-  (`YieldWait`), after which the member's `hs.fin` would find no answer
-  while the member holds that epoch pending; that changes.
+  abandoned before it expires is not counted. (Before the second change it waited 1 hour, after which the member's
+  `hs.fin` found no answer.)
 - **Rekey backoff:** a failed rekey of the service's own waits 1 hour,
   doubling to 24 hours, before the next (chosen; not in the spec). It
   holds in addition to S5's three blocks (section 1).
@@ -390,7 +397,8 @@ separately. The README's release-29 status paragraph shrinks with each.
    never for an `hs.fin`); the received flag (section 10); `hs.confirm`
    (section 5); the 48 and 16 days a responder keeps keys; "A reconnect
    ends R's rekey answers"; a rekey `hs.init` answered once (a `th1`
-   mark); advertising `hs_confirm` and `relay_follow` (section 6); the
+   mark); advertising `hs_confirm` (section 6; it also advertised
+   `relay_follow`, which the second change stops); the
    tried mark, re-sealing at the responder's activation, the check at
    deposit, and the not-delivered cases that need no other change
    (section 13).
@@ -402,7 +410,17 @@ separately. The README's release-29 status paragraph shrinks with each.
    kept for `L` (section 8); `token_revoked` ending one token; the
    handshakes a newer one ends that the initiator owns; re-sealing at the
    initiator's confirmation (section 13, with the tried mark of change
-   1).
+   1); `relay_follow` no longer advertised (section 6). The tokens of the
+   service's own reconnect's `hs.resp` are kept with its pending epoch,
+   its `hs.fin` going on the carried standing token, and adopted at its
+   confirmation (§6.3.1), so that a new try after an abandonment goes on
+   the held reconnect token; at that confirmation the service also
+   re-mints a standing and a reconnect token for the member ("The prompt
+   to adopt", §6.6), and a verified `hs.fin` of the member's ends every
+   open handshake of the service's own and settles its reconnect (X2,
+   §6.5). The rest of carried tokens is the third change's. A pending epoch
+   abandoned by a link (K2) is abandoned here; its demotion from the
+   start, which refuses messages under it, comes with the fourth.
 3. **Forks and tokens.** Rule E (section 9) and its fork evidence; a
    handshake naming the confirmed epoch; fork by `ctx`; a handshake's
    tokens adopted at confirmation, on both sides, with the refresh's
@@ -438,6 +456,15 @@ separately. The README's release-29 status paragraph shrinks with each.
 
 ## Changes
 
+- **0.5.1 (2026-11-13):** pinned to VAULT-MESSAGING 0.90.1; §3 item 4, a
+  reconnect `hs.init` refused `token_revoked` makes the connection
+  `stale` at once; §14, the prompt to adopt and X2 in the second change.
+- **0.5.0 (2026-11-12):** §6, `relay_follow` is not advertised
+  (VAULT-MESSAGING 0.90.0); §14, the service's own reconnect adopts its
+  carried tokens at confirmation in the second change; §3 item 8, a
+  `relay.address.update` restarts
+  an open try uncounted (chosen); §14, K2's demotion comes with the
+  fourth change; §3, §4 and §8 describe the second change as done.
 - **0.4.2 (2026-11-12):** §5, a waiting `hs.confirm` older than 2 days
   is replaced (chosen); §6, `version` stays 1 while the profile cannot
   change.

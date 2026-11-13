@@ -1055,7 +1055,11 @@ func TestForkJudgedAtOurReconnectRespStaysSuspended(t *testing.T) {
 		t.Fatalf("%d awaiting", len(f.p.awaiting))
 	}
 	f.failDeposit = nil
-	f.restore(f.backup(), true) // our reconnect starts and drops the waiting hs.resp; the answer stays
+	f.restore(f.backup(), true) // our reconnect starts; the answer stays
+	for _, aw := range f.p.awaiting {
+		rid := aw.RespEntry
+		f.p.dropOutbox(func(e *outboxEntry) bool { return e.ID == rid }) // its hs.resp is lost
+	}
 	var issued []string
 	for _, og := range f.p.outgoing {
 		issued = og.Issued

@@ -211,6 +211,11 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 	}
 	var eid [suite.EpochIDSize]byte
 	copy(eid[:], c.LastEpochID)
+	if c.pendingReconnect() {
+		// Having sent hs.fin for its own reconnect, the service accepts
+		// only that epoch as ctx (§6.6 "Accepting ctx", R29-X5).
+		copy(eid[:], c.Pending.ID)
+	}
 	body := pi.Init()
 	// A valid link that gives a key a second successor suspends the
 	// connection (§3.4), whatever else the hs.init carries: such a chain
@@ -273,16 +278,16 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 		// Crossing reconnects (§6.6, 0.72.1): ours yields to the member's,
 		// which names our last epoch. Ours is abandoned: no hs.fin goes
 		// out for it, a later hs.resp to it is acked and dropped, and its
-		// hs.init is dropped from the outbox if not yet deposited. The
-		// reconnect stays open until the member's hs.fin, or YieldWait.
+		// hs.init is dropped from the outbox if not yet deposited; a try
+		// abandoned so is not counted. The reconnect stays open until the
+		// member's hs.fin, or the answer's expiry (L, RELEASE-29 §8), when
+		// a new try starts.
 		for id, og := range p.outgoing {
 			if og.ConnID == c.ID && og.ini != nil && og.ini.Purpose() == handshake.PurposeReconnect {
-				og.ini.Abort()
-				for _, j := range og.Issued {
-					p.denyJTI(j, now)
+				p.dropOutgoing(id)
+				if c.ReconnectTries > 0 {
+					c.ReconnectTries--
 				}
-				delete(p.outgoing, id)
-				p.markDirty(kindOutgoing, id)
 			}
 		}
 		p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == c.ID && e.Token != "" && e.Token == c.Reconnect.Token })
@@ -297,9 +302,6 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 	id := p.newID(now)
 	th1 := pi.Th1()
 	exp := now.Add(HandshakeTTL)
-	if c.Reconnecting {
-		exp = now.Add(YieldWait)
-	}
 	p.awaiting[id] = &awaiting{ID: id, ConnID: c.ID, Purpose: handshake.PurposeReconnect, Th1: th1[:], Created: now,
 		Expires: exp, Reconnect: pend, r: resp}
 	p.markDirty(kindAwait, id)
@@ -324,11 +326,11 @@ func (p *Peer) applyReconnect(c *Connection, pend *pendingReconnect) error {
 			return errSignerMoved
 		}
 		if c.Reconnecting {
-			c.Reconnecting, c.ReconnectTries, c.ReconnectSlow, c.ReconnectSince = false, 0, false, time.Time{}
+			c.clearReconnect()
 			p.dropConnOutgoing(c)
 		}
 		if len(fresh) > 0 {
-			p.followRotation(c, ik, kem, fresh)
+			p.followRotation(c, ik, kem, fresh, false)
 		}
 		if c.State == StateSuspended {
 			return errSuspended // following judged another answer's links: a fork
@@ -364,11 +366,11 @@ func (p *Peer) applyReconnect(c *Connection, pend *pendingReconnect) error {
 		links = fresh
 	}
 	if c.Reconnecting {
-		c.Reconnecting, c.ReconnectTries, c.ReconnectSlow, c.ReconnectSince = false, 0, false, time.Time{}
+		c.clearReconnect()
 		p.dropConnOutgoing(c)
 	}
 	if len(links) > 0 {
-		p.followRotation(c, pend.IK, kem, links)
+		p.followRotation(c, pend.IK, kem, links, false)
 	}
 	if c.State == StateSuspended {
 		return errSuspended
@@ -388,6 +390,13 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 	}
 	if c.Reconnecting {
 		p.audit("rekey_while_reconnecting", c.ID) // the reconnect settles the session
+		return ackAfterFlush
+	}
+	if pe := c.Pending; pe != nil && !in.TS.After(pe.RespTS) {
+		// §6.3.1 "Crossing" (R29-X1): the member made this rekey before
+		// the hs.resp that made our pending epoch; it establishes ours at
+		// our hs.fin.
+		p.audit("rekey_crossing_dropped", c.ID)
 		return ackAfterFlush
 	}
 	pi, err := handshake.AcceptRekey(raw, in, ep, now)
@@ -414,6 +423,16 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 		pi.Discard()
 		return ackAfterFlush
 	}
+	if !c.standingValid(now) {
+		// Rule J (§6.3.1, R29-X3): an answer the service could not deposit
+		// is not made (no deposit is tried). Holding no valid standing
+		// token, the service reconnects (RELEASE-29 §3 item 6).
+		pi.Discard()
+		p.audit("rekey_answer_undepositable", c.ID)
+		p.mark(kindInner, rekeyKey(pi.Th1()), []byte{1}, now.Add(DedupeRetention+envelope.MaxClockSkewFuture))
+		p.beginReconnect(c, now)
+		return ackAfterFlush
+	}
 	// Crossing rekeys: the lower th1 wins (§6.5).
 	for id, og := range p.outgoing {
 		if og.ConnID != c.ID {
@@ -436,6 +455,12 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 	if err != nil {
 		p.audit("rekey_refused", c.ID)
 		return ackAfterFlush
+	}
+	if c.Pending != nil {
+		// A later rekey of the member's shows that its answer to ours
+		// ended without hs.fin: the pending epoch is abandoned and the
+		// rekey answered (§6.3.1 "Crossing").
+		p.abandonPending(c, "crossing", false, now)
 	}
 	id := p.newID(now)
 	th1 := pi.Th1()
@@ -542,7 +567,19 @@ func (p *Peer) handleFin(id string, raw []byte, sender ed25519.PublicKey, now ti
 			}
 		}
 	}
-	p.installEpoch(c, fr.Epoch, false, now)
+	// A verified hs.fin comes first (§6.5, §6.6, R29-X2): activating the
+	// member's handshake as responder abandons every handshake of the
+	// service's own with the member (its rekeys and reconnect awaiting
+	// hs.resp, and its pending epoch), and an open reconnect of its is
+	// settled: the session is common again, at this epoch.
+	p.dropConnOutgoing(c)
+	p.abandonPending(c, "peer_activated", false, now)
+	if c.Reconnecting {
+		c.clearReconnect()
+		p.audit("reconnect_settled_by_member", c.ID)
+	}
+	p.installEpoch(c, fr.Epoch, now)
+	p.activeAgain(c)
 	// The member's vault holds the epoch pending until a message from us
 	// opens under it (§6.3.1 Responder, R29-R1): hs.confirm, body {},
 	// never answered. A member vault from before release 29 answers it
@@ -560,32 +597,27 @@ func (p *Peer) handleFin(id string, raw []byte, sender ed25519.PublicKey, now ti
 	return ackAfterFlush
 }
 
-// installEpoch makes ep the connection's current epoch (mine: one the
-// service began). What waits in the outbox under the epoch it replaces
+// installEpoch makes ep the connection's current epoch: a first
+// contact's, or a member's rekey or reconnect the service activated as
+// responder at its verified hs.fin (the service's own epochs become
+// current at their confirmation, confirmPending). What waits in the outbox under the epoch it replaces
 // is sealed again under ep first (§8.3, resealAtKeyChange). The previous
 // epoch's send key is deleted at once and its receive key kept (§6.5);
-// when the service activates a member's epoch as responder and the
-// previous one is the confirmed epoch, that one keeps its rk too, up to
-// ConfirmedKeysFor (§6.3.1).
-func (p *Peer) installEpoch(c *Connection, ep *handshake.Epoch, mine bool, now time.Time) {
+// when the previous one is the confirmed epoch, it keeps its rk too, up
+// to ConfirmedKeysFor (§6.3.1).
+func (p *Peer) installEpoch(c *Connection, ep *handshake.Epoch, now time.Time) {
 	if c.kr == nil {
 		c.kr = &handshake.Keyring{}
 	}
-	if !mine {
-		// At a responder's activation (§8.3). At the service's own rekey
-		// or reconnect the hs.fin must precede anything in the new epoch;
-		// its waiting messages stay under the old one, which the member
-		// still opens (change 2 re-seals them at the confirmation).
-		p.resealAtKeyChange(c, ep, now)
-	}
-	if !mine && len(c.LastEpochID) > 0 && bytes.Equal(c.Confirmed, c.LastEpochID) {
+	p.resealAtKeyChange(c, ep, now)
+	if len(c.LastEpochID) > 0 && bytes.Equal(c.Confirmed, c.LastEpochID) {
 		c.kr.ActivateKeeping(ep, now, now.Add(ConfirmedKeysFor), handshake.KeepRK)
 	} else {
 		c.kr.Activate(ep, now)
 	}
 	eid := ep.ID()
 	c.LastEpochID = eid[:]
-	p.recordActivated(c, eid[:], mine, now)
+	p.recordActivated(c, eid[:], false, now)
 	if ep.Suite() > c.Suite {
 		c.Suite = ep.Suite() // §13.4 pin
 	}
@@ -695,14 +727,17 @@ func (p *Peer) startRekey(c *Connection, now time.Time) {
 	if now.Before(c.RekeyNotBefore) && c.RekeyNotBefore.Sub(now) <= RekeyBackoffMax {
 		return // a rekey of ours failed lately: backing off (a wait longer than the most: the clock went back)
 	}
+	if c.Pending != nil {
+		return // our new epoch awaits its confirmation (§6.3.1, §6.5)
+	}
 	for _, og := range p.outgoing {
 		if og.ConnID == c.ID {
 			return
 		}
 	}
 	for _, aw := range p.awaiting {
-		if aw.ConnID == c.ID && aw.Purpose == handshake.PurposeRekey {
-			return // the member's rekey is in flight
+		if aw.ConnID == c.ID && aw.New == nil {
+			return // an answer of ours awaits the member's hs.fin (§6.5, S5)
 		}
 	}
 	ini, err := handshake.NewInitiator(handshake.InitiatorConfig{
@@ -719,10 +754,13 @@ func (p *Peer) startRekey(c *Connection, now time.Time) {
 	}
 	id := p.newID(now)
 	kid, th1 := ini.EphKid(), ini.Th1()
-	p.outgoing[id] = &outgoing{ID: id, ConnID: c.ID, EphKid: kid[:], Th1: th1[:], Init: s, Created: now, ini: ini}
+	og := &outgoing{ID: id, ConnID: c.ID, EphKid: kid[:], Th1: th1[:], Init: s, Created: now, ini: ini}
+	p.outgoing[id] = og
 	p.markDirty(kindOutgoing, id)
 	p.markDirty(kindConn, c.ID) // the epoch's send count moved
-	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: ini.Envelope(), Handshake: true}, now)
+	e := &outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: ini.Envelope(), Handshake: true}
+	p.queueDeposit(e, now)
+	og.InitEntry = e.ID
 	p.log().Info("rekey started", "connection_id", c.ID)
 }
 
@@ -768,31 +806,34 @@ func (p *Peer) handleResp(id string, raw []byte, sender ed25519.PublicKey, now t
 		return ackAfterFlush
 	}
 	if len(fresh) > 0 {
-		p.followRotation(c, res.ResponderIK, res.ResponderKEM, fresh)
+		p.followRotation(c, res.ResponderIK, res.ResponderKEM, fresh, false)
 	}
 	if c.State == StateSuspended {
 		// Following judged an answer's links: a fork. No hs.fin, no epoch.
 		res.Epoch.Destroy()
 		return ackAfterFlush
 	}
-	// hs.fin goes first; what follows is sealed in the new epoch.
-	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: res.Fin, Handshake: true}, now)
-	p.installEpoch(c, res.Epoch, true, now)
-	p.log().Info("rekeyed", "connection_id", c.ID)
+	// hs.fin goes out; the new epoch is pending until the member confirms
+	// it, and the service sends in the current one until then (§6.3.1
+	// Initiator).
+	p.makePending(c, og, res, nil, now)
+	p.log().Info("rekeyed: epoch pending", "connection_id", c.ID)
 	return ackAfterFlush
 }
 
+// dropOutgoing abandons a handshake of ours awaiting hs.resp: its tokens
+// are revoked and its hs.init, if not yet deposited, is not sent. The
+// caller decides what follows for an open reconnect.
 func (p *Peer) dropOutgoing(id string) {
 	if og := p.outgoing[id]; og != nil {
-		reconnect := og.ini != nil && og.ini.Purpose() == handshake.PurposeReconnect
 		if og.ini != nil {
 			og.ini.Abort()
 		}
 		for _, j := range og.Issued {
 			p.denyJTI(j, p.now())
 		}
-		if c := p.conns[og.ConnID]; reconnect && c != nil && c.Reconnecting {
-			p.reconnectFailed(c)
+		if og.InitEntry != "" {
+			p.dropOutbox(func(e *outboxEntry) bool { return e.ID == og.InitEntry })
 		}
 	}
 	delete(p.outgoing, id)

@@ -321,6 +321,12 @@ type Member struct {
 	// (an hs.resp to a reconnect we replaced), as a vault does.
 	IgnoreStray bool
 
+	// NoConfirm stops the Member from sending hs.confirm when it activates
+	// the service's rekey or reconnect at its hs.fin (§6.3.1 Responder), as
+	// a release-29 vault does; Confirms counts those sent.
+	NoConfirm bool
+	Confirms  int
+
 	// IgnoreForeign drops a reconnect hs.init signed by another identity
 	// key than the service's, as a vault does.
 	IgnoreForeign bool
@@ -442,6 +448,10 @@ func (m *Member) handle(msg relayclient.Message) bool {
 			m.DepositTo(m.SvcReq, res.Fin)
 		case m.recon != nil && env.RecipientKid().Equal(m.recon.EphKid()):
 			res, err := m.recon.HandleResp(msg.Payload, sender, now)
+			if err != nil && m.IgnoreStray {
+				m.recon = nil // past its window: the reconnect ended, as a vault's does
+				return true
+			}
 			if err != nil {
 				m.t.Fatalf("Member: reconnect hs.resp: %v", err)
 			}
@@ -505,6 +515,10 @@ func (m *Member) handle(msg relayclient.Message) bool {
 					m.SvcStand, m.SvcRecon, m.pendTokens = m.pendTokens[0], m.pendTokens[1], [2]string{}
 				}
 				m.activate(fr.Epoch, now)
+				if !m.NoConfirm {
+					m.Confirms++
+					m.Send(handshake.TypeConfirm, []byte(`{}`))
+				}
 				return true
 			}
 		}
@@ -682,6 +696,9 @@ func (m *Member) answerReconnect(raw []byte, sender ed25519.PublicKey) {
 	m.t.Helper()
 	now := m.clk.Now()
 	pi, err := handshake.OpenInit(raw, m.ownKEM, now)
+	if err != nil && m.IgnoreStray {
+		return // an earlier try's hs.init, past its window: dropped, as a vault does
+	}
 	if err != nil {
 		m.t.Fatalf("Member: reconnect hs.init: %v", err)
 	}
@@ -829,6 +846,31 @@ func (m *Member) SendAddressUpdate(w *World, seed byte, relayURL string) {
 		m.t.Fatal(err)
 	}
 	m.sendAddress(rk.Public().(ed25519.PublicKey), relayURL, tok)
+}
+
+// SendAddressUpdateWithReconnect is SendAddressUpdate with a reconnect
+// token for the new key too.
+func (m *Member) SendAddressUpdateWithReconnect(w *World, seed byte, relayURL string) {
+	m.t.Helper()
+	rk := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed}, 32))
+	v := w.View(rk)
+	if _, err := v.Register(context.Background()); err != nil {
+		m.t.Fatal(err)
+	}
+	mint := func(ttl time.Duration) string {
+		tok, err := v.MintToken(relayauth.EncodeKey(m.svc.Relay.PK), RelayURL, relayclient.TokenOptions{TTL: ttl})
+		if err != nil {
+			m.t.Fatal(err)
+		}
+		return tok
+	}
+	pk := rk.Public().(ed25519.PublicKey)
+	body, _ := json.Marshal(map[string]any{
+		"relay":           map[string]string{"url": relayURL, "mailbox": relayauth.MailboxID(pk), "pk": base64.StdEncoding.EncodeToString(pk)},
+		"token":           mint(peerwire.StandingMax),
+		"reconnect_token": mint(300 * 24 * time.Hour),
+	})
+	m.Send("relay.address.update", body)
 }
 
 // SendAddressUpdateTo sends relay.address.update naming a key the Member

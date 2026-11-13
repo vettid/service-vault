@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"slices"
@@ -130,11 +131,18 @@ func (p *Peer) drainOutbox(ctx context.Context) {
 			}
 			continue
 		}
-		if e.Op == opDeposit && (blocked[e.Mailbox] || awaiting[e.Mailbox] && e.Token == "") {
-			continue
+		if e.Op == opDeposit && (blocked[e.Mailbox] || awaiting[e.Mailbox] && e.Token == "" && !e.Refresh) {
+			continue // a refresh passes the deposits awaiting a token (§8.4)
 		}
-		if c := p.conns[e.ConnID]; e.Op == opDeposit && e.Token == "" && c != nil && c.Reconnecting {
-			continue // nothing in the session while a reconnect is open (§6.6)
+		if c := p.conns[e.ConnID]; e.Op == opDeposit && e.Token == "" && !e.Handshake && c != nil && (c.Reconnecting || c.State == StateStale) {
+			// Nothing but the handshake while a reconnect is open (RELEASE-29
+			// §3); a stale connection's entries wait for a new epoch, which
+			// seals them again (§3.4.1: stale is not final). A held entry
+			// still ends at its exp or past its window (§8.3 cases 1, 2).
+			if !e.NotAfter.IsZero() && !now.Before(e.NotAfter) || p.heldDrop(e, now) {
+				done[e] = true
+			}
+			continue
 		}
 		if !e.NotAfter.IsZero() && !now.Before(e.NotAfter) {
 			done[e] = true
@@ -207,10 +215,12 @@ func (p *Peer) deposit(ctx context.Context, e *outboxEntry, now time.Time) (fini
 		return finished, err
 	}
 	if c := p.conns[e.ConnID]; c != nil && c.Reconnecting && e.Token == c.Reconnect.Token {
-		// Our hs.init, refused for good: dropping it ends the reconnect
-		// (dropOutgoing: reconnect_failed, the connection stale), as the
-		// reconnect token is spent and a new try on it cannot succeed.
+		// Our hs.init, refused for good (token_revoked: a failed try at
+		// once; quota_exceeded; a token or mailbox the relay no longer
+		// knows): no try can be deposited on that token, so the reconnect
+		// ends, the connection stale (§3.4.1 "The reconnect bound").
 		p.dropConnOutgoing(c)
+		p.reconnectFailed(c)
 	}
 	// The hs.resp to a member's reconnect, on the token its hs.init
 	// brought: that reconnect cannot complete.
@@ -226,8 +236,14 @@ func (p *Peer) depositOnce(ctx context.Context, e *outboxEntry, now time.Time) (
 	tok := e.Token
 	c := p.conns[e.ConnID]
 	if tok == "" {
-		if c == nil || c.Standing.Token == "" {
+		if c == nil {
 			return true, nil // the connection is gone (§7.4: its entries are deleted)
+		}
+		if c.Standing.Token == "" {
+			// No standing token held (one was revoked): the entry waits
+			// for a valid one (§8.6), which a reconnect brings.
+			e.NotBefore, e.AwaitToken = now.Add(time.Hour), true
+			return false, errNoStanding
 		}
 		tok = c.Standing.Token
 	}
@@ -253,42 +269,94 @@ func (p *Peer) depositOnce(ctx context.Context, e *outboxEntry, now time.Time) (
 	switch re.Code {
 	case codeTokenExpired:
 		if c != nil && e.Token == "" {
-			// §7.2: ask for a fresh standing token; the entry waits for it.
-			// (A reconnect, §6.6, is the member vault's to start: it holds
-			// our reconnect token.)
-			p.refreshHeld(c, now, true)
+			// The entry waits for a fresh standing token. Expired on our
+			// clock too, no refresh could be deposited: the service
+			// reconnects (§7.2, §8.6; RELEASE-29 §3 item 2), which abandons
+			// a pending rekey. Otherwise it asks for a fresh token (§7.2).
 			e.NotBefore = now.Add(time.Hour)
 			e.AwaitToken = true
 			e.Attempts++
+			if !now.Before(c.Standing.Exp) {
+				p.beginReconnect(c, now)
+			} else {
+				p.refreshHeld(c, now, true)
+			}
 			return false, err
 		}
 		return true, err
-	case codeTokenRevoked, codeMailboxUnknown:
+	case codeTokenRevoked:
+		if c != nil && e.Token == "" {
+			// §8.6 (0.88.2; RELEASE-29 §3 item 4): the held standing token
+			// is revoked. That token ends, not the connection: this entry
+			// and the others wait for a valid one, which the reconnect the
+			// service starts brings. Its pending epoch's hs.fin refused so
+			// shows that the member dropped its answer: that epoch is
+			// abandoned, and the reconnect starts at once (§6.3.1 "A
+			// carried token refused").
+			if c.Standing.Token == tok {
+				c.Standing, c.RefreshID = HeldToken{}, ""
+				p.markDirty(kindConn, c.ID)
+			}
+			p.audit("standing_token_revoked", c.ID)
+			e.NotBefore = now.Add(time.Hour)
+			e.AwaitToken = true
+			e.Attempts++
+			if c.Pending != nil && bytes.Equal(e.FinEpoch, c.Pending.ID) {
+				p.abandonPending(c, "fin_revoked", true, now)
+			} else {
+				p.beginReconnect(c, now)
+			}
+			return false, err
+		}
+		if c != nil && c.Pending != nil && len(e.FinEpoch) > 0 && bytes.Equal(e.FinEpoch, c.Pending.ID) {
+			// A reconnect's hs.fin on the hs.resp's carried token, refused:
+			// the member dropped its answer. The epoch is abandoned (its
+			// carried tokens with it) and a new try goes on the held
+			// reconnect token, not counted as failed (§6.3.1 "A carried
+			// token refused").
+			p.abandonPending(c, "fin_revoked", true, now)
+		}
+		return true, err
+	case codeMailboxUnknown:
 		// Terminal: stop sending to that mailbox (§8.6).
 		if c != nil && e.Token == "" && c.State == StateActive {
 			c.State = StateStale
 			p.markDirty(kindConn, c.ID)
 			p.audit("peer_stale", c.ID)
-			// TODO(change 2, RELEASE-29 §3 item 4): token_revoked on a
-			// held token ends that token only; the entries then wait.
-			reason := "undelivered_refused"
-			if re.Code == codeMailboxUnknown {
-				reason = "undelivered_mailbox_unknown"
-			}
-			p.dropUndelivered(c, reason, e)
-			p.auditRefused(e, reason)
+			p.dropUndelivered(c, "undelivered_mailbox_unknown", e)
+			p.auditRefused(e, "undelivered_mailbox_unknown")
 		}
 		return true, err
 	case codeQuotaExceeded:
+		if c != nil && e.Token != "" && c.Reconnecting && e.Token == c.Reconnect.Token {
+			return true, err // a try's hs.init refused for quota: the bound ends the reconnect (§3.4.1)
+		}
 		// §8.6: a quota_exceeded without its quota member (an older relay)
 		// is taken for the token's.
 		if c != nil && e.Token == "" && (re.Quota == relayclient.QuotaToken || re.Quota == "") {
-			// §8.6: the standing token's quota is spent; a fresh token
-			// cures it. Other quotas are the member mailbox's: retry later.
-			p.refreshHeld(c, now, true)
+			// §8.6 (0.88.6): the standing token's quota is spent. Before its
+			// exp a fresh token cures it: the entry waits and a refresh is
+			// asked. The refresh itself refused for the quota is not sent
+			// again, and the service reconnects at once, as it does for a
+			// deposit refused after the exp (RELEASE-29 §3 item 5); before
+			// the exp, not without a valid reconnect token (the reconnect
+			// could not start: it goes on asking). Other quotas are the
+			// member mailbox's: retry later.
+			past := !now.Before(c.Standing.Exp)
+			if e.Refresh && (past || c.reconnectValid(now)) {
+				c.RefreshID = ""
+				p.markDirty(kindConn, c.ID)
+				p.beginReconnect(c, now)
+				return true, err
+			}
 			e.NotBefore = now.Add(time.Hour)
 			e.AwaitToken = true
 			e.Attempts++
+			if past {
+				p.beginReconnect(c, now)
+			} else if !e.Refresh {
+				p.refreshHeld(c, now, true)
+			}
 			return false, err
 		}
 		return false, err
@@ -307,6 +375,9 @@ func (p *Peer) depositOnce(ctx context.Context, e *outboxEntry, now time.Time) (
 	}
 	return false, err
 }
+
+// errNoStanding: a deposit on the standing token waits, none being held.
+var errNoStanding = errors.New("peer: no standing token held")
 
 // kickEvents wakes the event loop.
 func (p *Peer) kickEvents() {

@@ -113,9 +113,9 @@ func (p *Peer) dispatch(ctx context.Context, c *Connection, in *envelope.Inner, 
 		p.audit("challenge_unsupported", c.ID)
 	case handshake.TypeConfirm:
 		// A member's vault confirms an epoch it activated as responder
-		// (§6.3.1, R29-R1): noteFromMember has moved the confirmed epoch
-		// already. The service holds no pending epoch of its own yet, so
-		// nothing more: acked, without audit, never answered.
+		// (§6.3.1, R29-R1): noteFromMember has moved the confirmed epoch,
+		// or confirmed the service's own pending epoch, already. Nothing
+		// more: acked, without audit, never answered.
 	default:
 		if isVoteType(in.Type) && p.cfg.Votes != nil {
 			if err := p.vote(ctx, c, in, ikey, msgID, now); errors.Is(err, ErrNoAnswer) {
@@ -204,9 +204,20 @@ func (p *Peer) sendTo(c *Connection, typ string, body json.RawMessage, now time.
 	return p.sendInner(c, &envelope.Inner{ID: p.newID(now), Type: typ, TS: now, Body: body}, now)
 }
 
+// While a reconnect of the service's is open the message waits in the
+// outbox (RELEASE-29 §3), and is sealed again under the reconnect's epoch
+// at its confirmation.
 func (p *Peer) sendInner(c *Connection, in *envelope.Inner, now time.Time) string {
-	if c.kr == nil || c.kr.Current() == nil || c.State != StateActive || c.Reconnecting {
+	if p.sendEntry(c, in, now) == nil {
 		return ""
+	}
+	return in.ID
+}
+
+// sendEntry is sendInner, returning the outbox entry queued (nil: none).
+func (p *Peer) sendEntry(c *Connection, in *envelope.Inner, now time.Time) *outboxEntry {
+	if c.kr == nil || c.kr.Current() == nil || c.State != StateActive {
+		return nil
 	}
 	if in.Features == nil {
 		in.Features = features() // §10.8, §6.3.1 Capability
@@ -215,15 +226,16 @@ func (p *Peer) sendInner(c *Connection, in *envelope.Inner, now time.Time) strin
 		// The member's mailbox has not taken our deposits for a while: what
 		// would pile up is dropped, not kept without bound.
 		p.audit("outbox_full", c.ID)
-		return ""
+		return nil
 	}
 	raw, err := c.kr.Current().Seal(in)
 	if err != nil {
-		return ""
+		return nil
 	}
 	p.markDirty(kindConn, c.ID) // the epoch's send count moved
-	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: raw}, now)
-	return in.ID
+	e := &outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: raw}
+	p.queueDeposit(e, now)
+	return e
 }
 
 // MaxOutboxPerConn bounds the deposits waiting for one connection
@@ -473,18 +485,36 @@ func (p *Peer) housekeeping(now time.Time) {
 	p.expireRequests(now)
 	p.expireChallenges(now)
 	for id, og := range p.outgoing {
-		if now.Sub(og.Created) >= HandshakeTTL {
-			p.rekeyFailed(og, now)
-			p.dropOutgoing(id) // an hs.resp that never came (or can no longer be accepted)
+		c := p.conns[og.ConnID]
+		reconnect := og.ini != nil && og.ini.Purpose() == handshake.PurposeReconnect
+		life := HandshakeTTL
+		if reconnect && c != nil && c.ReconnectRestore {
+			life = ReconnectTimeout // a restore's try (RELEASE-29 §4)
+		}
+		if now.Sub(og.Created) < life {
+			continue
+		}
+		p.rekeyFailed(og, now)
+		p.dropOutgoing(id) // an hs.resp that never came (or can no longer be accepted)
+		if reconnect && c != nil {
+			// A failed try: the next one, or stale after the last (§3.4.1
+			// "The reconnect bound").
+			p.audit("reconnect_try_expired", c.ID) // checkReconnect starts the next
 		}
 	}
 	for _, c := range p.conns {
+		if c.kr != nil {
+			c.kr.Prune(now)
+		}
 		if c.Reconnecting {
 			p.checkReconnect(c, now)
 			continue
 		}
 		if c.State != StateActive {
 			continue
+		}
+		if !c.standingValid(now) && p.standingWaiting(c) {
+			continue // tickPendings reconnects, after the batch
 		}
 		if c.kr != nil && c.kr.Current() != nil && c.kr.Current().NeedsRekey(now) {
 			p.startRekey(c, now)
@@ -495,9 +525,6 @@ func (p *Peer) housekeeping(now time.Time) {
 			p.markDirty(kindConn, c.ID)
 		}
 		p.refreshHeld(c, now, false)
-		if c.kr != nil {
-			c.kr.Prune(now)
-		}
 	}
 	p.remintIssued(now)
 	p.pruneIssued(now)

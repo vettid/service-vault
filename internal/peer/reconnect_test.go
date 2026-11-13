@@ -185,8 +185,10 @@ func TestReconnectResumedAfterRestart(t *testing.T) {
 	}
 }
 
-// While the reconnect is open nothing is sealed in the restored session,
-// and a member's reconnect hs.init answered once is not answered again.
+// While the reconnect is open nothing is deposited in the restored
+// session: a challenge waits, and goes under the reconnect's epoch once it
+// is confirmed (RELEASE-29 §3). A member's reconnect hs.init answered once
+// is not answered again.
 func TestReconnectWindowAndReplay(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
@@ -195,10 +197,17 @@ func TestReconnectWindowAndReplay(t *testing.T) {
 	m.StartRekey()
 	f.pump()
 	f.restore(b, true)
-	if _, err := f.p.Authenticate(context.Background(), cid, "Sign in", "", time.Minute); err == nil {
-		t.Fatal("a challenge sealed in the restored session")
+	if _, err := f.p.Authenticate(context.Background(), cid, "Sign in", "", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	f.step()
+	if len(m.Challenges) != 0 || m.Step() != 1 {
+		t.Fatal("something but the reconnect's hs.init was deposited")
 	}
 	f.pump()
+	if len(m.Challenges) != 1 {
+		t.Fatalf("%d challenges after the reconnect", len(m.Challenges))
+	}
 	if f.p.conns[cid].Reconnecting {
 		t.Fatal("reconnect not completed")
 	}
@@ -257,8 +266,9 @@ func TestReconnectSlow(t *testing.T) {
 	}
 }
 
-// A reconnect not completed in 7 days fails: the connection is stale, and
-// the member's late answer is not taken.
+// Each try of a restore's reconnect waits 7 days for its hs.resp
+// (RELEASE-29 §4); the third unanswered fails it: the connection is
+// stale, and the member's late answer is not taken.
 func TestReconnectTimeout(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
@@ -267,6 +277,13 @@ func TestReconnectTimeout(t *testing.T) {
 	m.StartRekey()
 	f.pump()
 	f.restore(b, true)
+	for try := 1; try < MaxReconnectTries; try++ {
+		f.clk.Advance(ReconnectTimeout + time.Minute)
+		f.tick()
+		if c := f.p.conns[cid]; !c.Reconnecting || c.ReconnectTries != try+1 || len(f.p.outgoing) != 1 {
+			t.Fatalf("try %d: reconnecting %v, tries %d, %d outgoing", try, c.Reconnecting, c.ReconnectTries, len(f.p.outgoing))
+		}
+	}
 	f.clk.Advance(ReconnectTimeout + time.Minute)
 	f.tick()
 	c := f.p.conns[cid]
@@ -411,8 +428,9 @@ func (f *fixture) lateRespAcked() {
 	}
 }
 
-// A member's reconnect we yielded to whose hs.fin does not come in
-// YieldWait: a new try of ours.
+// A member's reconnect we yielded to whose hs.fin does not come before
+// the answer's expiry (L, RELEASE-29 §8): a new try of ours; the try that
+// yielded is not counted.
 func TestReconnectYieldExpires(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
@@ -424,9 +442,14 @@ func TestReconnectYieldExpires(t *testing.T) {
 	if _, err := f.p.Step(context.Background(), 0); err != nil {
 		t.Fatal(err)
 	}
-	f.clk.Advance(YieldWait + time.Minute)
+	f.clk.Advance(time.Hour)
 	f.tick()
-	if c := f.p.conns[cid]; !c.Reconnecting || c.ReconnectTries != 2 || len(f.p.outgoing) != 1 || len(f.p.awaiting) != 0 {
+	if c := f.p.conns[cid]; !c.Reconnecting || c.ReconnectTries != 0 || len(f.p.outgoing) != 0 || len(f.p.awaiting) != 1 {
+		t.Fatalf("after an hour: reconnecting %v, tries %d, %d outgoing, %d awaiting", c.Reconnecting, c.ReconnectTries, len(f.p.outgoing), len(f.p.awaiting))
+	}
+	f.clk.Advance(HandshakeTTL)
+	f.tick()
+	if c := f.p.conns[cid]; !c.Reconnecting || c.ReconnectTries != 1 || len(f.p.outgoing) != 1 || len(f.p.awaiting) != 0 {
 		t.Fatalf("reconnecting %v, tries %d, %d outgoing, %d awaiting", c.Reconnecting, c.ReconnectTries, len(f.p.outgoing), len(f.p.awaiting))
 	}
 	f.pump()
@@ -473,8 +496,8 @@ func (f *fixture) respEntry(c *Connection) *outboxEntry {
 var errUnavailable = &relayclient.Error{Status: 503, Code: "unavailable"}
 
 // Two reconnects of the member while ours yields: when the first one's
-// hs.fin has not come in YieldWait, the second's is still awaited, so no
-// new try goes out (§6.6, 0.72.1); the second settles it.
+// hs.fin has not come before its expiry, the second's is still awaited,
+// so no new try goes out (§6.6, 0.72.1); the second settles it.
 func TestReconnectYieldWaitsForTheOther(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
@@ -487,10 +510,10 @@ func TestReconnectYieldWaitsForTheOther(t *testing.T) {
 	if len(f.p.awaiting) != 2 {
 		t.Fatalf("%d awaiting", len(f.p.awaiting))
 	}
-	f.clk.Advance(YieldWait - 30*time.Minute + time.Minute) // the first expires
+	f.clk.Advance(HandshakeTTL - 30*time.Minute + time.Minute) // the first expires
 	f.tick()
 	c := f.p.conns[cid]
-	if !c.Reconnecting || len(f.p.outgoing) != 0 || len(f.p.awaiting) != 1 || c.ReconnectTries != 1 {
+	if !c.Reconnecting || len(f.p.outgoing) != 0 || len(f.p.awaiting) != 1 || c.ReconnectTries != 0 {
 		t.Fatalf("reconnecting %v, %d outgoing, %d awaiting, tries %d", c.Reconnecting, len(f.p.outgoing), len(f.p.awaiting), c.ReconnectTries)
 	}
 	f.pump()
@@ -551,12 +574,12 @@ func TestReconnectYieldExpiresDropsItsResp(t *testing.T) {
 	if resp == nil {
 		t.Fatal("no hs.resp waiting")
 	}
-	f.clk.Advance(YieldWait + time.Minute)
+	f.clk.Advance(HandshakeTTL + time.Minute)
 	f.tick()
 	if f.respEntry(f.p.conns[cid]) != nil && f.respEntry(f.p.conns[cid]).Token == resp.Token {
 		t.Fatal("the hs.resp of the expired handshake is still queued")
 	}
-	if c = f.p.conns[cid]; c.ReconnectTries != 2 || len(f.p.outgoing) != 1 {
+	if c = f.p.conns[cid]; c.ReconnectTries != 1 || len(f.p.outgoing) != 1 {
 		t.Fatalf("tries %d, %d outgoing", c.ReconnectTries, len(f.p.outgoing))
 	}
 	f.failDeposit = nil
@@ -592,8 +615,8 @@ func TestOutboxChangedDuringDrain(t *testing.T) {
 	if f.respEntry(c) == nil {
 		t.Fatal("no hs.resp waiting")
 	}
-	// Behind it: session messages (dropped by the new try) and an entry
-	// the try leaves alone.
+	// Behind it: session messages (held while the reconnect is open) and
+	// an entry the try leaves alone.
 	now := f.clk.Now()
 	for i := range 6 {
 		f.p.queueDeposit(&outboxEntry{ConnID: cid, Mailbox: mb, Payload: []byte{byte(i)}}, now)
@@ -608,7 +631,7 @@ func TestOutboxChangedDuringDrain(t *testing.T) {
 	if n := f.revokes["jti-x"]; n != 1 {
 		t.Fatalf("the entry behind was sent %d times", n)
 	}
-	if c = f.p.conns[cid]; c.ReconnectTries != 2 || len(f.p.outgoing) != 1 || len(f.p.awaiting) != 0 {
+	if c = f.p.conns[cid]; c.ReconnectTries != 1 || len(f.p.outgoing) != 1 || len(f.p.awaiting) != 0 {
 		t.Fatalf("tries %d, %d outgoing, %d awaiting", c.ReconnectTries, len(f.p.outgoing), len(f.p.awaiting))
 	}
 }

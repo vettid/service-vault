@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
@@ -75,7 +76,7 @@ func (p *Peer) identityRotate(c *Connection, body []byte, now time.Time) {
 		p.audit("bad_rotation", c.ID)
 		return
 	}
-	p.followRotation(c, final, kem, []*handshake.Rotation{r})
+	p.followRotation(c, final, kem, []*handshake.Rotation{r}, true)
 }
 
 // revisits reports whether following links would lead the connection's
@@ -99,8 +100,10 @@ func (p *Peer) revisits(c *Connection, links []*handshake.Rotation) bool {
 }
 
 // followRotation records links the connection's identity advanced through
-// and its new keys.
-func (p *Peer) followRotation(c *Connection, ik ed25519.PublicKey, kem *suite.PublicKey, links []*handshake.Rotation) {
+// and its new keys. restart is set when the links came in an
+// identity.rotate: only then is an open reconnect of ours started again
+// (a handshake's own links make the change it completes).
+func (p *Peer) followRotation(c *Connection, ik ed25519.PublicKey, kem *suite.PublicKey, links []*handshake.Rotation, restart bool) {
 	c.Peer.IK = ik
 	if kem != nil {
 		c.Peer.KEM = kem.Bytes()
@@ -113,9 +116,25 @@ func (p *Peer) followRotation(c *Connection, ik ed25519.PublicKey, kem *suite.Pu
 		// still in use; the chain a peer may send is at most this long.
 		c.Chain = c.Chain[len(c.Chain)-handshake.MaxRotations:]
 	}
+	// §3.4.1 H5: the service's open handshakes pinned to the member's
+	// previous ik are abandoned: its rekeys and reconnect awaiting hs.resp,
+	// and its pending epoch ("Pending epochs at a link", R29-K2). Its open
+	// reconnect starts again under the new ik, spending a deposit but not a
+	// try, at most once per change (RELEASE-29 §3 item 8); its rekeys
+	// start again when the epoch next needs one. Then its answers whose
+	// signer the links no longer reach are dropped.
+	now := p.now()
+	// Only a try of ours is restarted; a member's reconnect we yielded to
+	// is not ours to start again.
+	ownTry := restart && c.Reconnecting && (p.outgoingReconnect(c) || c.pendingReconnect())
 	p.dropConnOutgoing(c)
-	p.dropStaleAnswers(c)
+	p.abandonPending(c, "link", false, now)
 	p.markDirty(kindConn, c.ID)
+	if ownTry && c.State != StateSuspended && !suite.EqualPublic(c.ReconnectRestartIK, ik) {
+		c.ReconnectRestartIK = bytes.Clone(ik)
+		p.restartReconnect(c, now)
+	}
+	p.dropStaleAnswers(c)
 	p.log().Info("member identity rotated", "connection_id", c.ID)
 }
 
@@ -202,7 +221,7 @@ func (p *Peer) followAtFin(c *Connection, f *pendingFollow, now time.Time) bool 
 		return false
 	}
 	if len(fresh) > 0 {
-		p.followRotation(c, ik, kem, fresh)
+		p.followRotation(c, ik, kem, fresh, false)
 	}
 	return c.State != StateSuspended // following judged another answer's links
 }
@@ -283,6 +302,8 @@ func (p *Peer) suspend(c *Connection, now time.Time) {
 	c.State = StateSuspended
 	p.dropUndelivered(c, "undelivered_suspended", nil)
 	p.dropConnOutgoing(c)
+	p.abandonPending(c, "suspended", false, now)
+	p.reconnectFailed(c) // ended by the suspension: no reconnect_failed
 	for id, aw := range p.awaiting {
 		if aw.ConnID == c.ID {
 			p.dropAwaiting(id, now) // and revokes a pending reconnect's tokens
@@ -379,7 +400,21 @@ func (p *Peer) relayAddressUpdate(c *Connection, sender ed25519.PublicKey, body 
 	p.log().Info("member relay address updated", "connection_id", c.ID)
 	// Tokens we issued for the old key stop at the relay's grace; issue
 	// fresh ones for the new key, which also acknowledges the update.
-	p.dropConnOutgoing(c)
+	if rc := p.outgoingReconnect(c); rc && rt.Token == "" {
+		// No reconnect token for the new mailbox: the try's hs.init, made
+		// for the old one, stays (the member still collects there in the
+		// relay's grace); a new one could not be deposited. Our rekeys go.
+		for id, og := range p.outgoing {
+			if og.ConnID == c.ID && og.ini != nil && og.ini.Purpose() == handshake.PurposeRekey {
+				p.dropOutgoing(id)
+			}
+		}
+	} else {
+		p.dropConnOutgoing(c)
+		if rc {
+			p.restartReconnect(c, now) // on the new mailbox and token; not a failed try
+		}
+	}
 	p.issueTo(c, tokStanding, now)
 	p.issueTo(c, tokReconnect, now)
 	p.retryConn(c.ID)

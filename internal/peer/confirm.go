@@ -35,8 +35,11 @@ const ConfirmResend = 12 * 24 * time.Hour
 
 // serviceFeatures are the capabilities the service advertises, in every
 // message's inner features and in its profile.update (§10.8, §6.3.1
-// Capability; RELEASE-29 §6): sorted, each once.
-var serviceFeatures = []string{handshake.CapConfirm, "relay_follow"}
+// Capability; RELEASE-29 §6): sorted, each once. relay_follow is not
+// advertised: a vault advertises it only once it implements both §3.4.1
+// and §3.4.2 (VAULT-MESSAGING 0.90.0), and the service's §3.4.2 is not
+// built yet.
+var serviceFeatures = []string{handshake.CapConfirm}
 
 // features returns a copy of serviceFeatures for one message.
 func features() []string { return slices.Clone(serviceFeatures) }
@@ -132,7 +135,8 @@ func (p *Peer) pruneEpochs(c *Connection, now time.Time) {
 
 // noteFromMember applies §6.3.1 to a message from the member, other than
 // hs.fin, that opened under ep and passed the sender and suspension
-// checks, before anything else is done with it: the received flag, the
+// checks, before anything else is done with it: the confirmation of the
+// service's pending epoch, the received flag, the
 // confirmed epoch, and hs.confirm again for a message under a confirmed
 // epoch that is not current, while the current one is a member's the
 // service activated as responder (queued once per batch, reconfirmAll).
@@ -142,6 +146,9 @@ func (p *Peer) noteFromMember(c *Connection, ep *handshake.Epoch, now time.Time)
 	}
 	eid := ep.ID()
 	id := eid[:]
+	if pe := c.Pending; pe != nil && bytes.Equal(pe.ID, id) {
+		p.confirmPending(c, now) // §6.3.1 Initiator: first, in this write
+	}
 	if e := c.epochMeta(id); e != nil && !e.Received {
 		e.Received = true
 		p.markDirty(kindConn, c.ID)
@@ -372,6 +379,34 @@ func (p *Peer) checkAtDeposit(e *outboxEntry, now time.Time) int {
 	return atDepositGo
 }
 
+// heldDrop reports whether a held durable entry (behind an open reconnect,
+// or to a stale connection) ends while it waits: its exp passed
+// (held_expired), or it was tried and is past the 16-day window
+// (undelivered_window), each audited (§8.3 cases 1, 2).
+func (p *Peer) heldDrop(e *outboxEntry, now time.Time) bool {
+	c := p.conns[e.ConnID]
+	if c == nil || e.Confirm || e.BestEffort || len(e.Payload) == 0 || c.kr == nil || c.kr.Current() == nil {
+		return false
+	}
+	env, err := envelope.Parse(e.Payload)
+	if err != nil {
+		return false
+	}
+	in, err := c.kr.Current().OpenSent(env)
+	if err != nil || in.Type == handshake.TypeInit || in.Type == handshake.TypeFin {
+		return false
+	}
+	switch {
+	case !in.Exp.IsZero() && !now.Before(in.Exp):
+		p.logDrop(c, "held_expired", in)
+		return true
+	case e.Tried && now.Sub(in.TS) >= DedupeRetention:
+		p.logDrop(c, "undelivered_window", in)
+		return true
+	}
+	return false
+}
+
 // logDrop audits one waiting message that is not delivered (§8.3 "Not
 // delivered"): drop.<reason>, with the inner id as ref.
 func (p *Peer) logDrop(c *Connection, reason string, in *envelope.Inner) {
@@ -405,9 +440,9 @@ func (p *Peer) dropUndelivered(c *Connection, reason string, keep *outboxEntry) 
 
 // auditRefused audits an entry the relay refused for good (§8.3 cases 5
 // and 8): a durable message to a connection with its inner id as ref, any
-// other entry by its reason alone. TODO(change 2): an entry still sealed
-// under an older epoch gets no ref until the initiator's re-seal at
-// confirmation leaves none there.
+// other entry by its reason alone. Every waiting durable message is
+// sealed under the current epoch: the service's own new epoch is pending
+// until its confirmation, which seals them again (confirmPending).
 func (p *Peer) auditRefused(e *outboxEntry, reason string) {
 	if c := p.conns[e.ConnID]; c != nil && c.kr != nil && c.kr.Current() != nil && !e.Handshake && !e.BestEffort && !e.Confirm {
 		if env, err := envelope.Parse(e.Payload); err == nil {

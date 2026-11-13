@@ -58,6 +58,8 @@ type fixture struct {
 	// failDeposit, when set, decides a deposit's relay error (nil: the
 	// deposit goes through); revokes counts the revocations by value.
 	failDeposit func(mailbox, token string) error
+	// failCollect, when set, is the error of the service's collects.
+	failCollect error
 	revokes     map[string]int
 	logs        lockedBuffer
 }
@@ -94,6 +96,13 @@ func (r testRelay) Deposit(ctx context.Context, mailboxID, token string, payload
 		}
 	}
 	return r.View.Deposit(ctx, mailboxID, token, payload)
+}
+
+func (r testRelay) Collect(ctx context.Context, wait time.Duration, max int) ([]relayclient.Message, error) {
+	if r.f.failCollect != nil {
+		return nil, r.f.failCollect
+	}
+	return r.View.Collect(ctx, wait, max)
 }
 
 func (r testRelay) Revoke(ctx context.Context, es ...relayclient.Revocation) error {

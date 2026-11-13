@@ -33,16 +33,27 @@ fourth. Done so far:
   under it and every 12 days while the current epoch is unconfirmed; a
   member's reconnect ends the service's open answers to that member's
   rekeys; a rekey `hs.init` is answered once; it records the received
-  flag; it advertises `hs_confirm` and `relay_follow`; waiting messages
-  are sealed again at a key change, and checked at deposit (§8.3), each
-  deposit being one attempt;
+  flag; it advertises `hs_confirm`; waiting messages are sealed again at
+  a key change, and checked at deposit (§8.3), each deposit being one
+  attempt;
+- **the initiator** (change 2): the service's own rekey or reconnect
+  epoch is pending until a message from the member opens under it, and
+  waiting messages are then sealed again under it; it is abandoned at
+  `B` (32 days, judged after the first short collect since the start),
+  for want of a standing token, at a crossing, at a change of the
+  member's `ik`, and when the member's handshake is activated; the
+  service reconnects after such an abandonment and whenever it holds no
+  valid standing token (rule J among those cases), sends nothing but the
+  handshake while a reconnect is open, gives each try its own lifetime
+  (7 days after a restore, 16 otherwise), and ends a reconnect `stale`
+  at the bounds of §3.4.1; `token_revoked` on its standing token ends
+  that token only, and the entries wait;
 - after a rekey of its own fails, it waits an hour before the next,
   doubling to a day.
 
-Not yet: holding its own new epochs pending until confirmed, `B`,
-crossings and rule J, reconnects outside a restore (change 2); rule E,
-fork by `ctx` and a handshake's carried tokens (change 3); the `ik`
-demotion rules and the release marker (change 4).
+Not yet: rule E, fork by `ctx` and a handshake's carried tokens (change
+3); the `ik` demotion rules and the release marker (change 4); the
+relay-key rules of §3.4.2, after which it advertises `relay_follow`.
 
 This repository replaces
 [vettid/vettid-service-vault](https://github.com/vettid/vettid-service-vault),
@@ -135,16 +146,18 @@ destination.
   at once, under the key the service now has. Further starts under that
   same key keep that try. Once the keys are put right, the next start
   drops that try in turn (the alarm fires again; expect it) and spends
-  another. So each key change costs a reconnect one of its 3 tries, and
-  the 7 days still count from when it started: a reconnect already on
-  its second try when the keys went wrong ends (`reconnect_failed`), and
-  that member must connect again from a new invitation.
-- `reconnect_failed`: after a table restore, a connection's reconnect
-  could not start or complete, so that member must connect again (see
-  "Restoring the table").
-- `reconnect_slow`: such a reconnect is unanswered after a day. It
-  stays open for 7 days, since a locked member vault answers when it is
-  unlocked.
+  another. So each key change costs a reconnect one of its 3 tries: a
+  reconnect already on its third try when the keys went wrong ends
+  (`reconnect_failed`), and that member must connect again from a new
+  invitation.
+- `reconnect_failed`: a connection's reconnect (after a table restore,
+  or one the service started for want of a standing token or after its
+  own new epoch went unconfirmed) could not start or complete, so that
+  member must connect again (see "Restoring the table").
+- `reconnect_slow`: such a reconnect is unanswered after a day. Each
+  try waits for an answer 7 days after a restore and 16 otherwise, and
+  its new epoch then up to 32 days for the member's confirmation, since
+  a locked member vault answers when it is unlocked.
 - `vote_chunk_missing`: a proposal's stored members (its member chunks
   in the table) are missing, or not the ones its record names (at most
   one line per proposal per 10 minutes). Every cast, status, close,
@@ -513,15 +526,19 @@ nothing is leaked). So the first start after `table restore` reconnects
 every active connection (§6.6): it names its last epoch, which the
 member's vault still keeps in its history, carries fresh tokens, and
 follows any identity rotation the member made since; it logs
-`restored: reconnects started` and `reconnected` per connection. A
+`restored: reconnects started`, and per connection `reconnected: epoch
+pending` and then `epoch confirmed`. A
 reconnect completes when the member's vault next collects, usually
-within minutes; until then nothing is sent on that connection (its
-sign-ins fail). A restart keeps it open as it was, resending an
+within minutes; until the member's vault confirms it nothing but the
+handshake is sent on that connection: messages and sign-in challenges
+wait, and go under the new epoch then (a sign-in may time out first). A
+restart keeps it open as it was, resending an
 unconfirmed deposit with the same bytes; a new one goes out only if that
 state was lost, at most 3 per restore (the member's reconnect token
 allows 4 messages). If the member's vault starts its own reconnect
-meanwhile, the service's yields to it. One that can't
-start, or isn't completed within 7 days, fails: the connection becomes
+meanwhile, the service's yields to it. Each try waits 7 days for its
+answer. One that can't start, whose third try goes unanswered, or whose
+new epoch is not confirmed within 32 days, fails: the connection becomes
 stale, `reconnect_failed` alarms, and the member connects again from a
 new invitation, which replaces the old connection (admins then also
 need "Recovering admins"). This is VAULT-MESSAGING 0.72.1 §6.6 "After a
@@ -584,8 +601,9 @@ cluster and the service share the name):
    high or too low. Note such a restore with the results.
 4. If the image changes too, deploy it now. Start the service:
    `aws ecs update-service --cluster T --service T --desired-count 1`.
-5. Check `/health`, the TLS pin, the `reconnected` lines and a member's
-   sign-in. Then delete `T-restore`.
+5. Check `/health`, the TLS pin, the `epoch confirmed` lines and a member's
+   sign-in (a member whose vault has not collected yet shows only
+   `reconnected: epoch pending` until it does). Then delete `T-restore`.
 
 The operator needs: `dynamodb:CreateBackup`, `ListBackups`,
 `DescribeContinuousBackups`, `RestoreTableFromBackup` or
@@ -600,7 +618,10 @@ Rolling the image back past the reconnect after a restore (to
 `53a8c41` or older) is safe only when no member's reconnect awaits its
 `hs.fin`: an older image would install the epoch without the tokens and
 rotation links the reconnect brought. Check the logs for
-`reconnected` / `epoch installed` lines settling every reconnect first.
+`epoch confirmed` / `epoch installed` lines settling every reconnect first.
+An image from before release 29's second change does not know a stored
+pending epoch: roll back to one only when every `reconnected: epoch
+pending` or `rekeyed: epoch pending` line has its `epoch confirmed`.
 
 The KMS key must be the one the backup was made under: the stack's key,
 which is retained and never deleted with the stack.

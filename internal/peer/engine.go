@@ -82,6 +82,10 @@ type Peer struct {
 	// reconfirm marks the connections the current batch owes an
 	// hs.confirm (§6.3.1 Responder; noteFromMember).
 	reconfirm map[string]bool
+	// drained is the start latch for B (RELEASE-29 §2): clear at every
+	// start and at a failed collect, set once a collect with fewer than
+	// MaxBatch messages has been processed and written.
+	drained bool
 
 	cfg    Config
 	limits relayclient.Limits
@@ -188,6 +192,7 @@ func (p *Peer) Start(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.limits = reg.Limits
+	p.drained = false // B waits for this start's first short collect (RELEASE-29 §2)
 	// An earlier process, or this one before a restart, may have left
 	// messages leased.
 	p.leasedUntil(p.now())
@@ -207,7 +212,13 @@ func (p *Peer) Start(ctx context.Context) error {
 			p.resumeReconnects(p.now())
 		}
 	}
+	for _, c := range p.conns {
+		if c.State == StateActive && !c.standingValid(p.now()) {
+			p.beginReconnect(c, p.now()) // §7.2 "On unlock" step 3 (RELEASE-29 §3 item 2)
+		}
+	}
 	p.housekeeping(p.now())
+	p.tickPendings(p.now())
 	if err := p.flush(ctx); err != nil {
 		return err
 	}
@@ -309,6 +320,7 @@ func (p *Peer) Tick(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.housekeeping(p.now())
+	p.tickPendings(p.now())
 	return p.flushAndDrain(ctx)
 }
 
@@ -336,6 +348,7 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 	defer p.mu.Unlock()
 	if err != nil {
 		p.leasedUntil(p.now()) // the relay may have leased a batch we never saw
+		p.drained = false      // a failed collect clears the latch (RELEASE-29 §2)
 		return 0, err
 	}
 	if len(msgs) > 0 {
@@ -343,6 +356,7 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 			for _, m := range msgs {
 				p.leaveUnacked(m, p.now())
 			}
+			p.drained = false
 			return 0, err
 		}
 	}
@@ -351,6 +365,9 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 	if len(msgs) == 0 {
 		if free && started.After(p.emptyAt) {
 			p.emptyAt = started
+		}
+		if free {
+			p.drained = true // a short collect, nothing still leased (RELEASE-29 §2)
 		}
 		if len(p.outbox) == 0 {
 			return 0, nil
@@ -365,6 +382,7 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 		for _, m := range msgs {
 			p.leaveUnacked(m, now)
 		}
+		p.drained = false // the batch comes back: B waits for it (RELEASE-29 §2)
 		return 0, err
 	}
 	for _, m := range msgs {
@@ -392,8 +410,12 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 		}
 	}
 	p.reconfirmAll(now)
+	p.tickPendings(now) // after the batch: a confirmation in it comes first
 	if err := p.flush(ctx); err != nil {
 		return len(msgs), err
+	}
+	if len(msgs) < MaxBatch && free {
+		p.drained = true // a short collect, processed and written (RELEASE-29 §2)
 	}
 	for _, id := range acks {
 		delete(p.unacked, id)
