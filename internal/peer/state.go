@@ -31,13 +31,14 @@ const (
 	kindResp     = "resp"     // cached responses (§8.2)
 	kindLease    = "lease"    // the latest collect that leased messages, by process (Caught)
 	kindUnacked  = "unacked"  // a message left unacked, by msg_id: its times only (Caught)
+	kindOnce     = "once"     // a one-shot operator action that ran (EndAllConnections)
 )
 
 // Kinds lists every record kind the peer stores, for a migration that
 // must touch them all (internal/sealstore).
 func Kinds() []string {
 	return []string{kindConn, kindInvite, kindAwait, kindRequest, kindOutgoing, kindToken, kindOutbox, kindAuth, kindEvent,
-		kindMsg, kindInner, kindResp, kindLease, kindUnacked}
+		kindMsg, kindInner, kindResp, kindLease, kindUnacked, kindOnce}
 }
 
 // Retention (VAULT-MESSAGING §8.2, §6.4).

@@ -188,6 +188,11 @@ func TestConfigFromEnv(t *testing.T) {
 		}
 	}
 	e = goodEnv()
+	e["SV_END_ALL_CONNECTIONS"] = " 2026-11-13 "
+	if c, err := configFromEnv(env(e)); err != nil || c.EndAllConnections != "2026-11-13" {
+		t.Fatalf("SV_END_ALL_CONNECTIONS: %+v %v", c, err)
+	}
+	e = goodEnv()
 	e["SV_SERVICE_NAME"] = "VettID " + strings.Repeat("x", 250)
 	if _, err := configFromEnv(env(e)); err == nil {
 		t.Error("a service name too long for an approval context accepted")
@@ -197,7 +202,7 @@ func TestConfigFromEnv(t *testing.T) {
 		"SV_TABLE": "", "SV_WEBHOOK_URL": "http://member.example/", "SV_WEBHOOK_SECRET": "short",
 		"SV_API_KEY_HASHES": "zz", "SV_SERVICE_NAME": "VettID",
 		"SV_SIGNIN_LIMITS_EMAIL": "5", "SV_SIGNIN_LIMITS_SOURCE": "0/1m", "SV_APPROVAL_LIMITS": "x/1h",
-		"SV_RECORD_KEY_VERSION": "0", "SV_TEST_SIGNINS": "yes",
+		"SV_RECORD_KEY_VERSION": "0", "SV_TEST_SIGNINS": "yes", "SV_END_ALL_CONNECTIONS": "13/11/2026",
 	} {
 		e := goodEnv()
 		e[k] = v

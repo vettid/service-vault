@@ -144,6 +144,10 @@ type Config struct {
 	// TestSignIns serves POST /v1/signins/unsigned (SV_TEST_SIGNINS, default
 	// false): for test deployments only.
 	TestSignIns bool
+	// EndAllConnections (SV_END_ALL_CONNECTIONS, a date YYYY-MM-DD) ends
+	// every connection at the first start that sees that date (README
+	// "Rolling back"; docs/RELEASE-29.md section 11).
+	EndAllConnections string
 	// RecordKeyVersion is the lowest record key version to use
 	// (SV_RECORD_KEY_VERSION, default 1; README "Rotating the record key").
 	RecordKeyVersion uint32
@@ -284,6 +288,12 @@ func configFromEnv(getenv func(string) string) (*Config, error) {
 		c.TestSignIns = true
 	default:
 		return nil, errors.New("SV_TEST_SIGNINS: true or false")
+	}
+	if v := strings.TrimSpace(getenv("SV_END_ALL_CONNECTIONS")); v != "" {
+		if _, err := time.Parse(time.DateOnly, v); err != nil {
+			return nil, errors.New("SV_END_ALL_CONNECTIONS: a date, YYYY-MM-DD")
+		}
+		c.EndAllConnections = v
 	}
 	c.RecordKeyVersion = 1
 	if v := strings.TrimSpace(getenv("SV_RECORD_KEY_VERSION")); v != "" {
@@ -458,7 +468,7 @@ func serve(args []string) error {
 	}
 	svc.Approvals = approvals
 	pc := peer.Config{Keys: keys, Relay: peer.OneDepositAttempt(rc), RelayURL: cfg.RelayURL, Profile: cfg.Profile, Store: records,
-		Events: svc, Log: log}
+		Events: svc, Log: log, EndAllConnections: cfg.EndAllConnections}
 	var ballots *ballot.RecordStore
 	signIK := func(label string, msg []byte) ([]byte, error) { return suite.Sign(keys.IK, label, msg) }
 	if cfg.BallotsTable != "" {

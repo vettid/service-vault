@@ -221,6 +221,16 @@ describe('compute', () => {
     expect(() => synth({ envName: 'test', testSignIns: true })).toThrow(/testSignIns/);
   });
 
+  test('endAllConnections: SV_END_ALL_CONNECTIONS only with a date', () => {
+    const envOf = (props: Partial<ServiceVaultStackProps>) => {
+      const td = Object.values<any>(synth(props).findResources('AWS::ECS::TaskDefinition'))[0].Properties;
+      return Object.fromEntries(td.ContainerDefinitions[0].Environment.map((e: any) => [e.Name, e.Value]));
+    };
+    expect(envOf({}).SV_END_ALL_CONNECTIONS).toBeUndefined();
+    expect(envOf({ endAllConnections: '2026-11-13' }).SV_END_ALL_CONNECTIONS).toBe('2026-11-13');
+    expect(() => synth({ endAllConnections: 'today' })).toThrow(/endAllConnections/);
+  });
+
   test('secrets are generated, never given a value, and retained', () => {
     const secrets = t.findResources('AWS::SecretsManager::Secret');
     expect(Object.keys(secrets)).toHaveLength(2);

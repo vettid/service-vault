@@ -7,7 +7,7 @@ import { ServiceVaultStack } from '../lib/service-vault-stack';
 //   (votes.vettid.org, for publishing votes; optional), webhookUrl
 //   (required), relayUrl, serviceName, apiClientSecurityGroupId,
 //   apiClientCidr, vpcCidr, adminBootstrapEmail, adminThreshold,
-//   approvalTtl, approvalAllowNoPurpose, testSignIns (staging only), longApprovalChallenges (true or absent), recordSealMigrate, recordKeyVersion, and one of alarmTopicArn and
+//   approvalTtl, approvalAllowNoPurpose, testSignIns (staging only), longApprovalChallenges (true or absent), endAllConnections (a date, one-shot), recordSealMigrate, recordKeyVersion, and one of alarmTopicArn and
 //   alarmEmail (required). See
 //   README "Deployment".
 const app = new cdk.App();
@@ -25,6 +25,8 @@ const envName = ctx('envName') ?? 'prod';
 const testSignIns = ctx('testSignIns');
 if (testSignIns !== undefined && testSignIns !== 'true') throw new Error('context "testSignIns" must be true or absent');
 const longApprovalChallenges = ctx('longApprovalChallenges');
+const endAllConnections = ctx('endAllConnections');
+if (endAllConnections !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(endAllConnections)) throw new Error('context "endAllConnections" must be a date, YYYY-MM-DD, or absent');
 if (longApprovalChallenges !== undefined && longApprovalChallenges !== 'true') throw new Error('context "longApprovalChallenges" must be true or absent');
 const stack = new ServiceVaultStack(app, `ServiceVault-${envName}`, {
   envName,
@@ -43,6 +45,7 @@ const stack = new ServiceVaultStack(app, `ServiceVault-${envName}`, {
   approvalAllowNoPurpose: ctx('approvalAllowNoPurpose') === 'true',
   testSignIns: testSignIns === 'true',
   longApprovalChallenges: longApprovalChallenges === 'true',
+  endAllConnections,
   alarmTopicArn: ctx('alarmTopicArn'),
   alarmEmail: ctx('alarmEmail'),
   recordSealMigrate: ctx('recordSealMigrate') === 'true',

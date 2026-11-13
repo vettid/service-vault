@@ -1,6 +1,6 @@
 # Release 29 in the service vault
 
-**Status:** 0.8.0, draft (2026-11-13). Against VAULT-MESSAGING 0.90.6.
+**Status:** 0.9.0, draft (2026-11-13). Against VAULT-MESSAGING 0.90.6.
 
 VAULT-MESSAGING §6.3.1 ("Lifetimes and activation on confirmation",
 release 29) asks a service vault to follow its rules "on either side as
@@ -279,7 +279,12 @@ invitations.
   carries it. The deployment's circuit breaker can roll a failed deploy
   back by itself, so the fourth change adds the runbook step: after a
   `deploy_failed` rollback across the fourth change, end every
-  connection before deploying forward.
+  connection before deploying forward. (Owner decision a, GC #10082:
+  the operator does so with a one-shot setting, `SV_END_ALL_CONNECTIONS`
+  set to a date, which ends every connection as this section ends a
+  record without the marker, with the reason `ended_all`, records that
+  it ran, and does nothing at a later start with the same date; README
+  "Rolling back across release 29".)
 - **Invitations** are not ended: one claimed under this version makes a
   connection under its rules, which carries the marker.
 - **On staging,** where every connection is ended this way, the deploy
@@ -482,6 +487,8 @@ separately. The README's release-29 status paragraph shrinks with each.
 
 ## Changes
 
+- **0.9.0 (2026-11-13):** §11, the runbook step's one-shot setting
+  (owner decision a, GC #10082); §14 item 4c is built.
 - **0.8.0 (2026-11-13):** §14 item 4 in three parts: 4b (the demotion
   rules, K2's demotion, K9, X4's refused-reconnect links) is built; the
   marker and the end of older records (section 11, U1) move to 4c; §13,

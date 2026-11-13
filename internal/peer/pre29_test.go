@@ -111,3 +111,56 @@ func TestMarkerWrittenAndKept(t *testing.T) {
 	}
 
 }
+
+// The one-shot EndAllConnections (owner decision a, GC #10082): the first
+// start that sees a date ends every connection (connection.removed with
+// reason ended_all, audited, the alarm), invitations stay; a restart with
+// the same date ends nothing more; a new date runs again.
+func TestEndAllConnectionsOnce(t *testing.T) {
+	f := newFixture(t)
+	a := f.connect(f.member(10), "")
+	b := f.connect(f.member(20), "")
+	inv := f.invite("later")
+	f.endAll = "2026-11-13"
+	f.start()
+	if len(f.p.conns) != 0 {
+		t.Fatalf("%d connections left", len(f.p.conns))
+	}
+	if _, ok := f.p.invites[inv.ID]; !ok {
+		t.Fatal("an invitation was ended")
+	}
+	f.p.DeliverEvents(context.Background())
+	ended := map[string]bool{}
+	for _, e := range f.ev.of(EventConnectionRemoved) {
+		if e.Reason == RemovedEndAll && e.Direction == "out" {
+			ended[e.ConnectionID] = true
+		}
+	}
+	if !ended[a] || !ended[b] || !strings.Contains(f.logs.String(), "alarm=connections_ended") {
+		t.Fatalf("ended %v", ended)
+	}
+	// A connection made after the run survives a restart with the same date.
+	m := f.member(30)
+	c := f.connect(m, "")
+	n := strings.Count(f.logs.String(), "reason=connection_ended_all")
+	f.start()
+	if _, ok := f.p.conns[c]; !ok || strings.Count(f.logs.String(), "reason=connection_ended_all") != n {
+		t.Fatal("the same date ran again")
+	}
+	if !f.signIn(m, c) {
+		t.Fatal("the connection does not work after the restart")
+	}
+	// A new date runs again.
+	f.endAll = "2026-11-14"
+	f.start()
+	if _, ok := f.p.conns[c]; ok {
+		t.Fatal("a new date did not run")
+	}
+	// Unset: nothing happens.
+	c2 := f.connect(f.member(40), "")
+	f.endAll = ""
+	f.start()
+	if _, ok := f.p.conns[c2]; !ok {
+		t.Fatal("ended without the setting")
+	}
+}
