@@ -524,7 +524,7 @@ func (p *Peer) housekeeping(now time.Time) {
 		if c.State != StateActive {
 			continue
 		}
-		if !c.standingValid(now) && p.standingWaiting(c) {
+		if !c.standingValid(now) && p.standingWaiting(c) && !p.carriedWait(c, now) {
 			continue // tickPendings reconnects, after the batch
 		}
 		if c.kr != nil && c.kr.Current() != nil && c.kr.Current().NeedsRekey(now) {

@@ -88,6 +88,15 @@ func (c *Connection) initEpochs() {
 		c.Epochs = []EpochMeta{{ID: bytes.Clone(c.LastEpochID)}}
 		c.Confirmed = bytes.Clone(c.LastEpochID)
 	}
+	// A record from before signers were kept: with no link followed, the
+	// member's key never changed, so it signed them all.
+	if len(c.Chain) == 0 {
+		for i := range c.Epochs {
+			if len(c.Epochs[i].Signer) == 0 {
+				c.Epochs[i].Signer = bytes.Clone(c.Peer.IK)
+			}
+		}
+	}
 }
 
 // recordActivated records id as the connection's current epoch: the

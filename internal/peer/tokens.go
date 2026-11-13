@@ -234,10 +234,11 @@ func (p *Peer) storeIssuedTo(c *Connection, body json.RawMessage) {
 		return
 	}
 	if kind == tokReconnect {
-		// Only one that is valid and lasts longer than the held one, as
+		// Only one that is valid and lasts at least as long as the held one
+		// (exps are whole seconds), as
 		// for a handshake's carried token (§6.3.1): a copy holding the
 		// session's keys cannot swap in a shorter-lived one.
-		if !p.now().Before(ht.Exp) || !ht.Exp.After(c.Reconnect.Exp) {
+		if !p.now().Before(ht.Exp) || ht.Exp.Before(c.Reconnect.Exp) {
 			p.audit("issued_token_not_later", c.ID)
 			return
 		}
@@ -320,15 +321,19 @@ func (p *Peer) revokeAtRefresh(c *Connection, now time.Time) {
 			keep[j] = true
 		}
 	}
+	// Newer: a later exp, then a later mint (Seq; 0 on older records).
+	newer := func(a, b *IssuedToken) bool {
+		return a.Exp.After(b.Exp) || a.Exp.Equal(b.Exp) && a.Seq > b.Seq
+	}
 	var carried, prompt *IssuedToken
 	for _, t := range p.issued {
-		if t.ConnID != c.ID || t.Kind != tokStanding {
+		if t.ConnID != c.ID || t.Kind != tokStanding || t.Denied {
 			continue
 		}
-		if t.Carried && (carried == nil || t.Seq > carried.Seq) {
+		if t.Carried && (carried == nil || newer(t, carried)) {
 			carried = t
 		}
-		if t.Prompt && (prompt == nil || t.Seq > prompt.Seq) {
+		if t.Prompt && (prompt == nil || newer(t, prompt)) {
 			prompt = t
 		}
 	}
@@ -338,7 +343,7 @@ func (p *Peer) revokeAtRefresh(c *Connection, now time.Time) {
 		}
 	}
 	for _, t := range p.issued {
-		if t.ConnID != c.ID || t.Kind != tokStanding || t.Denied || keep[t.JTI] || t.Seq > under.Seq {
+		if t.ConnID != c.ID || t.Kind != tokStanding || t.Denied || keep[t.JTI] || newer(t, under) {
 			continue
 		}
 		t.Denied = true

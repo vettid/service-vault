@@ -391,6 +391,17 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 		// accepted as if it were current (§6.3.1 Responder); rule E applies
 		// at its hs.fin.
 		if eid := ep.ID(); c.kr == nil || len(c.Confirmed) == 0 || !bytes.Equal(eid[:], c.Confirmed) {
+			// A rekey under an older epoch may be fork evidence (§3.4.1
+			// "Fork by ctx", as vettid-vault's rekeyOtherEpoch): the links
+			// it carries are judged with those followed.
+			var fresh []*handshake.Rotation
+			if b, err := handshake.ParseInit(in.Body); err == nil {
+				fresh = b.Rotations[handshake.KnownPrefix(chainOf(c), b.Rotations):]
+			}
+			if p.forkEpoch(c, eid[:], fresh) {
+				p.suspendFor(c, SuspendEpoch, now)
+				return ackAfterFlush
+			}
 			p.audit("rekey_not_current_epoch", c.ID)
 			return ackAfterFlush
 		}
@@ -552,8 +563,14 @@ func (p *Peer) handleFin(id string, raw []byte, sender ed25519.PublicKey, now ti
 	if aw.ForkEp {
 		// §3.4.1 "Fork by ctx": its hs.init named an epoch older than the
 		// confirmed one, after which the member's key moved on; sig_I has
-		// verified, so it is evidence of a second copy.
+		// verified, so it is evidence of a second copy. The tokens our
+		// hs.resp carried are revoked.
 		fr.Epoch.Destroy()
+		if aw.Reconnect != nil {
+			for _, j := range aw.Reconnect.Issued {
+				p.denyJTI(j, now)
+			}
+		}
 		p.suspendFor(c, SuspendEpoch, now)
 		return ackAfterFlush
 	}

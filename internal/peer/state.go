@@ -614,18 +614,15 @@ func (p *Peer) flush(ctx context.Context) error {
 // legacyRelayMove ends a connection that a relay.address.update moved
 // before the update was refused (#152). No honest member ever sent one,
 // so the move came from whoever held the session's keys: the stored
-// relay address may be that copy's. It is not honored: the connection
-// becomes stale (nothing is deposited to that address), with an alarm;
-// the member connects again from a new invitation.
+// relay address may be that copy's. It is not honored: the connection is
+// suspended (nothing is sent or accepted, and no reconnect revives it),
+// with an alarm; the member connects again from a new invitation.
 func (p *Peer) legacyRelayMove(c *Connection) {
 	c.LegacyPrevRelayPK = nil
-	if c.State == StateActive {
-		c.State = StateStale
-	}
 	p.markDirty(kindConn, c.ID)
-	p.audit("relay_moved_unlinked", c.ID)
-	p.log().Error("a connection was moved by a relay.address.update before it was refused: marked stale; the member must connect again",
-		"alarm", "relay_moved_unlinked", "connection_id", c.ID)
+	// Suspended, not stale: a stale connection comes back at its next
+	// epoch, which whoever holds the moved address could establish.
+	p.suspendFor(c, SuspendRelayMoved, p.now())
 }
 
 // orphan is a pending epoch whose record and keys were not stored together.

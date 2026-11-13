@@ -33,8 +33,13 @@ const (
 const StateSuspended = "suspended"
 
 // SuspendRotationConflict is connection.suspended's reason for a
-// rotation conflict, the only one so far.
+// rotation conflict.
 const SuspendRotationConflict = "rotation_conflict"
+
+// SuspendRelayMoved is connection.suspended's reason for a connection a
+// relay.address.update moved before such updates were refused
+// (legacyRelayMove).
+const SuspendRelayMoved = "relay_moved_unlinked"
 
 // identityRotate follows one link of the member's rotation chain (§3.4):
 // both signatures, old_ik the stored key, and one successor per key. The
@@ -304,8 +309,13 @@ func (p *Peer) suspendFor(c *Connection, reason string, now time.Time) {
 	}
 	p.markDirty(kindConn, c.ID)
 	p.emit(&Event{Type: EventConnectionSuspended, ConnectionID: c.ID, Tag: c.Tag, Reason: reason}, now)
-	if reason == SuspendEpoch {
+	switch reason {
+	case SuspendEpoch:
 		p.log().Error("fork evidence: connection suspended", "alarm", "fork_suspected", "connection_id", c.ID)
+		return
+	case SuspendRelayMoved:
+		p.log().Error("a connection was moved by a relay.address.update before it was refused: suspended; the member must connect again",
+			"alarm", "relay_moved_unlinked", "connection_id", c.ID)
 		return
 	}
 	p.log().Error("member identity rotation conflict: connection suspended", "alarm", "rotate_conflict", "connection_id", c.ID)

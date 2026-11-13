@@ -426,7 +426,7 @@ separately. The README's release-29 status paragraph shrinks with each.
    tokens (section 3, items 3 and 7, and the exceptions in items 2, 4
    and 5); a stale reconnect answer ending at a later message. Also: a
    connection a `relay.address.update` moved before it was refused is
-   marked `stale` at load, with an alarm (no honest member sent one), and
+   suspended at load, with an alarm (no honest member sent one), and
    a reconnect token issued to the service is adopted only if valid and
    later than the held one.
 4. **`ik` links and the marker.** The `rotations` of `identity.rotate`;
@@ -461,7 +461,7 @@ separately. The README's release-29 status paragraph shrinks with each.
 - **0.6.0 (2026-11-13):** the third change is built: §12 describes it
   as done; §14 item 3 adds, from the lead's review of #152, that a
   connection a `relay.address.update` moved before it was refused is
-  marked `stale` at load (alarm `relay_moved_unlinked`), and that a
+  suspended at load (alarm `relay_moved_unlinked`), and that a
   reconnect token issued to the service replaces the held one only if it
   is valid and lasts longer.
 - **0.5.2 (2026-11-13):** §3 item 8, `relay.address.update` is refused

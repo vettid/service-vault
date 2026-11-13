@@ -53,29 +53,46 @@ func (p *Peer) classifyCtx(c *Connection, ctx string, fresh []*handshake.Rotatio
 			return a, false, false, true
 		}
 	}
-	ci := c.epochIndex(c.Confirmed)
-	for i, e := range c.Epochs {
-		if !is(e.ID) || e.Destroyed || i >= ci {
-			continue
-		}
-		anc := ancestors(c, fresh)
-		for _, later := range c.Epochs[i+1 : ci+1] {
-			for _, k := range anc {
-				if len(later.Signer) > 0 && suite.EqualPublic(later.Signer, k) {
-					return e.ID, false, true, true
-				}
-			}
+	for _, e := range c.Epochs {
+		if is(e.ID) && p.forkEpoch(c, e.ID, fresh) {
+			return e.ID, false, true, true
 		}
 	}
 	return nil, false, false, false
+}
+
+// forkEpoch is §3.4.1 "Fork by ctx": a handshake naming epoch id, older
+// than the confirmed one, after which an epoch up to the confirmed one was
+// signed by an ancestor of the ik the handshake reaches (the chain
+// followed, with its links not yet followed, fresh). Destroyed epochs, and
+// records without a signer, are no evidence.
+func (p *Peer) forkEpoch(c *Connection, id []byte, fresh []*handshake.Rotation) bool {
+	ic, ci := c.epochIndex(id), c.epochIndex(c.Confirmed)
+	if ic < 0 || ci <= ic || c.Epochs[ic].Destroyed {
+		return false
+	}
+	anc := ancestors(c, fresh)
+	for _, later := range c.Epochs[ic+1 : ci+1] {
+		for _, k := range anc {
+			if len(later.Signer) > 0 && suite.EqualPublic(later.Signer, k) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ancestors are the member's identity keys the chain followed, with the
 // hs.init's fresh links, has moved past (every link's old key).
 func ancestors(c *Connection, fresh []*handshake.Rotation) []ed25519.PublicKey {
 	var out []ed25519.PublicKey
-	for _, r := range append(chainOf(c), fresh...) {
+	for _, r := range chainOf(c) {
 		out = append(out, r.OldIK)
+	}
+	for _, r := range fresh {
+		if r.Verify() == nil { // only a valid link is evidence
+			out = append(out, r.OldIK)
+		}
 	}
 	return out
 }

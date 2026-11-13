@@ -1370,14 +1370,137 @@ func TestLegacyRelayMoveAtLoad(t *testing.T) {
 	}
 	f.start()
 	c := f.p.conns[cid]
-	if c.State != StateStale || len(c.LegacyPrevRelayPK) != 0 || !strings.Contains(f.logs.String(), "alarm=relay_moved_unlinked") {
+	if c.State != StateSuspended || len(c.LegacyPrevRelayPK) != 0 || !strings.Contains(f.logs.String(), "alarm=relay_moved_unlinked") {
 		t.Fatalf("state %s", c.State)
 	}
-	n := len(m.Got)
-	f.p.sendTo(c, "connection.note", []byte(`{}`), f.clk.Now())
+	f.p.DeliverEvents(context.Background())
+	if evs := f.ev.of(EventConnectionSuspended); len(evs) != 1 || evs[0].Reason != SuspendRelayMoved {
+		t.Fatalf("events %v", evs)
+	}
+	// Whoever holds the stored address cannot revive it: a reconnect from
+	// it is refused, and no sign-in is answered.
+	m.IgnoreStray, m.IgnoreRevoked = true, true
+	m.Reconnect()
 	f.pump()
-	if len(m.Got) != n {
-		t.Fatal("deposited to the moved address")
+	if c = f.p.conns[cid]; c.State != StateSuspended {
+		t.Fatalf("revived: state %s", c.State)
+	}
+	if _, err := f.p.Authenticate(context.Background(), cid, "Sign in", "", time.Minute); err == nil {
+		t.Fatal("a sign-in on the suspended connection")
+	}
+}
+
+// While carried tokens wait, hs.confirm still goes again every 12 days,
+// even with an entry waiting for a standing token.
+func TestConfirmAgainWhileCarriedWait(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	memberReconnected(t, f, m, cid)
+	c := f.p.conns[cid]
+	st := c.Standing.Token
+	f.failDeposit = func(_, token string) error {
+		if token == st {
+			return errUnavailable
+		}
+		return nil
+	}
+	f.p.sendTo(c, "connection.note", []byte(`{}`), f.clk.Now())
+	c.Standing.Exp = f.clk.Now()
+	before := c.ConfirmAt
+	f.clk.Advance(ConfirmResend + time.Minute)
+	f.tick()
+	if c = f.p.conns[cid]; !c.ConfirmAt.After(before) || c.Reconnecting {
+		t.Fatalf("hs.confirm again: %v -> %v, reconnecting %v", before, c.ConfirmAt, c.Reconnecting)
+	}
+}
+
+// A rekey hs.init under an epoch older than the confirmed one, after the
+// member's key moved on, is fork evidence (§3.4.1 "Fork by ctx"): a copy
+// holding that epoch made it.
+func TestRekeyForkByCtx(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	m.StartRekey() // under the first epoch; held back at the relay
+	msgs, err := f.sv.Collect(context.Background(), 0, 32)
+	if err != nil || len(msgs) != 1 {
+		t.Fatalf("%d (%v)", len(msgs), err)
+	}
+	_ = f.sv.Ack(context.Background(), msgs[0].MsgID)
+	memberRekey(t, f, m, cid)
+	m.Send("connection.note", []byte(`{}`)) // the second epoch is confirmed
+	f.pump()
+	m.RotateIdentity(40, false)
+	f.pump()
+	f.w.Redeliver(m.SvcMailbox(), msgs[0])
+	f.step()
+	if c := f.p.conns[cid]; c.State != StateSuspended || !strings.Contains(f.logs.String(), "alarm=fork_suspected") {
+		t.Fatalf("state %s", c.State)
+	}
+}
+
+// revokeAtRefresh's keeps, one by one: a token a still-open handshake
+// carried (an answer's, our pending epoch's, our try's), the newest live
+// carried one, the newest re-minted one and one newer than the token the
+// refresh came under; the rest goes, the one it came under included.
+func TestRevokeAtRefreshKeeps(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	c := f.p.conns[cid]
+	for _, t0 := range f.p.issued {
+		t0.Denied = true // start from nothing
+	}
+	now := f.clk.Now()
+	mk := func(jti string, seq uint64, carried, prompt, denied bool) {
+		f.p.issued[jti] = &IssuedToken{JTI: jti, Kind: tokStanding, ConnID: cid, Exp: now.Add(time.Hour), Seq: seq, Carried: carried, Prompt: prompt, Denied: denied}
+	}
+	mk("old", 1, false, false, false)
+	mk("answer", 2, true, false, false)
+	mk("pending", 3, true, false, false)
+	mk("try", 4, true, false, false)
+	mk("prompt", 5, false, true, false)
+	mk("carried", 6, true, false, false)
+	mk("carried-dead", 7, true, false, true)
+	mk("under", 8, false, false, false)
+	mk("newer", 9, false, false, false)
+	f.p.awaiting["x"] = &awaiting{ID: "x", ConnID: cid, Reconnect: &pendingReconnect{Issued: []string{"answer"}}}
+	f.p.outgoing["y"] = &outgoing{ID: "y", ConnID: cid, Issued: []string{"try"}}
+	c.Pending = &PendingEpoch{Issued: []string{"pending"}}
+	f.p.msgJTI = "under"
+	f.p.revokeAtRefresh(c, now)
+	f.p.msgJTI = ""
+	for jti, want := range map[string]bool{"old": true, "answer": false, "pending": false, "try": false, "prompt": false,
+		"carried": false, "under": true, "newer": false} {
+		if got := f.p.issued[jti].Denied; got != want {
+			t.Errorf("%s: revoked %v", jti, got)
+		}
+	}
+	delete(f.p.awaiting, "x")
+	delete(f.p.outgoing, "y")
+	c.Pending = nil
+}
+
+// B's no-token abandonment waits while carried tokens wait (R29-I6 with
+// "No reconnect while carried tokens wait").
+func TestPendingRekeyKeptWhileCarriedWait(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	memberReconnected(t, f, m, cid)
+	m.NoConfirm = true
+	f.clk.Advance(handshake.PolicyVaultToVault.MaxAge + time.Second)
+	f.tick() // our rekey
+	f.pump()
+	c := f.p.conns[cid]
+	if c.Pending == nil || !f.p.carriedWait(c, f.clk.Now()) {
+		t.Fatalf("pending %v, carried wait %v", c.Pending, f.p.carriedWait(c, f.clk.Now()))
+	}
+	c.Standing.Exp = f.clk.Now()
+	f.tick()
+	if c = f.p.conns[cid]; c.Pending == nil || c.Reconnecting {
+		t.Fatal("abandoned for want of a token while carried tokens wait")
 	}
 }
 
@@ -1645,9 +1768,24 @@ func TestForkByCtx(t *testing.T) {
 	f.pump()
 	m.IgnoreStray = true
 	m.ReconnectNaming(first)
+	f.step() // answered: judged at its hs.fin
+	var issued []string
+	for _, aw := range f.p.awaiting {
+		if aw.ForkEp && aw.Reconnect != nil {
+			issued = aw.Reconnect.Issued
+		}
+	}
+	if len(issued) == 0 {
+		t.Fatal("not answered as a fork sign")
+	}
 	f.pump()
 	if c := f.p.conns[cid]; c.State != StateSuspended || !strings.Contains(f.logs.String(), "alarm=fork_suspected") {
 		t.Fatalf("state %s", c.State)
+	}
+	for _, j := range issued {
+		if tk := f.p.issued[j]; tk == nil || !tk.Denied {
+			t.Fatalf("token %s of our hs.resp not revoked", j)
+		}
 	}
 }
 

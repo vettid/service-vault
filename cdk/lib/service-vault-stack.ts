@@ -92,8 +92,8 @@ export const ALARMS = {
   rotate_conflict: 'A member identity rotation conflict suspended a connection (two vaults rotating, or a replayed copy; a member can also cause it on purpose, so it may be noise)',
   /** Fork evidence about an epoch (rule E, fork by ctx; internal/peer/forks.go): a connection is suspended. */
   fork_suspected: 'Fork evidence about a session epoch suspended a connection: a second or old copy of the member vault used it (README "fork_suspected")',
-  /** A connection a relay.address.update moved before the update was refused (internal/peer/state.go): marked stale at start. */
-  relay_moved_unlinked: 'A connection that a relay.address.update moved before such updates were refused was marked stale at start: the address may belong to a copy; the member must connect again (README "relay_moved_unlinked")',
+  /** A connection a relay.address.update moved before the update was refused (internal/peer/state.go): suspended at start. */
+  relay_moved_unlinked: 'A connection that a relay.address.update moved before such updates were refused was suspended at start: the address may belong to a copy; the member must connect again (README "relay_moved_unlinked")',
   /** A webhook was given up after the outbox's MaxAge (internal/webhook/outbox.go): the application missed an event. */
   webhook_dropped: 'A webhook was dropped as undeliverable after 24 h: the application missed an event',
   /** A stored outgoing hs.init names another identity key than the service's (internal/peer/state.go): dropped at start. */

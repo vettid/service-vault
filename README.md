@@ -153,7 +153,7 @@ destination.
   member connects again from a new invitation.
 - `relay_moved_unlinked`: at start, a connection that a
   `relay.address.update` moved before the service refused such updates
-  was marked stale: the address it holds may be a copy's. No honest
+  was suspended (reason `relay_moved_unlinked`): the address it holds may be a copy's. No honest
   member sent one; that member connects again from a new invitation.
 - `webhook_dropped`: a webhook was given up after 24 hours, so the
   application missed an event.
