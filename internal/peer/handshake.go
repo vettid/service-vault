@@ -251,8 +251,8 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 		CollectSender: sender, RecordRelayKey: c.Peer.Relay.PK, KnownInitiatorIK: start,
 		ExpectedCtx: handshake.EpochCtx(eid), Features: features(), Now: now,
 	}
-	st, err1 := p.heldToken(body.Token, &c.Peer, tokStanding)
-	rt, err2 := p.heldToken(body.ReconnectToken, &c.Peer, tokReconnect)
+	st, err1 := p.heldTokenFor(c, body.Token, tokStanding)
+	rt, err2 := p.heldTokenFor(c, body.ReconnectToken, tokReconnect)
 	if err1 != nil || err2 != nil {
 		p.audit("reconnect_bad_token", c.ID)
 		pi.Discard()
@@ -624,6 +624,7 @@ func (p *Peer) handleFin(id string, raw []byte, sender ed25519.PublicKey, now ti
 	}
 	p.installEpoch(c, fr.Epoch, now)
 	if aw.Reconnect != nil {
+		p.markCarried(aw.Reconnect.Issued)
 		// Its tokens are carried: adopted when the confirmed epoch reaches
 		// this one, not now (§6.3.1, R29-T1); they supersede earlier ones.
 		p.recordCarried(c, aw.Reconnect.Standing, aw.Reconnect.Reconnect, now)

@@ -221,6 +221,7 @@ func (p *Peer) noTokenReconnect(c *Connection, now time.Time) {
 // not a failed try.
 func (p *Peer) carriedRevoked(c *Connection, tok string, now time.Time) {
 	p.audit("carried_token_revoked", c.ID)
+	p.recordRevokedHeld(c, tok, now)
 	for i := range c.Carried {
 		if r := &c.Carried[i]; r.Standing.Token == tok {
 			r.Discarded, r.Standing, r.Reconnect = true, HeldToken{}, HeldToken{}

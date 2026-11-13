@@ -223,8 +223,8 @@ func (p *Peer) startReconnect(c *Connection, now time.Time) bool {
 // epoch, which is pending until the member confirms it (§6.3.1
 // Initiator). The reconnect stays open until then.
 func (p *Peer) finishReconnect(c *Connection, og *outgoing, res *handshake.Result, now time.Time) disposition {
-	st, err1 := p.heldToken(res.Resp.Token, &c.Peer, tokStanding)
-	rt, err2 := p.heldToken(res.Resp.ReconnectToken, &c.Peer, tokReconnect)
+	st, err1 := p.heldTokenFor(c, res.Resp.Token, tokStanding)
+	rt, err2 := p.heldTokenFor(c, res.Resp.ReconnectToken, tokReconnect)
 	if err1 != nil || err2 != nil {
 		p.audit("reconnect_bad_token", c.ID)
 		res.Epoch.Destroy()

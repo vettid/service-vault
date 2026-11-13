@@ -1,6 +1,6 @@
 # Release 29 in the service vault
 
-**Status:** 0.6.1, draft (2026-11-13). Against VAULT-MESSAGING 0.90.2.
+**Status:** 0.6.2, draft (2026-11-13). Against VAULT-MESSAGING 0.90.3.
 
 VAULT-MESSAGING §6.3.1 ("Lifetimes and activation on confirmation",
 release 29) asks a service vault to follow its rules "on either side as
@@ -431,8 +431,13 @@ separately. The README's release-29 status paragraph shrinks with each.
    and is not caught (a residual: release 29 starts clean on staging, and
    the old handler's log line, `member relay address updated`, shows any).
    A token the service holds is refused when over §7.1's lifetime for its
-   kind or dated ahead, and a reconnect token issued to it is adopted only
-   if valid and later than the held one (as vettid-vault #244).
+   kind (or the own relay's max_token_lifetime, when the member shares
+   it), dated ahead, or with its exp not after its iat; a reconnect token
+   issued to it is adopted only if valid and later than the held one; a
+   held token the relay revoked is refused if offered again until its exp
+   (as vettid-vault #244). The own relay's limit is the one read at the
+   service's last registration: if the relay raises it, a longer honest
+   token is refused until the service registers again (a restart).
 4. **`ik` links and the marker.** The `rotations` of `identity.rotate`;
    demotion by position and the held outbox; strict F1 and the
    reconnects of section 3 item 9; seen links; epochs abandoned while
@@ -462,6 +467,10 @@ separately. The README's release-29 status paragraph shrinks with each.
 
 ## Changes
 
+- **0.6.2 (2026-11-13):** pinned to VAULT-MESSAGING 0.90.3; §14 item 3,
+  the held-token checks follow vettid-vault #244 in full (exp after iat,
+  the own relay's max_token_lifetime, revoked held tokens refused if
+  offered again).
 - **0.6.1 (2026-11-13):** pinned to VAULT-MESSAGING 0.90.2; §14 item 3,
   held-token bounds (as vettid-vault #244) and the legacy relay-move
   residual.

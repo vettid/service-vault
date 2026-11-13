@@ -3,6 +3,7 @@ package peer
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/vettid/vettid-relay/relayauth"
@@ -82,7 +83,6 @@ func (p *Peer) mintReconnectPair(connID string, np *peerInfo, now time.Time) (st
 		p.denyJTI(j1, now)
 		return "", "", nil, err
 	}
-	p.issued[j1].Carried, p.issued[j2].Carried = true, true
 	return st, rt, []string{j1, j2}, nil
 }
 
@@ -113,22 +113,78 @@ func (p *Peer) heldToken(tok string, np *peerInfo, kind string) (HeldToken, erro
 	}
 	max := peerwire.StandingMax
 	if kind == tokReconnect {
-		max = maxReconnectLife
+		max = handshake.ReconnectTokenMaxLifetime
 	}
-	if c.Exp.Sub(c.Iat) > max || c.Iat.After(p.now().Add(heldIatSkew)) {
+	// A peer on our own relay is bound by its max_token_lifetime too (the
+	// relay refuses a longer one).
+	if lim := time.Duration(p.limits.MaxTokenLifetimeSeconds) * time.Second; lim > 0 && lim < max &&
+		strings.TrimRight(np.Relay.URL, "/") == strings.TrimRight(p.cfg.RelayURL, "/") {
+		max = lim
+	}
+	if !c.Exp.After(c.Iat) || c.Exp.Sub(c.Iat) > max || c.Iat.After(p.now().Add(envelope.MaxClockSkewFuture)) {
 		return HeldToken{}, errTokenBound
 	}
-	return HeldToken{Token: tok, Exp: c.Exp}, nil
+	return HeldToken{Token: tok, Exp: c.Exp, JTI: c.Jti}, nil
 }
 
-// maxReconnectLife is §7.1's bound for a reconnect token; heldIatSkew how
-// far ahead a held token's iat may be (the inner ts skew, §8.4).
-const (
-	maxReconnectLife = 365 * 24 * time.Hour
-	heldIatSkew      = 5 * time.Minute
-)
+// heldTokenFor is heldToken for a connection's own token, refusing one the
+// relay revoked while we held it (RevokedHeld).
+func (p *Peer) heldTokenFor(c *Connection, tok, kind string) (HeldToken, error) {
+	ht, err := p.heldToken(tok, &c.Peer, kind)
+	if err != nil {
+		return ht, err
+	}
+	for _, r := range c.RevokedHeld {
+		if r.JTI == ht.JTI {
+			return HeldToken{}, errRevokedHeld
+		}
+	}
+	return ht, nil
+}
 
-var errTokenBound = errors.New("peer: token over its lifetime bound")
+// markCarried marks the tokens a handshake carried once it activated (our
+// pending epoch confirmed, or a member's reconnect established at its
+// hs.fin): only an activated handshake is "the newest token-carrying
+// handshake" a refresh spares (§6.3.1, §7.2); an abandoned one's tokens
+// are revoked and never count.
+func (p *Peer) markCarried(jtis []string) {
+	for _, j := range jtis {
+		if t := p.issued[j]; t != nil && !t.Carried {
+			t.Carried = true
+			p.markDirty(kindToken, j)
+		}
+	}
+}
+
+// recordRevokedHeld records a held token's jti the relay revoked, until
+// its exp, dropping the entries past theirs.
+func (p *Peer) recordRevokedHeld(c *Connection, tok string, now time.Time) {
+	if tok == "" {
+		return
+	}
+	// Its jti and exp from the token itself (a held record from before
+	// held tokens kept their jti has none).
+	cl, err := relayauth.ParseToken(tok, c.Peer.Relay.PK)
+	if err != nil {
+		return
+	}
+	keep := c.RevokedHeld[:0]
+	for _, r := range c.RevokedHeld {
+		if now.Before(r.Exp) && r.JTI != cl.Jti {
+			keep = append(keep, r)
+		}
+	}
+	c.RevokedHeld = keep
+	if now.Before(cl.Exp) {
+		c.RevokedHeld = append(c.RevokedHeld, RevokedJTI{JTI: cl.Jti, Exp: cl.Exp})
+	}
+	p.markDirty(kindConn, c.ID)
+}
+
+var (
+	errTokenBound  = errors.New("peer: token over its lifetime bound")
+	errRevokedHeld = errors.New("peer: a token the relay revoked")
+)
 
 // denyJTI revokes one token (§7.4: invitations).
 func (p *Peer) denyJTI(jti string, now time.Time) {
@@ -252,7 +308,10 @@ func (p *Peer) storeIssuedTo(c *Connection, body json.RawMessage) {
 	if kind != tokReconnect {
 		kind = tokStanding
 	}
-	ht, err := p.heldToken(tok, &c.Peer, kind)
+	if tok != "" && (tok == c.Standing.Token || tok == c.Reconnect.Token) {
+		return // the held token offered again: nothing to do, nothing to audit
+	}
+	ht, err := p.heldTokenFor(c, tok, kind)
 	if err != nil || !p.now().Before(ht.Exp) {
 		p.audit("bad_issued_token", c.ID)
 		return
@@ -352,9 +411,12 @@ func (p *Peer) revokeAtRefresh(c *Connection, now time.Time) {
 		}
 		return a.Seq > b.Seq
 	}
+	// The newest of each among all the connection's tokens, revoked ones
+	// included: a revoked newest spares none (revoked ones are skipped
+	// below).
 	var carried, prompt *IssuedToken
 	for _, t := range p.issued {
-		if t.ConnID != c.ID || t.Kind != tokStanding || t.Denied {
+		if t.ConnID != c.ID || t.Kind != tokStanding {
 			continue
 		}
 		if t.Carried && (carried == nil || newer(t, carried)) {
