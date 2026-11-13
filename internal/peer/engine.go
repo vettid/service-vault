@@ -64,6 +64,11 @@ type Config struct {
 	// first Start reconnects every connection (reconnect.go) and, once
 	// the reconnects are stored and sent, calls it (to clear the marker).
 	AfterRestore func(context.Context) error
+	// EndAllConnections, a date (YYYY-MM-DD), ends every connection at the
+	// first start that sees that date and records that it ran: a later
+	// start with the same date does nothing (endAllOnce; RELEASE-29 §11,
+	// the runbook step after a rollback across the marker). Empty: none.
+	EndAllConnections string
 	// Votes answers members' vote.* requests (vote.go); without it they
 	// are answered unsupported_type.
 	Votes Votes
@@ -209,6 +214,9 @@ func (p *Peer) Start(ctx context.Context) error {
 	p.leasedUntil(p.now())
 	if !p.started {
 		if err := p.load(ctx); err != nil {
+			return err
+		}
+		if err := p.endAllOnce(ctx, p.now()); err != nil {
 			return err
 		}
 		if err := p.loadUnacked(ctx); err != nil {

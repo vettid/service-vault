@@ -75,10 +75,14 @@ fourth. Done so far:
   a pending epoch abandoned by a link is demoted from the start (K2), and
   one abandoned otherwise is ended at the member's `identity.rotate` when
   its key was superseded (K9); a reconnect refused while ours is pending
-  still has its links applied (X4).
+  still has its links applied (X4);
+- **the marker** (change 4c): every connection record carries
+  `messaging_release: 29`, and each start ends records without it
+  (`pre29_ended`), with a one-shot setting to end every connection after
+  a rollback (`SV_END_ALL_CONNECTIONS`).
 
-Not yet: the release marker and the end of older records (change 4c); the
-relay-key rules of §3.4.2, after which it advertises `relay_follow`.
+Not yet: the relay-key rules of §3.4.2, after which it advertises
+`relay_follow`.
 
 This repository replaces
 [vettid/vettid-service-vault](https://github.com/vettid/vettid-service-vault),
@@ -151,6 +155,7 @@ deploy doesn't add the rule.
 | `approvalTtl` | no (`24h`; `1h` unless `envName` is `prod`) | `SV_APPROVAL_TTL`. The stack also sets `SV_CHANNEL`: `production` only when `envName` is `prod` (as for `SV_SIGSTORE`), `staging` for every other `envName`; and it refuses an `approvalTtl` above `1h` for `staging` |
 | `longApprovalChallenges` | no (off) | `true` sets `SV_LONG_APPROVAL_CHALLENGES` (see "Admin approvals", Timing). Set it for a channel only once that channel's member-vault release carries VAULT-MESSAGING 0.82.0 (staging: release 26). `-c longApprovalChallenges=true` or absent; the stack refuses it for `envName` `prod` (production waits for a production member-vault release with 0.82.0) |
 | `approvalAllowNoPurpose` | no | `true` sets `SV_APPROVAL_ALLOW_NO_PURPOSE` (see "Admin approvals"): only while an admin's vault predates purposes |
+| `endAllConnections` | no | A date, `YYYY-MM-DD`: sets `SV_END_ALL_CONNECTIONS`, which ends every connection at the first start that sees that date (see "Rolling back across release 29"). The date names one run: use one not used before (a used one ends nothing and raises `end_all_reused`). Context is not remembered: the next deploy without it unsets it |
 | `testSignIns` | no | `true` sets `SV_TEST_SIGNINS` (see `POST /v1/signins/unsigned`): testing only, so the stack refuses it unless `envName` is `staging`. Context is not remembered: a staging deploy without `-c testSignIns=true` turns the route off again |
 | `recordSealMigrate` | no | `true` only for the deploy that upgrades a deployment from before sealing (see "Records at rest") |
 | `recordKeyVersion` | no (1) | `SV_RECORD_KEY_VERSION`, the lowest record key version to use: set it one above the table's to rotate the record key (see "Rotating the record key"). Leaving it out later is fine |
@@ -169,6 +174,27 @@ destination.
   `relay.address.update` moved before the service refused such updates
   was suspended (reason `relay_moved_unlinked`): the address it holds may be a copy's. No honest
   member sent one; that member connects again from a new invitation.
+- `pre29_ended`: at start, connections whose records come from before
+  release 29's rules were complete (no `messaging_release: 29`) were
+  ended, as docs/RELEASE-29.md section 11 says (with claims not yet
+  activated whose records lack it): each member is sent
+  `connection.removed`, the application gets `connection.removed` with
+  `reason: pre29` (`connection.expired` for a claim), and the member
+  connects again from a new invitation. A claim's member is sent nothing, as at an ordinary expiry, and a
+  first contact still awaiting its `hs.fin` raises no application
+  event; a member whose approval was in flight may briefly see the
+  connection as active until its own checks fail (its tokens are
+  revoked, so nothing goes through).
+  Expected once, at the first start of the release-29 version (on
+  staging: re-invite the test members; an empty admin set is recovered
+  as "Recovering an empty set" says). Again later only after a
+  rollback: see "Rolling back across release 29".
+- `connections_ended`: `SV_END_ALL_CONNECTIONS` ended every connection
+  at start (see "Rolling back across release 29"); unset it with the
+  next deploy.
+- `end_all_reused`: `SV_END_ALL_CONNECTIONS` names a date that already
+  ran, so nothing was ended: deploy again with a date not used before if
+  the runbook step was meant, otherwise unset it.
 - `webhook_dropped`: a webhook was given up after 24 hours, so the
   application missed an event.
 - `outgoing_identity_changed`: at start, a stored handshake this
@@ -657,6 +683,46 @@ An image from before release 29's second change does not know a stored
 pending epoch: roll back to one only when every `reconnected: epoch
 pending` or `rekeyed: epoch pending` line has its `epoch confirmed`.
 
+**Rolling back across release 29.** From release 29's last change on,
+every connection record carries `messaging_release: 29`, and each start
+ends the ones that don't (alarm `pre29_ended`; docs/RELEASE-29.md
+section 11). An image from before it keeps the field on records it
+does not rewrite, yet may write a connection's handshakes, tokens and
+outbox under its older rules. So after any rollback to such an image,
+the circuit breaker's included (alarm `deploy_failed`), end every
+connection when deploying forward again:
+1. Deploy the release-29 image with `-c endAllConnections=<a date not
+   used before, YYYY-MM-DD>` (today's, usually). The date only names the
+   run: a past or future date runs at once, and one used before ends
+   nothing and raises `end_all_reused`. The first start that sees it ends
+   every connection and every claim not yet activated: each member is
+   sent `connection.removed`, the application gets `connection.removed`
+   (or `connection.expired` for a claim) with `reason: ended_all`, and
+   alarm `connections_ended` gives the count. The run is recorded once
+   all are ended, so a restart with the same date ends nothing more.
+   A claim's member is sent nothing, as at an ordinary expiry, and a
+   first contact still awaiting its `hs.fin` raises no application
+   event; a member whose approval was in flight may briefly see the
+   connection as active until its own checks fail (its tokens are
+   revoked, so nothing goes through).
+2. Check that the run completed: the `connections_ended` alarm for the
+   date, and no ERROR at that start. A start that fails partway ends the
+   rest at the next start, whose alarm counts only those; the counts of
+   both add up. If such a failed start is itself rolled back by the
+   circuit breaker, only the connections ended before the failure have
+   their tokens revoked; the rest stay usable under the older image,
+   whose housekeeping may mint new tokens for them. Deploy forward with
+   the same date again, which ends what is left.
+3. Deploy again without `endAllConnections` (context is not
+   remembered, so a plain deploy unsets it).
+4. Invite the members again. The admin connections are ended too, so
+   the admin set is empty (`admins_short`): recover it as "Recovering an
+   empty set" says (`service-vault admin bootstrap -email`). On staging,
+   the release-29 version's first
+   deploy ends every connection anyway (`pre29_ended`); it needs the
+   owner's go of its own, and the staging test members are re-invited
+   after it.
+
 The KMS key must be the one the backup was made under: the stack's key,
 which is retained and never deleted with the stack.
 
@@ -689,6 +755,7 @@ which is retained and never deleted with the stack.
 | `SV_LONG_APPROVAL_CHALLENGES` | env, optional | `true` sends an approval challenge with the approval's own expiry, at most 24 hours, and reminds only admins holding no live challenge (VAULT-MESSAGING 0.82.0 §10.4); default `false`: 10 minutes, and a reminder challenges every admin who has not answered. Turn it on for a channel only once that channel's member vaults carry 0.82.0 (staging: release 26): an older member vault cuts the challenge to 10 minutes without telling the service. Only `true` turns it on; any other value but `false` stops the start (chosen; not in the spec) |
 | `SV_CHANNEL` | env, optional | `staging` or `production` (default `production`); anything else stops the start. The default is production, so a staging run outside the CDK stack must set `SV_CHANNEL=staging` itself. On `staging` an approval lasts at most 1 hour (STAGING-TIME-SCALE N16; VAULT-MESSAGING 0.82.0 §10.4), and so does its challenge |
 | `SV_APPROVAL_ALLOW_NO_PURPOSE` | env, optional | `true` counts approvals signed without a purpose (vaults before VAULT-MESSAGING 0.65.0), marked `no_purpose`; default `false`, which audits them and doesn't count them (§10.4). For a transition only |
+| `SV_END_ALL_CONNECTIONS` | env, optional | A date, `YYYY-MM-DD`: the first start that sees it ends every connection (each member sent `connection.removed`, its tokens revoked, its waiting messages audited, `connection_ended_all` audited, `connection.removed` with `reason: ended_all`, alarm `connections_ended`) and records that it ran; any later start with the same date does nothing. Invitations stay. Set by the stack's `endAllConnections` context; a malformed value stops the start |
 | `SV_TEST_SIGNINS` | env, optional | `true` serves `POST /v1/signins/unsigned` (`svctl signin -unsigned`); default `false`, when it answers `403 test_only`. For testing only: it sends members a sign-in they did not start. A malformed value stops the start |
 | `SV_RECORD_KEY_VERSION` | env, optional | The lowest record key version to use (default 1; see "Rotating the record key") |
 
@@ -733,9 +800,9 @@ billed.
 
 **Webhooks** (signed as `sdk/go/webhook` verifies): `connection.pending`
 `{invite_id, sas, name}`, `connection.added` `{invite_id, name, email_bound}`,
-`connection.declined` / `connection.expired` `{invite_id}`,
-`connection.removed` `{direction: in|out}`, `connection.suspended`
-`{reason: rotation_conflict}`, `signin.approved`
+`connection.declined` `{invite_id}`, `connection.expired` `{invite_id, reason?: pre29 | ended_all}` (a `connection.removed` or `connection.expired` for a record ended at a start may come twice, if the service stopped between its two writes: treat a repeat as one),
+`connection.removed` `{direction: in|out, reason?: pre29 | ended_all}`, `connection.suspended`
+`{reason: rotation_conflict | epoch | relay_moved_unlinked}`, `signin.approved`
 `{signin_id, key_changed}`, `signin.denied` `{signin_id, reason}`,
 `signin.expired` `{signin_id}`, each with its `connection_id`. `name` is
 the member's account name as their vault presents it. Admin approvals add

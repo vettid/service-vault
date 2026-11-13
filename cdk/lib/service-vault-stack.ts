@@ -86,6 +86,13 @@ export const CLIENT_PARAMS = [
   'webhook-secret-arn',
 ] as const;
 
+/** Whether v is a real calendar date, YYYY-MM-DD (as the service's time.Parse(time.DateOnly) reads it). */
+export function isCalendarDate(v: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+  const d = new Date(`${v}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v;
+}
+
 /** Log lines the daemon marks for an alarm (`"alarm": <name>`). */
 export const ALARMS = {
   /** A member's identity key got two successors; the connection is suspended (internal/peer/rotation.go). */
@@ -94,6 +101,12 @@ export const ALARMS = {
   fork_suspected: 'Fork evidence about a session epoch suspended a connection: a second or old copy of the member vault used it (README "fork_suspected")',
   /** A connection a relay.address.update moved before the update was refused (internal/peer/state.go): suspended at start. */
   relay_moved_unlinked: 'A connection that a relay.address.update moved before such updates were refused was suspended at start: the address may belong to a copy; the member must connect again (README "relay_moved_unlinked")',
+  /** Connections from before release 29 were ended at start (internal/peer/pre29.go): their members must connect again. */
+  pre29_ended: 'Connections made before release 29 were ended at start (one line with the count): their members must connect again from new invitations; expected once, at the first start of the release-29 version (README "pre29_ended")',
+  /** Every connection was ended by the one-shot SV_END_ALL_CONNECTIONS (internal/peer/pre29.go). */
+  connections_ended: 'Every connection was ended at start by SV_END_ALL_CONNECTIONS (the runbook step after a rollback across the release-29 marker): the members must connect again; unset it with the next deploy (README "Rolling back")',
+  /** SV_END_ALL_CONNECTIONS names a date that already ran (internal/peer/pre29.go): nothing was ended. */
+  end_all_reused: 'SV_END_ALL_CONNECTIONS names a date that already ran, so nothing was ended at this start: if the runbook step was meant, deploy again with a date not used before; otherwise unset it (README "Rolling back across release 29")',
   /** A webhook was given up after the outbox's MaxAge (internal/webhook/outbox.go): the application missed an event. */
   webhook_dropped: 'A webhook was dropped as undeliverable after 24 h: the application missed an event',
   /** A stored outgoing hs.init names another identity key than the service's (internal/peer/state.go): dropped at start. */
@@ -196,6 +209,13 @@ export interface ServiceVaultStackProps extends cdk.StackProps {
    * other envName throws.
    */
   readonly testSignIns?: boolean;
+  /**
+   * A date (YYYY-MM-DD): the first start that sees it ends every connection
+   * and records that it ran (SV_END_ALL_CONNECTIONS; README "Rolling back",
+   * the runbook step after a rollback across the release-29 marker). Context
+   * is not remembered: the next deploy without it unsets it.
+   */
+  readonly endAllConnections?: string;
   /**
    * Send an approval challenge with the approval's own expiry, at most 24
    * hours, and remind only admins holding no live challenge
@@ -348,6 +368,12 @@ export class ServiceVaultStack extends cdk.Stack {
         throw new Error(`testSignIns is for the staging deployment only: members of a real service must sign in themselves (envName is "${envName}")`);
       }
       approvalEnv.SV_TEST_SIGNINS = 'true';
+    }
+    if (props.endAllConnections !== undefined) {
+      if (!isCalendarDate(props.endAllConnections)) {
+        throw new Error(`endAllConnections must be a date, YYYY-MM-DD (got "${props.endAllConnections}")`);
+      }
+      approvalEnv.SV_END_ALL_CONNECTIONS = props.endAllConnections;
     }
     const prefix = `vettid-service-vault-${envName}`;
     const exportPrefix = `ServiceVault-${envName}`;

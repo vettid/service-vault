@@ -341,8 +341,15 @@ func (p *Peer) handleResponse(c *Connection, in *envelope.Inner, now time.Time) 
 // token issued to the member is denylisted by jti; the held tokens,
 // session keys and outbox entries are deleted.
 func (p *Peer) removeConnection(c *Connection, dir string, now time.Time) {
+	p.removeConnectionFor(c, dir, "", now)
+}
+
+// removeConnectionFor is removeConnection with the reason connection.removed
+// carries to the application ("": none; pre29, RELEASE-29 §11).
+func (p *Peer) removeConnectionFor(c *Connection, dir, reason string, now time.Time) {
 	if dir == "out" && c.kr != nil && c.kr.Current() != nil && c.Standing.Token != "" && c.State == StateActive && !c.Reconnecting &&
-		!c.currentDemoted() { // nothing but handshake messages under a demoted epoch (§3.4.1 K5)
+		!c.currentDemoted() && // nothing but handshake messages under a demoted epoch (§3.4.1 K5)
+		len(c.LegacyPrevRelayPK) == 0 { // nor to an address a relay.address.update may have moved (legacyRelayMove)
 		in := &envelope.Inner{ID: p.newID(now), Type: peerwire.TypeConnectionRemoved, TS: now, Body: peerwire.ConnectionRemovedBody(),
 			Features: features()}
 		if raw, err := c.kr.Current().Seal(in); err == nil {
@@ -382,7 +389,7 @@ func (p *Peer) removeConnection(c *Connection, dir string, now time.Time) {
 	if d == "replaced" {
 		d = "in"
 	}
-	p.emit(&Event{Type: EventConnectionRemoved, ConnectionID: c.ID, Direction: d, Tag: c.Tag}, now)
+	p.emit(&Event{Type: EventConnectionRemoved, ConnectionID: c.ID, Direction: d, Tag: c.Tag, Reason: reason}, now)
 }
 
 // ErrNotFound is an unknown or inactive connection or invitation.

@@ -31,13 +31,14 @@ const (
 	kindResp     = "resp"     // cached responses (§8.2)
 	kindLease    = "lease"    // the latest collect that leased messages, by process (Caught)
 	kindUnacked  = "unacked"  // a message left unacked, by msg_id: its times only (Caught)
+	kindOnce     = "once"     // a one-shot operator action that ran (EndAllConnections)
 )
 
 // Kinds lists every record kind the peer stores, for a migration that
 // must touch them all (internal/sealstore).
 func Kinds() []string {
 	return []string{kindConn, kindInvite, kindAwait, kindRequest, kindOutgoing, kindToken, kindOutbox, kindAuth, kindEvent,
-		kindMsg, kindInner, kindResp, kindLease, kindUnacked}
+		kindMsg, kindInner, kindResp, kindLease, kindUnacked, kindOnce}
 }
 
 // Retention (VAULT-MESSAGING §8.2, §6.4).
@@ -150,7 +151,11 @@ type Connection struct {
 	// when the last hs.confirm was queued (§6.3.1 Responder; confirm.go).
 	Epochs    []EpochMeta `json:"epochs,omitempty"`
 	Confirmed []byte      `json:"confirmed,omitempty"`
-	ConfirmAt time.Time   `json:"confirm_at,omitzero"`
+	// MessagingRelease is the marker every connection record is written
+	// with (RELEASE-29 §11): a record without it, or with a value below
+	// MessagingRelease, is ended at the next start (endPre29).
+	MessagingRelease int       `json:"messaging_release,omitempty"`
+	ConfirmAt        time.Time `json:"confirm_at,omitzero"`
 
 	Created   time.Time `json:"created"`
 	Activated time.Time `json:"activated"`
@@ -243,12 +248,15 @@ type InviteRecord struct {
 
 // awaiting is a handshake we answered with hs.resp, awaiting hs.fin.
 type awaiting struct {
-	ID       string            `json:"id"`
-	ConnID   string            `json:"conn_id"` // the connection it is for (new or existing)
-	New      *peerInfo         `json:"new,omitempty"`
-	Purpose  handshake.Purpose `json:"purpose"`
-	InviteID string            `json:"invite_id,omitempty"`
-	Held     HeldToken         `json:"held"` // the peer's token from hs.init
+	ID string `json:"id"`
+	// MessagingRelease: the marker (RELEASE-29 §11), as on a connection: a
+	// first contact's awaiting without it is ended at start.
+	MessagingRelease int               `json:"messaging_release,omitempty"`
+	ConnID           string            `json:"conn_id"` // the connection it is for (new or existing)
+	New              *peerInfo         `json:"new,omitempty"`
+	Purpose          handshake.Purpose `json:"purpose"`
+	InviteID         string            `json:"invite_id,omitempty"`
+	Held             HeldToken         `json:"held"` // the peer's token from hs.init
 	// Th1 identifies the hs.init answered, so that a copy of it (an
 	// outbox retry re-deposits the same bytes) is not answered twice.
 	Th1     []byte                   `json:"th1,omitempty"`
@@ -328,18 +336,21 @@ func (f *pendingFollow) parse() (ed25519.PublicKey, *suite.PublicKey, []*handsha
 // request is a first-contact connection after hs.fin, before activation
 // (§6.4, 0.10.3).
 type request struct {
-	ID           string               `json:"id"` // the connection's id
-	InviteID     string               `json:"invite_id"`
-	Peer         peerInfo             `json:"peer"`
-	SAS          string               `json:"sas"`
-	Epoch        handshake.EpochState `json:"epoch"`
-	Approved     bool                 `json:"approved"`
-	PeerApproved bool                 `json:"peer_approved"`
-	HeldRequest  HeldToken            `json:"held_request"`
-	Standing     HeldToken            `json:"standing"`
-	Reconnect    HeldToken            `json:"reconnect"`
-	Created      time.Time            `json:"created"`
-	Expires      time.Time            `json:"expires"`
+	ID string `json:"id"` // the connection's id
+	// MessagingRelease: the marker (RELEASE-29 §11), as on a connection: a
+	// request without it is ended at start.
+	MessagingRelease int                  `json:"messaging_release,omitempty"`
+	InviteID         string               `json:"invite_id"`
+	Peer             peerInfo             `json:"peer"`
+	SAS              string               `json:"sas"`
+	Epoch            handshake.EpochState `json:"epoch"`
+	Approved         bool                 `json:"approved"`
+	PeerApproved     bool                 `json:"peer_approved"`
+	HeldRequest      HeldToken            `json:"held_request"`
+	Standing         HeldToken            `json:"standing"`
+	Reconnect        HeldToken            `json:"reconnect"`
+	Created          time.Time            `json:"created"`
+	Expires          time.Time            `json:"expires"`
 
 	ep *handshake.Epoch
 }
@@ -517,6 +528,7 @@ func (p *Peer) recordData(k key) ([]byte, time.Time, error) {
 		if c.kr != nil {
 			c.Keyring = c.kr.Export()
 		}
+		c.MessagingRelease = MessagingRelease // on every connection record written (RELEASE-29 §11)
 		v = c
 	case kindInvite:
 		inv := p.invites[k.id]
@@ -536,6 +548,7 @@ func (p *Peer) recordData(k key) ([]byte, time.Time, error) {
 			}
 			aw.Resp = s
 		}
+		aw.MessagingRelease = MessagingRelease // RELEASE-29 §11
 		v = aw
 	case kindRequest:
 		r := p.requests[k.id]
@@ -545,6 +558,7 @@ func (p *Peer) recordData(k key) ([]byte, time.Time, error) {
 		if r.ep != nil {
 			r.Epoch = r.ep.Export()
 		}
+		r.MessagingRelease = MessagingRelease // RELEASE-29 §11
 		v = r
 	case kindOutgoing:
 		og := p.outgoing[k.id]
@@ -834,10 +848,21 @@ func (p *Peer) load(ctx context.Context) error {
 		p.seq = max(p.seq, t.Seq)
 	}
 	p.dropStale(stale)
+	// RELEASE-29 §11, before anything else uses the connections: records
+	// from before release 29's rules were complete are ended.
+	if err := p.endPre29(ctx, p.now()); err != nil {
+		return err
+	}
 	for _, c := range moved {
+		if p.conns[c.ID] != c {
+			continue // ended above
+		}
 		p.legacyRelayMove(c)
 	}
 	for _, o := range orphans {
+		if p.conns[o.c.ID] != o.c {
+			continue // ended above
+		}
 		p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == o.c.ID && bytes.Equal(e.FinEpoch, o.id) })
 		for _, j := range o.issued {
 			p.denyJTI(j, p.now())

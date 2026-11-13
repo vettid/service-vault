@@ -55,6 +55,8 @@ type fixture struct {
 	afterRestore func(context.Context) error
 	// votes, when set, is the next start's Config.Votes.
 	votes Votes
+	// endAll is Config.EndAllConnections at the next start.
+	endAll string
 	// failDeposit, when set, decides a deposit's relay error (nil: the
 	// deposit goes through); revokes counts the revocations by value.
 	failDeposit func(mailbox, token string) error
@@ -127,7 +129,7 @@ func newFixture(t *testing.T) *fixture {
 func (f *fixture) start() {
 	f.t.Helper()
 	p, err := New(Config{Log: slog.New(slog.NewTextHandler(&f.logs, nil)), Keys: f.keys, Relay: testRelay{f.sv, f}, RelayURL: peertest.RelayURL, Store: f.store, Events: f.ev, Now: f.clk.Now,
-		Profile: Profile{FirstName: "VettID", LastName: "Member Service"}, AfterRestore: f.afterRestore, Votes: f.votes})
+		Profile: Profile{FirstName: "VettID", LastName: "Member Service"}, AfterRestore: f.afterRestore, Votes: f.votes, EndAllConnections: f.endAll})
 	if err != nil {
 		f.t.Fatal(err)
 	}
