@@ -6,12 +6,14 @@
 //
 // roots/<instance>/release-<n>.json is a copy of release n's
 // vote_trust_roots (vettid-vault enclave/releasecfg/<channel>.json at
-// tag release/<channel>/<n>), for every release of that channel that is
-// active, deprecated or a candidate in its manifest and registers the
-// vote feature (BALLOT-PROTOCOL §3.3). A bundle must verify against each
-// of them, so a vault that dropped a root still accepts it. The copies
-// are checked against the releases and the manifest by the rootscheck
-// test (go test -tags rootscheck).
+// tag release/<channel>/<n>), for every supported release of that
+// channel that registers the vote feature: listed active or deprecated in
+// its signed manifest, or a candidate (tagged, not yet in the manifest)
+// (BALLOT-PROTOCOL §3.3). A bundle must verify against each of them, so a
+// vault that dropped a root still accepts it. The copies are checked
+// against the releases and the manifest by the rootscheck test (go test
+// -tags rootscheck), and against Sigstore's current trusted root by
+// tools/rootwatch; both run daily (.github/workflows/vault-roots.yml).
 package vaultroots
 
 import (

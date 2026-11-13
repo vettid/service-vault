@@ -1,0 +1,80 @@
+name: vault-roots
+
+# The trusted roots the service checks bundles against before sending
+# (internal/vaultroots, BALLOT-PROTOCOL §3.3):
+# - rootscheck: each copy equals the vote_trust_roots of the vault release
+#   it copies, and every supported release that registers vote has one
+#   (the signed manifest decides which are supported);
+# - sigstore: Sigstore's current trusted root (through TUF) still matches
+#   the pinned copies.
+# Daily, and on a pull request that changes them. A scheduled failure
+# opens an issue (one at a time per job).
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'internal/vaultroots/**'
+      - 'tools/rootwatch/**'
+      - '.github/workflows/vault-roots.yml'
+      - 'go.mod'
+
+permissions:
+  contents: read
+
+jobs:
+  rootscheck:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: clone vettid-vault with its release tags
+        run: git clone --quiet --filter=blob:none --no-checkout https://github.com/vettid/vettid-vault.git "$RUNNER_TEMP/vettid-vault"
+      - name: the copies match the supported releases
+        env:
+          VAULTROOTS_VAULT_REPO: ${{ runner.temp }}/vettid-vault
+        run: go test -count=1 -v -tags rootscheck -run TestCopiesMatchReleases ./internal/vaultroots/
+
+  sigstore:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: tools/rootwatch
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tools/rootwatch/go.mod
+      - run: go mod verify
+      - run: go vet .
+      - name: Sigstore's trusted root matches the pinned copies
+        run: go run . -roots ../../internal/vaultroots/roots
+
+  issue:
+    if: failure() && github.event_name == 'schedule'
+    needs: [rootscheck, sigstore]
+    runs-on: ubuntu-26.04
+    permissions:
+      issues: write
+    steps:
+      - name: open an issue unless one is open
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ROOTSCHECK: ${{ needs.rootscheck.result }}
+          SIGSTORE: ${{ needs.sigstore.result }}
+        run: |
+          title="vault-roots: the pinned vault trusted roots need attention"
+          open=$(gh issue list --state open --search "in:title \"$title\"" --json number --jq 'length')
+          if [ "$open" != "0" ]; then echo "an issue is already open"; exit 0; fi
+          gh issue create --title "$title" --body "The scheduled vault-roots check failed: rootscheck $ROOTSCHECK, sigstore $SIGSTORE. See $RUN.
+
+          rootscheck: a copy under internal/vaultroots/roots differs from its vault release, is missing for a supported release that registers vote, or is left over from one no longer supported.
+          sigstore: Sigstore's trusted root changed. Until a vault release pins the new roots, bundles under a new key are not sent (alarm proposal_bundle_unverified, README)."

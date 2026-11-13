@@ -287,7 +287,12 @@ destination.
   is sent. The ERROR line names the proposal and the error. A new
   Sigstore key that no supported vault release pins yet means a vault
   release with the new roots must ship first (the scheduled roots check
-  opens an issue when Sigstore's trusted root changes).
+  opens an issue when Sigstore's trusted root changes). Each new vault
+  release that registers `vote` needs its copy,
+  `internal/vaultroots/roots/<channel>/release-<n>.json` (its
+  `vote_trust_roots`, indented by two spaces); the daily `vault-roots`
+  workflow fails while a supported release has none, or a copy differs
+  or outlives its release.
 - `results_bundle_unverified`: a vote's results bundle failed its
   timestamp check (the authority's signature, the pinned trusted root, or
   its validity period); the results are not published. One anchored by

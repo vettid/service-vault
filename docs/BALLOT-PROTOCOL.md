@@ -197,8 +197,9 @@ design: vettid/votes, docs/VOTES-SITE.md).
   member's vault will (VAULT-MESSAGING §10.19.4 step 6), with the
   vaults' own verifier, under its anchor key, against the trusted roots
   of **every supported vault release** of its Sigstore instance: a
-  release that is `active`, `deprecated` or a `candidate` in that
-  channel's manifest and registers the `vote` feature. A bundle that
+  release that registers the `vote` feature and is listed `active` or
+  `deprecated` in that channel's signed manifest, or is a `candidate`
+  (VAULT-RELEASES: tagged, not yet signed into a manifest). A bundle that
   fails any of them is not sent (alarm `proposal_bundle_unverified`);
   an extension already published stays in effect. (chosen; not in the
   spec)
