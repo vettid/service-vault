@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/vettid/service-vault/internal/peer/peertest"
+	"github.com/vettid/vettid-relay/relayauth"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/suite"
@@ -282,5 +283,65 @@ func TestRekeyLinksNotSeenBeforePrecheck(t *testing.T) {
 	}
 	if c := f.p.conns[cid]; len(c.Seen) != 0 {
 		t.Fatalf("seen %d: a rekey that failed its own checks recorded its links", len(c.Seen))
+	}
+}
+
+// A rekey hs.init whose from.relay.pk is not its sender fails
+// rekeyPrecheck: its links are checked by rule C but never recorded as
+// seen, whatever check refuses it later.
+func TestRekeyFailingPrecheckRecordsNothing(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	m.RotateIdentity(50, true) // A->B
+	other := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{66}, 32)).Public().(ed25519.PublicKey)
+	m.Addr = handshake.RelayAddr{URL: m.Addr.URL, Mailbox: relayauth.MailboxID(other), PK: other} // not its sender
+	m.StartRekeyWithLinks()
+	if _, err := f.p.Step(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if c := f.p.conns[cid]; len(c.Seen) != 0 {
+		t.Fatalf("seen %d", len(c.Seen))
+	}
+}
+
+// The whole chain is kept: after more links than MaxRotations, a second
+// successor of the first key still suspends (it is still an ancestor).
+func TestLongChainKeepsAncestors(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	orig := m.IK
+	for i := 0; i < handshake.MaxRotations+2; i++ {
+		r := m.RotateIdentity(byte(100+2*i), true)
+		m.SendRotation(r)
+		f.pump()
+	}
+	c := f.p.conns[cid]
+	if len(c.Chain) != handshake.MaxRotations+2 || !isAncestor(c, orig.Public().(ed25519.PublicKey)) {
+		t.Fatalf("chain %d", len(c.Chain))
+	}
+	ax, _ := link(t, orig, 30) // another successor of the first key
+	m.SendRotations(ax)
+	f.pump()
+	if c.State != StateSuspended {
+		t.Fatalf("state %s", c.State)
+	}
+}
+
+// A link in an identity.rotate refused for its ts stays seen (rule C runs
+// first).
+func TestRefusedRotateLinkStaysSeen(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	r := m.RotateIdentity(40, true)
+	m.SendInner(&envelope.Inner{ID: m.NewID(), Type: TypeIdentityRotate, TS: f.clk.Now().Add(-30 * 24 * time.Hour),
+		Body: peertest.RotateBody(r, r)})
+	if _, err := f.p.Step(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if c := f.p.conns[cid]; len(c.Seen) != 1 || len(c.Chain) != 0 || !f.audited("stale_or_future") {
+		t.Fatalf("seen %d, chain %d", len(c.Seen), len(c.Chain))
 	}
 }

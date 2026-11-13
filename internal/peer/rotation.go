@@ -126,11 +126,10 @@ func (p *Peer) followRotation(c *Connection, ik ed25519.PublicKey, kem *suite.Pu
 	for _, r := range links {
 		c.Chain = append(c.Chain, r.Marshal())
 	}
-	if len(c.Chain) > handshake.MaxRotations {
-		// Only the last links matter for one-successor checks of keys
-		// still in use; the chain a peer may send is at most this long.
-		c.Chain = c.Chain[len(c.Chain)-handshake.MaxRotations:]
-	}
+	// The whole chain is kept, as the member vault keeps it: ancestry
+	// (Table B) and rule C read every link followed, so a link from a key
+	// many rotations back is still judged (a member rotates at a phone
+	// transfer, a recovery or a credential.rotate: rarely).
 	pruneSeen(c) // a followed link is no longer only seen; irrelevant ones go
 	// §3.4.1 H5: the service's open handshakes pinned to the member's
 	// previous ik are abandoned: its rekeys and reconnect awaiting hs.resp,

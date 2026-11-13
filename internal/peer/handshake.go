@@ -444,7 +444,9 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 	// never before (checkSigner).
 	body := pi.Init()
 	for _, r := range body.Rotations {
-		if r.Verify() == nil && p.rotationConflict(c, r, now) {
+		// Not recorded here: only a rekey that passed rekeyPrecheck records
+		// its links as seen (above).
+		if p.rotationConflictRec(c, r, false, now) {
 			pi.Discard()
 			return ackAfterFlush
 		}
