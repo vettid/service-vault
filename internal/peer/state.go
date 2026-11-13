@@ -363,7 +363,8 @@ type IssuedToken struct {
 	ConnID string    `json:"conn_id,omitempty"`
 	Exp    time.Time `json:"exp"`
 	Denied bool      `json:"denied,omitempty"`
-	// Carried: minted for a reconnect's hs.init or hs.resp. Prompt:
+	// Carried: minted for a reconnect's hs.init or hs.resp, and that
+	// reconnect activated (markCarried). Prompt:
 	// re-minted at our reconnect's confirmation ("The prompt to adopt").
 	// A refresh after quota_exceeded keeps the newest of each (§6.3.1
 	// "Revocation by the issuer"; RELEASE-29 §12).

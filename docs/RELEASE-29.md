@@ -435,7 +435,9 @@ separately. The README's release-29 status paragraph shrinks with each.
    it), dated ahead, or with its exp not after its iat; a reconnect token
    issued to it is adopted only if valid and later than the held one; a
    held token the relay revoked is refused if offered again until its exp
-   (as vettid-vault #244).
+   (as vettid-vault #244). The own relay's limit is the one read at the
+   service's last registration: if the relay raises it, a longer honest
+   token is refused until the service registers again (a restart).
 4. **`ik` links and the marker.** The `rotations` of `identity.rotate`;
    demotion by position and the held outbox; strict F1 and the
    reconnects of section 3 item 9; seen links; epochs abandoned while

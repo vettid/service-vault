@@ -624,6 +624,7 @@ func (p *Peer) handleFin(id string, raw []byte, sender ed25519.PublicKey, now ti
 	}
 	p.installEpoch(c, fr.Epoch, now)
 	if aw.Reconnect != nil {
+		p.markCarried(aw.Reconnect.Issued)
 		// Its tokens are carried: adopted when the confirmed epoch reaches
 		// this one, not now (§6.3.1, R29-T1); they supersede earlier ones.
 		p.recordCarried(c, aw.Reconnect.Standing, aw.Reconnect.Reconnect, now)

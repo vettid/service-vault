@@ -2284,7 +2284,7 @@ func TestHeldTokenParity(t *testing.T) {
 		t.Fatal("the held token offered again was audited")
 	}
 	c := f.p.conns[cid]
-	f.p.recordRevokedHeld(c, c.Standing, f.clk.Now())
+	f.p.recordRevokedHeld(c, c.Standing.Token, f.clk.Now())
 	revoked := c.Standing.Token
 	c.Standing = held
 	send("standing", revoked)
@@ -2377,5 +2377,164 @@ func TestDiscardCheckAfterBatch(t *testing.T) {
 		if c.Reconnecting == laterToken {
 			t.Fatalf("later token %v: reconnecting %v", laterToken, c.Reconnecting)
 		}
+	}
+}
+
+// A standing token the relay answers token_revoked is refused when the
+// member offers it again (its jti recorded until its exp).
+func TestRevokedStandingRefusedWhenOfferedAgain(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	c := f.p.conns[cid]
+	revoked := c.Standing.Token
+	f.failDeposit = func(_, token string) error {
+		if token == revoked {
+			return &relayclient.Error{Status: 403, Code: codeTokenRevoked}
+		}
+		return nil
+	}
+	f.p.sendTo(c, "connection.note", []byte(`{}`), f.clk.Now())
+	f.step()
+	if c = f.p.conns[cid]; len(c.RevokedHeld) != 1 {
+		t.Fatalf("%d recorded", len(c.RevokedHeld))
+	}
+	c.Standing = HeldToken{}
+	m.IgnoreStray, m.IgnoreRevoked = true, true
+	m.Send(peerwire.TypeTokenIssued, peerwire.TokenIssuedBody("standing", revoked))
+	f.step()
+	if c = f.p.conns[cid]; c.Standing.Token == revoked {
+		t.Fatal("the revoked token taken again")
+	}
+}
+
+// A reconnect hs.init refused token_revoked drops the held reconnect token
+// and records its jti; a carried token refused is recorded too.
+func TestRevokedReconnectAndCarriedRecorded(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	rt := f.p.conns[cid].Reconnect.Token
+	f.failDeposit = func(_, token string) error {
+		if token == rt {
+			return &relayclient.Error{Status: 403, Code: codeTokenRevoked}
+		}
+		return nil
+	}
+	f.beginReconnectNow(cid)
+	c := f.p.conns[cid]
+	if c.Reconnect.Token != "" || len(c.RevokedHeld) != 1 {
+		t.Fatalf("token kept %v, %d recorded", c.Reconnect.Token != "", len(c.RevokedHeld))
+	}
+	f2 := newFixture(t)
+	m2 := f2.member(10)
+	cid2 := f2.connect(m2, "")
+	mb := f2.p.conns[cid2].Peer.Relay.Mailbox
+	f2.failDeposit = func(mailbox, token string) error {
+		c := f2.p.conns[cid2]
+		if r := c.carriedFor(c.LastEpochID); mailbox == mb && r != nil && token == r.Standing.Token {
+			return &relayclient.Error{Status: 403, Code: codeTokenRevoked}
+		}
+		return nil
+	}
+	f2.clk.Advance(time.Hour)
+	m2.Reconnect()
+	m2.IgnoreRevoked = true
+	f2.pump()
+	if c := f2.p.conns[cid2]; len(c.RevokedHeld) != 1 {
+		t.Fatalf("carried: %d recorded", len(c.RevokedHeld))
+	}
+}
+
+// RevokedHeld drops entries past their exp, and one jti is kept once.
+func TestRevokedHeldPruned(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	c := f.p.conns[cid]
+	now := f.clk.Now()
+	short := m.MintAt(now, now.Add(time.Hour), "short")
+	long := m.MintAt(now, now.Add(10*24*time.Hour), "long")
+	f.p.recordRevokedHeld(c, short, now)
+	f.p.recordRevokedHeld(c, long, now)
+	f.p.recordRevokedHeld(c, long, now)
+	if len(c.RevokedHeld) != 2 {
+		t.Fatalf("%d entries", len(c.RevokedHeld))
+	}
+	f.p.recordRevokedHeld(c, long, now.Add(2*time.Hour))
+	if len(c.RevokedHeld) != 1 || c.RevokedHeld[0].JTI != "long" {
+		t.Fatalf("not pruned: %+v", c.RevokedHeld)
+	}
+}
+
+// An abandoned reconnect's tokens are not the newest carried: the newest
+// activated one stays spared at a refresh with the token it came under
+// unknown; a refresh-revoked newest spares none.
+func TestRefreshNewestCarriedActivatedOnly(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	f.clk.Advance(time.Hour)
+	m.Reconnect() // the member's reconnect: our hs.resp's tokens, activated
+	f.pump()
+	var act string
+	for j, tk := range f.p.issued {
+		if tk.ConnID == cid && tk.Kind == tokStanding && tk.Carried {
+			act = j
+		}
+	}
+	if act == "" {
+		t.Fatal("no activated carried token")
+	}
+	f.clk.Advance(time.Hour)
+	f.beginReconnectNow(cid) // ours, abandoned: its tokens revoked, never carried
+	c := f.p.conns[cid]
+	f.p.mu.Lock()
+	f.p.dropConnOutgoing(c)
+	c.clearReconnect()
+	f.p.revokeAtRefresh(c, f.clk.Now())
+	f.p.mu.Unlock()
+	if f.p.issued[act].Denied {
+		t.Fatal("the newest activated carried token was revoked")
+	}
+	f.p.issued[act].Denied = true // revoked by a refresh: still the newest
+	revived := false
+	for j, tk := range f.p.issued {
+		if tk.ConnID == cid && tk.Kind == tokStanding && j != act && !revived {
+			// an older carried one, live: not spared, as the newest is revoked
+			tk.Denied, tk.Carried, tk.Exp = false, true, f.p.issued[act].Exp.Add(-time.Minute)
+			revived = true
+		}
+	}
+	if !revived {
+		t.Fatal("setup: no other standing token")
+	}
+	f.p.mu.Lock()
+	f.p.revokeAtRefresh(c, f.clk.Now())
+	f.p.mu.Unlock()
+	for _, tk := range f.p.issued {
+		if tk.ConnID == cid && tk.Kind == tokStanding && !tk.Denied {
+			t.Fatalf("%s spared though the newest carried is revoked", tk.JTI)
+		}
+	}
+}
+
+// Our reconnect's hs.init tokens count as carried once its epoch is
+// confirmed, not before.
+func TestOwnReconnectTokensCarriedAtConfirmation(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	f.beginReconnectNow(cid)
+	var issued []string
+	for _, og := range f.p.outgoing {
+		issued = og.Issued
+	}
+	if len(issued) == 0 || f.p.issued[issued[0]].Carried {
+		t.Fatal("carried before the confirmation")
+	}
+	f.pump()
+	if c := f.p.conns[cid]; c.Reconnecting || !f.p.issued[issued[0]].Carried {
+		t.Fatal("not carried after the confirmation")
 	}
 }

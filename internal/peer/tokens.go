@@ -83,7 +83,6 @@ func (p *Peer) mintReconnectPair(connID string, np *peerInfo, now time.Time) (st
 		p.denyJTI(j1, now)
 		return "", "", nil, err
 	}
-	p.issued[j1].Carried, p.issued[j2].Carried = true, true
 	return st, rt, []string{j1, j2}, nil
 }
 
@@ -143,18 +142,41 @@ func (p *Peer) heldTokenFor(c *Connection, tok, kind string) (HeldToken, error) 
 	return ht, nil
 }
 
+// markCarried marks the tokens a handshake carried once it activated (our
+// pending epoch confirmed, or a member's reconnect established at its
+// hs.fin): only an activated handshake is "the newest token-carrying
+// handshake" a refresh spares (§6.3.1, §7.2); an abandoned one's tokens
+// are revoked and never count.
+func (p *Peer) markCarried(jtis []string) {
+	for _, j := range jtis {
+		if t := p.issued[j]; t != nil && !t.Carried {
+			t.Carried = true
+			p.markDirty(kindToken, j)
+		}
+	}
+}
+
 // recordRevokedHeld records a held token's jti the relay revoked, until
 // its exp, dropping the entries past theirs.
-func (p *Peer) recordRevokedHeld(c *Connection, ht HeldToken, now time.Time) {
+func (p *Peer) recordRevokedHeld(c *Connection, tok string, now time.Time) {
+	if tok == "" {
+		return
+	}
+	// Its jti and exp from the token itself (a held record from before
+	// held tokens kept their jti has none).
+	cl, err := relayauth.ParseToken(tok, c.Peer.Relay.PK)
+	if err != nil {
+		return
+	}
 	keep := c.RevokedHeld[:0]
 	for _, r := range c.RevokedHeld {
-		if now.Before(r.Exp) {
+		if now.Before(r.Exp) && r.JTI != cl.Jti {
 			keep = append(keep, r)
 		}
 	}
 	c.RevokedHeld = keep
-	if ht.JTI != "" && now.Before(ht.Exp) {
-		c.RevokedHeld = append(c.RevokedHeld, RevokedJTI{JTI: ht.JTI, Exp: ht.Exp})
+	if now.Before(cl.Exp) {
+		c.RevokedHeld = append(c.RevokedHeld, RevokedJTI{JTI: cl.Jti, Exp: cl.Exp})
 	}
 	p.markDirty(kindConn, c.ID)
 }
@@ -286,7 +308,7 @@ func (p *Peer) storeIssuedTo(c *Connection, body json.RawMessage) {
 	if kind != tokReconnect {
 		kind = tokStanding
 	}
-	if tok == c.Standing.Token || tok == c.Reconnect.Token {
+	if tok != "" && (tok == c.Standing.Token || tok == c.Reconnect.Token) {
 		return // the held token offered again: nothing to do, nothing to audit
 	}
 	ht, err := p.heldTokenFor(c, tok, kind)

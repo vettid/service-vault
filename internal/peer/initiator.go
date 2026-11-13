@@ -142,6 +142,7 @@ func (p *Peer) confirmPending(c *Connection, now time.Time) {
 			}
 		}
 	case handshake.PurposeReconnect:
+		p.markCarried(pe.Issued)
 		c.clearReconnect()
 		// §6.3.1 "The prompt to adopt", §6.6 "Re-minted after every
 		// successful reconnect": fresh tokens under the new epoch.

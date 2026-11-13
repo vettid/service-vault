@@ -221,7 +221,7 @@ func (p *Peer) deposit(ctx context.Context, e *outboxEntry, now time.Time) (fini
 		// ends, the connection stale (§3.4.1 "The reconnect bound").
 		if relayclient.IsCode(err, codeTokenRevoked) || relayclient.IsCode(err, "token_invalid") {
 			if relayclient.IsCode(err, codeTokenRevoked) {
-				p.recordRevokedHeld(c, c.Reconnect, now)
+				p.recordRevokedHeld(c, e.Token, now)
 			}
 			c.Reconnect = HeldToken{} // dropped: a bad token cannot pin
 			p.markDirty(kindConn, c.ID)
@@ -301,7 +301,7 @@ func (p *Peer) depositOnce(ctx context.Context, e *outboxEntry, now time.Time) (
 			// abandoned, and the reconnect starts at once (§6.3.1 "A
 			// carried token refused").
 			if c.Standing.Token == tok {
-				p.recordRevokedHeld(c, c.Standing, now)
+				p.recordRevokedHeld(c, tok, now)
 				c.Standing, c.RefreshID = HeldToken{}, ""
 				p.markDirty(kindConn, c.ID)
 			}
@@ -328,6 +328,7 @@ func (p *Peer) depositOnce(ctx context.Context, e *outboxEntry, now time.Time) (
 			// carried tokens with it) and a new try goes on the held
 			// reconnect token, not counted as failed (§6.3.1 "A carried
 			// token refused").
+			p.recordRevokedHeld(c, e.Token, now)
 			p.abandonPending(c, "fin_revoked", true, now)
 		}
 		return true, err
