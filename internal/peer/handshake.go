@@ -202,9 +202,7 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 		return
 	}
 	if !suite.EqualPublic(sender, c.Peer.Relay.PK) {
-		// Only the relay key on record may reconnect (§6.6); the previous
-		// one's grace (legacy, PrevRelayGrace) is for messages, and must
-		// not let it suspend the connection below.
+		// Only the relay key on record may reconnect (§6.6).
 		p.audit("reconnect_sender", c.ID)
 		pi.Discard()
 		return

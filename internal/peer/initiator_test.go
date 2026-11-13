@@ -1291,7 +1291,7 @@ func TestAddressUpdateDuringTryRefused(t *testing.T) {
 	f.step()
 	c := f.p.conns[cid]
 	if !c.Reconnecting || c.ReconnectTries != 1 || len(f.p.outgoing) != 1 || c.Peer.Relay.Mailbox != mb {
-		t.Fatalf("reconnecting %v, tries %d, %d outgoing", c.Reconnecting, c.ReconnectTries, len(f.p.outgoing))
+		t.Fatalf("reconnecting %v, tries %d, %d outgoing, mailbox %s (was %s)", c.Reconnecting, c.ReconnectTries, len(f.p.outgoing), c.Peer.Relay.Mailbox, mb)
 	}
 	for _, og := range f.p.outgoing {
 		if !bytes.Equal(og.Th1, th1) {
@@ -1354,5 +1354,48 @@ func TestStartAbandonsStalePendingWithoutToken(t *testing.T) {
 	f.start()
 	if c = f.p.conns[cid]; c.Pending != nil || !f.audited("pending_abandoned_no_token") {
 		t.Fatalf("pending %v", c.Pending)
+	}
+}
+
+// A connection a relay.address.update moved before the update was refused
+// is not honored at load: it becomes stale, with an alarm.
+func TestLegacyRelayMoveAtLoad(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	f.p.conns[cid].LegacyPrevRelayPK = bytes.Repeat([]byte{9}, ed25519.PublicKeySize)
+	f.p.markDirty(kindConn, cid)
+	if err := f.p.flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	f.start()
+	c := f.p.conns[cid]
+	if c.State != StateStale || len(c.LegacyPrevRelayPK) != 0 || !strings.Contains(f.logs.String(), "alarm=relay_moved_unlinked") {
+		t.Fatalf("state %s", c.State)
+	}
+	n := len(m.Got)
+	f.p.sendTo(c, "connection.note", []byte(`{}`), f.clk.Now())
+	f.pump()
+	if len(m.Got) != n {
+		t.Fatal("deposited to the moved address")
+	}
+}
+
+// A reconnect token issued to us replaces the held one only if it is
+// valid and lasts longer.
+func TestIssuedReconnectTokenOnlyLater(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	held := f.p.conns[cid].Reconnect
+	m.Send(peerwire.TypeTokenIssued, peerwire.TokenIssuedBody("reconnect", m.Mint(10*24*time.Hour)))
+	f.pump()
+	if c := f.p.conns[cid]; c.Reconnect.Token != held.Token || !f.audited("issued_token_not_later") {
+		t.Fatal("a shorter-lived reconnect token replaced the held one")
+	}
+	m.Send(peerwire.TypeTokenIssued, peerwire.TokenIssuedBody("reconnect", m.Mint(330*24*time.Hour)))
+	f.pump()
+	if c := f.p.conns[cid]; c.Reconnect.Token == held.Token {
+		t.Fatal("a longer-lived reconnect token was not adopted")
 	}
 }

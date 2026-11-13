@@ -7,8 +7,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/vettid/vettid-relay/relayauth"
-
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
@@ -37,18 +35,6 @@ const StateSuspended = "suspended"
 // SuspendRotationConflict is connection.suspended's reason for a
 // rotation conflict, the only one so far.
 const SuspendRotationConflict = "rotation_conflict"
-
-// PrevRelayGrace bounds how long the member's previous relay key is still
-// recognized as the connection's after a relay.address.update. Legacy:
-// the update is refused now (session.go), so only a connection stored
-// before that still has a grace, which ends within 30 days; this code and
-// PrevRelayPK can go after that. Deposits made before the rotation, and
-// resends of the update itself (§3.4 (b)), arrive with it. The grace ends earlier, at the first message from the
-// new key: deposits to one mailbox stay in order (§8.3), so nothing from
-// before the rotation is still to come; the tokens issued to the old key
-// are then revoked. A second rotation within the grace replaces the
-// previous key (the first one's late deposits are then dropped).
-const PrevRelayGrace = 30 * 24 * time.Hour
 
 // identityRotate follows one link of the member's rotation chain (§3.4):
 // both signatures, old_ik the stored key, and one successor per key. The
@@ -313,38 +299,4 @@ func (p *Peer) suspend(c *Connection, now time.Time) {
 	p.markDirty(kindConn, c.ID)
 	p.emit(&Event{Type: EventConnectionSuspended, ConnectionID: c.ID, Tag: c.Tag, Reason: SuspendRotationConflict}, now)
 	p.log().Error("member identity rotation conflict: connection suspended", "alarm", "rotate_conflict", "connection_id", c.ID)
-}
-
-// endRelayGrace forgets the member's previous relay key and revokes the
-// tokens issued to it (the member vault denylists the old sub the same
-// way).
-func (p *Peer) endRelayGrace(c *Connection, now time.Time) {
-	if len(c.PrevRelayPK) == 0 {
-		return
-	}
-	sub := relayauth.EncodeKey(c.PrevRelayPK)
-	for _, t := range p.issued {
-		if t.ConnID == c.ID && t.Sub == sub && !t.Denied {
-			t.Denied = true
-			p.markDirty(kindToken, t.JTI)
-			p.queueRevoke(t.JTI, now)
-		}
-	}
-	c.PrevRelayPK, c.PrevRelayUntil = nil, time.Time{}
-	p.markDirty(kindConn, c.ID)
-}
-
-// noteSender ends the previous key's grace at the first message from the
-// current key, and when it runs out.
-func (p *Peer) noteSender(c *Connection, sender ed25519.PublicKey, now time.Time) {
-	if len(c.PrevRelayPK) > 0 && (suite.EqualPublic(sender, c.Peer.Relay.PK) || !now.Before(c.PrevRelayUntil)) {
-		p.endRelayGrace(c, now)
-	}
-}
-
-// relayKeyIs reports whether pk is the connection's relay key, or its
-// previous one within PrevRelayGrace.
-func (c *Connection) relayKeyIs(pk ed25519.PublicKey, now time.Time) bool {
-	return suite.EqualPublic(c.Peer.Relay.PK, pk) ||
-		(len(c.PrevRelayPK) > 0 && now.Before(c.PrevRelayUntil) && suite.EqualPublic(c.PrevRelayPK, pk))
 }

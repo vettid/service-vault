@@ -582,7 +582,7 @@ func (p *Peer) handleMessage(ctx context.Context, m relayclient.Message, now tim
 		p.audit("bad_envelope", "")
 		return ackAfterFlush, nil
 	}
-	c := p.connByRelayKey(sender, now)
+	c := p.connByRelayKey(sender)
 	// §7.1 (0.10.3): a request token covers only the rest of a handshake
 	// awaiting approval and connection.approved / declined.
 	if t := p.issued[m.JTI]; m.JTI != "" && t != nil && t.Kind == tokRequest {
@@ -670,16 +670,10 @@ func kidEqual(b []byte, k suite.Kid) bool {
 	return x.Equal(k)
 }
 
-// connByRelayKey finds a connection by its member's relay key, or the
-// previous one within a legacy PrevRelayGrace (rotation.go).
-func (p *Peer) connByRelayKey(pk ed25519.PublicKey, now time.Time) *Connection {
+// connByRelayKey finds a connection by its member's relay key.
+func (p *Peer) connByRelayKey(pk ed25519.PublicKey) *Connection {
 	for _, c := range p.conns {
 		if suite.EqualPublic(c.Peer.Relay.PK, pk) {
-			return c
-		}
-	}
-	for _, c := range p.conns {
-		if c.relayKeyIs(pk, now) {
 			return c
 		}
 	}

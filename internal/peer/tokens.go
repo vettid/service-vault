@@ -214,6 +214,13 @@ func (p *Peer) storeIssuedTo(c *Connection, body json.RawMessage) {
 		return
 	}
 	if kind == tokReconnect {
+		// Only one that is valid and lasts longer than the held one, as
+		// for a handshake's carried token (§6.3.1): a copy holding the
+		// session's keys cannot swap in a shorter-lived one.
+		if !p.now().Before(ht.Exp) || !ht.Exp.After(c.Reconnect.Exp) {
+			p.audit("issued_token_not_later", c.ID)
+			return
+		}
 		c.Reconnect = ht
 		p.markDirty(kindConn, c.ID)
 		return

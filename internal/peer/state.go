@@ -137,11 +137,11 @@ type Connection struct {
 	// Chain is the member's identity.rotate links followed (§3.4), for
 	// "one successor per key"; the last MaxRotations are kept.
 	Chain []json.RawMessage `json:"chain,omitempty"`
-	// PrevRelayPK is the member's relay key before its last
-	// relay.address.update, still recognized until PrevRelayUntil. Legacy:
-	// set only on connections stored before the update was refused.
-	PrevRelayPK    ed25519.PublicKey `json:"prev_relay_pk,omitempty"`
-	PrevRelayUntil time.Time         `json:"prev_relay_until,omitzero"`
+	// LegacyPrevRelayPK is read only to find a connection a
+	// relay.address.update moved before the update was refused: no honest
+	// member sent one, so such a connection is marked stale at load
+	// (legacyRelayMove).
+	LegacyPrevRelayPK ed25519.PublicKey `json:"prev_relay_pk,omitempty"`
 
 	// The member's credential key pinned at the first signed
 	// connection.authenticate.response (§10.4).
@@ -584,6 +584,23 @@ func (p *Peer) flush(ctx context.Context) error {
 }
 
 // load reads every record into memory at start.
+// legacyRelayMove ends a connection that a relay.address.update moved
+// before the update was refused (#152). No honest member ever sent one,
+// so the move came from whoever held the session's keys: the stored
+// relay address may be that copy's. It is not honored: the connection
+// becomes stale (nothing is deposited to that address), with an alarm;
+// the member connects again from a new invitation.
+func (p *Peer) legacyRelayMove(c *Connection) {
+	c.LegacyPrevRelayPK = nil
+	if c.State == StateActive {
+		c.State = StateStale
+	}
+	p.markDirty(kindConn, c.ID)
+	p.audit("relay_moved_unlinked", c.ID)
+	p.log().Error("a connection was moved by a relay.address.update before it was refused: marked stale; the member must connect again",
+		"alarm", "relay_moved_unlinked", "connection_id", c.ID)
+}
+
 // orphan is a pending epoch whose record and keys were not stored together.
 type orphan struct {
 	c      *Connection
@@ -595,6 +612,7 @@ type orphan struct {
 func (p *Peer) load(ctx context.Context) error {
 	var stale []*outgoing
 	var orphans []orphan
+	var moved []*Connection
 	type target struct {
 		kind string
 		put  func([]byte) (string, error)
@@ -611,6 +629,9 @@ func (p *Peer) load(ctx context.Context) error {
 			}
 			c.kr = kr
 			c.initEpochs()
+			if len(c.LegacyPrevRelayPK) > 0 {
+				moved = append(moved, c)
+			}
 			// The pending epoch's record and its keys are written together;
 			// one without the other is abandoned, after the load
 			// (orphanPending), with its hs.fin and tokens.
@@ -749,6 +770,9 @@ func (p *Peer) load(ctx context.Context) error {
 		p.seq = max(p.seq, e.Seq)
 	}
 	p.dropStale(stale)
+	for _, c := range moved {
+		p.legacyRelayMove(c)
+	}
 	for _, o := range orphans {
 		p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == o.c.ID && bytes.Equal(e.FinEpoch, o.id) })
 		for _, j := range o.issued {
