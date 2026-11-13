@@ -119,6 +119,10 @@ type Connection struct {
 	// Pending is the service's own rekey or reconnect epoch awaiting
 	// confirmation (§6.3.1 Initiator; initiator.go).
 	Pending *PendingEpoch `json:"pending,omitempty"`
+	// Carried are the tokens a member's reconnect carried, kept with the
+	// epoch it established until the confirmed epoch reaches it
+	// (carried.go).
+	Carried []CarriedTokens `json:"carried,omitempty"`
 	// RekeyFailures counts the rekeys of ours that ended without an
 	// epoch since the last epoch installed; none starts before
 	// RekeyNotBefore (rekeyFailed).
@@ -388,6 +392,9 @@ type outboxEntry struct {
 	// Refresh marks our relay.token.refresh: it passes the deposits that
 	// wait for a fresh standing token (§8.4, §8.6).
 	Refresh bool `json:"refresh,omitempty"`
+	// CarriedTok: Token is a handshake's carried token (an hs.resp or an
+	// hs.confirm), whose token_revoked ends that handshake's tokens.
+	CarriedTok bool `json:"carried_tok,omitempty"`
 	// StaleTS counts the relay's timestamp_stale refusals of it.
 	StaleTS int `json:"stale_ts,omitempty"`
 	// Vote is a deposit SendMessage queued: only these count toward

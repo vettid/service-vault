@@ -304,7 +304,7 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 		Expires: exp, Reconnect: pend, r: resp}
 	p.markDirty(kindAwait, id)
 	// On the standing token the hs.init brought: ours may have expired.
-	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Token: st.Token, Payload: env, Handshake: true}, now)
+	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Token: st.Token, Payload: env, Handshake: true, CarriedTok: true}, now)
 }
 
 // applyReconnect applies a member's reconnect once its hs.fin verified.
@@ -333,8 +333,7 @@ func (p *Peer) applyReconnect(c *Connection, pend *pendingReconnect) error {
 		if c.State == StateSuspended {
 			return errSuspended // following judged another answer's links: a fork
 		}
-		c.Standing, c.Reconnect = pend.Standing, pend.Reconnect
-		c.State = StateActive
+		c.State = StateActive // its tokens are kept with the epoch (handleFin)
 		p.markDirty(kindConn, c.ID)
 		return nil
 	}
@@ -373,8 +372,7 @@ func (p *Peer) applyReconnect(c *Connection, pend *pendingReconnect) error {
 	if c.State == StateSuspended {
 		return errSuspended
 	}
-	c.Standing, c.Reconnect = pend.Standing, pend.Reconnect
-	c.State = StateActive
+	c.State = StateActive // its tokens are kept with the epoch (handleFin)
 	p.markDirty(kindConn, c.ID)
 	return nil
 }
@@ -428,7 +426,7 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 		pi.Discard()
 		p.audit("rekey_answer_undepositable", c.ID)
 		p.mark(kindInner, rekeyKey(pi.Th1()), []byte{1}, now.Add(DedupeRetention+envelope.MaxClockSkewFuture))
-		p.beginReconnect(c, now)
+		p.noTokenReconnect(c, now)
 		return ackAfterFlush
 	}
 	// Crossing rekeys: the lower th1 wins (§6.5).
@@ -577,6 +575,11 @@ func (p *Peer) handleFin(id string, raw []byte, sender ed25519.PublicKey, now ti
 		p.audit("reconnect_settled_by_member", c.ID)
 	}
 	p.installEpoch(c, fr.Epoch, now)
+	if aw.Reconnect != nil {
+		// Its tokens are carried: adopted when the confirmed epoch reaches
+		// this one, not now (§6.3.1, R29-T1); they supersede earlier ones.
+		p.recordCarried(c, aw.Reconnect.Standing, aw.Reconnect.Reconnect, now)
+	}
 	p.activeAgain(c)
 	// The member's vault holds the epoch pending until a message from us
 	// opens under it (§6.3.1 Responder, R29-R1): hs.confirm, body {},

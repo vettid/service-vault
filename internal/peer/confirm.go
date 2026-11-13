@@ -56,6 +56,10 @@ type EpochMeta struct {
 	// Received is §6.3.1's received flag (R29-F3): a message from the
 	// member other than hs.fin opened under the epoch and was accepted.
 	Received bool `json:"received,omitempty"`
+	// Destroyed by rule E (§6.3.1), with the accepted hs.init's inner ts:
+	// a later message under it is fork evidence.
+	Destroyed bool      `json:"destroyed,omitempty"`
+	DestroyTS time.Time `json:"destroy_ts,omitzero"`
 }
 
 func (c *Connection) epochIndex(id []byte) int {
@@ -113,6 +117,7 @@ func (p *Peer) setConfirmed(c *Connection, id []byte, now time.Time) {
 	}
 	c.Confirmed = bytes.Clone(id)
 	p.markDirty(kindConn, c.ID)
+	p.adoptReached(c, id, now) // before the handler of the message that moved it
 	if old != nil && !bytes.Equal(old, c.LastEpochID) && c.kr != nil {
 		var eid [suite.EpochIDSize]byte
 		copy(eid[:], old)
@@ -166,7 +171,7 @@ func (p *Peer) noteFromMember(c *Connection, ep *handshake.Epoch, now time.Time)
 // reconfirmAll queues hs.confirm for each connection the batch marked.
 func (p *Peer) reconfirmAll(now time.Time) {
 	for id := range p.reconfirm {
-		if c := p.conns[id]; c != nil {
+		if c := p.conns[id]; c != nil && !c.confirmStopped() {
 			p.replaceStaleConfirm(c, now)
 			if !p.confirmQueued(c) {
 				p.queueConfirm(c, now)
@@ -201,7 +206,8 @@ func (p *Peer) queueConfirm(c *Connection, now time.Time) bool {
 	if err != nil {
 		return false
 	}
-	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: raw, Confirm: true}, now)
+	tok := c.confirmToken(now) // the epoch's carried standing token while it waits
+	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Token: tok, Payload: raw, Confirm: true, CarriedTok: tok != ""}, now)
 	c.ConfirmAt = now
 	p.markDirty(kindConn, c.ID)
 	return true
@@ -223,7 +229,7 @@ func (p *Peer) confirmQueued(c *Connection) bool {
 // is still in the outbox.
 func (p *Peer) tickConfirm(c *Connection, now time.Time) {
 	cur := c.epochMeta(c.LastEpochID)
-	if cur == nil || cur.Mine || c.epochIndex(c.Confirmed) >= c.epochIndex(c.LastEpochID) {
+	if cur == nil || cur.Mine || c.epochIndex(c.Confirmed) >= c.epochIndex(c.LastEpochID) || c.confirmStopped() {
 		return
 	}
 	if p.confirmQueued(c) {

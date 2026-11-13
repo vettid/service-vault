@@ -76,6 +76,9 @@ func (p *Peer) makePending(c *Connection, og *outgoing, res *handshake.Result, c
 		p.abandonPending(c, "replaced", false, now)
 	}
 	c.kr.SetPending(res.Epoch, now)
+	if og.ini.Purpose() == handshake.PurposeReconnect {
+		p.supersedeCarried(c) // this reconnect supersedes earlier carried tokens
+	}
 	id := res.Epoch.ID()
 	pe := &PendingEpoch{ID: bytes.Clone(id[:]), Purpose: og.ini.Purpose(), FinAt: now, Issued: og.Issued,
 		OwnIK: bytes.Clone(p.cfg.Keys.IKPublic())}
@@ -235,7 +238,7 @@ func (p *Peer) tickPendings(now time.Time) {
 	for _, c := range p.conns {
 		p.tickPending(c, now)
 		if c.State == StateActive && !c.Reconnecting && !c.standingValid(now) && p.standingWaiting(c) {
-			p.beginReconnect(c, now)
+			p.noTokenReconnect(c, now)
 		}
 	}
 }
@@ -250,7 +253,7 @@ func (p *Peer) tickPending(c *Connection, now time.Time) {
 	case pe == nil || c.State == StateSuspended:
 	case p.drained && now.Sub(pe.FinAt) > PendingLife:
 		p.abandonPending(c, "b_passed", true, now)
-	case pe.Purpose == handshake.PurposeRekey && !c.standingValid(now):
+	case pe.Purpose == handshake.PurposeRekey && !c.standingValid(now) && !p.carriedWait(c, now):
 		p.abandonPending(c, "no_token", true, now)
 	}
 }

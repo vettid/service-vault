@@ -217,7 +217,7 @@ func (p *Peer) Start(ctx context.Context) error {
 	}
 	for _, c := range p.conns {
 		if c.State == StateActive && !c.standingValid(p.now()) {
-			p.beginReconnect(c, p.now()) // §7.2 "On unlock" step 3 (RELEASE-29 §3 item 2)
+			p.noTokenReconnect(c, p.now()) // §7.2 "On unlock" step 3 (RELEASE-29 §3 item 2)
 		}
 	}
 	p.housekeeping(p.now())

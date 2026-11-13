@@ -277,7 +277,7 @@ func (p *Peer) depositOnce(ctx context.Context, e *outboxEntry, now time.Time) (
 			e.AwaitToken = true
 			e.Attempts++
 			if !now.Before(c.Standing.Exp) {
-				p.beginReconnect(c, now)
+				p.noTokenReconnect(c, now)
 			} else {
 				p.refreshHeld(c, now, true)
 			}
@@ -304,9 +304,15 @@ func (p *Peer) depositOnce(ctx context.Context, e *outboxEntry, now time.Time) (
 			if c.Pending != nil && bytes.Equal(e.FinEpoch, c.Pending.ID) {
 				p.abandonPending(c, "fin_revoked", true, now)
 			} else {
-				p.beginReconnect(c, now)
+				p.noTokenReconnect(c, now)
 			}
 			return false, err
+		}
+		if c != nil && e.CarriedTok && !(c.Pending != nil && bytes.Equal(e.FinEpoch, c.Pending.ID)) {
+			// An hs.confirm or hs.resp on a member's carried token: that
+			// handshake was abandoned there (§6.3.1 "A carried token
+			// refused"); for an hs.resp, deposit drops our answer.
+			p.carriedRevoked(c, e.Token, now)
 		}
 		if c != nil && c.Pending != nil && len(e.FinEpoch) > 0 && bytes.Equal(e.FinEpoch, c.Pending.ID) {
 			// A reconnect's hs.fin on the hs.resp's carried token, refused:
@@ -346,14 +352,14 @@ func (p *Peer) depositOnce(ctx context.Context, e *outboxEntry, now time.Time) (
 			if e.Refresh && (past || c.reconnectValid(now)) {
 				c.RefreshID = ""
 				p.markDirty(kindConn, c.ID)
-				p.beginReconnect(c, now)
+				p.noTokenReconnect(c, now)
 				return true, err
 			}
 			e.NotBefore = now.Add(time.Hour)
 			e.AwaitToken = true
 			e.Attempts++
 			if past {
-				p.beginReconnect(c, now)
+				p.noTokenReconnect(c, now)
 			} else if !e.Refresh {
 				p.refreshHeld(c, now, true)
 			}

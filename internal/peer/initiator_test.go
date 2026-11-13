@@ -1450,3 +1450,123 @@ func TestRefreshRevocations(t *testing.T) {
 		t.Fatal("the newest carried standing token was revoked")
 	}
 }
+
+// memberReconnected has the member reconnect, with tokens that outlast the
+// held ones; the member sends nothing after, so they stay carried.
+func memberReconnected(t *testing.T, f *fixture, m *peertest.Member, cid string) *CarriedTokens {
+	t.Helper()
+	f.clk.Advance(time.Hour)
+	m.Reconnect()
+	f.pump()
+	c := f.p.conns[cid]
+	r := c.carriedFor(c.LastEpochID)
+	if r == nil || !c.carriedUsable(r, f.clk.Now()) || epochOf(c) != m.KR.Current().ID() {
+		t.Fatal("no carried tokens after the member's reconnect")
+	}
+	return r
+}
+
+// Our hs.confirm for a member's reconnect goes on its carried standing
+// token (§6.3.1 "What they are used for before").
+func TestConfirmOnCarriedToken(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	var tokens []string
+	mb := f.p.conns[cid].Peer.Relay.Mailbox
+	f.failDeposit = func(mailbox, token string) error {
+		if mailbox == mb {
+			tokens = append(tokens, token)
+		}
+		return nil
+	}
+	r := memberReconnected(t, f, m, cid)
+	n := 0
+	for _, tk := range tokens {
+		if tk == r.Standing.Token {
+			n++
+		}
+	}
+	if n != 2 { // our hs.resp, and our hs.confirm
+		t.Fatalf("%d deposits on the carried token", n)
+	}
+}
+
+// While carried tokens wait, no reconnect starts for want of a valid
+// standing token; past their bound they are discarded and it starts.
+func TestCarriedWaitThenBound(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	r := memberReconnected(t, f, m, cid)
+	c := f.p.conns[cid]
+	st := c.Standing.Token
+	f.failDeposit = func(_, token string) error {
+		if token == st {
+			return errUnavailable
+		}
+		return nil
+	}
+	f.p.sendTo(c, "connection.note", []byte(`{}`), f.clk.Now())
+	c.Standing.Exp = f.clk.Now()
+	f.tick()
+	if c = f.p.conns[cid]; c.Reconnecting {
+		t.Fatal("a reconnect while carried tokens wait")
+	}
+	f.clk.Advance(r.Standing.Exp.Sub(f.clk.Now()) + time.Minute)
+	f.tick()
+	if c = f.p.conns[cid]; !c.Reconnecting || !c.confirmStopped() || !f.audited("carried_discarded") {
+		t.Fatalf("past the bound: reconnecting %v", c.Reconnecting)
+	}
+}
+
+// token_revoked on our hs.confirm's carried token: the member dropped
+// that handshake; the tokens are discarded and hs.confirm stops.
+func TestCarriedConfirmRevoked(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	mb := f.p.conns[cid].Peer.Relay.Mailbox
+	var carried string
+	f.failDeposit = func(mailbox, token string) error {
+		c := f.p.conns[cid]
+		if r := c.carriedFor(c.LastEpochID); mailbox == mb && r != nil && token == r.Standing.Token {
+			carried = token
+			return &relayclient.Error{Status: 403, Code: codeTokenRevoked}
+		}
+		return nil
+	}
+	f.clk.Advance(time.Hour)
+	m.Reconnect()
+	m.IgnoreRevoked = true
+	f.pump()
+	c := f.p.conns[cid]
+	if carried == "" || !c.confirmStopped() || !f.audited("carried_token_revoked") {
+		t.Fatalf("revoked %q, stopped %v", carried, c.confirmStopped())
+	}
+	f.clk.Advance(ConfirmResend + time.Minute)
+	f.tick()
+	if f.p.confirmQueued(f.p.conns[cid]) {
+		t.Fatal("hs.confirm again after the discard")
+	}
+}
+
+// Our own reconnect supersedes a member's carried tokens.
+func TestOwnReconnectSupersedesCarried(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	memberReconnected(t, f, m, cid)
+	f.beginReconnectNow(cid)
+	m.NoConfirm = true
+	f.pump()
+	c := f.p.conns[cid]
+	if !c.pendingReconnect() {
+		t.Fatal("not pending")
+	}
+	for _, r := range c.Carried {
+		if !r.Discarded {
+			t.Fatal("an earlier carried record is still waiting")
+		}
+	}
+}

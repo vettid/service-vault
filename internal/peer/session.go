@@ -514,6 +514,7 @@ func (p *Peer) housekeeping(now time.Time) {
 		if c.kr != nil {
 			c.kr.Prune(now)
 		}
+		p.sweepCarried(c, now)
 		if c.Reconnecting {
 			p.checkReconnect(c, now)
 			continue
