@@ -1,2 +1,4 @@
 # Vectors are compared byte for byte (and by sha256): never convert line endings.
 testdata/** -text
+# Generated and compared byte for byte (TestSourceMDUpToDate): LF on every checkout.
+docs/SOURCE.md text eol=lf

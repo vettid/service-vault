@@ -15,7 +15,7 @@ tests passing (VAULT-SERVICE-INDEPENDENCE R5).
 | Module | Version in `go.mod` | Commit | Date (UTC) | What the service takes |
 |---|---|---|---|---|
 | `github.com/vettid/vettid-relay` | `v0.0.0-20261027144202-528df9b0bf76` | [`528df9b0bf76`](https://github.com/vettid/vettid-relay/commit/528df9b0bf76) | 2026-10-27 14:42:02 | `relayclient` and `relayauth`; newer than vettid-vault requires (token jtis from crypto/rand) |
-| `github.com/vettid/vettid-vault` | `v0.0.0-20261112163356-425a5aeaef1b` | [`425a5aeaef1b`](https://github.com/vettid/vettid-vault/commit/425a5aeaef1b) | 2026-11-12 16:33:56 | the wire packages `vms/*` (`credwire`, `envelope`, `handshake`, `invite`, `peerwire`, `strictjson`, `suite`, `votewire`; `manifest` in the `rootscheck` test only); `deps_test.go` fails to compile if one moves or its exported API changes shape |
+| `github.com/vettid/vettid-vault` | `v0.0.0-20261112163356-425a5aeaef1b` | [`425a5aeaef1b`](https://github.com/vettid/vettid-vault/commit/425a5aeaef1b) | 2026-11-12 16:33:56 | the wire packages `vms/*` (`credwire`, `envelope`, `handshake`, `invite`, `peerwire`, `strictjson`, `suite`, `votewire`; `manifest` in the `rootscheck` test only); the build fails if one moves or its exported API changes shape, and `deps_test.go` pins the shapes the service relies on |
 
 ## Other direct dependencies
 
@@ -25,10 +25,11 @@ Ordinary releases chosen in the PR that adds them, with their licence checked fo
 |---|---|---|---|
 | `filippo.io/edwards25519` | `v1.1.0` | BSD-3-Clause | `vote` (BALLOT-PROTOCOL §2's canonical-encoding and small-order checks, which `crypto/ed25519` doesn't make) |
 | `github.com/aws/aws-sdk-go-v2` | `v1.48.0` | Apache-2.0 | the AWS clients' shared types (`cmd/service-vault`, `cmd/svctl`, `internal/keystore`, `internal/publish`, `internal/store`) |
-| `github.com/aws/aws-sdk-go-v2/config` | `v1.33.12` | Apache-2.0 | loading AWS credentials and region (`cmd/service-vault`, `cmd/svctl`) |
+| `github.com/aws/aws-sdk-go-v2/config` | `v1.33.12` | Apache-2.0 | loading AWS credentials and region (`cmd/service-vault`, `cmd/svctl`, `integration`) |
 | `github.com/aws/aws-sdk-go-v2/credentials` | `v1.20.12` | Apache-2.0 | `integration` only (static LocalStack credentials) |
 | `github.com/aws/aws-sdk-go-v2/service/dynamodb` | `v1.72.2` | Apache-2.0 | `internal/store` (keystore blobs, the peer's records) |
 | `github.com/aws/aws-sdk-go-v2/service/kms` | `v1.62.1` | Apache-2.0 | `internal/keystore` (KMS envelope) |
+| `github.com/aws/aws-sdk-go-v2/service/lambda` | `v1.114.4` | Apache-2.0 | `internal/publish`, `cmd/service-vault` (invoking the anchor signer) |
 | `github.com/aws/aws-sdk-go-v2/service/ssm` | `v1.81.1` | Apache-2.0 | `cmd/service-vault` (publishes the TLS key pin), `cmd/svctl` (reads it) |
 | `github.com/digitorus/timestamp` | `v0.0.0-20231217203849-220c5c2851b7` (commit `220c5c2851b7`, 2023-12-17) | BSD-2-Clause | `anchor` (RFC 3161 timestamp responses in Sigstore bundles) |
 | `github.com/sigstore/timestamp-authority/v2` | `v2.1.3` | Apache-2.0 | `anchor` (verifying the timestamp authority's signature) |

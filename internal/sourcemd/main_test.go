@@ -51,6 +51,7 @@ func TestRenderRefuses(t *testing.T) {
 		mod, want string
 	}{
 		"ok":         {full(""), ""},
+		"indirect;":  {full("require example.com/dep v1.0.0 // indirect; pulled in by x\n"), ""},
 		"no note":    {full("require example.com/new v1.0.0\n"), "no note for it"},
 		"replace":    {full("replace example.com/a => ../a\n"), "not handled"},
 		"stray note": {"module github.com/vettid/service-vault\n\ngo 1.26.0\n\nrequire rsc.io/qr v0.2.0\n", "does not require directly"},

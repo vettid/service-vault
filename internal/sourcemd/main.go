@@ -7,7 +7,8 @@
 //
 // Without -w it prints the file. TestSourceMDUpToDate fails while the
 // committed file differs, or while a direct dependency has no note here
-// (or a note names a module no longer required).
+// (or a note names a module no longer required). It trusts go.mod's
+// "// indirect" markers, so CI also runs `go mod tidy -diff`.
 package main
 
 import (
@@ -34,14 +35,15 @@ type note struct {
 
 // notes are the service module's direct dependencies.
 var notes = map[string]note{
-	"github.com/vettid/vettid-vault": {Why: "the wire packages `vms/*` (`credwire`, `envelope`, `handshake`, `invite`, `peerwire`, `strictjson`, `suite`, `votewire`; `manifest` in the `rootscheck` test only); `deps_test.go` fails to compile if one moves or its exported API changes shape"},
+	"github.com/vettid/vettid-vault": {Why: "the wire packages `vms/*` (`credwire`, `envelope`, `handshake`, `invite`, `peerwire`, `strictjson`, `suite`, `votewire`; `manifest` in the `rootscheck` test only); the build fails if one moves or its exported API changes shape, and `deps_test.go` pins the shapes the service relies on"},
 	"github.com/vettid/vettid-relay": {Why: "`relayclient` and `relayauth`; newer than vettid-vault requires (token jtis from crypto/rand)"},
 
 	"github.com/aws/aws-sdk-go-v2":                  {Licence: "Apache-2.0", UsedBy: "the AWS clients' shared types (`cmd/service-vault`, `cmd/svctl`, `internal/keystore`, `internal/publish`, `internal/store`)"},
-	"github.com/aws/aws-sdk-go-v2/config":           {Licence: "Apache-2.0", UsedBy: "loading AWS credentials and region (`cmd/service-vault`, `cmd/svctl`)"},
+	"github.com/aws/aws-sdk-go-v2/config":           {Licence: "Apache-2.0", UsedBy: "loading AWS credentials and region (`cmd/service-vault`, `cmd/svctl`, `integration`)"},
 	"github.com/aws/aws-sdk-go-v2/credentials":      {Licence: "Apache-2.0", UsedBy: "`integration` only (static LocalStack credentials)"},
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb": {Licence: "Apache-2.0", UsedBy: "`internal/store` (keystore blobs, the peer's records)"},
 	"github.com/aws/aws-sdk-go-v2/service/kms":      {Licence: "Apache-2.0", UsedBy: "`internal/keystore` (KMS envelope)"},
+	"github.com/aws/aws-sdk-go-v2/service/lambda":   {Licence: "Apache-2.0", UsedBy: "`internal/publish`, `cmd/service-vault` (invoking the anchor signer)"},
 	"github.com/aws/aws-sdk-go-v2/service/ssm":      {Licence: "Apache-2.0", UsedBy: "`cmd/service-vault` (publishes the TLS key pin), `cmd/svctl` (reads it)"},
 	"github.com/digitorus/timestamp":                {Licence: "BSD-2-Clause", UsedBy: "`anchor` (RFC 3161 timestamp responses in Sigstore bundles)"},
 	"github.com/sigstore/timestamp-authority/v2":    {Licence: "Apache-2.0", UsedBy: "`anchor` (verifying the timestamp authority's signature)"},
@@ -188,7 +190,9 @@ func directRequires(file string) ([]require, error) {
 		line := strings.TrimSpace(sc.Text())
 		code, comment, _ := strings.Cut(line, "//")
 		code = strings.TrimSpace(code)
-		indirect := strings.TrimSpace(comment) == "indirect"
+		// As cmd/go reads it: "indirect", or "indirect;" and a note.
+		c := strings.TrimSpace(comment)
+		indirect := c == "indirect" || strings.HasPrefix(c, "indirect;")
 		switch {
 		case code == "":
 			continue
