@@ -74,6 +74,11 @@ func (p *Peer) forkEpoch(c *Connection, id []byte, fresh []*handshake.Rotation) 
 	}
 	anc := ancestors(c, fresh)
 	for _, later := range c.Epochs[ic+1 : ci+1] {
+		if later.Demoted && !later.Received {
+			// (0.88.2, owner decision a) an epoch demoted with its received
+			// flag clear is no evidence: the member may never have used it.
+			continue
+		}
 		for _, k := range anc {
 			if len(later.Signer) > 0 && suite.EqualPublic(later.Signer, k) {
 				return true

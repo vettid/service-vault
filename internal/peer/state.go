@@ -108,6 +108,10 @@ type Connection struct {
 	// deposits).
 	Reconnecting   bool `json:"reconnecting,omitempty"`
 	ReconnectTries int  `json:"reconnect_tries,omitempty"`
+	// ReconnectTriesFor is the epoch ReconnectTries counts tries for: a
+	// reconnect naming another epoch starts its count afresh (§3.4.1 "The
+	// reconnect bound": the third failed try for one named epoch).
+	ReconnectTriesFor []byte `json:"reconnect_tries_for,omitempty"`
 	// ReconnectSince is when the reconnect's first try started;
 	// ReconnectSlow is set once the reconnect_slow alarm was raised.
 	ReconnectSince time.Time `json:"reconnect_since,omitzero"`
@@ -125,6 +129,13 @@ type Connection struct {
 	// Abandoned are the ids of pending epochs of ours abandoned since the
 	// last confirmation: a member's reconnect may name one (§6.6).
 	Abandoned [][]byte `json:"abandoned,omitempty"`
+	// AbandonedMeta records every pending epoch of ours abandoned, while
+	// its receive keys are kept (16 days): what §3.4.1 judges a message
+	// under it by (K2, K9).
+	AbandonedMeta []AbandonedEpoch `json:"abandoned_meta,omitempty"`
+	// ReconnectNamed is the epoch the open reconnect of ours names when it
+	// is not the current one (strict F1's E, R29-K7); see reconnectTarget.
+	ReconnectNamed []byte `json:"reconnect_named,omitempty"`
 	// Carried are the tokens a member's reconnect carried, kept with the
 	// epoch it established until the confirmed epoch reaches it
 	// (carried.go).
@@ -259,6 +270,10 @@ type awaiting struct {
 	NamedConf bool      `json:"named_conf,omitempty"`
 	ForkEp    bool      `json:"fork_ep,omitempty"`
 	InitTS    time.Time `json:"init_ts,omitzero"`
+	// InitEpoch is the epoch a rekey's hs.init traveled under: strict F1's
+	// E for the links applied at its hs.fin (VAULT-MESSAGING 0.90.4). An
+	// answer recorded before change 4b has none and runs no strict F1.
+	InitEpoch []byte `json:"init_epoch,omitempty"`
 
 	r *handshake.Responder
 }

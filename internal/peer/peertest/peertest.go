@@ -210,7 +210,7 @@ func (v *View) Deposit(_ context.Context, mailboxID, token string, payload []byt
 	}
 	id := v.w.id()
 	mb.msgs = append(mb.msgs, &storedMsg{m: relayclient.Message{MsgID: id, Sender: v.c.PublicKeyB64(), JTI: cl.Jti,
-		Payload: append([]byte(nil), payload...)}})
+		DepositedAt: v.w.clk.Now().UTC().Format(time.RFC3339Nano), Payload: append([]byte(nil), payload...)}})
 	return id, nil
 }
 

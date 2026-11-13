@@ -46,9 +46,12 @@ const SuspendRelayMoved = "relay_moved_unlinked"
 // followed must start at the stored key (an ancestor: refused unexpected;
 // any other key: unknown_ik); the rest must verify as a chain from it, and
 // no new key may be the stored key or an ancestor (ik_rollback) or come
-// back to a key already passed (bad_rotation). The member's vault rekeys
-// next (§3.4 step 3), under the new key.
-func (p *Peer) identityRotate(c *Connection, body []byte, now time.Time) {
+// back to a key already passed (bad_rotation). Following runs "Epochs
+// after an ik link" and strict F1 with E the epoch the message traveled
+// under (msgEpoch); R29-K9 is judged whether the links were followed or
+// all already were. The member's vault rekeys next (§3.4 step 3), under
+// the new key.
+func (p *Peer) identityRotate(c *Connection, body []byte, msgEpoch []byte, now time.Time) {
 	links, err := rotateLinks(body)
 	if err != nil {
 		p.audit("bad_rotation", c.ID)
@@ -64,7 +67,8 @@ func (p *Peer) identityRotate(c *Connection, body []byte, now time.Time) {
 	}
 	i := handshake.KnownPrefix(chainOf(c), links)
 	if i == len(links) {
-		return // every link already followed: ignored
+		p.k9(c, links, msgEpoch, now) // every link already followed: ignored, K9 still judged
+		return
 	}
 	switch first := links[i].OldIK; {
 	case suite.EqualPublic(first, c.Peer.IK):
@@ -91,7 +95,8 @@ func (p *Peer) identityRotate(c *Connection, body []byte, now time.Time) {
 		p.audit("bad_rotation", c.ID)
 		return
 	}
-	p.followRotation(c, final, kem, app, true)
+	p.followRotation(c, final, kem, app, msgEpoch, true)
+	p.k9(c, links, msgEpoch, now)
 }
 
 // revisits reports whether following links would lead the connection's
@@ -115,10 +120,13 @@ func (p *Peer) revisits(c *Connection, links []*handshake.Rotation) bool {
 }
 
 // followRotation records links the connection's identity advanced through
-// and its new keys. restart is set when the links came in an
-// identity.rotate: only then is an open reconnect of ours started again
-// (a handshake's own links make the change it completes).
-func (p *Peer) followRotation(c *Connection, ik ed25519.PublicKey, kem *suite.PublicKey, links []*handshake.Rotation, restart bool) {
+// and its new keys, and applies §3.4.1's demotions at the position of the
+// message being handled (demoteAt), f1 being strict F1's E (nil: none).
+// restart is set when the links came in an identity.rotate: only then is
+// an open reconnect of ours started again, or the reconnect after a
+// demotion started (a handshake's own links make the change it
+// completes).
+func (p *Peer) followRotation(c *Connection, ik ed25519.PublicKey, kem *suite.PublicKey, links []*handshake.Rotation, f1 []byte, restart bool) {
 	c.Peer.IK = ik
 	if kem != nil {
 		c.Peer.KEM = kem.Bytes()
@@ -145,7 +153,11 @@ func (p *Peer) followRotation(c *Connection, ik ed25519.PublicKey, kem *suite.Pu
 	p.dropConnOutgoing(c)
 	p.abandonPending(c, "link", false, now)
 	p.markDirty(kindConn, c.ID)
-	if ownTry && c.State != StateSuspended && !suite.EqualPublic(c.ReconnectRestartIK, ik) {
+	if !p.demoteAt(c, links, f1, restart, now) {
+		return // suspended: every handshake and answer is gone
+	}
+	if ownTry && c.State != StateSuspended && !c.currentDemoted() && len(c.ReconnectNamed) == 0 &&
+		!suite.EqualPublic(c.ReconnectRestartIK, ik) {
 		c.ReconnectRestartIK = bytes.Clone(ik)
 		p.restartReconnect(c, now)
 	}
@@ -225,7 +237,7 @@ func newPendingFollow(body *handshake.Init) *pendingFollow {
 // whether the handshake may complete; when not, the connection may be
 // suspended (a second successor) or the handshake is audited and
 // dropped.
-func (p *Peer) followAtFin(c *Connection, f *pendingFollow, now time.Time) bool {
+func (p *Peer) followAtFin(c *Connection, f *pendingFollow, f1 []byte, now time.Time) bool {
 	ik, kem, links, err := f.parse()
 	if err != nil {
 		p.audit("hs_record_bad", c.ID)
@@ -236,7 +248,7 @@ func (p *Peer) followAtFin(c *Connection, f *pendingFollow, now time.Time) bool 
 		return false
 	}
 	if len(fresh) > 0 {
-		p.followRotation(c, ik, kem, fresh, false)
+		p.followRotation(c, ik, kem, fresh, f1, false)
 	}
 	return c.State != StateSuspended // following judged another answer's links
 }

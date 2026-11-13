@@ -110,7 +110,8 @@ func (p *Peer) dispatch(ctx context.Context, c *Connection, in *envelope.Inner, 
 	case peerwire.TypeConnAuthRotated:
 		p.connAuthRotated(c, in.Body)
 	case TypeIdentityRotate:
-		p.identityRotate(c, in.Body, now)
+		eid := ep.ID()
+		p.identityRotate(c, in.Body, eid[:], now)
 	case TypeRelayAddressUpdate:
 		// Refused from every member, as vettid-vault #241 makes the member
 		// vault do (the audit names differ: a service has no drop.peer_key
@@ -340,7 +341,8 @@ func (p *Peer) handleResponse(c *Connection, in *envelope.Inner, now time.Time) 
 // token issued to the member is denylisted by jti; the held tokens,
 // session keys and outbox entries are deleted.
 func (p *Peer) removeConnection(c *Connection, dir string, now time.Time) {
-	if dir == "out" && c.kr != nil && c.kr.Current() != nil && c.Standing.Token != "" && c.State == StateActive && !c.Reconnecting {
+	if dir == "out" && c.kr != nil && c.kr.Current() != nil && c.Standing.Token != "" && c.State == StateActive && !c.Reconnecting &&
+		!c.currentDemoted() { // nothing but handshake messages under a demoted epoch (§3.4.1 K5)
 		in := &envelope.Inner{ID: p.newID(now), Type: peerwire.TypeConnectionRemoved, TS: now, Body: peerwire.ConnectionRemovedBody(),
 			Features: features()}
 		if raw, err := c.kr.Current().Seal(in); err == nil {
@@ -522,11 +524,16 @@ func (p *Peer) housekeeping(now time.Time) {
 			c.kr.Prune(now)
 		}
 		p.sweepCarried(c, now)
+		p.pruneAbandoned(c, now)
 		if c.Reconnecting {
 			p.checkReconnect(c, now)
 			continue
 		}
 		if c.State != StateActive {
+			continue
+		}
+		if c.currentDemoted() {
+			p.tickDemoted(c, now) // §3.4.1 K5: only the reconnect goes
 			continue
 		}
 		if !c.standingValid(now) && p.standingWaiting(c) {

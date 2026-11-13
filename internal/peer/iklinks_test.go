@@ -187,7 +187,7 @@ func TestSeenLinksBoundedAndPruned(t *testing.T) {
 	}
 	// Following the first link prunes it (and keeps the rest, reached from
 	// the new key).
-	f.p.followRotation(c, first.NewIK, first.NewKEM, []*handshake.Rotation{first}, false)
+	f.p.followRotation(c, first.NewIK, first.NewKEM, []*handshake.Rotation{first}, nil, false)
 	if len(c.Seen) != MaxSeen-1 {
 		t.Fatalf("seen %d after following one", len(c.Seen))
 	}

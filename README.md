@@ -65,9 +65,19 @@ fourth. Done so far:
   doubling to a day;
 - **`ik` links, first part** (change 4a): `identity.rotate` carries the
   whole chain (S8, R29-K1), and links seen but not followed count for
-  "one successor per key" (rule C, R29-K8).
+  "one successor per key" (rule C, R29-K8);
+- **`ik` links, second part** (change 4b): epochs a superseded key made
+  are demoted by relay position (R29-K4) and by strict F1 (K7, also for
+  links applied at an `hs.fin`); while the current epoch is demoted only
+  handshake messages go, what waits is held, and the service reconnects
+  naming the newest usable epoch (or strict F1's E); a message under a
+  demoted epoch is refused, or suspends when it could only be a copy's;
+  a pending epoch abandoned by a link is demoted from the start (K2), and
+  one abandoned otherwise is ended at the member's `identity.rotate` when
+  its key was superseded (K9); a reconnect refused while ours is pending
+  still has its links applied (X4).
 
-Not yet: the `ik` demotion rules and the release marker (change 4b); the
+Not yet: the release marker and the end of older records (change 4c); the
 relay-key rules of §3.4.2, after which it advertises `relay_follow`.
 
 This repository replaces
