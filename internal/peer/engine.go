@@ -218,7 +218,6 @@ func (p *Peer) Start(ctx context.Context) error {
 		}
 	}
 	p.housekeeping(p.now())
-	p.tickPendings(p.now())
 	if err := p.flush(ctx); err != nil {
 		return err
 	}

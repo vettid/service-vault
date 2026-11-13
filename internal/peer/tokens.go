@@ -177,6 +177,9 @@ func (p *Peer) refreshHeld(c *Connection, now time.Time, force bool) {
 	if c.State != StateActive || c.Reconnecting || c.Standing.Token == "" || now.Before(c.RefreshAfter) {
 		return
 	}
+	if !now.Before(c.Standing.Exp) {
+		return // past its exp a refresh could not be deposited: a waiting entry reconnects instead (§8.6)
+	}
 	if !force && c.Standing.Exp.Sub(now) >= peerwire.HolderRefreshBelow {
 		return
 	}

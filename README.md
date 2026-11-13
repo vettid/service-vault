@@ -797,13 +797,12 @@ both bind.
 transfer, a recovery or a `credential.rotate` rotates the member vault's
 keys, and the service follows each rotation, so the connection survives
 the move:
-- *Relay key.* `relay.address.update` moves the connection to the new
-  mailbox, with the tokens for it. The service answers with fresh tokens
-  for the new key, which is the member vault's signal that the service
-  has the address. The previous key is still recognized, for messages
-  already in flight and for resends of the update, until the first
-  message from the new key (or 30 days). The tokens issued to it are then
-  revoked. Only the current key can move the connection.
+- *Relay key.* `relay.address.update` is refused (audited
+  `address_update_refused`; nothing changes), as a member vault refuses
+  it: it moved a connection on the session's authentication alone, with
+  no signed relay links, so an old copy of a member's vault could
+  redirect the service's deposits. Release 29 rotates no relay key; the
+  relay-key rules of VAULT-MESSAGING §3.4.2 replace it later.
 - *Identity and KEM keys.* `identity.rotate`, signed by the old and the
   new key, is followed when it starts at the stored key. The member
   vault's rekey under the new key is then answered, and a rekey the

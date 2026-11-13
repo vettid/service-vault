@@ -106,7 +106,14 @@ func (p *Peer) dispatch(ctx context.Context, c *Connection, in *envelope.Inner, 
 	case TypeIdentityRotate:
 		p.identityRotate(c, in.Body, now)
 	case TypeRelayAddressUpdate:
-		p.relayAddressUpdate(c, sender, in.Body, now)
+		// Refused from every member (as vettid-vault #241 does): it moved
+		// the connection's mailbox and tokens on the session's
+		// authentication alone, with no signed relay links and none of
+		// rule U's checks (VAULT-MESSAGING §3.4.1), so an old copy of a
+		// member's vault holding the session's keys could redirect our
+		// deposits. Release 29 rotates no relay key (§3.4.1 A5); §3.4.2's
+		// rules replace this (GC #9442). Acked, dropped, nothing changes.
+		p.audit("address_update_refused", c.ID)
 	case peerwire.TypeConnAuthChallenge:
 		// The service has no member credential to sign with (§10.4); a
 		// challenge to it is never answered (chosen; not in the spec).

@@ -3,10 +3,8 @@ package peer
 import (
 	"bytes"
 	"crypto/ed25519"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"strings"
 	"time"
 
 	"github.com/vettid/vettid-relay/relayauth"
@@ -40,7 +38,9 @@ const StateSuspended = "suspended"
 const SuspendRotationConflict = "rotation_conflict"
 
 // PrevRelayGrace bounds how long the member's previous relay key is still
-// recognized as the connection's after a relay.address.update: deposits
+// recognized as the connection's after a relay.address.update (refused
+// now, session.go; the grace of a connection stored before still runs
+// out): deposits
 // made before the rotation, and resends of the update itself (§3.4 (b)),
 // arrive with it. The grace ends earlier, at the first message from the
 // new key: deposits to one mailbox stay in order (§8.3), so nothing from
@@ -312,112 +312,6 @@ func (p *Peer) suspend(c *Connection, now time.Time) {
 	p.markDirty(kindConn, c.ID)
 	p.emit(&Event{Type: EventConnectionSuspended, ConnectionID: c.ID, Tag: c.Tag, Reason: SuspendRotationConflict}, now)
 	p.log().Error("member identity rotation conflict: connection suspended", "alarm", "rotate_conflict", "connection_id", c.ID)
-}
-
-// relayAddressUpdate records the member's new relay address and the
-// tokens for it after the member rotated its relay key (§3.4), and
-// answers with fresh tokens for the new key (relay.token.issued), which
-// is the member's signal that the service has the new address. The
-// previous key stays recognized for PrevRelayGrace.
-//
-// Only the current key may move the connection: from the previous key,
-// in its grace, a resend of the update already applied is ignored and
-// anything else is refused, so an exposed old key can neither move the
-// connection nor roll it back.
-func (p *Peer) relayAddressUpdate(c *Connection, sender ed25519.PublicKey, body []byte, now time.Time) {
-	var b struct {
-		Relay struct {
-			URL     string `json:"url"`
-			Mailbox string `json:"mailbox"`
-			PK      string `json:"pk"`
-		} `json:"relay"`
-		Token          string `json:"token"`
-		ReconnectToken string `json:"reconnect_token"`
-	}
-	if json.Unmarshal(body, &b) != nil {
-		p.audit("bad_address_update", c.ID)
-		return
-	}
-	pk, err := base64.StdEncoding.DecodeString(b.Relay.PK)
-	if err != nil || len(pk) != ed25519.PublicKeySize {
-		p.audit("bad_address_update", c.ID)
-		return
-	}
-	a := handshake.RelayAddr{URL: strings.TrimRight(b.Relay.URL, "/"), Mailbox: b.Relay.Mailbox, PK: pk}
-	if handshake.ValidateRelayAddr(a) != nil {
-		p.audit("bad_address_update", c.ID)
-		return
-	}
-	if a.URL != p.cfg.RelayURL {
-		// As at first contact: the service deposits only on its own relay
-		// (chosen; not in the spec).
-		p.audit("address_update_other_relay", c.ID)
-		return
-	}
-	if suite.EqualPublic(pk, c.Peer.Relay.PK) {
-		return // a resend of the update we have (§3.4 (b))
-	}
-	if !suite.EqualPublic(sender, c.Peer.Relay.PK) {
-		p.audit("address_update_from_old_key", c.ID)
-		return
-	}
-	if o := p.connByRelayKey(pk, now); o != nil && o != c {
-		p.audit("address_update_key_in_use", c.ID)
-		return
-	}
-	np := c.Peer
-	np.Relay = RelayRef{URL: a.URL, Mailbox: a.Mailbox, PK: pk}
-	st, err := p.heldToken(b.Token, &np)
-	if err != nil {
-		p.audit("bad_address_update", c.ID)
-		return
-	}
-	var rt HeldToken
-	if b.ReconnectToken != "" {
-		if rt, err = p.heldToken(b.ReconnectToken, &np); err != nil {
-			p.audit("bad_address_update", c.ID)
-			return
-		}
-	}
-	if len(c.PrevRelayPK) > 0 {
-		p.endRelayGrace(c, now) // a second rotation: the first key's tokens go
-	}
-	c.PrevRelayPK, c.PrevRelayUntil = c.Peer.Relay.PK, now.Add(PrevRelayGrace)
-	c.Peer.Relay = np.Relay
-	c.Standing, c.RefreshID, c.RefreshAfter = st, "", time.Time{}
-	if rt.Token != "" {
-		c.Reconnect = rt
-	}
-	// Our queued deposits on the standing token still address the old
-	// mailbox: retarget them (a deposit on a token of its own keeps it).
-	for _, e := range p.outbox {
-		if e.Op == opDeposit && e.ConnID == c.ID && e.Token == "" {
-			e.Mailbox = a.Mailbox
-			p.markDirty(kindOutbox, e.ID)
-		}
-	}
-	p.markDirty(kindConn, c.ID)
-	p.log().Info("member relay address updated", "connection_id", c.ID)
-	// Tokens we issued for the old key stop at the relay's grace; issue
-	// fresh ones for the new key, which also acknowledges the update.
-	if rc := p.outgoingReconnect(c); rc && rt.Token == "" {
-		// No reconnect token for the new mailbox: the try's hs.init, made
-		// for the old one, stays (the member still collects there in the
-		// relay's grace); a new one could not be deposited. Our rekeys go.
-		for id, og := range p.outgoing {
-			if og.ConnID == c.ID && og.ini != nil && og.ini.Purpose() == handshake.PurposeRekey {
-				p.dropOutgoing(id)
-			}
-		}
-	} else {
-		p.dropConnOutgoing(c)
-		if rc {
-			p.restartReconnect(c, now) // on the new mailbox and token; not a failed try
-		}
-	}
-	p.issueTo(c, tokStanding, now)
-	p.issueTo(c, tokReconnect, now)
-	p.retryConn(c.ID)
 }
 
 // endRelayGrace forgets the member's previous relay key and revokes the
