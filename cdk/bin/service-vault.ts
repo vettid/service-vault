@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import * as cdk from 'aws-cdk-lib';
-import { ServiceVaultStack } from '../lib/service-vault-stack';
+import { ServiceVaultStack, isCalendarDate } from '../lib/service-vault-stack';
 
 // Parameters come from context (cdk.json, ~/.cdk.json or -c key=value):
 //   envName (default prod), image (required, by digest), votesUrl
@@ -26,7 +26,7 @@ const testSignIns = ctx('testSignIns');
 if (testSignIns !== undefined && testSignIns !== 'true') throw new Error('context "testSignIns" must be true or absent');
 const longApprovalChallenges = ctx('longApprovalChallenges');
 const endAllConnections = ctx('endAllConnections');
-if (endAllConnections !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(endAllConnections)) throw new Error('context "endAllConnections" must be a date, YYYY-MM-DD, or absent');
+if (endAllConnections !== undefined && !isCalendarDate(endAllConnections)) throw new Error('context "endAllConnections" must be a date, YYYY-MM-DD, or absent');
 if (longApprovalChallenges !== undefined && longApprovalChallenges !== 'true') throw new Error('context "longApprovalChallenges" must be true or absent');
 const stack = new ServiceVaultStack(app, `ServiceVault-${envName}`, {
   envName,

@@ -842,7 +842,9 @@ func (p *Peer) load(ctx context.Context) error {
 	p.dropStale(stale)
 	// RELEASE-29 §11, before anything else uses the connections: records
 	// from before release 29's rules were complete are ended.
-	p.endPre29(p.now())
+	if err := p.endPre29(ctx, p.now()); err != nil {
+		return err
+	}
 	for _, c := range moved {
 		if p.conns[c.ID] != c {
 			continue // ended above

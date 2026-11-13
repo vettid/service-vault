@@ -432,7 +432,7 @@ func (s *Service) Deliver(ctx context.Context, e *peer.Event) error {
 	case peer.EventConnectionRemoved:
 		m := map[string]string{"direction": e.Direction}
 		if e.Reason != "" {
-			m["reason"] = e.Reason // pre29 (RELEASE-29 §11)
+			m["reason"] = e.Reason // pre29 | ended_all (RELEASE-29 §11)
 		}
 		data = m
 	case peer.EventConnectionSuspended:

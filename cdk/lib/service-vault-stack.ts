@@ -86,6 +86,13 @@ export const CLIENT_PARAMS = [
   'webhook-secret-arn',
 ] as const;
 
+/** Whether v is a real calendar date, YYYY-MM-DD (as the service's time.Parse(time.DateOnly) reads it). */
+export function isCalendarDate(v: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+  const d = new Date(`${v}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v;
+}
+
 /** Log lines the daemon marks for an alarm (`"alarm": <name>`). */
 export const ALARMS = {
   /** A member's identity key got two successors; the connection is suspended (internal/peer/rotation.go). */
@@ -361,7 +368,7 @@ export class ServiceVaultStack extends cdk.Stack {
       approvalEnv.SV_TEST_SIGNINS = 'true';
     }
     if (props.endAllConnections !== undefined) {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(props.endAllConnections)) {
+      if (!isCalendarDate(props.endAllConnections)) {
         throw new Error(`endAllConnections must be a date, YYYY-MM-DD (got "${props.endAllConnections}")`);
       }
       approvalEnv.SV_END_ALL_CONNECTIONS = props.endAllConnections;

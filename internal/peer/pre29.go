@@ -28,23 +28,51 @@ const RemovedPre29 = "pre29"
 // application gets connection.removed with the reason pre29. One alarm
 // gives the count. Invitations are not ended: one claimed later makes a
 // connection under these rules.
-func (p *Peer) endPre29(now time.Time) {
+func (p *Peer) endPre29(ctx context.Context, now time.Time) error {
 	var old []*Connection
 	for _, c := range p.conns {
+		// A record from a later release (above 29, after a rollback to
+		// this one) is kept: its rules include these.
 		if c.MessagingRelease < MessagingRelease {
 			old = append(old, c)
 		}
 	}
 	if len(old) == 0 {
-		return
+		return nil
 	}
 	sort.Slice(old, func(i, j int) bool { return old[i].ID < old[j].ID })
 	for _, c := range old {
-		p.audit("connection_pre29_ended", c.ID)
-		p.removeConnectionFor(c, "out", RemovedPre29, now)
+		if err := p.endConnection(ctx, c, "connection_pre29_ended", RemovedPre29, now); err != nil {
+			return err
+		}
 	}
 	p.log().Error("connections from before release 29 ended: the members must connect again from new invitations",
 		"alarm", "pre29_ended", "count", len(old))
+	return nil
+}
+
+// endConnection ends one connection at a start (endPre29, endAllOnce) and
+// stores it in two writes: first everything the end changes but the
+// connection record (its tokens denied, its revocations and the member's
+// notice queued, its waiting messages and handshakes dropped, the
+// application's event), then the deletion of the record itself. The store
+// splits a large write into transactions (internal/store: 100 items each),
+// so ending many connections in one write could delete records whose
+// tokens were never denied; this way, a write that fails leaves the record
+// in place, and the next start ends that connection again.
+func (p *Peer) endConnection(ctx context.Context, c *Connection, audit, reason string, now time.Time) error {
+	p.audit(audit, c.ID)
+	p.removeConnectionFor(c, "out", reason, now)
+	k := key{kindConn, c.ID}
+	_, conn := p.dirty[k]
+	delete(p.dirty, k)
+	if err := p.flush(ctx); err != nil {
+		return err
+	}
+	if conn {
+		p.markDirty(k.kind, k.id)
+	}
+	return p.flush(ctx)
 }
 
 // RemovedEndAll is connection.removed's reason for a connection ended by
@@ -82,11 +110,15 @@ func (p *Peer) endAllOnce(ctx context.Context, now time.Time) error {
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].ID < all[j].ID })
 	for _, c := range all {
-		p.audit("connection_ended_all", c.ID)
-		p.removeConnectionFor(c, "out", RemovedEndAll, now)
+		if err := p.endConnection(ctx, c, "connection_ended_all", RemovedEndAll, now); err != nil {
+			return err // the run is not recorded: the next start ends the rest
+		}
 	}
 	rec, _ := json.Marshal(map[string]any{"date": date, "at": now.UTC(), "count": len(all)})
-	p.mark(kindOnce, id, rec, time.Time{}) // written with the removals, in the same flush
+	p.mark(kindOnce, id, rec, time.Time{})
+	if err := p.flush(ctx); err != nil { // recorded once every connection is ended
+		return err
+	}
 	p.log().Error("every connection ended by EndAllConnections: the members must connect again from new invitations",
 		"alarm", "connections_ended", "date", date, "count", len(all))
 	return nil

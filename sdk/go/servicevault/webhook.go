@@ -94,14 +94,20 @@ type ConnectionRemoved struct {
 	Header
 	Direction string `json:"direction"`
 	// Reason is RemovedPre29 for a connection the service ended at a start
-	// because it came from before release 29 (invite the member again);
-	// empty otherwise.
+	// because it came from before release 29, or RemovedEndAll for one the
+	// operator's one-shot SV_END_ALL_CONNECTIONS ended (invite the member
+	// again either way); empty otherwise.
 	Reason string `json:"reason,omitempty"`
 }
 
 // RemovedPre29: the service ended the connection at a start because it was
 // made before release 29 (service-vault docs/RELEASE-29.md section 11).
 const RemovedPre29 = "pre29"
+
+// RemovedEndAll: the operator ended every connection with the one-shot
+// SV_END_ALL_CONNECTIONS (service-vault README "Rolling back across
+// release 29").
+const RemovedEndAll = "ended_all"
 
 // ConnectionSuspended: the connection stopped. It can't sign in, answer
 // approvals or carry messages until the member connects again from a new

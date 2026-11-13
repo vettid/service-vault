@@ -180,7 +180,8 @@ destination.
   `connection.removed`, the application gets `connection.removed` with
   `reason: pre29`, and the member connects again from a new invitation.
   Expected once, at the first start of the release-29 version (on
-  staging: re-invite the test members). Again later only after a
+  staging: re-invite the test members; an empty admin set is recovered
+  as "Recovering an empty set" says). Again later only after a
   rollback: see "Rolling back across release 29".
 - `connections_ended`: `SV_END_ALL_CONNECTIONS` ended every connection
   at start (see "Rolling back across release 29"); unset it with the
@@ -690,7 +691,10 @@ connection when deploying forward again:
 2. Check the alarm's count against the number of connections.
 3. Deploy again without `endAllConnections` (context is not
    remembered, so a plain deploy unsets it).
-4. Invite the members again. On staging, the release-29 version's first
+4. Invite the members again. The admin connections are ended too, so
+   the admin set is empty (`admins_short`): recover it as "Recovering an
+   empty set" says (`service-vault admin bootstrap -email`). On staging,
+   the release-29 version's first
    deploy ends every connection anyway (`pre29_ended`); it needs the
    owner's go of its own, and the staging test members are re-invited
    after it.
@@ -773,7 +777,7 @@ billed.
 **Webhooks** (signed as `sdk/go/webhook` verifies): `connection.pending`
 `{invite_id, sas, name}`, `connection.added` `{invite_id, name, email_bound}`,
 `connection.declined` / `connection.expired` `{invite_id}`,
-`connection.removed` `{direction: in|out, reason?: pre29}`, `connection.suspended`
+`connection.removed` `{direction: in|out, reason?: pre29 | ended_all}`, `connection.suspended`
 `{reason: rotation_conflict | epoch | relay_moved_unlinked}`, `signin.approved`
 `{signin_id, key_changed}`, `signin.denied` `{signin_id, reason}`,
 `signin.expired` `{signin_id}`, each with its `connection_id`. `name` is

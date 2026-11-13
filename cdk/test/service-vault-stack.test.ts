@@ -229,6 +229,8 @@ describe('compute', () => {
     expect(envOf({}).SV_END_ALL_CONNECTIONS).toBeUndefined();
     expect(envOf({ endAllConnections: '2026-11-13' }).SV_END_ALL_CONNECTIONS).toBe('2026-11-13');
     expect(() => synth({ endAllConnections: 'today' })).toThrow(/endAllConnections/);
+    expect(() => synth({ endAllConnections: '2026-11-31' })).toThrow(/endAllConnections/);
+    expect(() => synth({ endAllConnections: '2026-13-01' })).toThrow(/endAllConnections/);
   });
 
   test('secrets are generated, never given a value, and retained', () => {
