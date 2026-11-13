@@ -2141,7 +2141,12 @@ func TestRekeyPrecheckChecks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	oldLink, err := handshake.NewRotation(m.IK, y, yKEM.Public()) // valid, from the stored ik
+	if err != nil {
+		t.Fatal(err)
+	}
 	good := build(m.Addr, m.IK, nil)
+	endMismatch := build(m.Addr, m.IK, []*handshake.Rotation{oldLink}) // reaches y, signed by the old ik
 	fromOther := build(otherRelay, m.IK, nil)
 	badChain := build(m.Addr, y, []*handshake.Rotation{link})
 	memberRekey(t, f, m, cid) // the first epoch is no longer current
@@ -2179,6 +2184,10 @@ func TestRekeyPrecheckChecks(t *testing.T) {
 	in, ep = open(badChain)
 	if _, err := f.p.rekeyPrecheck(c, in, ep, m.Addr.PK, now); err == nil {
 		t.Fatal("links that do not resolve from the stored ik passed")
+	}
+	in, ep = open(endMismatch)
+	if _, err := f.p.rekeyPrecheck(c, in, ep, m.Addr.PK, now); err == nil {
+		t.Fatal("a chain ending at another key than from.ik passed")
 	}
 }
 
@@ -2573,4 +2582,21 @@ func TestOwnRelayCapOnlyOnOurRelay(t *testing.T) {
 		t.Fatal("a member on our relay not held to it")
 	}
 	f.p.limits.MaxTokenLifetimeSeconds = 0
+}
+
+// The reconnect token's own 365-day bound, from a member on another relay
+// (so our relay's cap does not decide it).
+func TestReconnectTokenYearBound(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	now := f.clk.Now()
+	np := f.p.conns[cid].Peer
+	np.Relay.URL = "https://relay.example.org"
+	if _, err := f.p.heldToken(m.MintAtAud(now, now.Add(366*24*time.Hour), "y366", np.Relay.URL), &np, tokReconnect); err == nil {
+		t.Fatal("a 366-day reconnect token taken")
+	}
+	if _, err := f.p.heldToken(m.MintAtAud(now, now.Add(365*24*time.Hour), "y365", np.Relay.URL), &np, tokReconnect); err != nil {
+		t.Fatalf("a 365-day reconnect token refused: %v", err)
+	}
 }
