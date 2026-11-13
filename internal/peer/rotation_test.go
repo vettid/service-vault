@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"strings"
 	"testing"
 	"time"
 
@@ -100,83 +101,51 @@ func TestBadRotationDropped(t *testing.T) {
 	}
 }
 
-// A member's vault rotates its relay key: relay.address.update, deposited
-// with the old key, moves the connection to the new mailbox; the service
-// answers with tokens for the new key; traffic flows both ways after it.
-// A message from the old key still in flight is accepted; the first
-// message from the new key ends that grace and revokes the old key's
-// tokens.
-func TestMemberRelayRotation(t *testing.T) {
+// relay.address.update is refused (as vettid-vault #241 does for a member
+// vault): valid in form, with a token and with or without a reconnect
+// token, sent under the session (as an old copy holding the session's
+// keys could), it changes nothing (address, tokens, no previous key kept,
+// a waiting deposit not moved), is audited each time, gets no tokens in
+// answer, and the service still reaches the member where it was.
+func TestRelayAddressUpdateRefused(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
 	cid := f.connect(m, "")
-	oldPK := append(ed25519.PublicKey(nil), f.p.conns[cid].Peer.Relay.PK...)
-	oldStand := m.SvcStand // the service's token for the old key
-	oldView := m.RotateRelay(f.w, 50)
-	// In flight: deposited with the old key after the update.
-	cur, curStand := m.R, m.SvcStand
-	m.R, m.SvcStand = oldView, oldStand
-	m.Send(peerwire.TypeProfileUpdate, peerwire.ProfileUpdateBody(2, "Nora", "Late", ikOf(m.IK), nil))
-	m.R, m.SvcStand = cur, curStand
-	f.pump()
+	before := *f.p.conns[cid]
+	issued := len(m.Received(peerwire.TypeTokenIssued))
 	c := f.p.conns[cid]
-	if !suite.EqualPublic(c.Peer.Relay.PK, m.Addr.PK) || c.Peer.Relay.Mailbox != m.Addr.Mailbox {
-		t.Fatal("address not followed")
+	st := c.Standing.Token
+	f.failDeposit = func(_, token string) error {
+		if token == st {
+			return errUnavailable
+		}
+		return nil
 	}
-	if got, _ := f.p.Connection(cid); got.Name != "Nora Late" {
-		t.Fatalf("the message in flight from the old key: %q", got.Name)
+	f.p.sendTo(c, "connection.note", []byte(`{}`), f.clk.Now()) // waits
+	m.SendAddressUpdate(f.w, 50, peertest.RelayURL)
+	m.SendAddressUpdateWithReconnect(f.w, 51, peertest.RelayURL)
+	f.step()
+	for _, e := range f.p.outbox {
+		if e.ConnID == cid && e.Mailbox != before.Peer.Relay.Mailbox {
+			t.Fatal("a waiting deposit was moved to another mailbox")
+		}
 	}
-	if !suite.EqualPublic(c.PrevRelayPK, oldPK) {
-		t.Fatal("previous key not kept")
-	}
-	f.start() // the grace survives a restart
-	if c = f.p.conns[cid]; !suite.EqualPublic(c.PrevRelayPK, oldPK) {
-		t.Fatal("previous key lost on restart")
-	}
-	if issued := m.Received(peerwire.TypeTokenIssued); len(issued) < 2 {
-		t.Fatalf("tokens for the new key: %d", len(issued))
-	}
-	// Service to member, in the new mailbox; member to service with the
-	// new key, which ends the grace.
-	if !f.signIn(m, cid) {
-		t.Fatal("sign-in after the relay rotation")
-	}
+	f.failDeposit = nil
+	f.clk.Advance(time.Minute)
+	f.pump()
 	c = f.p.conns[cid]
-	if len(c.PrevRelayPK) != 0 || f.p.connByRelayKey(oldPK, f.clk.Now()) != nil {
-		t.Fatal("the old key outlived the first message from the new key")
+	if !suite.EqualPublic(c.Peer.Relay.PK, before.Peer.Relay.PK) || c.Peer.Relay.Mailbox != before.Peer.Relay.Mailbox ||
+		c.Standing.Token != before.Standing.Token || c.Reconnect.Token != before.Reconnect.Token || len(c.PrevRelayPK) != 0 {
+		t.Fatal("a relay.address.update changed the connection")
 	}
-	if _, err := oldView.Deposit(context.Background(), m.SvcMailbox(), oldStand, []byte("x")); err == nil {
-		t.Fatal("the old key's token still works")
+	if n := strings.Count(f.logs.String(), "reason=address_update_refused "); n != 2 {
+		t.Fatalf("audited %d times", n)
 	}
-}
-
-// Only the current key may move the connection: from the old key, an
-// update to yet another key is refused. From the new key, an update to a
-// key whose token doesn't check out (here the old key), a key another
-// connection uses, and another relay are refused.
-func TestRelayUpdateRefusals(t *testing.T) {
-	f := newFixture(t)
-	m := f.member(10)
-	other := f.member(30)
-	cid := f.connect(m, "")
-	f.connect(other, "")
-	oldStand := m.SvcStand
-	oldView := m.RotateRelay(f.w, 50)
-	newPK := append(ed25519.PublicKey(nil), m.Addr.PK...)
-	cur, curStand := m.R, m.SvcStand
-	m.R, m.SvcStand = oldView, oldStand
-	m.SendAddressUpdate(f.w, 51, "") // from the old key, in its grace
-	m.R, m.SvcStand = cur, curStand
-	f.pump()
-	if c := f.p.conns[cid]; !suite.EqualPublic(c.Peer.Relay.PK, newPK) {
-		t.Fatal("the old key moved the connection")
+	if len(m.Received(peerwire.TypeTokenIssued)) != issued {
+		t.Fatal("tokens issued in answer")
 	}
-	m.SendAddressUpdateTo(f.w, ikOf(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{12}, 32))), "") // the old key, no valid token
-	m.SendAddressUpdateTo(f.w, other.Addr.PK, "")
-	m.SendAddressUpdate(f.w, 52, "https://relay.example.org")
-	f.pump()
-	if c := f.p.conns[cid]; !suite.EqualPublic(c.Peer.Relay.PK, newPK) {
-		t.Fatal("a refused update moved the connection")
+	if !f.signIn(m, cid) {
+		t.Fatal("the member is no longer reached")
 	}
 }
 

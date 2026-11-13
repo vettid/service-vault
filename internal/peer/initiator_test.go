@@ -1275,35 +1275,84 @@ func TestAdoptReconnectTokenOnlyLaterExp(t *testing.T) {
 	}
 }
 
-// A relay.address.update from the member while our try awaits its
-// hs.resp: with a reconnect token for the new mailbox the try starts again
-// there, not counted; without one the try stays.
-func TestAddressUpdateDuringTry(t *testing.T) {
-	for _, withRT := range []bool{true, false} {
-		f := newFixture(t)
-		m := f.member(10)
-		cid := f.connect(m, "")
-		f.beginReconnectNow(cid)
-		var th1 []byte
-		for _, og := range f.p.outgoing {
-			th1 = og.Th1
+// A relay.address.update during our reconnect try is refused: the try,
+// its hs.init and its mailbox stay as they were.
+func TestAddressUpdateDuringTryRefused(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	f.beginReconnectNow(cid)
+	var th1 []byte
+	for _, og := range f.p.outgoing {
+		th1 = og.Th1
+	}
+	mb := f.p.conns[cid].Peer.Relay.Mailbox
+	m.SendAddressUpdateWithReconnect(f.w, 77, peertest.RelayURL)
+	f.step()
+	c := f.p.conns[cid]
+	if !c.Reconnecting || c.ReconnectTries != 1 || len(f.p.outgoing) != 1 || c.Peer.Relay.Mailbox != mb {
+		t.Fatalf("reconnecting %v, tries %d, %d outgoing", c.Reconnecting, c.ReconnectTries, len(f.p.outgoing))
+	}
+	for _, og := range f.p.outgoing {
+		if !bytes.Equal(og.Th1, th1) {
+			t.Fatal("the try was started again")
 		}
-		if withRT {
-			m.SendAddressUpdateWithReconnect(f.w, 77, peertest.RelayURL)
-		} else {
-			m.SendAddressUpdate(f.w, 77, peertest.RelayURL)
+	}
+}
+
+// An expired standing token with nothing waiting starts no reconnect.
+func TestExpiredTokenNothingWaiting(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	f.p.conns[cid].Standing.Exp = f.clk.Now()
+	f.step()
+	f.tick()
+	if c := f.p.conns[cid]; c.Reconnecting || len(f.p.outgoing) != 0 {
+		t.Fatal("a reconnect with nothing waiting")
+	}
+}
+
+// A batch that confirms nothing: the no-token reconnect starts at the end
+// of that same step, without a tick.
+func TestNoTokenReconnectAtBatchEnd(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	c := f.p.conns[cid]
+	st := c.Standing.Token
+	f.failDeposit = func(_, token string) error {
+		if token == st {
+			return errUnavailable
 		}
-		f.step()
-		c := f.p.conns[cid]
-		if !c.Reconnecting || c.ReconnectTries != 1 || len(f.p.outgoing) != 1 || c.State != StateActive {
-			t.Fatalf("rt %v: reconnecting %v, tries %d, %d outgoing, %s", withRT, c.Reconnecting, c.ReconnectTries, len(f.p.outgoing), c.State)
-		}
-		same := false
-		for _, og := range f.p.outgoing {
-			same = bytes.Equal(og.Th1, th1)
-		}
-		if same == withRT {
-			t.Fatalf("rt %v: started again %v", withRT, !same)
-		}
+		return nil
+	}
+	f.p.sendTo(c, "connection.note", []byte(`{}`), f.clk.Now())
+	f.step() // the entry waits
+	c.Standing.Exp = f.clk.Now()
+	m.Send("connection.note", []byte(`{}`)) // under the current epoch: confirms nothing
+	f.step()
+	if c = f.p.conns[cid]; !c.Reconnecting || len(f.p.outgoing) != 1 {
+		t.Fatal("no reconnect at the end of the batch")
+	}
+}
+
+// At a start, a stale connection's pending rekey with no valid standing
+// token is abandoned at once (R29-I6), not at the first tick.
+func TestStartAbandonsStalePendingWithoutToken(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	ownRekeyPending(t, f, m, cid)
+	c := f.p.conns[cid]
+	c.State = StateStale
+	c.Standing.Exp = f.clk.Now()
+	f.p.markDirty(kindConn, cid)
+	if err := f.p.flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	f.start()
+	if c = f.p.conns[cid]; c.Pending != nil || !f.audited("pending_abandoned_no_token") {
+		t.Fatalf("pending %v", c.Pending)
 	}
 }

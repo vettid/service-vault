@@ -138,7 +138,8 @@ type Connection struct {
 	// "one successor per key"; the last MaxRotations are kept.
 	Chain []json.RawMessage `json:"chain,omitempty"`
 	// PrevRelayPK is the member's relay key before its last
-	// relay.address.update, still recognized until PrevRelayUntil.
+	// relay.address.update, still recognized until PrevRelayUntil. Legacy:
+	// set only on connections stored before the update was refused.
 	PrevRelayPK    ed25519.PublicKey `json:"prev_relay_pk,omitempty"`
 	PrevRelayUntil time.Time         `json:"prev_relay_until,omitzero"`
 

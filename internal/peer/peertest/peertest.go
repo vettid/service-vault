@@ -773,37 +773,6 @@ func (m *Member) SendRotation(r *handshake.Rotation) {
 	m.Send("identity.rotate", body)
 }
 
-// RotateRelay rotates the Member vault's relay key (§3.4): the new
-// mailbox and tokens for it go out as relay.address.update, deposited with
-// the old key; the service's tokens for the new key then arrive there.
-// The old view is returned (it can still deposit).
-func (m *Member) RotateRelay(w *World, seed byte) *View {
-	m.t.Helper()
-	old := m.R
-	rk := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed}, 32))
-	nv := w.View(rk)
-	if _, err := nv.Register(context.Background()); err != nil {
-		m.t.Fatal(err)
-	}
-	pk := rk.Public().(ed25519.PublicKey)
-	addr := handshake.RelayAddr{URL: RelayURL, Mailbox: relayauth.MailboxID(pk), PK: pk}
-	mint := func(ttl time.Duration) string {
-		tok, err := nv.MintToken(relayauth.EncodeKey(m.svc.Relay.PK), RelayURL, relayclient.TokenOptions{TTL: ttl})
-		if err != nil {
-			m.t.Fatal(err)
-		}
-		return tok
-	}
-	body, _ := json.Marshal(map[string]any{
-		"relay":           map[string]string{"url": addr.URL, "mailbox": addr.Mailbox, "pk": base64.StdEncoding.EncodeToString(pk)},
-		"token":           mint(peerwire.StandingMax),
-		"reconnect_token": mint(300 * 24 * time.Hour),
-	})
-	m.Send("relay.address.update", body) // with the old key
-	m.R, m.rk, m.Addr = nv, rk, addr
-	return old
-}
-
 // Reconnect sends a reconnect hs.init (§6.6) on the service's reconnect
 // token, carrying the rotations since the last epoch.
 func (m *Member) Reconnect() { m.ReconnectNaming(m.KR.Current().ID()) }
@@ -871,13 +840,6 @@ func (m *Member) SendAddressUpdateWithReconnect(w *World, seed byte, relayURL st
 		"reconnect_token": mint(300 * 24 * time.Hour),
 	})
 	m.Send("relay.address.update", body)
-}
-
-// SendAddressUpdateTo sends relay.address.update naming a key the Member
-// does not hold (its token is not valid for it).
-func (m *Member) SendAddressUpdateTo(_ *World, pk ed25519.PublicKey, relayURL string) {
-	m.t.Helper()
-	m.sendAddress(pk, relayURL, "not-a-token")
 }
 
 func (m *Member) sendAddress(pk ed25519.PublicKey, relayURL, tok string) {

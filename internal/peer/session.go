@@ -19,7 +19,7 @@ import (
 // connection (§8.2, §8.3, §8.4, §7.3).
 func (p *Peer) dispatch(ctx context.Context, c *Connection, in *envelope.Inner, ep *handshake.Epoch, raw []byte, sender ed25519.PublicKey, msgID string, now time.Time) (disposition, error) {
 	p.markDirty(kindConn, c.ID)     // the epoch's receive count moved
-	if !c.relayKeyIs(sender, now) { // §6.3, or the key before a relay.address.update
+	if !c.relayKeyIs(sender, now) { // §6.3, or the key before a legacy relay.address.update
 		p.audit("sender_mismatch", c.ID)
 		return ackAfterFlush, nil
 	}
@@ -106,7 +106,16 @@ func (p *Peer) dispatch(ctx context.Context, c *Connection, in *envelope.Inner, 
 	case TypeIdentityRotate:
 		p.identityRotate(c, in.Body, now)
 	case TypeRelayAddressUpdate:
-		p.relayAddressUpdate(c, sender, in.Body, now)
+		// Refused from every member, as vettid-vault #241 makes the member
+		// vault do (the audit names differ: a service has no drop.peer_key
+		// record): it moved
+		// the connection's mailbox and tokens on the session's
+		// authentication alone, with no signed relay links and none of
+		// rule U's checks (VAULT-MESSAGING §3.4.1), so an old copy of a
+		// member's vault holding the session's keys could redirect our
+		// deposits. Release 29 rotates no relay key (§3.4.1 A5); §3.4.2's
+		// rules replace this (GC #9442). Acked, dropped, nothing changes.
+		p.audit("address_update_refused", c.ID)
 	case peerwire.TypeConnAuthChallenge:
 		// The service has no member credential to sign with (§10.4); a
 		// challenge to it is never answered (chosen; not in the spec).

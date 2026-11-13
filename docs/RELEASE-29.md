@@ -1,6 +1,6 @@
 # Release 29 in the service vault
 
-**Status:** 0.5.1, draft (2026-11-13). Against VAULT-MESSAGING 0.90.1.
+**Status:** 0.5.2, draft (2026-11-13). Against VAULT-MESSAGING 0.90.1.
 
 VAULT-MESSAGING §6.3.1 ("Lifetimes and activation on confirmation",
 release 29) asks a service vault to follow its rules "on either side as
@@ -102,10 +102,8 @@ current epoch unless stated:
    rekeys and reconnects under the new `ik`. A restarted reconnect spends
    one of the reconnect token's deposits, not a failed try, at most once
    per change of the member's `ik`; the change it was spent for is
-   stored, so a restart of the process does not spend another. **(Chosen;
-   not in the spec)** a `relay.address.update` from the member while a
-   try's `hs.init` awaits its `hs.resp` starts that try again the same
-   way, uncounted: the `hs.init` went to the old mailbox;
+   stored, so a restart of the process does not spend another
+   (`relay.address.update` is refused, so moves nothing);
 9. after a demotion of its current epoch by position, naming the newest
    epoch that has been current and is neither demoted nor destroyed
    (with none, the connection becomes `stale`); after strict F1, naming
@@ -456,6 +454,9 @@ separately. The README's release-29 status paragraph shrinks with each.
 
 ## Changes
 
+- **0.5.2 (2026-11-13):** §3 item 8, `relay.address.update` is refused
+  (as vettid-vault #241 makes a member vault do), so the restart it made
+  is gone.
 - **0.5.1 (2026-11-13):** pinned to VAULT-MESSAGING 0.90.1; §3 item 4, a
   reconnect `hs.init` refused `token_revoked` makes the connection
   `stale` at once; §14, the prompt to adopt and X2 in the second change.
