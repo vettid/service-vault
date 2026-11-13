@@ -65,6 +65,7 @@ import (
 	"github.com/vettid/service-vault/internal/signin"
 	"github.com/vettid/service-vault/internal/store"
 	"github.com/vettid/service-vault/internal/tlsid"
+	"github.com/vettid/service-vault/internal/vaultroots"
 	"github.com/vettid/service-vault/internal/webhook"
 	sdkwebhook "github.com/vettid/service-vault/sdk/go/webhook"
 	"github.com/vettid/service-vault/vote"
@@ -544,6 +545,12 @@ func serve(args []string) error {
 				return anchor.TimestampTime(cfg.Sigstore, bundle, doc)
 			}
 			mgr.AuthorityTime = authorityTime(as.anc, cfg.Sigstore)
+			// What members are sent is checked as their vaults will: the
+			// listed anchor key, every supported release's pinned roots.
+			anchorKey := as.spki
+			mgr.CheckBundle = func(doc []byte, bundle json.RawMessage) error {
+				return vaultroots.Check(cfg.Sigstore, [][]byte{anchorKey}, doc, bundle, time.Now())
+			}
 			mgr.Publisher = votesPublisher(cfg.VotesURL, as, records, mgr, log)
 		}
 		if rebuild {

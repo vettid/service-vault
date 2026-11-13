@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.13.12 (2026-11-11)
+**Status:** 0.13.13 (2026-11-12)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -192,6 +192,16 @@ design: vettid/votes, docs/VOTES-SITE.md).
   signature over the document under its anchor key. The Sigstore bundle
   goes up with the document and with the message that carries it to
   vaults (§8.5 "Rekor profile").
+- **Checked before it is sent** (0.13.13): before a proposal or an
+  extension is sent to any member, the service verifies its bundle as a
+  member's vault will (VAULT-MESSAGING §10.19.4 step 6), with the
+  vaults' own verifier, under its anchor key, against the trusted roots
+  of **every supported vault release** of its Sigstore instance: a
+  release that is `active`, `deprecated` or a `candidate` in that
+  channel's manifest and registers the `vote` feature. A bundle that
+  fails any of them is not sent (alarm `proposal_bundle_unverified`);
+  an extension already published stays in effect. (chosen; not in the
+  spec)
 - **The site checks** the service is listed, the signatures, the exact
   JCS bytes, the bundle under a listed anchor key, and the order above.
 - **Write-once:** each document has one path; the site accepts the same
@@ -969,6 +979,12 @@ item.
 
 ## Changes
 
+- **0.13.13 (2026-11-12):** (GC #1343, Ballot P1) §3.3: the service
+  checks a proposal's and an extension's bundle, as a member's vault
+  will, against the pinned roots of every supported vault release
+  (defined there) before sending it, and sends nothing on a failure. No
+  change to the messages, the documents, the vectors or what a member's
+  vault checks.
 - **0.13.12 (2026-11-11):** (owner decision 2026-11-11; service-vault
   #137) §7: the count waits for the timestamp authority's time. Just
   before counting, after the reconcile of the extensions, the service

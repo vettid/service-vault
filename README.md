@@ -275,6 +275,19 @@ destination.
   close (`rec#vote_stamp_wait` keeps the early stamp); a close before
   then answers `stamped_early` at once. Member vaults keep checking for
   7 days, so a late publication is still judged.
+- `proposal_bundle_unverified`: a proposal's or an extension's Sigstore
+  bundle does not verify, by vettid-vault's own verifier
+  (`vms/votewire`), under this service's anchor key against the trusted
+  roots that every supported member-vault release pins
+  (`internal/vaultroots`, BALLOT-PROTOCOL §3.3). A member's vault would
+  refuse it, so nothing is sent: a proposal is published but its
+  `vote.proposal` goes to no one (`POST /v1/proposals/{id}/publish`
+  sends it once the bundle checks), and an extension stays in effect on
+  the site, where members' vaults also find it, but no `vote.extended`
+  is sent. The ERROR line names the proposal and the error. A new
+  Sigstore key that no supported vault release pins yet means a vault
+  release with the new roots must ship first (the scheduled roots check
+  opens an issue when Sigstore's trusted root changes).
 - `results_bundle_unverified`: a vote's results bundle failed its
   timestamp check (the authority's signature, the pinned trusted root, or
   its validity period); the results are not published. One anchored by

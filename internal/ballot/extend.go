@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/vettid/service-vault/vote"
+	"strconv"
 	"time"
 )
 
@@ -255,6 +256,12 @@ func (m *Manager) Extend(ctx context.Context, id, approvalID string, in Extensio
 	o.Pending = nil
 	if err := m.Store.SaveProposal(ctx, o, false); err != nil {
 		return nil, err
+	}
+	// The extension is published and in effect: the site holds it, and
+	// members' vaults also learn it from there. Only the sending waits
+	// for a bundle their vaults accept.
+	if err := m.checkBundle("extension "+strconv.FormatInt(e.N, 10), id, doc, bundle); err != nil {
+		return e, nil
 	}
 	body, _ := json.Marshal(struct {
 		ProposalID   string          `json:"proposal_id"`

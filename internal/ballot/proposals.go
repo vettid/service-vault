@@ -111,9 +111,14 @@ type Manager struct {
 	// after the close in force (BALLOT-PROTOCOL §7, 0.13.12). Nil counts
 	// nothing (fail closed).
 	AuthorityTime func(ctx context.Context) (int64, error)
-	NewID         func(time.Time) (string, error)
-	Now           func() time.Time
-	Log           *slog.Logger
+	// CheckBundle checks a proposal's or an extension's Sigstore bundle as
+	// a member vault will, against the trusted roots every supported vault
+	// release pins (internal/vaultroots), before members are sent it. Nil
+	// sends nothing (fail closed).
+	CheckBundle func(doc []byte, bundle json.RawMessage) error
+	NewID       func(time.Time) (string, error)
+	Now         func() time.Time
+	Log         *slog.Logger
 	// Background is the context member sends run under, after the request
 	// that started them (sends.go); they stop when it ends. The daemon's
 	// lasts until its shutdown has waited for them. Nil:
@@ -145,6 +150,25 @@ func (m *Manager) maxEligible() int {
 // ErrNoTimestamps is a service vault with no way to verify the time of an
 // anchor bundle: it applies no extension.
 var ErrNoTimestamps = errors.New("ballot: anchor timestamps can't be verified here")
+
+// ErrBundleUnverified is a bundle a member vault would not accept: its
+// proposal or extension is not sent (the alarm proposal_bundle_unverified).
+var ErrBundleUnverified = errors.New("ballot: the anchor bundle does not verify against the vaults' pinned roots")
+
+// checkBundle checks doc's bundle before members are sent it (CheckBundle),
+// and raises proposal_bundle_unverified when it fails.
+func (m *Manager) checkBundle(what, id string, doc []byte, bundle json.RawMessage) error {
+	err := errors.New("no bundle check configured")
+	if m.CheckBundle != nil {
+		err = m.CheckBundle(doc, bundle)
+	}
+	if err == nil {
+		return nil
+	}
+	m.log().Error("an anchor bundle a member vault would refuse: nothing is sent", "alarm", "proposal_bundle_unverified",
+		"proposal_id", id, "document", what, "err", err.Error())
+	return fmt.Errorf("%w: %s of %s: %v", ErrBundleUnverified, what, id, err)
+}
 
 func (m *Manager) tsaTime(bundle json.RawMessage, doc []byte) (int64, error) {
 	if m.Timestamp == nil {
@@ -348,6 +372,12 @@ func (m *Manager) Publish(ctx context.Context, id string) (int, error) {
 		if err := m.Store.SaveProposal(ctx, o, false); err != nil {
 			return 0, err
 		}
+	}
+	// Before any member is sent it, whether just published or published
+	// before: a vault refuses what this refuses, so sending it would
+	// only leave members unable to vote.
+	if err := m.checkBundle("proposal", id, o.Doc, o.Bundle); err != nil {
+		return 0, err
 	}
 	p, err := o.Parsed()
 	if err != nil {

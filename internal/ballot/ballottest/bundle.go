@@ -16,6 +16,15 @@ func Bundle(tsa, integrated int64) json.RawMessage {
 	return b
 }
 
+// Check accepts any test bundle and refuses a missing one
+// (Manager.CheckBundle in tests). The real check is vaultroots.Check.
+func Check(_ []byte, bundle json.RawMessage) error {
+	if len(bundle) == 0 {
+		return errors.New("ballottest: no bundle")
+	}
+	return nil
+}
+
 // Time reads a test bundle's timestamp (Manager.Timestamp in tests).
 func Time(bundle json.RawMessage, _ []byte) (int64, error) {
 	var b struct {
