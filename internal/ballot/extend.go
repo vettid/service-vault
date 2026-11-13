@@ -251,6 +251,7 @@ func (m *Manager) Extend(ctx context.Context, id, approvalID string, in Extensio
 	if at >= o.ClosesAt {
 		return nil, ErrTooLate
 	}
+	prevClose := o.ClosesAt
 	o.Extensions = append(o.Extensions, vote.Signed{Doc: doc, Sig: sig})
 	o.ClosesAt = e.ClosesAt
 	o.Pending = nil
@@ -258,9 +259,12 @@ func (m *Manager) Extend(ctx context.Context, id, approvalID string, in Extensio
 		return nil, err
 	}
 	// The extension is published and in effect: the site holds it, and
-	// members' vaults also learn it from there. Only the sending waits
-	// for a bundle their vaults accept.
-	if err := m.checkBundle("extension "+strconv.FormatInt(e.N, 10), id, doc, bundle); err != nil {
+	// members' vaults also learn it from there (and check its bundle
+	// themselves). Only the sending waits for a bundle their vaults
+	// accept; one that fails is never sent (README
+	// "proposal_bundle_unverified"). A vault takes an extension's stamp
+	// only before the close it extends (VAULT-MESSAGING §10.19.4).
+	if err := m.checkBundle("extension "+strconv.FormatInt(e.N, 10), id, doc, bundle, time.Unix(prevClose-1, 0)); err != nil {
 		return e, nil
 	}
 	body, _ := json.Marshal(struct {

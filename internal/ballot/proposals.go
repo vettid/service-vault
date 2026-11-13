@@ -113,9 +113,11 @@ type Manager struct {
 	AuthorityTime func(ctx context.Context) (int64, error)
 	// CheckBundle checks a proposal's or an extension's Sigstore bundle as
 	// a member vault will, against the trusted roots every supported vault
-	// release pins (internal/vaultroots), before members are sent it. Nil
-	// sends nothing (fail closed).
-	CheckBundle func(doc []byte, bundle json.RawMessage) error
+	// release pins (internal/vaultroots), before members are sent it, with
+	// the latest time the bundle's stamp may have (zero: the vaults' limit
+	// for a message sent now). Nil sends nothing (fail closed), and Create
+	// refuses before the approval is used.
+	CheckBundle func(doc []byte, bundle json.RawMessage, notAfter time.Time) error
 	NewID       func(time.Time) (string, error)
 	Now         func() time.Time
 	Log         *slog.Logger
@@ -155,12 +157,17 @@ var ErrNoTimestamps = errors.New("ballot: anchor timestamps can't be verified he
 // proposal or extension is not sent (the alarm proposal_bundle_unverified).
 var ErrBundleUnverified = errors.New("ballot: the anchor bundle does not verify against the vaults' pinned roots")
 
+// ErrNoBundleCheck is a service vault with no bundle check (no vault
+// release of its Sigstore instance pins vote trust roots): Create refuses
+// before the approval is used, since nothing it published could be sent.
+var ErrNoBundleCheck = fmt.Errorf("%w: no bundle check configured", ErrBundleUnverified)
+
 // checkBundle checks doc's bundle before members are sent it (CheckBundle),
 // and raises proposal_bundle_unverified when it fails.
-func (m *Manager) checkBundle(what, id string, doc []byte, bundle json.RawMessage) error {
-	err := errors.New("no bundle check configured")
+func (m *Manager) checkBundle(what, id string, doc []byte, bundle json.RawMessage, notAfter time.Time) error {
+	err := ErrNoBundleCheck
 	if m.CheckBundle != nil {
-		err = m.CheckBundle(doc, bundle)
+		err = m.CheckBundle(doc, bundle, notAfter)
 	}
 	if err == nil {
 		return nil
@@ -248,6 +255,10 @@ func (e *ErrInput) Unwrap() error { return e.Err }
 func (m *Manager) Create(ctx context.Context, approvalID string, in ProposalInput) (*Created, error) {
 	if m.Publisher == nil {
 		return nil, ErrNoPublisher
+	}
+	if m.CheckBundle == nil {
+		m.log().Error("no bundle check: proposals are refused", "alarm", "proposal_bundle_unverified")
+		return nil, ErrNoBundleCheck
 	}
 	if err := checkInput(&in); err != nil {
 		return nil, &ErrInput{err}
@@ -376,7 +387,7 @@ func (m *Manager) Publish(ctx context.Context, id string) (int, error) {
 	// Before any member is sent it, whether just published or published
 	// before: a vault refuses what this refuses, so sending it would
 	// only leave members unable to vote.
-	if err := m.checkBundle("proposal", id, o.Doc, o.Bundle); err != nil {
+	if err := m.checkBundle("proposal", id, o.Doc, o.Bundle, time.Time{}); err != nil {
 		return 0, err
 	}
 	p, err := o.Parsed()

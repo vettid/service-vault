@@ -546,10 +546,18 @@ func serve(args []string) error {
 			}
 			mgr.AuthorityTime = authorityTime(as.anc, cfg.Sigstore)
 			// What members are sent is checked as their vaults will: the
-			// listed anchor key, every supported release's pinned roots.
+			// current anchor key, every supported release's pinned roots.
+			// With none pinned for this instance there is no check, and
+			// creating a proposal answers bundle_check_not_configured
+			// before its approval is used.
 			anchorKey := as.spki
-			mgr.CheckBundle = func(doc []byte, bundle json.RawMessage) error {
-				return vaultroots.Check(cfg.Sigstore, [][]byte{anchorKey}, doc, bundle, time.Now())
+			if _, err := vaultroots.Sets(cfg.Sigstore); err != nil {
+				log.Error("no vault release pins vote trust roots for this Sigstore instance: proposals are refused",
+					"alarm", "proposal_bundle_unverified", "sigstore", cfg.Sigstore, "err", err.Error())
+			} else {
+				mgr.CheckBundle = func(doc []byte, bundle json.RawMessage, notAfter time.Time) error {
+					return vaultroots.Check(cfg.Sigstore, [][]byte{anchorKey}, doc, bundle, time.Now(), notAfter)
+				}
 			}
 			mgr.Publisher = votesPublisher(cfg.VotesURL, as, records, mgr, log)
 		}

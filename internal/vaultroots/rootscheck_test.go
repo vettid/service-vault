@@ -60,6 +60,8 @@ func TestCopiesMatchReleases(t *testing.T) {
 
 // releaseCfg is what the check reads of enclave/releasecfg/<channel>.json.
 type releaseCfg struct {
+	Channel        string          `json:"channel"`
+	Release        uint64          `json:"release"`
 	ManifestKeys   []string        `json:"manifest_keys"`
 	Features       []string        `json:"features"`
 	VoteTrustRoots json.RawMessage `json:"vote_trust_roots"`
@@ -238,6 +240,9 @@ func readCfg(t *testing.T, repo, channel string, n uint64) releaseCfg {
 	var c releaseCfg
 	if err := json.Unmarshal(raw, &c); err != nil {
 		t.Fatalf("release %s/%d: %v", channel, n, err)
+	}
+	if c.Channel != channel || c.Release != n {
+		t.Fatalf("tag release/%s/%d holds the config of channel %q release %d", channel, n, c.Channel, c.Release)
 	}
 	return c
 }

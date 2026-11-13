@@ -1,6 +1,6 @@
 // Package vaultroots checks a proposal's or an extension's Sigstore
 // bundle as a member vault will (VAULT-MESSAGING §10.19.4 step 6),
-// before the service publishes and sends it: with vettid-vault's own
+// after the service publishes it and before it sends it: with vettid-vault's own
 // verifier (vms/votewire) and the trusted roots pinned in each vault
 // release that may receive it.
 //
@@ -24,6 +24,7 @@ import (
 	"io/fs"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -86,6 +87,9 @@ func parse(fsys fs.FS) (map[string][]Set, error) {
 				return nil, fmt.Errorf("vaultroots: unexpected file %s/%s", dir, name)
 			}
 			rel = strings.TrimSuffix(rel, ".json")
+			if n, err := strconv.ParseUint(rel, 10, 64); err != nil || strconv.FormatUint(n, 10) != rel {
+				return nil, fmt.Errorf("vaultroots: unexpected file %s/%s", dir, name)
+			}
 			raw, err := fs.ReadFile(fsys, path.Join(dir, name))
 			if err != nil {
 				return nil, err
@@ -103,7 +107,10 @@ func parse(fsys fs.FS) (map[string][]Set, error) {
 			list = append(list, Set{Releases: []string{rel}, Roots: roots})
 		}
 		for i := range list {
-			sort.Strings(list[i].Releases)
+			sort.Slice(list[i].Releases, func(a, b int) bool {
+				x, y := list[i].Releases[a], list[i].Releases[b]
+				return len(x) < len(y) || (len(x) == len(y) && x < y)
+			})
 		}
 		out[inst] = list
 	}
@@ -127,21 +134,26 @@ func Sets(instance string) ([]Set, error) {
 
 // Check verifies bundle for doc against every root set of instance, as
 // a member vault does: under one of the accepted anchor keys (SPKI DER),
-// timestamped at most Slack after now.
-func Check(instance string, accepted [][]byte, doc, bundle []byte, now time.Time) error {
+// timestamped at most Slack after now, and no later than notAfter when
+// that is set and earlier (an extension: before the close it extends).
+func Check(instance string, accepted [][]byte, doc, bundle []byte, now, notAfter time.Time) error {
 	list, err := Sets(instance)
 	if err != nil {
 		return err
 	}
-	return check(list, accepted, doc, bundle, now)
+	return check(list, accepted, doc, bundle, now, notAfter)
 }
 
-func check(list []Set, accepted [][]byte, doc, bundle []byte, now time.Time) error {
+func check(list []Set, accepted [][]byte, doc, bundle []byte, now, notAfter time.Time) error {
 	if len(list) == 0 {
 		return ErrNoRoots
 	}
+	limit := now.Add(Slack)
+	if !notAfter.IsZero() && notAfter.Before(limit) {
+		limit = notAfter
+	}
 	for _, s := range list {
-		if _, err := votewire.VerifyBundle(doc, bundle, accepted, s.Roots, now.Add(Slack), now); err != nil {
+		if _, err := votewire.VerifyBundle(doc, bundle, accepted, s.Roots, limit, now); err != nil {
 			return fmt.Errorf("vaultroots: the roots of vault release %s: %w", strings.Join(s.Releases, ", "), err)
 		}
 	}

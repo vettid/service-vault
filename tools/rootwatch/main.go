@@ -1,6 +1,6 @@
 // Command rootwatch compares Sigstore's current trusted root with the
-// trusted roots the member-vault releases pin (internal/vaultroots/roots),
-// and exits 1 when they differ in what a vault reads of them: the Rekor
+// newest trusted root each member-vault release pins
+// (internal/vaultroots/roots), and exits 1 when they differ in what a vault reads of them: the Rekor
 // logs (tlogs) and the timestamp authorities (vms/votewire reads nothing
 // else). A difference means Sigstore added, ended or changed a key: until a
 // vault release pins the new roots, a bundle under a new key is refused by
@@ -100,15 +100,15 @@ func check(in instance, rootsDir string) (bool, error) {
 		if err := json.Unmarshal(b, &roots); err != nil {
 			return false, fmt.Errorf("%s: %w", p, err)
 		}
-		pinned := map[string]bool{}
-		for _, r := range roots {
-			e, err := entries(r)
-			if err != nil {
-				return false, fmt.Errorf("%s: %w", p, err)
-			}
-			for k := range e {
-				pinned[k] = true
-			}
+		if len(roots) == 0 {
+			return false, fmt.Errorf("%s: no trusted root", p)
+		}
+		// The newest root only: a release may keep an older one beside
+		// it (a bundle verifies under any), and that one differs from
+		// Sigstore's current root by design.
+		pinned, err := entries(roots[len(roots)-1])
+		if err != nil {
+			return false, fmt.Errorf("%s: %w", p, err)
 		}
 		name := filepath.Base(p)
 		for _, k := range sortedKeys(current) {

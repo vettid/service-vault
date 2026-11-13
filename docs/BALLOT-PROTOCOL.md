@@ -200,9 +200,10 @@ design: vettid/votes, docs/VOTES-SITE.md).
   release that registers the `vote` feature and is listed `active` or
   `deprecated` in that channel's signed manifest, or is a `candidate`
   (VAULT-RELEASES: tagged, not yet signed into a manifest). A bundle that
-  fails any of them is not sent (alarm `proposal_bundle_unverified`);
-  an extension already published stays in effect. (chosen; not in the
-  spec)
+  fails any of them is not pushed (alarm `proposal_bundle_unverified`);
+  an extension already published stays in effect. A vault that asks
+  (`vote.status`) or reads the site is still given the document and its
+  bundle, and checks it itself as always. (chosen; not in the spec)
 - **The site checks** the service is listed, the signatures, the exact
   JCS bytes, the bundle under a listed anchor key, and the order above.
 - **Write-once:** each document has one path; the site accepts the same

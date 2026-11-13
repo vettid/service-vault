@@ -639,8 +639,17 @@ func (s *Server) createProposal(w http.ResponseWriter, r *http.Request) {
 	case approvalProblem(w, err):
 	case errors.As(err, &np):
 		// Kept, but not published: POST /v1/proposals/{id}/publish retries.
+		// reason bundle_unverified: published, but its bundle is one a
+		// member vault would refuse, so it is not sent (README
+		// "proposal_bundle_unverified").
 		s.log().Error("create proposal: not published", "proposal_id", np.ProposalID, "err", err)
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "not_published", "proposal_id": np.ProposalID})
+		out := map[string]string{"error": "not_published", "proposal_id": np.ProposalID}
+		if errors.Is(err, ballot.ErrBundleUnverified) {
+			out["reason"] = "bundle_unverified"
+		}
+		writeJSON(w, http.StatusServiceUnavailable, out)
+	case errors.Is(err, ballot.ErrNoBundleCheck):
+		writeError(w, http.StatusServiceUnavailable, "bundle_check_not_configured")
 	case errors.Is(err, ballot.ErrTooManyEligible):
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "too_many_eligible", "max_eligible": ballot.MaxEligible})
 	case errors.As(err, &ei):
@@ -683,6 +692,9 @@ func (s *Server) publishProposal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "publication_not_configured")
 	case errors.Is(err, ballot.ErrProposalChanged):
 		writeError(w, http.StatusConflict, "conflict") // another task saved it: retry
+	case errors.Is(err, ballot.ErrBundleUnverified):
+		// Published, not sent: a member vault would refuse its bundle.
+		writeError(w, http.StatusServiceUnavailable, "bundle_unverified")
 	case err != nil:
 		s.log().Error("publish proposal", "err", err)
 		writeError(w, http.StatusServiceUnavailable, "unavailable")
