@@ -44,16 +44,16 @@ func TestStrictF1Scope(t *testing.T) {
 	}
 	// Current signed by B: the later epochs signed by B or A are demoted, a
 	// destroyed one is left, one signed by C is not taken.
-	c.Epochs = []EpochMeta{{ID: eid(1), Signer: b}, {ID: eid(2), Signer: cc}, {ID: eid(3), Signer: a, Destroyed: true}, {ID: eid(4), Signer: b}}
+	c.Epochs = []EpochMeta{{ID: eid(1), Signer: b}, {ID: eid(2), Signer: cc}, {ID: eid(3), Signer: a, Destroyed: true}, {ID: eid(5), Signer: a}, {ID: eid(4), Signer: b}}
 	c.LastEpochID = eid(4)
 	if !f.p.f1Demote(c, []*handshake.Rotation{bc}, eid(1), false, f.clk.Now()) {
 		t.Fatal("suspended")
 	}
-	if c.Epochs[0].Demoted || c.Epochs[1].Demoted || c.Epochs[2].Demoted || !c.Epochs[3].Demoted {
-		t.Fatalf("demoted: %v %v %v %v", c.Epochs[0].Demoted, c.Epochs[1].Demoted, c.Epochs[2].Demoted, c.Epochs[3].Demoted)
+	if c.Epochs[0].Demoted || c.Epochs[1].Demoted || c.Epochs[2].Demoted || !c.Epochs[3].Demoted || !c.Epochs[4].Demoted {
+		t.Fatalf("demoted: %v %v %v %v %v", c.Epochs[0].Demoted, c.Epochs[1].Demoted, c.Epochs[2].Demoted, c.Epochs[3].Demoted, c.Epochs[4].Demoted)
 	}
 	// With restart, the reconnect names E, not the newest usable epoch.
-	c.Epochs[3].Demoted = false
+	c.Epochs[3].Demoted, c.Epochs[4].Demoted = false, false
 	f.p.f1Demote(c, []*handshake.Rotation{bc}, eid(1), true, f.clk.Now())
 	if !bytes.Equal(c.reconnectTarget(), eid(1)) || bytes.Equal(c.newestUsable(), eid(1)) {
 		t.Fatalf("target %x, newest usable %x", c.reconnectTarget(), c.newestUsable())
@@ -143,7 +143,7 @@ func TestDemotedWaitsForPending(t *testing.T) {
 	}
 	demoteCurrent(c, f.clk.Now())
 	f.p.tickDemoted(c, f.clk.Now())
-	if reconnectOutgoing(f, cid) || c.Pending == nil {
+	if reconnectOutgoing(f, cid) || c.Pending == nil || c.State != StateActive {
 		t.Fatal("the reconnect started over our pending epoch")
 	}
 }
@@ -193,5 +193,28 @@ func TestPosAfterByMsgID(t *testing.T) {
 	}
 	if !posAfter(t0.Add(time.Second), "", t0, "01A") {
 		t.Fatal("no deposited_at fallback")
+	}
+}
+
+// K9 for an identity.rotate that traveled under one of our abandoned
+// epochs (E): E's position comes from its record; the later abandoned
+// epoch signed by the old key is ended; E itself, whose flag the message
+// just set, is not judged (it would suspend an honest member).
+func TestK9UnderAbandonedEpoch(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	c := f.p.conns[cid]
+	a, _, _, ab, bc := chainOf2(t, f, m, c)
+	t0 := f.clk.Now()
+	c.Epochs = []EpochMeta{{ID: eid(1), Signer: a, EstAt: t0, EstMsg: "01M00000000000000000000005"}}
+	c.LastEpochID = eid(1)
+	c.AbandonedMeta = []AbandonedEpoch{
+		{ID: eid(2), At: t0, Signer: a, EstAt: t0, EstMsg: "01M00000000000000000000006", Received: true}, // E
+		{ID: eid(3), At: t0, Signer: a, EstAt: t0, EstMsg: "01M00000000000000000000007"},                 // after E
+	}
+	f.p.identityRotate(c, peertest.RotateBody(bc, ab, bc), eid(2), f.clk.Now())
+	if c.State != StateActive || c.AbandonedMeta[0].Ended || !c.AbandonedMeta[1].Ended {
+		t.Fatalf("state %s, E ended %v, later ended %v", c.State, c.AbandonedMeta[0].Ended, c.AbandonedMeta[1].Ended)
 	}
 }
