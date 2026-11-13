@@ -150,6 +150,10 @@ func (p *Peer) reconnectFailed(c *Connection) {
 // tokens. A rekey of ours in flight is dropped: it travels in an epoch the
 // member may no longer hold.
 func (p *Peer) startReconnect(c *Connection, now time.Time) bool {
+	if t := c.reconnectTarget(); len(t) > 0 && !bytes.Equal(t, c.ReconnectTriesFor) {
+		c.ReconnectTries, c.ReconnectTriesFor = 0, bytes.Clone(t) // counted per named epoch
+		p.markDirty(kindConn, c.ID)
+	}
 	if c.State != StateActive && c.State != StateStale || len(c.reconnectTarget()) == 0 ||
 		c.Reconnect.Token == "" || !now.Before(c.Reconnect.Exp) || c.ReconnectTries >= MaxReconnectTries {
 		p.log().Warn("reconnect not possible", "connection_id", c.ID, "state", c.State, "tries", c.ReconnectTries)
@@ -164,6 +168,16 @@ func (p *Peer) startReconnect(c *Connection, now time.Time) bool {
 	// pending epoch is abandoned, and so are our rekeys in flight.
 	p.abandonPending(c, "reconnect", false, now)
 	p.dropConnOutgoing(c)
+	if c.currentDemoted() {
+		// RK1: the reconnect after a demotion also ends our open answers to
+		// the member's rekeys, in this write, as the member vault does.
+		for aid, aw := range p.awaiting {
+			if aw.ConnID == c.ID && aw.New == nil && aw.Purpose == handshake.PurposeRekey {
+				p.audit("rekey_answer_ended_by_reconnect", c.ID)
+				p.dropAwaiting(aid, now)
+			}
+		}
+	}
 	// An earlier try's hs.init is replaced (§6.6). What else waits stays:
 	// nothing in the session goes while the reconnect is open, and it is
 	// sealed again under the reconnect's epoch at its confirmation (§8.3).

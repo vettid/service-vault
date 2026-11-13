@@ -129,7 +129,7 @@ func (p *Peer) demoteAt(c *Connection, links []*handshake.Rotation, f1 []byte, r
 	}
 	x, xm := p.relayAt, p.msgID
 	byPosition := func(e *EpochMeta) bool {
-		return !x.IsZero() && !e.Demoted && !e.Destroyed && signedByLinks(c, e.Signer, links) && !e.EstAt.IsZero() &&
+		return xm != "" && !e.Demoted && !e.Destroyed && signedByLinks(c, e.Signer, links) && e.EstMsg != "" &&
 			posAfter(e.EstAt, e.EstMsg, x, xm)
 	}
 	for i := range c.Epochs {
@@ -176,9 +176,26 @@ func (p *Peer) f1Demote(c *Connection, links []*handshake.Rotation, f1 []byte, r
 	if len(f1) == 0 || bytes.Equal(f1, c.LastEpochID) {
 		return true
 	}
-	ie, ic := c.epochIndex(f1), c.epochIndex(c.LastEpochID)
-	if ie < 0 || ic <= ie {
+	ic := c.epochIndex(c.LastEpochID)
+	if ic < 0 {
 		return true
+	}
+	// after reports whether the epoch at index i is later than E: by index
+	// when E is in the list, else (E one of our abandoned pending epochs,
+	// which the list never holds) by the position of its establishment.
+	var after func(i int) bool
+	if ie := c.epochIndex(f1); ie >= 0 {
+		after = func(i int) bool { return i > ie }
+	} else if a := c.abandonedMeta(f1); a != nil && a.EstMsg != "" {
+		after = func(i int) bool {
+			e := &c.Epochs[i]
+			return e.EstMsg != "" && posAfter(e.EstAt, e.EstMsg, a.EstAt, a.EstMsg)
+		}
+	} else {
+		return true
+	}
+	if !after(ic) {
+		return true // the current epoch is not later than E
 	}
 	cur := &c.Epochs[ic]
 	for _, r := range links {
@@ -186,8 +203,8 @@ func (p *Peer) f1Demote(c *Connection, links []*handshake.Rotation, f1 []byte, r
 			continue
 		}
 		var later []*EpochMeta
-		for i := ie + 1; i < len(c.Epochs); i++ {
-			if e := &c.Epochs[i]; !e.Destroyed && signedAtOrBefore(c, e.Signer, r.OldIK) {
+		for i := range c.Epochs {
+			if e := &c.Epochs[i]; after(i) && !e.Destroyed && signedAtOrBefore(c, e.Signer, r.OldIK) {
 				later = append(later, e)
 			}
 		}
@@ -204,12 +221,8 @@ func (p *Peer) f1Demote(c *Connection, links []*handshake.Rotation, f1 []byte, r
 		}
 		p.markDirty(kindConn, c.ID)
 		p.log().Warn("epochs demoted", "reason", "fork_suspected", "ref", "epoch", "rule", "strict_f1", "connection_id", c.ID)
-		// Our rekeys in flight travel in a demoted epoch: abandoned.
-		for id, og := range p.outgoing {
-			if og.ConnID == c.ID && og.ini != nil && og.ini.Purpose() == handshake.PurposeRekey {
-				p.dropOutgoing(id)
-			}
-		}
+		// Our rekeys in flight were abandoned already: following the links
+		// dropped every outgoing handshake (followRotation, H5).
 		if restart {
 			c.ReconnectNamed = bytes.Clone(f1)
 			p.markDirty(kindConn, c.ID)
@@ -341,8 +354,8 @@ func (p *Peer) k9(c *Connection, links []*handshake.Rotation, msgEpoch []byte, n
 	var judged []*AbandonedEpoch
 	for i := range c.AbandonedMeta {
 		a := &c.AbandonedMeta[i]
-		if a.Ended || bytes.Equal(a.ID, msgEpoch) || a.EstAt.IsZero() ||
-			!eAt.IsZero() && !posAfter(a.EstAt, a.EstMsg, eAt, eMsg) {
+		if a.Ended || bytes.Equal(a.ID, msgEpoch) || a.EstMsg == "" ||
+			eMsg != "" && !posAfter(a.EstAt, a.EstMsg, eAt, eMsg) {
 			continue
 		}
 		if signedByLinks(c, a.Signer, links) {
@@ -407,13 +420,9 @@ func (p *Peer) refusedReconnectLinks(c *Connection, body *handshake.Init, now ti
 		return
 	}
 	links := body.Rotations[n:]
-	for _, r := range links {
-		if suite.EqualPublic(r.NewIK, c.Peer.IK) || isAncestor(c, r.NewIK) {
-			p.audit("refused_reconnect_links_none", c.ID) // all or nothing
-			return
-		}
-	}
 	if p.revisits(c, links) {
+		// Table B would refuse a link (a new key that is the stored key, an
+		// ancestor, or one these links passed): none is followed.
 		p.audit("refused_reconnect_links_none", c.ID)
 		return
 	}
@@ -424,8 +433,8 @@ func (p *Peer) refusedReconnectLinks(c *Connection, body *handshake.Init, now ti
 		return
 	}
 	var e []byte
-	if c.epochMeta(named) != nil {
-		e = named
+	if c.epochMeta(named) != nil || c.abandonedMeta(named) != nil {
+		e = named // strict F1's E: an epoch that was current, or one of our abandoned ones
 	}
 	p.followRotation(c, final, kem, links, e, false)
 	p.audit("refused_reconnect_links", c.ID)
