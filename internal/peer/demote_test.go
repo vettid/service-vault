@@ -85,18 +85,11 @@ func TestStrictF1DemotesAndReconnectsNamingE(t *testing.T) {
 	if !bytes.Equal(named, s1.ID) {
 		t.Fatalf("the reconnect names %x, want E1", named)
 	}
-	// A message to the member made now is held, not deposited under E2.
-	before := len(m.Received(TypeIdentityRotate)) // placeholder count, unchanged
-	_ = before
+	// A message to the member made now waits (TestHeldWhileDemoted covers
+	// the hold itself) and is delivered under the new epoch.
 	id := f.p.sendTo(c, "test.note", []byte(`{}`), f.clk.Now())
 	if id == "" {
 		t.Fatal("not queued")
-	}
-	f.p.drainOutbox(context.Background())
-	for _, e := range f.p.outbox {
-		if e.ConnID == cid && !e.Handshake && e.Tried {
-			t.Fatal("a held message was deposited")
-		}
 	}
 	f.pump() // the member answers the reconnect, confirms, and receives what waited
 	if c.currentDemoted() || c.State != StateActive {
@@ -169,7 +162,7 @@ func TestDemotedEpochEarlierMessageSuspends(t *testing.T) {
 	id2 := ep2.ID()
 	e2 := c.epochMeta(id2[:])
 	// Demoted at a position after the message below.
-	e2.Demoted, e2.DemotedAt, e2.DemotedMsg = true, f.clk.Now().Add(time.Hour), "Z"
+	e2.Demoted, e2.DemotedAt, e2.DemotedMsg = true, f.clk.Now().Add(time.Hour), "ZZZZZZZZZZZZZZZZZZZZZZZZZZ"
 	raw, err := ep2.Seal(&envelope.Inner{ID: m.NewID(), Type: handshake.TypeConfirm, TS: f.clk.Now(), Body: []byte(`{}`)})
 	if err != nil {
 		t.Fatal(err)
@@ -279,6 +272,9 @@ func TestDemotionByPosition(t *testing.T) {
 		}
 		f.p.followRotation(c, r.NewIK, r.NewKEM, []*handshake.Rotation{r}, nil, false)
 		f.p.relayAt, f.p.msgID = time.Time{}, ""
+		if !flag && reconnectOutgoing(f, cid) {
+			t.Fatal("a reconnect started beside a handshake (restart false)")
+		}
 		switch {
 		case flag && c.State != StateSuspended:
 			t.Fatalf("flag set: state %s", c.State)
@@ -385,12 +381,12 @@ func TestRefusedReconnectLinksApplied(t *testing.T) {
 	if !suite.EqualPublic(c.Peer.IK, r.NewIK) || len(c.Chain) != 1 {
 		t.Fatalf("links not followed: chain %d", len(c.Chain))
 	}
-	if c.pendingReconnect() || !p2Outgoing(f, cid) {
+	if c.pendingReconnect() || !reconnectOutgoing(f, cid) {
 		t.Fatal("our reconnect was not started again")
 	}
 }
 
-func p2Outgoing(f *fixture, cid string) bool {
+func reconnectOutgoing(f *fixture, cid string) bool {
 	for _, og := range f.p.outgoing {
 		if og.ConnID == cid && og.ini != nil && og.ini.Purpose() == handshake.PurposeReconnect {
 			return true
