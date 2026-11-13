@@ -275,6 +275,47 @@ destination.
   close (`rec#vote_stamp_wait` keeps the early stamp); a close before
   then answers `stamped_early` at once. Member vaults keep checking for
   7 days, so a late publication is still judged.
+- `proposal_bundle_unverified`: a proposal's or an extension's Sigstore
+  bundle does not verify, by vettid-vault's own verifier
+  (`vms/votewire`), under this service's anchor key against the trusted
+  roots that every supported member-vault release pins
+  (`internal/vaultroots`, BALLOT-PROTOCOL §3.3). A member's vault would
+  refuse it, so nothing is sent: a proposal is published but its
+  `vote.proposal` goes to no one (creating it answers `503
+  not_published` with `reason: bundle_unverified`; `POST
+  /v1/proposals/{id}/publish` answers `503 bundle_unverified` until the
+  bundle checks, then sends it). An extension stays in effect on the
+  site, but no `vote.extended` is sent, then or later (the extend call
+  still answers 200). A vault that asks `vote.status` or reads the site
+  still gets the document and its bundle, and checks the bundle itself,
+  as the vaults always do. Only the current anchor key is accepted here,
+  so a proposal anchored under an earlier key is refused even though
+  vaults accept any listed key (fail closed). With no roots pinned for
+  the service's Sigstore instance (`SV_SIGSTORE`), the alarm is raised
+  at start, and creating a proposal or an extension answers `503
+  bundle_check_not_configured` before its approval is used. The ERROR
+  line names the proposal and the error.
+
+  What this check does not cover:
+  - **One verifier for every release.** The service runs the `votewire`
+    of the vettid-vault version in `go.mod` against each release's
+    roots, not each release's own `votewire`. Today they are the same
+    code for staging 25–29, but nothing here checks that they stay so:
+    a release whose verifier changes may refuse what this accepts.
+  - **The signed service list.** The anchor key is not looked up in the
+    signed service list. A key missing from it passes here, and member
+    vaults then refuse the bundle (`service_list`). That fails closed at
+    the vault, but this check does not catch it.
+
+  A new
+  Sigstore key that no supported vault release pins yet means a vault
+  release with the new roots must ship first (the scheduled roots check
+  opens an issue when Sigstore's trusted root changes). Each new vault
+  release that registers `vote` needs its copy,
+  `internal/vaultroots/roots/<channel>/release-<n>.json` (its
+  `vote_trust_roots`, indented by two spaces); the daily `vault-roots`
+  workflow fails while a supported release has none, or a copy differs
+  or outlives its release.
 - `results_bundle_unverified`: a vote's results bundle failed its
   timestamp check (the authority's signature, the pinned trusted root, or
   its validity period); the results are not published. One anchored by
@@ -789,7 +830,7 @@ billed.
 | `POST /v1/approvals/{id}/remind` | `{approval_id, reminded: [connection_id]}`: the challenge again to the admins who have not answered and hold no live challenge (the `remind_needed` ones); `too_soon` (429) within 10 minutes of the last, `not_pending` (409) once settled, `nothing_to_remind` (409) when every admin who has not answered still holds a live challenge. An optional body `{"force": [connection_id, ...]}` (chosen; not in the spec) challenges only the named admins again, each even with a live challenge (the old one is withdrawn first): `not_admin` (422) for one outside the approval's admins or the current set, `answered` (409) for one who has answered, `ask_budget` (409) for one at the approval's ask limit, from any approval (4 approval challenges that still count, or 5 for a repair action; each counts until its expiry plus 24 hours, since the member's vault may receive it as late as its expiry; a sixth would come back as a delayed denial); still `too_soon` within 10 minutes of the last. The answer carries the same `ask_budget` list (omitted when empty), and so does `GET /v1/approvals/{id}` for the `remind_needed` admins at the budget. Without a body, an admin at that budget is left out (and stays in `remind_needed`), and `ask_budget` (409) answers when that leaves nobody to challenge (an admin whose ask log cannot be read counts as at the budget), checked before `too_soon` and before anything is withdrawn. Each forced re-send spends one of that admin's 5 approval asks per 24 h (§10.4.1): use it only when the admin reports not seeing the request |
 | `GET /v1/admins` | `{admins: [connection_id], threshold}` |
 | `GET /v1/audit?since=&limit=` | `{entries: [...], next?}`: the audit log after entry `since`, oldest first, `limit` 1–100 (default 100); pass `next` as `since` for the next page |
-| `POST /v1/proposals` `{approval_id, title, text, choices, quorum, binding, removed_may_vote, opens_at, closes_at, outage_rule}` | Needs `approval_id`: the admins' `proposal.create` approval of exactly this input (see "Admin approvals"); it is checked and used up once (`approval_required` 400 without one; `approval_not_found`, `approval_not_approved`, `approval_wrong_action`, `approval_mismatch`, `approval_expired` 403; `approval_used` 409). `201 {proposal_id, proposal_hash, eligible, unsigned, sending}`: the proposal is made from the active connections at this moment whose vault advertised the vote feature (BALLOT-PROTOCOL §3.2), published, and sent to each in the background (BALLOT-PROTOCOL §3): `sending` is how many it is being sent to, and a member a send misses asks with `vote.status`; choices are `{label}` only: the service assigns the ids `c1`, `c2`, … and always adds `abstain`; `text` is empty or the title, `quorum.text` empty, `outage_rule` empty or the default (see "Admin approvals"). `unsigned` is how many of the `eligible` connections have no pinned credential key: their member has never signed in on the connection, and their vault refuses `vote.cast` with `not_signed_in` until they do (VAULT-MESSAGING §10.19.5); members sign in to the service themselves (on a test deployment only, `POST /v1/signins/unsigned`, `svctl signin -unsigned`). `invalid_proposal` (400) for one outside the bounds of BALLOT-PROTOCOL §3.1 (member vaults refuse those) or with no such connection; `too_many_eligible` (400, with `max_eligible`: 1000) when the roster has more than 1,000 eligible members, before the approval is used (requesting the `proposal.create` approval already answers `too_many_eligible` then, before the admins are asked) (a chosen limit, kept until the results' single upload to the votes site is scaled; members are already sent to in the background; BALLOT-PROTOCOL §3.2); `publication_not_configured` (503) until publication is configured; `503 {error: not_published, proposal_id}` when it was kept but its publication failed (retry with `/publish`). Served with `SV_BALLOTS_TABLE` |
+| `POST /v1/proposals` `{approval_id, title, text, choices, quorum, binding, removed_may_vote, opens_at, closes_at, outage_rule}` | Needs `approval_id`: the admins' `proposal.create` approval of exactly this input (see "Admin approvals"); it is checked and used up once (`approval_required` 400 without one; `approval_not_found`, `approval_not_approved`, `approval_wrong_action`, `approval_mismatch`, `approval_expired` 403; `approval_used` 409). `201 {proposal_id, proposal_hash, eligible, unsigned, sending}`: the proposal is made from the active connections at this moment whose vault advertised the vote feature (BALLOT-PROTOCOL §3.2), published, and sent to each in the background (BALLOT-PROTOCOL §3): `sending` is how many it is being sent to, and a member a send misses asks with `vote.status`; choices are `{label}` only: the service assigns the ids `c1`, `c2`, … and always adds `abstain`; `text` is empty or the title, `quorum.text` empty, `outage_rule` empty or the default (see "Admin approvals"). `unsigned` is how many of the `eligible` connections have no pinned credential key: their member has never signed in on the connection, and their vault refuses `vote.cast` with `not_signed_in` until they do (VAULT-MESSAGING §10.19.5); members sign in to the service themselves (on a test deployment only, `POST /v1/signins/unsigned`, `svctl signin -unsigned`). `invalid_proposal` (400) for one outside the bounds of BALLOT-PROTOCOL §3.1 (member vaults refuse those) or with no such connection; `too_many_eligible` (400, with `max_eligible`: 1000) when the roster has more than 1,000 eligible members, before the approval is used (requesting the `proposal.create` approval already answers `too_many_eligible` then, before the admins are asked) (a chosen limit, kept until the results' single upload to the votes site is scaled; members are already sent to in the background; BALLOT-PROTOCOL §3.2); `publication_not_configured` (503) until publication is configured; `bundle_check_not_configured` (503), before the approval is used, when no vault release pins vote trust roots for `SV_SIGSTORE` (alarm `proposal_bundle_unverified`); `503 {error: not_published, proposal_id}` when it was kept but its publication failed (retry with `/publish`), with `reason: bundle_unverified` when it was published but its bundle is one a member vault would refuse, so it is not sent (`/publish` then answers `503 bundle_unverified` until it checks). Served with `SV_BALLOTS_TABLE` |
 | `GET /v1/proposals/{id}` | `{proposal_id, proposal, proposal_hash, eligible, opens_at, closes_at, published}`: nothing that counts ballots before the results |
 | `POST /v1/proposals/{id}/publish` | `{sending}`: publishes a proposal whose publication failed, and sends it again to each eligible member in the background (`sending` is how many; 0 when those sends are still running, as it doesn't send twice, when the service is stopping, or once the results are published, when members are sent `vote.closed` instead). A proposal not published is no member's: a cast on it is `not_eligible`, `vote.status` `unknown_proposal`. `not_found` (404) |
 | `POST /v1/proposals/{id}/extend` `{approval_id, closes_at, outage: {from, to, source}}` | Needs `approval_id`: the admins' `vote.extend` approval of exactly this extension of this proposal, used up once (the same errors as creating). The extension (BALLOT-PROTOCOL §10.2), published and sent to each member in the background: for a relay outage of over an hour within the window that is over (its `to` not after now), by its length rounded up to the hour, 24 h in all at most; an outage still going on near the close is extended in parts (§10.2). `invalid_extension` (400), `outage_not_over` (422) for an outage still going on, `too_late` (409) once the close has passed. Requesting the `vote.extend` approval itself answers `outage_not_over` (422) for an outage still going on. A vote has at most 24 extensions (`invalid_extension` past that) |

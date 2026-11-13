@@ -71,7 +71,7 @@ func TestBallotChunksAtCapOnDynamoDB(t *testing.T) {
 	m := &ballot.Manager{Store: &ballot.RecordStore{Records: st, Copy: &ballot.MemCopy{}}, IK: ik.Public().(ed25519.PublicKey),
 		Sign:   func(label string, msg []byte) ([]byte, error) { return suite.Sign(ik, label, msg) },
 		Roster: r, Sender: sink{}, Publisher: closingSite{}, Catcher: caught{}, Approvals: approveAll{}, NewID: envelope.NewULID,
-		Now: func() time.Time { return now }, Timestamp: ballottest.Time,
+		Now: func() time.Time { return now }, Timestamp: ballottest.Time, CheckBundle: ballottest.Check,
 		AuthorityTime: func(context.Context) (int64, error) { return now.Unix(), nil }}
 	m.SetEligibleCapForTest(ballot.PlannedMaxEligible)
 	opens := now.Add(time.Hour).Unix()

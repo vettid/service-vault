@@ -65,6 +65,7 @@ import (
 	"github.com/vettid/service-vault/internal/signin"
 	"github.com/vettid/service-vault/internal/store"
 	"github.com/vettid/service-vault/internal/tlsid"
+	"github.com/vettid/service-vault/internal/vaultroots"
 	"github.com/vettid/service-vault/internal/webhook"
 	sdkwebhook "github.com/vettid/service-vault/sdk/go/webhook"
 	"github.com/vettid/service-vault/vote"
@@ -544,6 +545,21 @@ func serve(args []string) error {
 				return anchor.TimestampTime(cfg.Sigstore, bundle, doc)
 			}
 			mgr.AuthorityTime = authorityTime(as.anc, cfg.Sigstore)
+			// What members are sent is checked with their vaults'
+			// verifier: the current anchor key, every supported release's
+			// pinned roots (not the signed service list; README).
+			// With none pinned for this instance there is no check, and
+			// creating a proposal answers bundle_check_not_configured
+			// before its approval is used.
+			anchorKey := as.spki
+			if _, err := vaultroots.Sets(cfg.Sigstore); err != nil {
+				log.Error("no vault release pins vote trust roots for this Sigstore instance: proposals are refused",
+					"alarm", "proposal_bundle_unverified", "sigstore", cfg.Sigstore, "err", err.Error())
+			} else {
+				mgr.CheckBundle = func(doc []byte, bundle json.RawMessage, notAfter time.Time) error {
+					return vaultroots.Check(cfg.Sigstore, [][]byte{anchorKey}, doc, bundle, time.Now(), notAfter)
+				}
+			}
 			mgr.Publisher = votesPublisher(cfg.VotesURL, as, records, mgr, log)
 		}
 		if rebuild {

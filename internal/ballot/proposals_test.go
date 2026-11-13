@@ -231,6 +231,7 @@ func newManager(t *testing.T) (*Manager, *fakeSender, *fakePublisher) {
 		Sign:  func(label string, msg []byte) ([]byte, error) { return suite.Sign(ik, label, msg) },
 		IK:    ik.Public().(ed25519.PublicKey), Roster: fakeRoster{"c2", "c0", "c1"}, Sender: s, Publisher: p,
 		NewID: envelope.NewULID, Now: func() time.Time { return clock }, Approvals: &fakeApprovals{auto: true}, Timestamp: ballottest.Time,
+		CheckBundle: ballottest.Check,
 	}
 	m.AuthorityTime = func(context.Context) (int64, error) { return m.Now().Unix(), nil } // an authority agreeing with the clock
 	p.integrated = func() int64 { return m.Now().Unix() }

@@ -61,10 +61,15 @@ func (f *fakeProposals) Results(_ context.Context, id string) (*ballot.Published
 }
 
 func (f *fakeProposals) Publish(_ context.Context, id string) (int, error) {
-	if id != "p1" {
-		return 0, ballot.ErrUnknownProposal
+	switch id {
+	case "p1":
+		return 3, nil
+	case "unverified":
+		return 0, fmt.Errorf("%w: proposal of unverified: not under the pinned roots", ballot.ErrBundleUnverified)
+	case "nocheck":
+		return 0, fmt.Errorf("proposal of nocheck: %w", ballot.ErrNoBundleCheck)
 	}
-	return 3, nil
+	return 0, ballot.ErrUnknownProposal
 }
 
 func (f *fakeProposals) Extend(_ context.Context, id, approvalID string, in ballot.ExtensionInput) (*vote.Extension, error) {
@@ -134,6 +139,7 @@ func TestProposalRoutes(t *testing.T) {
 		errors.New("store down"):                 "unavailable",
 		&ballot.ErrNotPublished{ProposalID: "p1", Err: errors.New("rekor down")}: "not_published",
 		fmt.Errorf("%w: the roster has 1001", ballot.ErrTooManyEligible):         "too_many_eligible",
+		ballot.ErrNoBundleCheck: "bundle_check_not_configured",
 	} {
 		fp.err = err
 		if _, m := do(t, h, "POST", "/v1/proposals", apiKey, body); m["error"] != want {
@@ -145,11 +151,27 @@ func TestProposalRoutes(t *testing.T) {
 		t.Fatalf("too many eligible: %d %v", rec.Code, m)
 	}
 	fp.err = &ballot.ErrNotPublished{ProposalID: "p1", Err: errors.New("rekor down")}
-	if rec, m := do(t, h, "POST", "/v1/proposals", apiKey, body); rec.Code != 503 || m["proposal_id"] != "p1" {
+	if rec, m := do(t, h, "POST", "/v1/proposals", apiKey, body); rec.Code != 503 || m["proposal_id"] != "p1" || m["reason"] != nil {
 		t.Fatalf("not published: %d %v", rec.Code, m)
 	}
-	for id, want := range map[string]int{"p1": 200, "nope": 404} {
-		if rec, m := do(t, h, "POST", "/v1/proposals/"+id+"/publish", apiKey, ""); rec.Code != want || (want == 200 && m["sending"] != float64(3)) {
+	// Published, its bundle refused: still not_published (Publish
+	// retries), with the reason.
+	fp.err = &ballot.ErrNotPublished{ProposalID: "p1", Err: fmt.Errorf("%w: proposal of p1: x", ballot.ErrBundleUnverified)}
+	if rec, m := do(t, h, "POST", "/v1/proposals", apiKey, body); rec.Code != 503 || m["error"] != "not_published" ||
+		m["proposal_id"] != "p1" || m["reason"] != "bundle_unverified" {
+		t.Fatalf("not published, bundle unverified: %d %v", rec.Code, m)
+	}
+	fp.err = ballot.ErrNoBundleCheck
+	if rec, m := do(t, h, "POST", "/v1/proposals/ok/extend", apiKey, `{"approval_id":"A1","closes_at":9,"outage":{"from":1,"to":5000,"source":"s"}}`); rec.Code != 503 || m["error"] != "bundle_check_not_configured" {
+		t.Fatalf("extend without a check: %d %v", rec.Code, m)
+	}
+	fp.err = nil
+	for id, want := range map[string]struct {
+		code int
+		err  string
+	}{"p1": {200, ""}, "nope": {404, "not_found"}, "unverified": {503, "bundle_unverified"}, "nocheck": {503, "bundle_check_not_configured"}} {
+		rec, m := do(t, h, "POST", "/v1/proposals/"+id+"/publish", apiKey, "")
+		if rec.Code != want.code || (want.code == 200 && m["sending"] != float64(3)) || (want.err != "" && m["error"] != want.err) {
 			t.Errorf("publish %s: %d %v", id, rec.Code, m)
 		}
 	}

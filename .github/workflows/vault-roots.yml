@@ -1,0 +1,107 @@
+name: vault-roots
+
+# The trusted roots the service checks bundles against before sending
+# (internal/vaultroots, BALLOT-PROTOCOL §3.3):
+# - rootscheck: each copy equals the vote_trust_roots of the vault release
+#   it copies, and every supported release that registers vote has one
+#   (the signed manifest decides which are supported);
+# - sigstore: Sigstore's current trusted root (through TUF) still matches
+#   the pinned copies.
+# Daily, and on a pull request that changes them. A scheduled failure
+# opens an issue per failing check, or comments on the one already open.
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'internal/vaultroots/**'
+      - 'tools/rootwatch/**'
+      - '.github/workflows/vault-roots.yml'
+      - 'go.mod'
+
+permissions:
+  contents: read
+
+jobs:
+  rootscheck:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: clone vettid-vault with its release tags
+        run: git clone --quiet --filter=blob:none --no-checkout https://github.com/vettid/vettid-vault.git "$RUNNER_TEMP/vettid-vault"
+      - name: the copies match the supported releases
+        env:
+          VAULTROOTS_VAULT_REPO: ${{ runner.temp }}/vettid-vault
+        run: go test -count=1 -v -tags rootscheck -run TestCopiesMatchReleases ./internal/vaultroots/
+
+  sigstore:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    outputs:
+      # rootwatch's exit status: 1 the roots differ, 2 it could not
+      # compare (a TUF fetch failed, or sigstore-go's embedded TUF root
+      # is too old), empty if it did not run.
+      code: ${{ steps.watch.outputs.code }}
+    defaults:
+      run:
+        working-directory: tools/rootwatch
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tools/rootwatch/go.mod
+      - run: go mod verify
+      - run: go vet .
+      - run: go build -o "$RUNNER_TEMP/rootwatch" .
+      - name: Sigstore's trusted root matches the pinned copies
+        id: watch
+        run: |
+          set +e
+          "$RUNNER_TEMP/rootwatch" -roots ../../internal/vaultroots/roots
+          code=$?
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          exit "$code"
+
+  issue:
+    # One issue per failing check; while one is open, each further failed
+    # run comments on it, so a new failure is never hidden by an old one.
+    if: failure() && github.event_name == 'schedule'
+    needs: [rootscheck, sigstore]
+    runs-on: ubuntu-26.04
+    permissions:
+      issues: write
+    steps:
+      - name: open or update an issue per failing check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ROOTSCHECK: ${{ needs.rootscheck.result }}
+          SIGSTORE: ${{ needs.sigstore.result }}
+          SIGSTORE_CODE: ${{ needs.sigstore.outputs.code }}
+        run: |
+          report() {
+            title="vault-roots: $1"
+            n=$(gh issue list --state open --search "in:title \"$title\"" --json number,title --jq "map(select(.title == \"$title\")) | .[0].number // empty")
+            if [ -n "$n" ]; then
+              gh issue comment "$n" --body "Failed again: $RUN"
+            else
+              gh issue create --title "$title" --body "$2 See $RUN."
+            fi
+          }
+          if [ "$ROOTSCHECK" = failure ]; then
+            report "a pinned vault root copy is missing, differs or is left over" "A copy under internal/vaultroots/roots differs from its vault release, is missing for a supported release that registers vote, or is left over from one no longer supported (README \"proposal_bundle_unverified\")."
+          fi
+          if [ "$SIGSTORE" = failure ]; then
+            if [ "$SIGSTORE_CODE" = 1 ]; then
+              report "Sigstore's trusted root differs from the pinned vault roots" "Sigstore's trusted root no longer matches the newest root a vault release pins. Until a vault release pins the new roots, bundles under a new key are not sent (alarm proposal_bundle_unverified, README)."
+            else
+              report "the Sigstore trusted-root watch could not run" "rootwatch could not compare (exit ${SIGSTORE_CODE:-none}): a TUF fetch failed, sigstore-go's embedded TUF root is too old (bump sigstore-go in tools/rootwatch), or a step before it failed. Nothing is known about Sigstore's trusted root until it runs again."
+            fi
+          fi
