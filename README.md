@@ -52,8 +52,9 @@ fourth. Done so far:
   the service's confirmed epoch while it is not current, and at its
   `hs.fin` rule E destroys the epochs after it; a later message under a
   destroyed epoch is fork evidence and suspends the connection (reason
-  `epoch`, alarm `fork_suspected`), as does a reconnect naming an older
-  epoch after the member's key moved on (fork by `ctx`); a reconnect may
+  `epoch`, alarm `fork_suspected`), as does a rekey or reconnect naming
+  an older epoch after the member's key moved on (fork by `ctx`; a rekey
+  is judged once it passes its own checks); a reconnect may
   also name a pending epoch of the service's, or one it abandoned; a
   member's reconnect's tokens are kept with its epoch and adopted when
   the member sends under it, and no reconnect starts for want of a token

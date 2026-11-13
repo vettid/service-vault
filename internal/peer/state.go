@@ -65,6 +65,9 @@ type RelayRef struct {
 
 // HeldToken is a token a peer issued to us.
 type HeldToken struct {
+	// JTI is the token's jti, kept to refuse it if offered again after the
+	// relay revoked it (RevokedHeld); empty on older records.
+	JTI   string    `json:"jti,omitempty"`
 	Token string    `json:"token,omitempty"`
 	Exp   time.Time `json:"exp,omitzero"`
 }
@@ -144,6 +147,10 @@ type Connection struct {
 	// Chain is the member's identity.rotate links followed (§3.4), for
 	// "one successor per key"; the last MaxRotations are kept.
 	Chain []json.RawMessage `json:"chain,omitempty"`
+	// RevokedHeld are the jtis of tokens we held that the relay answered
+	// token_revoked, each kept until its exp: one offered again is refused
+	// (as vettid-vault #244).
+	RevokedHeld []RevokedJTI `json:"revoked_held,omitempty"`
 	// LegacyPrevRelayPK is read only to find a connection a
 	// relay.address.update moved before the update was refused: no honest
 	// member sent one, so such a connection is marked stale at load
@@ -341,6 +348,12 @@ const (
 	tokRequest   = "request"
 	tokOpen      = "open"
 )
+
+// RevokedJTI is a held token's jti the relay revoked, until its exp.
+type RevokedJTI struct {
+	JTI string    `json:"jti"`
+	Exp time.Time `json:"exp"`
+}
 
 // IssuedToken is a token the service issued, recorded by jti (§6.6).
 type IssuedToken struct {

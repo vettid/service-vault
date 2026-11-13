@@ -655,6 +655,25 @@ func (m *Member) startRekey(links []*handshake.Rotation) {
 	m.DepositTo(m.SvcStand, ini.Envelope())
 }
 
+// KEMPublic is the Member's static KEM public key.
+func (m *Member) KEMPublic() *suite.PublicKey { return m.kem.Public() }
+
+// SvcIK and SvcRelayPK are the service's identity and relay keys.
+func (m *Member) SvcIK() ed25519.PublicKey      { return m.svc.IK }
+func (m *Member) SvcRelayPK() ed25519.PublicKey { return m.svc.Relay.PK }
+
+// MintAt mints a deposit token for the service on the Member's mailbox
+// with the given iat and exp (an honest issuer sets exp = iat + ttl).
+func (m *Member) MintAt(iat, exp time.Time, jti string) string {
+	m.t.Helper()
+	tok, err := relayauth.MintToken(m.rk, relayauth.Claims{Iss: m.Addr.Mailbox, Sub: relayauth.EncodeKey(m.svc.Relay.PK),
+		Aud: RelayURL, Iat: iat, Exp: exp, Jti: jti})
+	if err != nil {
+		m.t.Fatal(err)
+	}
+	return tok
+}
+
 // SaveEpoch exports the Member's current epoch, keys included, as a copy
 // of the vault taken now would hold it.
 func (m *Member) SaveEpoch() handshake.EpochState { return m.KR.Current().Export() }

@@ -223,6 +223,7 @@ func (p *Peer) carriedRevoked(c *Connection, tok string, now time.Time) {
 	p.audit("carried_token_revoked", c.ID)
 	for i := range c.Carried {
 		if r := &c.Carried[i]; r.Standing.Token == tok {
+			p.recordRevokedHeld(c, r.Standing, now)
 			r.Discarded, r.Standing, r.Reconnect = true, HeldToken{}, HeldToken{}
 		}
 	}

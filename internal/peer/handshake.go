@@ -251,8 +251,8 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 		CollectSender: sender, RecordRelayKey: c.Peer.Relay.PK, KnownInitiatorIK: start,
 		ExpectedCtx: handshake.EpochCtx(eid), Features: features(), Now: now,
 	}
-	st, err1 := p.heldToken(body.Token, &c.Peer, tokStanding)
-	rt, err2 := p.heldToken(body.ReconnectToken, &c.Peer, tokReconnect)
+	st, err1 := p.heldTokenFor(c, body.Token, tokStanding)
+	rt, err2 := p.heldTokenFor(c, body.ReconnectToken, tokReconnect)
 	if err1 != nil || err2 != nil {
 		p.audit("reconnect_bad_token", c.ID)
 		pi.Discard()
