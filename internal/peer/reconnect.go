@@ -246,7 +246,8 @@ func (p *Peer) finishReconnect(c *Connection, og *outgoing, res *handshake.Resul
 	}
 	// §6.3.1 "I's rekeys end at its reconnect's hs.resp" (R29-T2): before
 	// the reconnect's epoch becomes pending, our open rekeys are
-	// abandoned (an hs.init not yet deposited is not sent).
+	// abandoned (an hs.init not yet deposited is not sent). Defensive, as
+	// in vettid-vault: startRekey starts none while a reconnect is open.
 	for id, o := range p.outgoing {
 		if o.ConnID == c.ID && o.ini != nil && o.ini.Purpose() == handshake.PurposeRekey {
 			p.audit("rekey_ended_by_reconnect", c.ID)

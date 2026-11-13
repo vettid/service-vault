@@ -129,6 +129,9 @@ func (p *Peer) confirmPending(c *Connection, now time.Time) {
 	p.activeAgain(c)
 	switch pe.Purpose {
 	case handshake.PurposeRekey:
+		// Defensive, as in vettid-vault: the service starts no reconnect
+		// while its rekey is pending (startReconnect abandons it), so none
+		// is open here.
 		for id, og := range p.outgoing {
 			if og.ConnID == c.ID && og.ini != nil && og.ini.Purpose() == handshake.PurposeReconnect && !bytes.Equal(og.Named, c.LastEpochID) {
 				p.audit("reconnect_stale_at_confirm", c.ID)
@@ -224,11 +227,16 @@ func (p *Peer) activeAgain(c *Connection) {
 	}
 }
 
-// tickPendings runs tickPending for every connection, after a batch has
-// been processed (a confirmation in it comes first) and at a tick.
+// tickPendings runs, after a batch has been processed (a confirmation or
+// a fresh token in it comes first) and at a tick: B and R29-I6
+// (tickPending), and the reconnect of a connection that has a waiting
+// entry and no valid standing token (RELEASE-29 §3 items 2 and 5).
 func (p *Peer) tickPendings(now time.Time) {
 	for _, c := range p.conns {
 		p.tickPending(c, now)
+		if c.State == StateActive && !c.Reconnecting && !c.standingValid(now) && p.standingWaiting(c) {
+			p.beginReconnect(c, now)
+		}
 	}
 }
 

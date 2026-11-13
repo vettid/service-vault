@@ -588,6 +588,7 @@ type orphan struct {
 	c      *Connection
 	id     []byte
 	issued []string
+	why    string // "ik": made under another identity key; "load": stored incompletely
 }
 
 func (p *Peer) load(ctx context.Context) error {
@@ -617,15 +618,15 @@ func (p *Peer) load(ctx context.Context) error {
 				// confirmable (R29-I7, RELEASE-29 §1).
 				p.log().Error("a stored pending epoch names another identity key than this service's: abandoned; check the service's keys and secrets",
 					"alarm", "outgoing_identity_changed", "connection_id", c.ID)
-				orphans = append(orphans, orphan{c, c.Pending.ID, c.Pending.Issued})
+				orphans = append(orphans, orphan{c, c.Pending.ID, c.Pending.Issued, "ik"})
 				c.Pending = nil
 				kr.AbandonPending(p.now())
 			} else if c.Pending != nil && kr.Pending() == nil {
-				orphans = append(orphans, orphan{c, c.Pending.ID, c.Pending.Issued})
+				orphans = append(orphans, orphan{c, c.Pending.ID, c.Pending.Issued, "load"})
 				c.Pending = nil
 			} else if c.Pending == nil && kr.Pending() != nil {
 				id := kr.Pending().ID()
-				orphans = append(orphans, orphan{c, bytes.Clone(id[:]), nil})
+				orphans = append(orphans, orphan{c, bytes.Clone(id[:]), nil, "load"})
 				kr.AbandonPending(p.now())
 			}
 			p.conns[c.ID] = c
@@ -753,8 +754,12 @@ func (p *Peer) load(ctx context.Context) error {
 			p.denyJTI(j, p.now())
 		}
 		p.markDirty(kindConn, o.c.ID)
-		p.log().Warn("a pending epoch stored incompletely was abandoned", "connection_id", o.c.ID)
+		p.audit("pending_abandoned_"+o.why, o.c.ID)
+		if o.why == "load" {
+			p.log().Warn("a pending epoch stored incompletely was abandoned", "connection_id", o.c.ID)
+		}
 	}
+
 	return nil
 }
 

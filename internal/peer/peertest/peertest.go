@@ -848,6 +848,31 @@ func (m *Member) SendAddressUpdate(w *World, seed byte, relayURL string) {
 	m.sendAddress(rk.Public().(ed25519.PublicKey), relayURL, tok)
 }
 
+// SendAddressUpdateWithReconnect is SendAddressUpdate with a reconnect
+// token for the new key too.
+func (m *Member) SendAddressUpdateWithReconnect(w *World, seed byte, relayURL string) {
+	m.t.Helper()
+	rk := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed}, 32))
+	v := w.View(rk)
+	if _, err := v.Register(context.Background()); err != nil {
+		m.t.Fatal(err)
+	}
+	mint := func(ttl time.Duration) string {
+		tok, err := v.MintToken(relayauth.EncodeKey(m.svc.Relay.PK), RelayURL, relayclient.TokenOptions{TTL: ttl})
+		if err != nil {
+			m.t.Fatal(err)
+		}
+		return tok
+	}
+	pk := rk.Public().(ed25519.PublicKey)
+	body, _ := json.Marshal(map[string]any{
+		"relay":           map[string]string{"url": relayURL, "mailbox": relayauth.MailboxID(pk), "pk": base64.StdEncoding.EncodeToString(pk)},
+		"token":           mint(peerwire.StandingMax),
+		"reconnect_token": mint(300 * 24 * time.Hour),
+	})
+	m.Send("relay.address.update", body)
+}
+
 // SendAddressUpdateTo sends relay.address.update naming a key the Member
 // does not hold (its token is not valid for it).
 func (m *Member) SendAddressUpdateTo(_ *World, pk ed25519.PublicKey, relayURL string) {

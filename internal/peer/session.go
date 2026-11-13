@@ -499,8 +499,7 @@ func (p *Peer) housekeeping(now time.Time) {
 		if reconnect && c != nil {
 			// A failed try: the next one, or stale after the last (§3.4.1
 			// "The reconnect bound").
-			p.audit("reconnect_try_expired", c.ID)
-			p.reconnectIfIdle(c, now)
+			p.audit("reconnect_try_expired", c.ID) // checkReconnect starts the next
 		}
 	}
 	for _, c := range p.conns {
@@ -515,10 +514,7 @@ func (p *Peer) housekeeping(now time.Time) {
 			continue
 		}
 		if !c.standingValid(now) && p.standingWaiting(c) {
-			// A waiting entry and no valid standing token: the service
-			// reconnects (RELEASE-29 §3 items 2 and 5).
-			p.beginReconnect(c, now)
-			continue
+			continue // tickPendings reconnects, after the batch
 		}
 		if c.kr != nil && c.kr.Current() != nil && c.kr.Current().NeedsRekey(now) {
 			p.startRekey(c, now)

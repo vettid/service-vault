@@ -400,10 +400,20 @@ func (p *Peer) relayAddressUpdate(c *Connection, sender ed25519.PublicKey, body 
 	p.log().Info("member relay address updated", "connection_id", c.ID)
 	// Tokens we issued for the old key stop at the relay's grace; issue
 	// fresh ones for the new key, which also acknowledges the update.
-	rc := p.outgoingReconnect(c)
-	p.dropConnOutgoing(c)
-	if rc {
-		p.restartReconnect(c, now) // its hs.init went to the old mailbox; not a failed try
+	if rc := p.outgoingReconnect(c); rc && rt.Token == "" {
+		// No reconnect token for the new mailbox: the try's hs.init, made
+		// for the old one, stays (the member still collects there in the
+		// relay's grace); a new one could not be deposited. Our rekeys go.
+		for id, og := range p.outgoing {
+			if og.ConnID == c.ID && og.ini != nil && og.ini.Purpose() == handshake.PurposeRekey {
+				p.dropOutgoing(id)
+			}
+		}
+	} else {
+		p.dropConnOutgoing(c)
+		if rc {
+			p.restartReconnect(c, now) // on the new mailbox and token; not a failed try
+		}
 	}
 	p.issueTo(c, tokStanding, now)
 	p.issueTo(c, tokReconnect, now)

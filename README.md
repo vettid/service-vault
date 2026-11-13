@@ -602,7 +602,8 @@ cluster and the service share the name):
 4. If the image changes too, deploy it now. Start the service:
    `aws ecs update-service --cluster T --service T --desired-count 1`.
 5. Check `/health`, the TLS pin, the `epoch confirmed` lines and a member's
-   sign-in. Then delete `T-restore`.
+   sign-in (a member whose vault has not collected yet shows only
+   `reconnected: epoch pending` until it does). Then delete `T-restore`.
 
 The operator needs: `dynamodb:CreateBackup`, `ListBackups`,
 `DescribeContinuousBackups`, `RestoreTableFromBackup` or
@@ -618,6 +619,9 @@ Rolling the image back past the reconnect after a restore (to
 `hs.fin`: an older image would install the epoch without the tokens and
 rotation links the reconnect brought. Check the logs for
 `epoch confirmed` / `epoch installed` lines settling every reconnect first.
+An image from before release 29's second change does not know a stored
+pending epoch: roll back to one only when every `reconnected: epoch
+pending` or `rekeyed: epoch pending` line has its `epoch confirmed`.
 
 The KMS key must be the one the backup was made under: the stack's key,
 which is retained and never deleted with the stack.
