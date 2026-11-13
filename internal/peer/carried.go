@@ -141,7 +141,12 @@ func (p *Peer) adoptReached(c *Connection, id []byte, now time.Time) {
 	c.Carried = keep
 	p.markDirty(kindConn, c.ID)
 	if discarded {
-		p.afterCarriedDiscard(c, now)
+		// Judged after the batch (tickPendings), not before this
+		// message's handler: a token in it may still come.
+		if p.discardCheck == nil {
+			p.discardCheck = map[string]bool{}
+		}
+		p.discardCheck[c.ID] = true
 	}
 }
 

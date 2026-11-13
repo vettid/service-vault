@@ -155,7 +155,9 @@ func (p *Peer) confirmPending(c *Connection, now time.Time) {
 	p.log().Info("epoch confirmed", "connection_id", c.ID, "purpose", string(pe.Purpose))
 }
 
-// abandonPending abandons the service's pending epoch: its receive key is
+// abandonPending abandons the service's pending epoch (why: b_passed,
+// no_token, fin_revoked, link, crossing, peer_activated, reconnect,
+// replaced, suspended, stale): its receive key is
 // kept 16 days as a previous epoch's (messages under it are processed
 // without confirming it), the tokens its hs.init carried are revoked, and
 // its hs.fin, if still in the outbox, is dropped unsent (§6.3.1, R29-T2).
@@ -240,6 +242,12 @@ func (p *Peer) activeAgain(c *Connection) {
 // (tickPending), and the reconnect of a connection that has a waiting
 // entry and no valid standing token (RELEASE-29 §3 items 2 and 5).
 func (p *Peer) tickPendings(now time.Time) {
+	for id := range p.discardCheck {
+		if c := p.conns[id]; c != nil && c.State == StateActive {
+			p.afterCarriedDiscard(c, now)
+		}
+	}
+	p.discardCheck = nil
 	for _, c := range p.conns {
 		p.tickPending(c, now)
 		if c.State == StateActive && !c.Reconnecting && !c.standingValid(now) && p.standingWaiting(c) {

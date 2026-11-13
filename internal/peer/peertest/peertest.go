@@ -655,6 +655,56 @@ func (m *Member) startRekey(links []*handshake.Rotation) {
 	m.DepositTo(m.SvcStand, ini.Envelope())
 }
 
+// SaveEpoch exports the Member's current epoch, keys included, as a copy
+// of the vault taken now would hold it.
+func (m *Member) SaveEpoch() handshake.EpochState { return m.KR.Current().Export() }
+
+// RekeyInitUnder deposits a rekey hs.init under a saved epoch, signed with
+// the Member's current keys (an old copy holding that epoch and the
+// current keys), and returns its initiator.
+func (m *Member) RekeyInitUnder(s handshake.EpochState) *handshake.Initiator {
+	m.t.Helper()
+	ep, err := handshake.ImportEpoch(s)
+	if err != nil {
+		m.t.Fatal(err)
+	}
+	ini, err := handshake.NewInitiator(handshake.InitiatorConfig{
+		Purpose: handshake.PurposeRekey, Identity: m.IK, StaticKEM: m.kem.Public(), Relay: m.Addr,
+		ResponderIK: m.svc.IK, ResponderRelayKey: m.svc.Relay.PK, Current: ep,
+		Policy: handshake.PolicyVaultToVault, Features: m.HSFeatures, Now: m.clk.Now(),
+	})
+	if err != nil {
+		m.t.Fatal(err)
+	}
+	m.DepositTo(m.SvcStand, ini.Envelope())
+	return ini
+}
+
+// FinishRekey takes the service's hs.resp to ini from the Member's mailbox
+// and deposits its hs.fin; it returns the new epoch (nil: no hs.resp).
+func (m *Member) FinishRekey(ini *handshake.Initiator) *handshake.Epoch {
+	m.t.Helper()
+	msgs, _ := m.R.Collect(context.Background(), 0, 32)
+	var ep *handshake.Epoch
+	for _, msg := range msgs {
+		env, err := envelope.Parse(msg.Payload)
+		if err == nil && ep == nil && env.Mode() == envelope.ModeSealed && env.RecipientKid().Equal(ini.EphKid()) {
+			sender, _ := relayauth.DecodeKey(msg.Sender)
+			res, err := ini.HandleResp(msg.Payload, sender, m.clk.Now())
+			if err != nil {
+				m.t.Fatalf("Member: hs.resp: %v", err)
+			}
+			m.DepositTo(m.SvcStand, res.Fin)
+			ep = res.Epoch
+			_ = m.R.Ack(context.Background(), msg.MsgID)
+			continue
+		}
+		_ = m.R.Ack(context.Background(), msg.MsgID)
+		m.R.w.Redeliver(m.R.mb, msg) // left for the Member's own handling
+	}
+	return ep
+}
+
 // answerRekey answers the service's rekey hs.init (§6.5).
 func (m *Member) answerRekey(raw []byte, in *envelope.Inner, ep *handshake.Epoch, sender ed25519.PublicKey) {
 	m.t.Helper()

@@ -189,7 +189,9 @@ func (p *Peer) noteFromMember(c *Connection, ep *handshake.Epoch, in *envelope.I
 	return false
 }
 
-// reconfirmAll queues hs.confirm for each connection the batch marked.
+// reconfirmAll queues hs.confirm for each connection the batch marked;
+// none once the current epoch's carried tokens were discarded (intended:
+// "hs.confirm again" stops for it, the per-batch one too).
 func (p *Peer) reconfirmAll(now time.Time) {
 	for id := range p.reconfirm {
 		if c := p.conns[id]; c != nil && !c.confirmStopped() {

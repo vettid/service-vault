@@ -1,6 +1,6 @@
 # Release 29 in the service vault
 
-**Status:** 0.6.0, draft (2026-11-13). Against VAULT-MESSAGING 0.90.1.
+**Status:** 0.6.1, draft (2026-11-13). Against VAULT-MESSAGING 0.90.2.
 
 VAULT-MESSAGING §6.3.1 ("Lifetimes and activation on confirmation",
 release 29) asks a service vault to follow its rules "on either side as
@@ -426,9 +426,13 @@ separately. The README's release-29 status paragraph shrinks with each.
    tokens (section 3, items 3 and 7, and the exceptions in items 2, 4
    and 5); a stale reconnect answer ending at a later message. Also: a
    connection a `relay.address.update` moved before it was refused is
-   suspended at load, with an alarm (no honest member sent one), and
-   a reconnect token issued to the service is adopted only if valid and
-   later than the held one.
+   suspended at load, with an alarm (no honest member sent one); a move
+   whose previous-key grace had already ended left no trace in the record
+   and is not caught (a residual: release 29 starts clean on staging, and
+   the old handler's log line, `member relay address updated`, shows any).
+   A token the service holds is refused when over §7.1's lifetime for its
+   kind or dated ahead, and a reconnect token issued to it is adopted only
+   if valid and later than the held one (as vettid-vault #244).
 4. **`ik` links and the marker.** The `rotations` of `identity.rotate`;
    demotion by position and the held outbox; strict F1 and the
    reconnects of section 3 item 9; seen links; epochs abandoned while
@@ -458,6 +462,9 @@ separately. The README's release-29 status paragraph shrinks with each.
 
 ## Changes
 
+- **0.6.1 (2026-11-13):** pinned to VAULT-MESSAGING 0.90.2; §14 item 3,
+  held-token bounds (as vettid-vault #244) and the legacy relay-move
+  residual.
 - **0.6.0 (2026-11-13):** the third change is built: §12 describes it
   as done; §14 item 3 adds, from the lead's review of #152, that a
   connection a `relay.address.update` moved before it was refused is

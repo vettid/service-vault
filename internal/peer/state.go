@@ -611,7 +611,7 @@ func (p *Peer) flush(ctx context.Context) error {
 }
 
 // load reads every record into memory at start.
-// legacyRelayMove ends a connection that a relay.address.update moved
+// legacyRelayMove suspends a connection that a relay.address.update moved
 // before the update was refused (#152). No honest member ever sent one,
 // so the move came from whoever held the session's keys: the stored
 // relay address may be that copy's. It is not honored: the connection is

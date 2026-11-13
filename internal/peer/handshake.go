@@ -160,7 +160,7 @@ func (p *Peer) respondFirst(pi *handshake.PendingInit, inv *InviteRecord, sender
 	np := infoFromPrincipal(body.From)
 	np.FirstName, np.LastName = profileNames(body.Profile)
 	id := p.newID(now)
-	held, err := p.heldToken(body.Token, np)
+	held, err := p.heldToken(body.Token, np, tokStanding)
 	if err != nil {
 		p.audit("hs_init_bad_token", "")
 		pi.Discard()
@@ -251,8 +251,8 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 		CollectSender: sender, RecordRelayKey: c.Peer.Relay.PK, KnownInitiatorIK: start,
 		ExpectedCtx: handshake.EpochCtx(eid), Features: features(), Now: now,
 	}
-	st, err1 := p.heldToken(body.Token, &c.Peer)
-	rt, err2 := p.heldToken(body.ReconnectToken, &c.Peer)
+	st, err1 := p.heldToken(body.Token, &c.Peer, tokStanding)
+	rt, err2 := p.heldToken(body.ReconnectToken, &c.Peer, tokReconnect)
 	if err1 != nil || err2 != nil {
 		p.audit("reconnect_bad_token", c.ID)
 		pi.Discard()
@@ -394,11 +394,10 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 			// A rekey under an older epoch may be fork evidence (§3.4.1
 			// "Fork by ctx", as vettid-vault's rekeyOtherEpoch): the links
 			// it carries are judged with those followed.
-			var fresh []*handshake.Rotation
-			if b, err := handshake.ParseInit(in.Body); err == nil {
-				fresh = b.Rotations[handshake.KnownPrefix(chainOf(c), b.Rotations):]
-			}
-			if p.forkEpoch(c, eid[:], fresh) {
+			// It is judged only once it passes the rekey's own checks
+			// (rekeyPrecheck): a replayed or pre-rotation hs.init is
+			// refused, not taken as evidence.
+			if fresh, err := p.rekeyPrecheck(c, in, ep, sender, now); err == nil && p.forkEpoch(c, eid[:], fresh) {
 				p.suspendFor(c, SuspendEpoch, now)
 				return ackAfterFlush
 			}

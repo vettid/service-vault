@@ -85,6 +85,9 @@ type Peer struct {
 	// msgJTI is the collect jti of the message being handled ("" when
 	// none): the token it was deposited under.
 	msgJTI string
+	// discardCheck marks the connections whose carried tokens a batch
+	// discarded at adoption: judged after the batch (tickPendings).
+	discardCheck map[string]bool
 	// drained is the start latch for B (RELEASE-29 §2): clear at every
 	// start and at a failed collect, set once a collect with fewer than
 	// MaxBatch messages has been processed and written.

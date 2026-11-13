@@ -219,6 +219,10 @@ func (p *Peer) deposit(ctx context.Context, e *outboxEntry, now time.Time) (fini
 		// once; quota_exceeded; a token or mailbox the relay no longer
 		// knows): no try can be deposited on that token, so the reconnect
 		// ends, the connection stale (§3.4.1 "The reconnect bound").
+		if relayclient.IsCode(err, codeTokenRevoked) || relayclient.IsCode(err, "token_invalid") {
+			c.Reconnect = HeldToken{} // never offered again: a bad token cannot pin
+			p.markDirty(kindConn, c.ID)
+		}
 		p.dropConnOutgoing(c)
 		p.reconnectFailed(c)
 	}

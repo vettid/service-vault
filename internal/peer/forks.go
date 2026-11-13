@@ -64,8 +64,9 @@ func (p *Peer) classifyCtx(c *Connection, ctx string, fresh []*handshake.Rotatio
 // forkEpoch is §3.4.1 "Fork by ctx": a handshake naming epoch id, older
 // than the confirmed one, after which an epoch up to the confirmed one was
 // signed by an ancestor of the ik the handshake reaches (the chain
-// followed, with its links not yet followed, fresh). Destroyed epochs, and
-// records without a signer, are no evidence.
+// followed, with its links not yet followed, fresh). A named epoch that
+// was destroyed is no evidence (rule E judges messages under it); a later
+// epoch's record without a signer is none either.
 func (p *Peer) forkEpoch(c *Connection, id []byte, fresh []*handshake.Rotation) bool {
 	ic, ci := c.epochIndex(id), c.epochIndex(c.Confirmed)
 	if ic < 0 || ci <= ic || c.Epochs[ic].Destroyed {
@@ -80,6 +81,39 @@ func (p *Peer) forkEpoch(c *Connection, id []byte, fresh []*handshake.Rotation) 
 		}
 	}
 	return false
+}
+
+// rekeyPrecheck is a rekey hs.init's own checks, before a judgment that
+// does not answer it (vettid-vault rekeyPrecheck): its body, purpose rekey
+// and ctx naming the epoch it opened under, the ts window, the sender
+// being the member's relay key and from.relay.pk, and from.ik the stored
+// key or reached from it through the hs.init's links. It returns those
+// links not yet followed.
+func (p *Peer) rekeyPrecheck(c *Connection, in *envelope.Inner, ep *handshake.Epoch, sender ed25519.PublicKey, now time.Time) ([]*handshake.Rotation, error) {
+	body, err := handshake.ParseInit(in.Body)
+	if err != nil {
+		return nil, err
+	}
+	if body.Purpose != handshake.PurposeRekey || body.Ctx != handshake.EpochCtx(ep.ID()) {
+		return nil, handshake.ErrCtx
+	}
+	if err := in.CheckTime(now, true); err != nil {
+		return nil, err
+	}
+	if !suite.EqualPublic(sender, c.Peer.Relay.PK) || !suite.EqualPublic(sender, body.From.Relay.PK) {
+		return nil, handshake.ErrSender
+	}
+	if len(body.Rotations) == 0 {
+		if !suite.EqualPublic(body.From.IK, c.Peer.IK) {
+			return nil, handshake.ErrIdentity
+		}
+		return nil, nil
+	}
+	final, _, n, err := handshake.ResolveChainKnown(c.Peer.IK, chainOf(c), body.Rotations)
+	if err != nil || !suite.EqualPublic(final, body.From.IK) {
+		return nil, handshake.ErrIdentity
+	}
+	return body.Rotations[n:], nil
 }
 
 // ancestors are the member's identity keys the chain followed, with the
@@ -102,9 +136,10 @@ func ancestors(c *Connection, fresh []*handshake.Rotation) []ed25519.PublicKey {
 // was not current: every epoch later than the confirmed one is destroyed,
 // recorded with the accepted hs.init's inner ts. Their send keys and rk
 // go; their receive keys are kept 16 days, only to judge a later message
-// under one. An hs.fin of ours for one, not yet sent, is dropped. An epoch
-// the service began and abandoned while pending is not among them (it is
-// not in the list).
+// under one. An epoch the service began and abandoned while pending is not
+// among them (it is not in the list); its own epochs in the list became
+// current at their confirmation, so no hs.fin of ours for one is still
+// waiting.
 func (p *Peer) ruleE(c *Connection, initTS, now time.Time) {
 	ci := c.epochIndex(c.Confirmed)
 	if ci < 0 {
@@ -124,8 +159,6 @@ func (p *Peer) ruleE(c *Connection, initTS, now time.Time) {
 			copy(eid[:], e.ID)
 			c.kr.Release(eid, now.Add(handshake.ReceiveKeyRetention))
 		}
-		id := e.ID
-		p.dropOutbox(func(o *outboxEntry) bool { return o.ConnID == c.ID && bytes.Equal(o.FinEpoch, id) })
 		p.audit("epoch_destroyed", c.ID)
 	}
 	p.markDirty(kindConn, c.ID)

@@ -101,13 +101,34 @@ func (p *Peer) mintReconnectJTI(connID string, np *peerInfo, now time.Time) (str
 
 // heldToken checks a token a member's vault issued to the service
 // (peerwire.VerifyHeldToken).
-func (p *Peer) heldToken(tok string, np *peerInfo) (HeldToken, error) {
+// A token no honest issuer mints is refused (as vettid-vault #244): one
+// whose lifetime exp - iat is over §7.1's bound for its kind (a reconnect
+// token 365 days, any other 30 days), or whose iat is more than the inner
+// ts skew ahead. With "a later exp wins", a far-future token would
+// otherwise pin the held one.
+func (p *Peer) heldToken(tok string, np *peerInfo, kind string) (HeldToken, error) {
 	c, err := peerwire.VerifyHeldToken(tok, np.Relay.PK, np.Relay.Mailbox, np.Relay.URL, p.cfg.Keys.RelayPublic())
 	if err != nil {
 		return HeldToken{}, err
 	}
+	max := peerwire.StandingMax
+	if kind == tokReconnect {
+		max = maxReconnectLife
+	}
+	if c.Exp.Sub(c.Iat) > max || c.Iat.After(p.now().Add(heldIatSkew)) {
+		return HeldToken{}, errTokenBound
+	}
 	return HeldToken{Token: tok, Exp: c.Exp}, nil
 }
+
+// maxReconnectLife is §7.1's bound for a reconnect token; heldIatSkew how
+// far ahead a held token's iat may be (the inner ts skew, §8.4).
+const (
+	maxReconnectLife = 365 * 24 * time.Hour
+	heldIatSkew      = 5 * time.Minute
+)
+
+var errTokenBound = errors.New("peer: token over its lifetime bound")
 
 // denyJTI revokes one token (§7.4: invitations).
 func (p *Peer) denyJTI(jti string, now time.Time) {
@@ -228,18 +249,20 @@ func (p *Peer) storeIssuedTo(c *Connection, body json.RawMessage) {
 		p.audit("bad_issued_token", c.ID)
 		return
 	}
-	ht, err := p.heldToken(tok, &c.Peer)
-	if err != nil {
+	if kind != tokReconnect {
+		kind = tokStanding
+	}
+	ht, err := p.heldToken(tok, &c.Peer, kind)
+	if err != nil || !p.now().Before(ht.Exp) {
 		p.audit("bad_issued_token", c.ID)
 		return
 	}
 	if kind == tokReconnect {
-		// Only one that is valid and lasts at least as long as the held one
-		// (exps are whole seconds), as
-		// for a handshake's carried token (§6.3.1): a copy holding the
-		// session's keys cannot swap in a shorter-lived one.
-		if !p.now().Before(ht.Exp) || ht.Exp.Before(c.Reconnect.Exp) {
-			p.audit("issued_token_not_later", c.ID)
+		// Only one with a later exp, as for a handshake's carried token
+		// (§6.3.1, as vettid-vault #244): a copy holding the session's
+		// keys cannot swap in a shorter-lived one.
+		if !ht.Exp.After(c.Reconnect.Exp) {
+			p.audit("issued_token_not_newer", c.ID)
 			return
 		}
 		c.Reconnect = ht
@@ -291,16 +314,12 @@ func (p *Peer) answerTokenRefresh(c *Connection, now time.Time) (json.RawMessage
 }
 
 // revokeAtRefresh revokes, at a refresh after quota_exceeded, the standing
-// tokens issued to c that §6.3.1 "Revocation by the issuer" lets it
-// (RELEASE-29 §12): never one a still-open handshake carried, the newest
-// one a reconnect carried, the newest one re-minted at a confirmation, nor
-// one newer than the token the refresh was deposited under. When that
-// token is unknown (no collect jti), none is revoked.
+// tokens issued to c that §6.3.1 "Revocation by the issuer" and §7.2 let
+// it (RELEASE-29 §12): the one the refresh was deposited under always;
+// never one a still-open handshake carried, the newest one a reconnect
+// carried, the newest one re-minted at a confirmation, nor one newer than
+// the one it came under; the others too.
 func (p *Peer) revokeAtRefresh(c *Connection, now time.Time) {
-	under := p.issued[p.msgJTI]
-	if under == nil || under.ConnID != c.ID {
-		return
-	}
 	keep := map[string]bool{}
 	for _, aw := range p.awaiting {
 		if aw.ConnID == c.ID && aw.Reconnect != nil {
@@ -321,9 +340,17 @@ func (p *Peer) revokeAtRefresh(c *Connection, now time.Time) {
 			keep[j] = true
 		}
 	}
-	// Newer: a later exp, then a later mint (Seq; 0 on older records).
+	// Newer: a later exp; at an equal exp a handshake's token (carried or
+	// re-minted at a confirmation) counts as newer; then the later mint.
+	hs := func(t *IssuedToken) bool { return t.Carried || t.Prompt }
 	newer := func(a, b *IssuedToken) bool {
-		return a.Exp.After(b.Exp) || a.Exp.Equal(b.Exp) && a.Seq > b.Seq
+		switch {
+		case !a.Exp.Equal(b.Exp):
+			return a.Exp.After(b.Exp)
+		case hs(a) != hs(b):
+			return hs(a)
+		}
+		return a.Seq > b.Seq
 	}
 	var carried, prompt *IssuedToken
 	for _, t := range p.issued {
@@ -342,10 +369,21 @@ func (p *Peer) revokeAtRefresh(c *Connection, now time.Time) {
 			keep[t.JTI] = true
 		}
 	}
+	// The token the refresh came under; unknown (no collect jti, or not a
+	// standing token issued to this connection): every other is judged as
+	// before, all but the spared ones revoked.
+	under := p.issued[p.msgJTI]
+	if under != nil && (under.ConnID != c.ID || under.Kind != tokStanding) {
+		under = nil
+	}
 	for _, t := range p.issued {
-		if t.ConnID != c.ID || t.Kind != tokStanding || t.Denied || keep[t.JTI] || newer(t, under) {
+		if t.ConnID != c.ID || t.Kind != tokStanding || t.Denied {
 			continue
 		}
+		if t != under && (keep[t.JTI] || under != nil && newer(t, under)) {
+			continue
+		}
+		// The one it came under is always revoked, a handshake's too.
 		t.Denied = true
 		p.markDirty(kindToken, t.JTI)
 		p.queueRevoke(t.JTI, now)
