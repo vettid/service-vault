@@ -81,6 +81,10 @@ type ConnectionDeclined struct {
 type ConnectionExpired struct {
 	Header
 	InviteID string `json:"invite_id"`
+	// Reason is RemovedPre29 or RemovedEndAll for a claim the service ended
+	// at a start (service-vault docs/RELEASE-29.md section 11); empty for an
+	// ordinary expiry.
+	Reason string `json:"reason,omitempty"`
 }
 
 // Removal directions (ConnectionRemoved.Direction).

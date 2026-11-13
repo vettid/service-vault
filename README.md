@@ -179,7 +179,12 @@ destination.
   ended, as docs/RELEASE-29.md section 11 says (with claims not yet
   activated whose records lack it): each member is sent
   `connection.removed`, the application gets `connection.removed` with
-  `reason: pre29`, and the member connects again from a new invitation.
+  `reason: pre29` (`connection.expired` for a claim), and the member
+  connects again from a new invitation. A claim's member is sent nothing, as at an ordinary expiry, and a
+  first contact still awaiting its `hs.fin` raises no application
+  event; a member whose approval was in flight may briefly see the
+  connection as active until its own checks fail (its tokens are
+  revoked, so nothing goes through).
   Expected once, at the first start of the release-29 version (on
   staging: re-invite the test members; an empty admin set is recovered
   as "Recovering an empty set" says). Again later only after a
@@ -695,13 +700,19 @@ connection when deploying forward again:
    (or `connection.expired` for a claim) with `reason: ended_all`, and
    alarm `connections_ended` gives the count. The run is recorded once
    all are ended, so a restart with the same date ends nothing more.
+   A claim's member is sent nothing, as at an ordinary expiry, and a
+   first contact still awaiting its `hs.fin` raises no application
+   event; a member whose approval was in flight may briefly see the
+   connection as active until its own checks fail (its tokens are
+   revoked, so nothing goes through).
 2. Check that the run completed: the `connections_ended` alarm for the
    date, and no ERROR at that start. A start that fails partway ends the
    rest at the next start, whose alarm counts only those; the counts of
    both add up. If such a failed start is itself rolled back by the
-   circuit breaker, the older image runs with connections whose tokens
-   are all revoked (none can be used): deploy forward with the same date
-   again, which ends what is left.
+   circuit breaker, only the connections ended before the failure have
+   their tokens revoked; the rest stay usable under the older image,
+   whose housekeeping may mint new tokens for them. Deploy forward with
+   the same date again, which ends what is left.
 3. Deploy again without `endAllConnections` (context is not
    remembered, so a plain deploy unsets it).
 4. Invite the members again. The admin connections are ended too, so
@@ -789,8 +800,8 @@ billed.
 
 **Webhooks** (signed as `sdk/go/webhook` verifies): `connection.pending`
 `{invite_id, sas, name}`, `connection.added` `{invite_id, name, email_bound}`,
-`connection.declined` `{invite_id}`, `connection.expired` `{invite_id, reason?: pre29 | ended_all}`,
-`connection.removed` `{direction: in|out, reason?: pre29 | ended_all}` (one ended at a start may come twice, if the service stopped between its two writes: treat a repeat as one), `connection.suspended`
+`connection.declined` `{invite_id}`, `connection.expired` `{invite_id, reason?: pre29 | ended_all}` (a `connection.removed` or `connection.expired` for a record ended at a start may come twice, if the service stopped between its two writes: treat a repeat as one),
+`connection.removed` `{direction: in|out, reason?: pre29 | ended_all}`, `connection.suspended`
 `{reason: rotation_conflict | epoch | relay_moved_unlinked}`, `signin.approved`
 `{signin_id, key_changed}`, `signin.denied` `{signin_id, reason}`,
 `signin.expired` `{signin_id}`, each with its `connection_id`. `name` is

@@ -186,3 +186,33 @@ func TestEndAllReusedDateAlarm(t *testing.T) {
 		t.Fatal("a reused date ended a connection, or raised no alarm")
 	}
 }
+
+// Only a first contact's awaiting is a claim: a member's rekey answered for
+// a marked connection, its record written without the marker (as an older
+// image would), stays through the sweep.
+func TestPre29KeepsRekeyAwaiting(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	m.StartRekey()
+	if _, err := f.p.Step(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	var awID string
+	for id, aw := range f.p.awaiting {
+		if aw.ConnID == cid && aw.New == nil {
+			awID = id
+		}
+	}
+	if awID == "" {
+		t.Fatal("setup: no rekey answer")
+	}
+	f.storedField(kindAwait, awID, "messaging_release", nil)
+	f.start()
+	if _, ok := f.p.awaiting[awID]; !ok {
+		t.Fatal("a rekey answer of a marked connection was ended")
+	}
+	if _, ok := f.p.conns[cid]; !ok {
+		t.Fatal("the connection was ended")
+	}
+}

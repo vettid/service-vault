@@ -39,7 +39,7 @@ func (s *failNth) Apply(ctx context.Context, ch []Change) error {
 // connections is denied.
 func TestPre29EndSurvivesAFailedWrite(t *testing.T) {
 	for _, endAll := range []bool{false, true} {
-		for at := 1; at <= 12; at++ {
+		for at := 1; at <= 24; at++ {
 			testEndSurvives(t, endAll, at)
 		}
 	}
@@ -52,6 +52,16 @@ func testEndSurvives(t *testing.T, endAll bool, at int) {
 		f := newFixture(t)
 		a := f.connect(f.member(10), "")
 		b := f.connect(f.member(20), "")
+		var claim string // a claim not yet activated: ended by end-all
+		if endAll {
+			mc := f.member(30)
+			inv := f.invite("")
+			mc.Accept(inv.Link, "")
+			f.pump()
+			for id := range f.p.requests {
+				claim = id
+			}
+		}
 		date := ""
 		if endAll {
 			date = "2026-11-13"
@@ -91,8 +101,13 @@ func testEndSurvives(t *testing.T, endAll bool, at int) {
 				t.Fatalf("at %d: connection %s not ended", at, id)
 			}
 		}
+		if claim != "" {
+			if _, ok := f.p.requests[claim]; ok {
+				t.Fatalf("at %d: the claim was not ended", at)
+			}
+		}
 		for _, tok := range f.p.issued {
-			if (tok.ConnID == a || tok.ConnID == b) && tok.Kind != tokOpen && !tok.Denied {
+			if (tok.ConnID == a || tok.ConnID == b || claim != "" && tok.ConnID == claim) && tok.Kind != tokOpen && !tok.Denied {
 				t.Fatalf("at %d: token %s of an ended connection not denied", at, tok.JTI)
 			}
 		}

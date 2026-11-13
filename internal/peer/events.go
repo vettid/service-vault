@@ -46,7 +46,7 @@ type Event struct {
 	SAS          string `json:"sas,omitempty"`        // connection.pending only
 	Name         string `json:"name,omitempty"`       // the member's account name (self-asserted, §6.4)
 	Tag          string `json:"tag,omitempty"`
-	Reason       string `json:"reason,omitempty"`      // signin.denied: denied | bad_signature; connection.suspended: rotation_conflict | epoch | relay_moved_unlinked; connection.removed: pre29 | ended_all
+	Reason       string `json:"reason,omitempty"`      // signin.denied: denied | bad_signature; connection.suspended: rotation_conflict | epoch | relay_moved_unlinked; connection.removed, connection.expired: pre29 | ended_all
 	KeyChanged   bool   `json:"key_changed,omitempty"` // signin.approved: the pinned key changed (§10.4)
 	// GovKeyChanged: the key is not the governance key (Connection.GovKey),
 	// nor reached from it by a rotation chain, or none is pinned.
