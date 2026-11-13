@@ -430,7 +430,11 @@ func (s *Service) Deliver(ctx context.Context, e *peer.Event) error {
 	case peer.EventConnectionDeclined, peer.EventConnectionExpired:
 		data = map[string]string{"invite_id": e.InviteID}
 	case peer.EventConnectionRemoved:
-		data = map[string]string{"direction": e.Direction}
+		m := map[string]string{"direction": e.Direction}
+		if e.Reason != "" {
+			m["reason"] = e.Reason // pre29 (RELEASE-29 §11)
+		}
+		data = m
 	case peer.EventConnectionSuspended:
 		data = map[string]string{"reason": e.Reason}
 	}

@@ -93,7 +93,15 @@ const (
 type ConnectionRemoved struct {
 	Header
 	Direction string `json:"direction"`
+	// Reason is RemovedPre29 for a connection the service ended at a start
+	// because it came from before release 29 (invite the member again);
+	// empty otherwise.
+	Reason string `json:"reason,omitempty"`
 }
+
+// RemovedPre29: the service ended the connection at a start because it was
+// made before release 29 (service-vault docs/RELEASE-29.md section 11).
+const RemovedPre29 = "pre29"
 
 // ConnectionSuspended: the connection stopped. It can't sign in, answer
 // approvals or carry messages until the member connects again from a new

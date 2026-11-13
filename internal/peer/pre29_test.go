@@ -1,0 +1,113 @@
+package peer
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+	"testing"
+)
+
+// storedRelease rewrites the stored connection record's marker (0: none),
+// as a record written before change 4c, or by an older image after a
+// rollback, has it.
+func (f *fixture) storedRelease(cid string, release int) {
+	f.t.Helper()
+	ctx := context.Background()
+	b, ok, err := f.store.Get(ctx, kindConn, cid)
+	if err != nil || !ok {
+		f.t.Fatalf("no record: %v", err)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(b, &m); err != nil {
+		f.t.Fatal(err)
+	}
+	if string(m["messaging_release"]) != "29" {
+		f.t.Fatalf("the record was written without the marker: %s", m["messaging_release"])
+	}
+	if release == 0 {
+		delete(m, "messaging_release")
+	} else {
+		m["messaging_release"], _ = json.Marshal(release)
+	}
+	b, _ = json.Marshal(m)
+	if err := f.store.Apply(ctx, []Change{{Kind: kindConn, ID: cid, Data: b}}); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// RELEASE-29 §11 (U1): every connection record is written with the
+// marker; at a start, one without it (or below 29) is ended before
+// anything else: the member is sent connection.removed, the tokens issued
+// for it are revoked, its waiting messages end audited, and the
+// application gets connection.removed with the reason pre29. A connection
+// with the marker, and an open invitation, stay.
+func TestPre29EndedAtStart(t *testing.T) {
+	for _, release := range []int{0, 28} {
+		f := newFixture(t)
+		m := f.member(10)
+		old := f.connect(m, "")
+		m2 := f.member(20)
+		keep := f.connect(m2, "")
+		inv := f.invite("later")
+		f.p.sendTo(f.p.conns[old], "test.note", []byte(`{}`), f.clk.Now()) // waits: the member is not collected
+		f.p.retryConn(old)
+		f.failDeposit = func(string, string) error { return errUnavailable }
+		f.p.drainOutbox(context.Background())
+		if err := f.p.flush(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		f.failDeposit = nil
+		f.storedRelease(old, release)
+		revoked := len(f.revokes)
+		f.start()
+		if _, ok := f.p.conns[old]; ok {
+			t.Fatalf("release %d: the old record was not ended", release)
+		}
+		if _, ok := f.p.conns[keep]; !ok {
+			t.Fatal("a record with the marker was ended")
+		}
+		if _, ok := f.p.invites[inv.ID]; !ok {
+			t.Fatal("an invitation was ended")
+		}
+		f.p.DeliverEvents(context.Background())
+		var got *Event
+		for _, e := range f.ev.of(EventConnectionRemoved) {
+			if e.ConnectionID == old {
+				got = e
+			}
+		}
+		if got == nil || got.Reason != RemovedPre29 || got.Direction != "out" {
+			t.Fatalf("connection.removed: %+v", got)
+		}
+		logs := f.logs.String()
+		for _, want := range []string{"reason=connection_pre29_ended", "alarm=pre29_ended", "reason=undelivered_removed"} {
+			if !strings.Contains(logs, want) {
+				t.Fatalf("release %d: no %s", release, want)
+			}
+		}
+		if len(f.revokes) <= revoked {
+			t.Fatal("no token was revoked")
+		}
+		f.pump()
+		if len(m.Received("connection.removed")) == 0 {
+			t.Fatal("the member was not sent connection.removed")
+		}
+		if !f.signIn(m2, keep) {
+			t.Fatal("the connection with the marker no longer works")
+		}
+	}
+}
+
+// A connection made under this version is written with the marker and
+// survives a restart.
+func TestMarkerWrittenAndKept(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	f.storedRelease(cid, 29) // checks the marker is there
+	f.start()
+	if _, ok := f.p.conns[cid]; !ok || f.audited("connection_pre29_ended") {
+		t.Fatal("a record with the marker was ended")
+	}
+
+}

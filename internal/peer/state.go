@@ -146,7 +146,11 @@ type Connection struct {
 	// when the last hs.confirm was queued (§6.3.1 Responder; confirm.go).
 	Epochs    []EpochMeta `json:"epochs,omitempty"`
 	Confirmed []byte      `json:"confirmed,omitempty"`
-	ConfirmAt time.Time   `json:"confirm_at,omitzero"`
+	// MessagingRelease is the marker every connection record is written
+	// with (RELEASE-29 §11): a record without it, or with a value below
+	// MessagingRelease, is ended at the next start (endPre29).
+	MessagingRelease int       `json:"messaging_release,omitempty"`
+	ConfirmAt        time.Time `json:"confirm_at,omitzero"`
 
 	Created   time.Time `json:"created"`
 	Activated time.Time `json:"activated"`
@@ -513,6 +517,7 @@ func (p *Peer) recordData(k key) ([]byte, time.Time, error) {
 		if c.kr != nil {
 			c.Keyring = c.kr.Export()
 		}
+		c.MessagingRelease = MessagingRelease // on every connection record written (RELEASE-29 §11)
 		v = c
 	case kindInvite:
 		inv := p.invites[k.id]
@@ -830,10 +835,19 @@ func (p *Peer) load(ctx context.Context) error {
 		p.seq = max(p.seq, t.Seq)
 	}
 	p.dropStale(stale)
+	// RELEASE-29 §11, before anything else uses the connections: records
+	// from before release 29's rules were complete are ended.
+	p.endPre29(p.now())
 	for _, c := range moved {
+		if p.conns[c.ID] != c {
+			continue // ended above
+		}
 		p.legacyRelayMove(c)
 	}
 	for _, o := range orphans {
+		if p.conns[o.c.ID] != o.c {
+			continue // ended above
+		}
 		p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == o.c.ID && bytes.Equal(e.FinEpoch, o.id) })
 		for _, j := range o.issued {
 			p.denyJTI(j, p.now())

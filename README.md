@@ -734,8 +734,8 @@ billed.
 **Webhooks** (signed as `sdk/go/webhook` verifies): `connection.pending`
 `{invite_id, sas, name}`, `connection.added` `{invite_id, name, email_bound}`,
 `connection.declined` / `connection.expired` `{invite_id}`,
-`connection.removed` `{direction: in|out}`, `connection.suspended`
-`{reason: rotation_conflict}`, `signin.approved`
+`connection.removed` `{direction: in|out, reason?: pre29}`, `connection.suspended`
+`{reason: rotation_conflict | epoch | relay_moved_unlinked}`, `signin.approved`
 `{signin_id, key_changed}`, `signin.denied` `{signin_id, reason}`,
 `signin.expired` `{signin_id}`, each with its `connection_id`. `name` is
 the member's account name as their vault presents it. Admin approvals add
