@@ -236,13 +236,13 @@ func (c *Connection) newestUsable() []byte {
 // strict F1 chose, else while the current epoch is demoted the newest
 // usable one, else the current one.
 func (c *Connection) reconnectTarget() []byte {
+	if !c.currentDemoted() {
+		return c.LastEpochID // a strict F1 choice ended with the demotion
+	}
 	if len(c.ReconnectNamed) > 0 {
 		return c.ReconnectNamed
 	}
-	if c.currentDemoted() {
-		return c.newestUsable()
-	}
-	return c.LastEpochID
+	return c.newestUsable()
 }
 
 // restartAfterDemotion starts "the reconnect after a demotion" (K5): it
@@ -254,12 +254,12 @@ func (p *Peer) restartAfterDemotion(c *Connection, now time.Time) {
 	if c.State != StateActive && c.State != StateStale {
 		return
 	}
+	if c.Pending != nil || p.reconnectOpen(c) {
+		return // one at a time: judged again once it is confirmed or abandoned
+	}
 	if len(c.reconnectTarget()) == 0 {
 		c.Reconnecting = true // so that reconnectFailed ends it
 		p.reconnectFailed(c)
-		return
-	}
-	if c.Pending != nil || p.reconnectOpen(c) {
 		return
 	}
 	if c.Reconnecting {
@@ -326,14 +326,23 @@ func (p *Peer) abandonedMessage(c *Connection, a *AbandonedEpoch, now time.Time)
 // (audited fork_suspected): a later message under one is fork evidence,
 // and a reconnect naming one is refused.
 func (p *Peer) k9(c *Connection, links []*handshake.Rotation, msgEpoch []byte, now time.Time) {
-	e := c.epochMeta(msgEpoch)
-	if e == nil || c.State == StateSuspended {
+	if c.State == StateSuspended {
+		return
+	}
+	var eAt time.Time
+	var eMsg string
+	if e := c.epochMeta(msgEpoch); e != nil {
+		eAt, eMsg = e.EstAt, e.EstMsg
+	} else if a := c.abandonedMeta(msgEpoch); a != nil {
+		eAt, eMsg = a.EstAt, a.EstMsg
+	} else {
 		return
 	}
 	var judged []*AbandonedEpoch
 	for i := range c.AbandonedMeta {
 		a := &c.AbandonedMeta[i]
-		if a.Ended || a.EstAt.IsZero() || !e.EstAt.IsZero() && !posAfter(a.EstAt, a.EstMsg, e.EstAt, e.EstMsg) {
+		if a.Ended || bytes.Equal(a.ID, msgEpoch) || a.EstAt.IsZero() ||
+			!eAt.IsZero() && !posAfter(a.EstAt, a.EstMsg, eAt, eMsg) {
 			continue
 		}
 		if signedByLinks(c, a.Signer, links) {

@@ -82,17 +82,23 @@ type EpochMeta struct {
 }
 
 // posAfter reports whether position (at, id) is after (at2, id2): a later
-// deposited_at, or the same with a later msg_id (§3.4.1 "Cut-off"; the
-// service has one mailbox, so msg_id order is the relay's order). A
-// shorter msg_id sorts first.
+// msg_id (§3.4.1 "Cut-off"; the service has one mailbox, so msg_id order
+// is the relay's order; a shorter one sorts first), or with either id
+// missing, a later deposited_at. (vettid-vault compares deposited_at
+// first; the spec orders by msg_id.)
 func posAfter(at time.Time, id string, at2 time.Time, id2 string) bool {
-	if !at.Equal(at2) {
-		return at.After(at2)
+	if id != "" && id2 != "" {
+		// One mailbox: the relay's msg_id order is its order (a ULID it
+		// keeps increasing). deposited_at has one-second precision and is
+		// the writing relay instance's clock.
+		if len(id) != len(id2) {
+			return len(id) > len(id2)
+		}
+		if id != id2 {
+			return id > id2
+		}
 	}
-	if len(id) != len(id2) {
-		return len(id) > len(id2)
-	}
-	return id > id2
+	return at.After(at2)
 }
 
 // epochPos is where an epoch was established: the relay position, and
@@ -159,6 +165,7 @@ func (p *Peer) recordActivated(c *Connection, id []byte, mine bool, pos epochPos
 	if c.Confirmed == nil {
 		c.Confirmed = bytes.Clone(id)
 	}
+	c.ReconnectNamed = nil // a new current epoch: a demotion's reconnect target is over
 	p.pruneEpochs(c, now)
 }
 
