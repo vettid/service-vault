@@ -15,11 +15,12 @@ import (
 
 // A member's vault rotates its keys at a transfer to a new phone, a
 // recovery and a credential.rotate (VAULT-MESSAGING §3.4, 0.68.0): its
-// relay key (relay.address.update), its identity and KEM keys
-// (identity.rotate, then a rekey), and its credential key
-// (connection.authenticate.rotated, connauth.go). The service follows
-// each, as the member vault follows a peer's, so that a connection
-// survives the member moving phones.
+// identity and KEM keys (identity.rotate, then a rekey) and its credential
+// key (connection.authenticate.rotated, connauth.go), which the service
+// follows, as the member vault follows a peer's. Its relay key
+// (relay.address.update) is not followed: the update is refused
+// (session.go) until §3.4.2's rules are built; release 29 rotates no relay
+// key.
 
 // Message types of §3.4 (VAULT-MESSAGING §10, "Sessions").
 const (
@@ -38,11 +39,11 @@ const StateSuspended = "suspended"
 const SuspendRotationConflict = "rotation_conflict"
 
 // PrevRelayGrace bounds how long the member's previous relay key is still
-// recognized as the connection's after a relay.address.update (refused
-// now, session.go; the grace of a connection stored before still runs
-// out): deposits
-// made before the rotation, and resends of the update itself (§3.4 (b)),
-// arrive with it. The grace ends earlier, at the first message from the
+// recognized as the connection's after a relay.address.update. Legacy:
+// the update is refused now (session.go), so only a connection stored
+// before that still has a grace, which ends within 30 days; this code and
+// PrevRelayPK can go after that. Deposits made before the rotation, and
+// resends of the update itself (§3.4 (b)), arrive with it. The grace ends earlier, at the first message from the
 // new key: deposits to one mailbox stay in order (§8.3), so nothing from
 // before the rotation is still to come; the tokens issued to the old key
 // are then revoked. A second rotation within the grace replaces the

@@ -218,6 +218,7 @@ func (p *Peer) Start(ctx context.Context) error {
 		}
 	}
 	p.housekeeping(p.now())
+	p.tickPendings(p.now())
 	if err := p.flush(ctx); err != nil {
 		return err
 	}
@@ -670,7 +671,7 @@ func kidEqual(b []byte, k suite.Kid) bool {
 }
 
 // connByRelayKey finds a connection by its member's relay key, or the
-// previous one within PrevRelayGrace (rotation.go).
+// previous one within a legacy PrevRelayGrace (rotation.go).
 func (p *Peer) connByRelayKey(pk ed25519.PublicKey, now time.Time) *Connection {
 	for _, c := range p.conns {
 		if suite.EqualPublic(c.Peer.Relay.PK, pk) {

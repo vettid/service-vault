@@ -101,21 +101,39 @@ func TestBadRotationDropped(t *testing.T) {
 	}
 }
 
-// relay.address.update is refused (vettid-vault #241): sent by the member
-// after rotating its relay key, or by an old copy holding the session's
-// keys, it changes nothing (address, tokens, no previous key kept), is
-// audited each time, gets no tokens in answer, and the service still
-// reaches the member where it was.
+// relay.address.update is refused (as vettid-vault #241 does for a member
+// vault): valid in form, with a token and with or without a reconnect
+// token, sent under the session (as an old copy holding the session's
+// keys could), it changes nothing (address, tokens, no previous key kept,
+// a waiting deposit not moved), is audited each time, gets no tokens in
+// answer, and the service still reaches the member where it was.
 func TestRelayAddressUpdateRefused(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
 	cid := f.connect(m, "")
 	before := *f.p.conns[cid]
 	issued := len(m.Received(peerwire.TypeTokenIssued))
-	m.SendAddressUpdate(f.w, 50, "")
-	m.SendAddressUpdateWithReconnect(f.w, 51, "")
-	f.pump()
 	c := f.p.conns[cid]
+	st := c.Standing.Token
+	f.failDeposit = func(_, token string) error {
+		if token == st {
+			return errUnavailable
+		}
+		return nil
+	}
+	f.p.sendTo(c, "connection.note", []byte(`{}`), f.clk.Now()) // waits
+	m.SendAddressUpdate(f.w, 50, peertest.RelayURL)
+	m.SendAddressUpdateWithReconnect(f.w, 51, peertest.RelayURL)
+	f.step()
+	for _, e := range f.p.outbox {
+		if e.ConnID == cid && e.Mailbox != before.Peer.Relay.Mailbox {
+			t.Fatal("a waiting deposit was moved to another mailbox")
+		}
+	}
+	f.failDeposit = nil
+	f.clk.Advance(time.Minute)
+	f.pump()
+	c = f.p.conns[cid]
 	if !suite.EqualPublic(c.Peer.Relay.PK, before.Peer.Relay.PK) || c.Peer.Relay.Mailbox != before.Peer.Relay.Mailbox ||
 		c.Standing.Token != before.Standing.Token || c.Reconnect.Token != before.Reconnect.Token || len(c.PrevRelayPK) != 0 {
 		t.Fatal("a relay.address.update changed the connection")

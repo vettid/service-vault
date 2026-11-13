@@ -795,8 +795,9 @@ both bind.
 
 **When a member moves phones** (VAULT-MESSAGING §3.4, 0.68.0). A
 transfer, a recovery or a `credential.rotate` rotates the member vault's
-keys, and the service follows each rotation, so the connection survives
-the move:
+keys. The service follows the identity and credential keys, so the
+connection survives those; it does not follow a relay key, which release
+29 does not rotate:
 - *Relay key.* `relay.address.update` is refused (audited
   `address_update_refused`; nothing changes), as a member vault refuses
   it: it moved a connection on the session's authentication alone, with

@@ -1336,3 +1336,23 @@ func TestNoTokenReconnectAtBatchEnd(t *testing.T) {
 		t.Fatal("no reconnect at the end of the batch")
 	}
 }
+
+// At a start, a stale connection's pending rekey with no valid standing
+// token is abandoned at once (R29-I6), not at the first tick.
+func TestStartAbandonsStalePendingWithoutToken(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	ownRekeyPending(t, f, m, cid)
+	c := f.p.conns[cid]
+	c.State = StateStale
+	c.Standing.Exp = f.clk.Now()
+	f.p.markDirty(kindConn, cid)
+	if err := f.p.flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	f.start()
+	if c = f.p.conns[cid]; c.Pending != nil || !f.audited("pending_abandoned_no_token") {
+		t.Fatalf("pending %v", c.Pending)
+	}
+}

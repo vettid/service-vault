@@ -455,7 +455,8 @@ separately. The README's release-29 status paragraph shrinks with each.
 ## Changes
 
 - **0.5.2 (2026-11-13):** §3 item 8, `relay.address.update` is refused
-  (as vettid-vault #241), so the restart it made is gone.
+  (as vettid-vault #241 makes a member vault do), so the restart it made
+  is gone.
 - **0.5.1 (2026-11-13):** pinned to VAULT-MESSAGING 0.90.1; §3 item 4, a
   reconnect `hs.init` refused `token_revoked` makes the connection
   `stale` at once; §14, the prompt to adopt and X2 in the second change.

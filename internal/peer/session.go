@@ -19,7 +19,7 @@ import (
 // connection (§8.2, §8.3, §8.4, §7.3).
 func (p *Peer) dispatch(ctx context.Context, c *Connection, in *envelope.Inner, ep *handshake.Epoch, raw []byte, sender ed25519.PublicKey, msgID string, now time.Time) (disposition, error) {
 	p.markDirty(kindConn, c.ID)     // the epoch's receive count moved
-	if !c.relayKeyIs(sender, now) { // §6.3, or the key before a relay.address.update
+	if !c.relayKeyIs(sender, now) { // §6.3, or the key before a legacy relay.address.update
 		p.audit("sender_mismatch", c.ID)
 		return ackAfterFlush, nil
 	}
@@ -106,7 +106,9 @@ func (p *Peer) dispatch(ctx context.Context, c *Connection, in *envelope.Inner, 
 	case TypeIdentityRotate:
 		p.identityRotate(c, in.Body, now)
 	case TypeRelayAddressUpdate:
-		// Refused from every member (as vettid-vault #241 does): it moved
+		// Refused from every member, as vettid-vault #241 makes the member
+		// vault do (the audit names differ: a service has no drop.peer_key
+		// record): it moved
 		// the connection's mailbox and tokens on the session's
 		// authentication alone, with no signed relay links and none of
 		// rule U's checks (VAULT-MESSAGING §3.4.1), so an old copy of a
