@@ -335,6 +335,15 @@ type IssuedToken struct {
 	ConnID string    `json:"conn_id,omitempty"`
 	Exp    time.Time `json:"exp"`
 	Denied bool      `json:"denied,omitempty"`
+	// Carried: minted for a reconnect's hs.init or hs.resp. Prompt:
+	// re-minted at our reconnect's confirmation ("The prompt to adopt").
+	// A refresh after quota_exceeded keeps the newest of each (§6.3.1
+	// "Revocation by the issuer"; RELEASE-29 §12).
+	Carried bool `json:"carried,omitempty"`
+	Prompt  bool `json:"prompt,omitempty"`
+	// Seq orders tokens by minting (the outbox's sequence): two minted
+	// in one millisecond have jtis in no particular order.
+	Seq uint64 `json:"seq,omitempty"`
 }
 
 // Outbox operations.
@@ -768,6 +777,9 @@ func (p *Peer) load(ctx context.Context) error {
 	}
 	for _, e := range p.events {
 		p.seq = max(p.seq, e.Seq)
+	}
+	for _, t := range p.issued {
+		p.seq = max(p.seq, t.Seq)
 	}
 	p.dropStale(stale)
 	for _, c := range moved {

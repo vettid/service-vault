@@ -1399,3 +1399,54 @@ func TestIssuedReconnectTokenOnlyLater(t *testing.T) {
 		t.Fatal("a longer-lived reconnect token was not adopted")
 	}
 }
+
+// A refresh after quota_exceeded revokes only what §6.3.1 lets the issuer
+// revoke (RELEASE-29 §12): an older standing token goes; the newest one a
+// reconnect carried, the newest re-minted at a confirmation and one newer
+// than the token the refresh came under stay.
+func TestRefreshRevocations(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	var first string
+	for j, tk := range f.p.issued {
+		if tk.ConnID == cid && tk.Kind == tokStanding {
+			first = j
+		}
+	}
+	m.Reconnect() // the member's: our hs.resp carries a standing token
+	f.pump()
+	f.beginReconnectNow(cid) // ours: re-minted at its confirmation
+	f.pump()
+	var carried, prompt string
+	for j, tk := range f.p.issued {
+		if tk.ConnID == cid && tk.Kind == tokStanding && tk.Carried {
+			carried = j
+		}
+		if tk.ConnID == cid && tk.Kind == tokStanding && tk.Prompt {
+			prompt = j
+		}
+	}
+	if first == "" || carried == "" || prompt == "" {
+		t.Fatalf("tokens: first %q carried %q prompt %q", first, carried, prompt)
+	}
+	f.clk.Advance(peerwire.QuotaRefreshEvery + time.Minute)
+	m.Send(peerwire.TypeTokenRefresh, peerwire.TokenRefreshBody()) // under the member's held token
+	m.IgnoreRevoked = true                                         // that token goes too: the answer carries a fresh one
+	f.pump()
+	if !f.p.issued[first].Denied {
+		t.Fatal("the older standing token was not revoked")
+	}
+	if f.p.issued[prompt].Denied {
+		t.Fatal("the re-minted standing token was revoked")
+	}
+	newest := ""
+	for j, tk := range f.p.issued {
+		if tk.ConnID == cid && tk.Kind == tokStanding && tk.Carried && (newest == "" || tk.Seq > f.p.issued[newest].Seq) {
+			newest = j
+		}
+	}
+	if f.p.issued[newest].Denied {
+		t.Fatal("the newest carried standing token was revoked")
+	}
+}

@@ -142,8 +142,8 @@ func (p *Peer) confirmPending(c *Connection, now time.Time) {
 		c.clearReconnect()
 		// §6.3.1 "The prompt to adopt", §6.6 "Re-minted after every
 		// successful reconnect": fresh tokens under the new epoch.
-		p.issueTo(c, tokStanding, now)
-		p.issueTo(c, tokReconnect, now)
+		p.issue(c, tokStanding, true, now)
+		p.issue(c, tokReconnect, true, now)
 	}
 	if c.Reconnecting && !p.reconnectOpen(c) {
 		c.clearReconnect() // its last try ended above: the session is settled
