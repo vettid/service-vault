@@ -112,6 +112,7 @@ func TestRelayAddressUpdateRefused(t *testing.T) {
 	m := f.member(10)
 	cid := f.connect(m, "")
 	before := *f.p.conns[cid]
+	before.Peer.Relay.PK = bytes.Clone(before.Peer.Relay.PK)
 	issued := len(m.Received(peerwire.TypeTokenIssued))
 	c := f.p.conns[cid]
 	st := c.Standing.Token
@@ -135,7 +136,7 @@ func TestRelayAddressUpdateRefused(t *testing.T) {
 	f.pump()
 	c = f.p.conns[cid]
 	if !suite.EqualPublic(c.Peer.Relay.PK, before.Peer.Relay.PK) || c.Peer.Relay.Mailbox != before.Peer.Relay.Mailbox ||
-		c.Standing.Token != before.Standing.Token || c.Reconnect.Token != before.Reconnect.Token || len(c.PrevRelayPK) != 0 {
+		c.Standing.Token != before.Standing.Token || c.Reconnect.Token != before.Reconnect.Token || len(c.LegacyPrevRelayPK) != 0 {
 		t.Fatal("a relay.address.update changed the connection")
 	}
 	if n := strings.Count(f.logs.String(), "reason=address_update_refused "); n != 2 {

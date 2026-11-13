@@ -119,6 +119,13 @@ type Connection struct {
 	// Pending is the service's own rekey or reconnect epoch awaiting
 	// confirmation (§6.3.1 Initiator; initiator.go).
 	Pending *PendingEpoch `json:"pending,omitempty"`
+	// Abandoned are the ids of pending epochs of ours abandoned since the
+	// last confirmation: a member's reconnect may name one (§6.6).
+	Abandoned [][]byte `json:"abandoned,omitempty"`
+	// Carried are the tokens a member's reconnect carried, kept with the
+	// epoch it established until the confirmed epoch reaches it
+	// (carried.go).
+	Carried []CarriedTokens `json:"carried,omitempty"`
 	// RekeyFailures counts the rekeys of ours that ended without an
 	// epoch since the last epoch installed; none starts before
 	// RekeyNotBefore (rekeyFailed).
@@ -137,11 +144,11 @@ type Connection struct {
 	// Chain is the member's identity.rotate links followed (§3.4), for
 	// "one successor per key"; the last MaxRotations are kept.
 	Chain []json.RawMessage `json:"chain,omitempty"`
-	// PrevRelayPK is the member's relay key before its last
-	// relay.address.update, still recognized until PrevRelayUntil. Legacy:
-	// set only on connections stored before the update was refused.
-	PrevRelayPK    ed25519.PublicKey `json:"prev_relay_pk,omitempty"`
-	PrevRelayUntil time.Time         `json:"prev_relay_until,omitzero"`
+	// LegacyPrevRelayPK is read only to find a connection a
+	// relay.address.update moved before the update was refused: no honest
+	// member sent one, so such a connection is marked stale at load
+	// (legacyRelayMove).
+	LegacyPrevRelayPK ed25519.PublicKey `json:"prev_relay_pk,omitempty"`
 
 	// The member's credential key pinned at the first signed
 	// connection.authenticate.response (§10.4).
@@ -231,6 +238,12 @@ type awaiting struct {
 	// RespEntry is the outbox entry of a rekey answer's hs.resp, dropped
 	// with the answer if not yet deposited.
 	RespEntry string `json:"resp_entry,omitempty"`
+	// NamedConf: its hs.init named the confirmed epoch while not current
+	// (rule E at hs.fin); ForkEp: it named an older epoch that is fork
+	// evidence (suspend at hs.fin); InitTS: the hs.init's inner ts.
+	NamedConf bool      `json:"named_conf,omitempty"`
+	ForkEp    bool      `json:"fork_ep,omitempty"`
+	InitTS    time.Time `json:"init_ts,omitzero"`
 
 	r *handshake.Responder
 }
@@ -250,6 +263,8 @@ type pendingReconnect struct {
 	// hs.fin (checkSigner); IK, KEM and Links are kept for a record from
 	// before it.
 	Signer *pendingFollow `json:"signer,omitempty"`
+	// Named is the epoch its ctx named.
+	Named []byte `json:"named,omitempty"`
 }
 
 // pendingFollow is what a member's rekey or reconnect hs.init named: the
@@ -335,6 +350,15 @@ type IssuedToken struct {
 	ConnID string    `json:"conn_id,omitempty"`
 	Exp    time.Time `json:"exp"`
 	Denied bool      `json:"denied,omitempty"`
+	// Carried: minted for a reconnect's hs.init or hs.resp. Prompt:
+	// re-minted at our reconnect's confirmation ("The prompt to adopt").
+	// A refresh after quota_exceeded keeps the newest of each (§6.3.1
+	// "Revocation by the issuer"; RELEASE-29 §12).
+	Carried bool `json:"carried,omitempty"`
+	Prompt  bool `json:"prompt,omitempty"`
+	// Seq orders tokens by minting (the outbox's sequence): two minted
+	// in one millisecond have jtis in no particular order.
+	Seq uint64 `json:"seq,omitempty"`
 }
 
 // Outbox operations.
@@ -379,6 +403,9 @@ type outboxEntry struct {
 	// Refresh marks our relay.token.refresh: it passes the deposits that
 	// wait for a fresh standing token (§8.4, §8.6).
 	Refresh bool `json:"refresh,omitempty"`
+	// CarriedTok: Token is a handshake's carried token (an hs.resp or an
+	// hs.confirm), whose token_revoked ends that handshake's tokens.
+	CarriedTok bool `json:"carried_tok,omitempty"`
 	// StaleTS counts the relay's timestamp_stale refusals of it.
 	StaleTS int `json:"stale_ts,omitempty"`
 	// Vote is a deposit SendMessage queued: only these count toward
@@ -584,6 +611,20 @@ func (p *Peer) flush(ctx context.Context) error {
 }
 
 // load reads every record into memory at start.
+// legacyRelayMove suspends a connection that a relay.address.update moved
+// before the update was refused (#152). No honest member ever sent one,
+// so the move came from whoever held the session's keys: the stored
+// relay address may be that copy's. It is not honored: the connection is
+// suspended (nothing is sent or accepted, and no reconnect revives it),
+// with an alarm; the member connects again from a new invitation.
+func (p *Peer) legacyRelayMove(c *Connection) {
+	c.LegacyPrevRelayPK = nil
+	p.markDirty(kindConn, c.ID)
+	// Suspended, not stale: a stale connection comes back at its next
+	// epoch, which whoever holds the moved address could establish.
+	p.suspendFor(c, SuspendRelayMoved, p.now())
+}
+
 // orphan is a pending epoch whose record and keys were not stored together.
 type orphan struct {
 	c      *Connection
@@ -595,6 +636,7 @@ type orphan struct {
 func (p *Peer) load(ctx context.Context) error {
 	var stale []*outgoing
 	var orphans []orphan
+	var moved []*Connection
 	type target struct {
 		kind string
 		put  func([]byte) (string, error)
@@ -611,6 +653,9 @@ func (p *Peer) load(ctx context.Context) error {
 			}
 			c.kr = kr
 			c.initEpochs()
+			if len(c.LegacyPrevRelayPK) > 0 {
+				moved = append(moved, c)
+			}
 			// The pending epoch's record and its keys are written together;
 			// one without the other is abandoned, after the load
 			// (orphanPending), with its hs.fin and tokens.
@@ -748,7 +793,13 @@ func (p *Peer) load(ctx context.Context) error {
 	for _, e := range p.events {
 		p.seq = max(p.seq, e.Seq)
 	}
+	for _, t := range p.issued {
+		p.seq = max(p.seq, t.Seq)
+	}
 	p.dropStale(stale)
+	for _, c := range moved {
+		p.legacyRelayMove(c)
+	}
 	for _, o := range orphans {
 		p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == o.c.ID && bytes.Equal(e.FinEpoch, o.id) })
 		for _, j := range o.issued {

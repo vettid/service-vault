@@ -1291,7 +1291,7 @@ func TestAddressUpdateDuringTryRefused(t *testing.T) {
 	f.step()
 	c := f.p.conns[cid]
 	if !c.Reconnecting || c.ReconnectTries != 1 || len(f.p.outgoing) != 1 || c.Peer.Relay.Mailbox != mb {
-		t.Fatalf("reconnecting %v, tries %d, %d outgoing", c.Reconnecting, c.ReconnectTries, len(f.p.outgoing))
+		t.Fatalf("reconnecting %v, tries %d, %d outgoing, mailbox %s (was %s)", c.Reconnecting, c.ReconnectTries, len(f.p.outgoing), c.Peer.Relay.Mailbox, mb)
 	}
 	for _, og := range f.p.outgoing {
 		if !bytes.Equal(og.Th1, th1) {
@@ -1354,5 +1354,750 @@ func TestStartAbandonsStalePendingWithoutToken(t *testing.T) {
 	f.start()
 	if c = f.p.conns[cid]; c.Pending != nil || !f.audited("pending_abandoned_no_token") {
 		t.Fatalf("pending %v", c.Pending)
+	}
+}
+
+// A connection a relay.address.update moved before the update was refused
+// is not honored at load: it is suspended, with an alarm.
+func TestLegacyRelayMoveAtLoad(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	f.p.conns[cid].LegacyPrevRelayPK = bytes.Repeat([]byte{9}, ed25519.PublicKeySize)
+	f.p.markDirty(kindConn, cid)
+	if err := f.p.flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	f.start()
+	c := f.p.conns[cid]
+	if c.State != StateSuspended || len(c.LegacyPrevRelayPK) != 0 || !strings.Contains(f.logs.String(), "alarm=relay_moved_unlinked") {
+		t.Fatalf("state %s", c.State)
+	}
+	f.p.DeliverEvents(context.Background())
+	if evs := f.ev.of(EventConnectionSuspended); len(evs) != 1 || evs[0].Reason != SuspendRelayMoved {
+		t.Fatalf("events %v", evs)
+	}
+	// Whoever holds the stored address cannot revive it: a reconnect from
+	// it is refused, and no sign-in is answered.
+	m.IgnoreStray, m.IgnoreRevoked = true, true
+	m.Reconnect()
+	f.pump()
+	if c = f.p.conns[cid]; c.State != StateSuspended {
+		t.Fatalf("revived: state %s", c.State)
+	}
+	if _, err := f.p.Authenticate(context.Background(), cid, "Sign in", "", time.Minute); err == nil {
+		t.Fatal("a sign-in on the suspended connection")
+	}
+}
+
+// While carried tokens wait, hs.confirm still goes again every 12 days,
+// even with an entry waiting for a standing token.
+func TestConfirmAgainWhileCarriedWait(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	memberReconnected(t, f, m, cid)
+	c := f.p.conns[cid]
+	st := c.Standing.Token
+	f.failDeposit = func(_, token string) error {
+		if token == st {
+			return errUnavailable
+		}
+		return nil
+	}
+	f.p.sendTo(c, "connection.note", []byte(`{}`), f.clk.Now())
+	c.Standing.Exp = f.clk.Now()
+	before := c.ConfirmAt
+	f.clk.Advance(ConfirmResend + time.Minute)
+	f.tick()
+	if c = f.p.conns[cid]; !c.ConfirmAt.After(before) || c.Reconnecting {
+		t.Fatalf("hs.confirm again: %v -> %v, reconnecting %v", before, c.ConfirmAt, c.Reconnecting)
+	}
+}
+
+// A rekey hs.init made before the member rotated (signed by its old key)
+// and delivered after: it fails the rekey's own checks, so it is refused,
+// not taken as fork evidence (rekeyPrecheck).
+func TestOldRekeyInitRefusedNotFork(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	m.StartRekey() // under the first epoch; held back at the relay
+	msgs, err := f.sv.Collect(context.Background(), 0, 32)
+	if err != nil || len(msgs) != 1 {
+		t.Fatalf("%d (%v)", len(msgs), err)
+	}
+	_ = f.sv.Ack(context.Background(), msgs[0].MsgID)
+	memberRekey(t, f, m, cid)
+	m.Send("connection.note", []byte(`{}`))
+	f.pump()
+	m.RotateIdentity(40, false)
+	f.pump()
+	f.w.Redeliver(m.SvcMailbox(), msgs[0])
+	f.step()
+	if c := f.p.conns[cid]; c.State == StateSuspended || !f.audited("rekey_not_current_epoch") {
+		t.Fatalf("state %s", c.State)
+	}
+}
+
+// §3.4.1 "Fork by ctx" for a rekey: a copy holding the first epoch and the
+// member's new key rekeys under that epoch after the second, signed by
+// the old key, was confirmed: the connection is suspended.
+func TestRekeyForkByCtx(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	saved := m.SaveEpoch()
+	memberRekey(t, f, m, cid)
+	m.Send("connection.note", []byte(`{}`))
+	f.pump()
+	m.RotateIdentity(40, false)
+	f.pump()
+	m.RekeyInitUnder(saved)
+	f.step()
+	if c := f.p.conns[cid]; c.State != StateSuspended || !strings.Contains(f.logs.String(), "alarm=fork_suspected") {
+		t.Fatalf("state %s", c.State)
+	}
+}
+
+// A rekey naming the confirmed epoch while it is not current (a copy that
+// holds it) is answered, and its hs.fin applies rule E: the epoch after the
+// confirmed one is destroyed (§6.3.1 Responder, rule E).
+func TestRekeyNamingConfirmedRuleE(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	saved := m.SaveEpoch()
+	first, second := memberRekey(t, f, m, cid) // confirmed stays the first
+	ini := m.RekeyInitUnder(saved)
+	f.step() // answered
+	if len(f.p.awaiting) != 1 {
+		t.Fatal("a rekey naming the confirmed epoch was not answered")
+	}
+	ep := m.FinishRekey(ini)
+	if ep == nil {
+		t.Fatal("no hs.resp")
+	}
+	f.step()
+	c := f.p.conns[cid]
+	if e := c.epochMeta(second[:]); e == nil || !e.Destroyed || epochOf(c) != ep.ID() || !bytes.Equal(c.Confirmed, first[:]) {
+		t.Fatal("rule E did not destroy the epoch after the confirmed one")
+	}
+}
+
+// revokeAtRefresh's keeps, one by one: a token a still-open handshake
+// carried (an answer's, our pending epoch's, our try's), the newest live
+// carried one, the newest re-minted one and one newer than the token the
+// refresh came under; the rest goes, the one it came under included.
+func TestRevokeAtRefreshKeeps(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	c := f.p.conns[cid]
+	for _, t0 := range f.p.issued {
+		t0.Denied = true // start from nothing
+	}
+	now := f.clk.Now()
+	mk := func(jti string, seq uint64, carried, prompt, denied bool) {
+		f.p.issued[jti] = &IssuedToken{JTI: jti, Kind: tokStanding, ConnID: cid, Exp: now.Add(time.Hour), Seq: seq, Carried: carried, Prompt: prompt, Denied: denied}
+	}
+	mk("old", 1, false, false, false)
+	mk("answer", 2, true, false, false)
+	mk("pending", 3, true, false, false)
+	mk("try", 4, true, false, false)
+	mk("prompt", 5, false, true, false)
+	mk("carried", 6, true, false, false)
+	mk("carried-dead", 7, true, false, true)
+	mk("under", 8, false, false, false)
+	mk("newer", 9, false, false, false)
+	f.p.awaiting["x"] = &awaiting{ID: "x", ConnID: cid, Reconnect: &pendingReconnect{Issued: []string{"answer"}}}
+	f.p.outgoing["y"] = &outgoing{ID: "y", ConnID: cid, Issued: []string{"try"}}
+	c.Pending = &PendingEpoch{Issued: []string{"pending"}}
+	f.p.msgJTI = "under"
+	f.p.revokeAtRefresh(c, now)
+	f.p.msgJTI = ""
+	for jti, want := range map[string]bool{"old": true, "answer": false, "pending": false, "try": false, "prompt": false,
+		"carried": false, "under": true, "newer": false} {
+		if got := f.p.issued[jti].Denied; got != want {
+			t.Errorf("%s: revoked %v", jti, got)
+		}
+	}
+	// Unknown: all but the spared ones go, newer ones too.
+	for _, j := range []string{"old", "under", "newer"} {
+		f.p.issued[j].Denied = false
+	}
+	f.p.revokeAtRefresh(c, now)
+	for jti, want := range map[string]bool{"old": true, "answer": false, "prompt": false, "carried": false, "newer": true} {
+		if got := f.p.issued[jti].Denied; got != want {
+			t.Errorf("unknown under, %s: revoked %v", jti, got)
+		}
+	}
+	delete(f.p.awaiting, "x")
+	delete(f.p.outgoing, "y")
+	c.Pending = nil
+}
+
+// B's no-token abandonment waits while carried tokens wait (R29-I6 with
+// "No reconnect while carried tokens wait").
+func TestPendingRekeyKeptWhileCarriedWait(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	memberReconnected(t, f, m, cid)
+	m.NoConfirm = true
+	f.clk.Advance(handshake.PolicyVaultToVault.MaxAge + time.Second)
+	f.tick() // our rekey
+	f.pump()
+	c := f.p.conns[cid]
+	if c.Pending == nil || !f.p.carriedWait(c, f.clk.Now()) {
+		t.Fatalf("pending %v, carried wait %v", c.Pending, f.p.carriedWait(c, f.clk.Now()))
+	}
+	c.Standing.Exp = f.clk.Now()
+	f.tick()
+	if c = f.p.conns[cid]; c.Pending == nil || c.Reconnecting {
+		t.Fatal("abandoned for want of a token while carried tokens wait")
+	}
+}
+
+// A reconnect token issued to us replaces the held one only if it is
+// valid and lasts longer.
+func TestIssuedReconnectTokenOnlyLater(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	held := f.p.conns[cid].Reconnect
+	m.Send(peerwire.TypeTokenIssued, peerwire.TokenIssuedBody("reconnect", m.Mint(10*24*time.Hour)))
+	f.pump()
+	if c := f.p.conns[cid]; c.Reconnect.Token != held.Token || !f.audited("issued_token_not_newer") {
+		t.Fatal("a shorter-lived reconnect token replaced the held one")
+	}
+	m.Send(peerwire.TypeTokenIssued, peerwire.TokenIssuedBody("reconnect", m.Mint(330*24*time.Hour)))
+	f.pump()
+	if c := f.p.conns[cid]; c.Reconnect.Token == held.Token {
+		t.Fatal("a longer-lived reconnect token was not adopted")
+	}
+}
+
+// A refresh after quota_exceeded revokes only what §6.3.1 lets the issuer
+// revoke (RELEASE-29 §12): an older standing token goes; the newest one a
+// reconnect carried, the newest re-minted at a confirmation and one newer
+// than the token the refresh came under stay.
+func TestRefreshRevocations(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	var first string
+	for j, tk := range f.p.issued {
+		if tk.ConnID == cid && tk.Kind == tokStanding {
+			first = j
+		}
+	}
+	m.Reconnect() // the member's: our hs.resp carries a standing token
+	f.pump()
+	f.beginReconnectNow(cid) // ours: re-minted at its confirmation
+	f.pump()
+	var carried, prompt string
+	for j, tk := range f.p.issued {
+		if tk.ConnID == cid && tk.Kind == tokStanding && tk.Carried {
+			carried = j
+		}
+		if tk.ConnID == cid && tk.Kind == tokStanding && tk.Prompt {
+			prompt = j
+		}
+	}
+	if first == "" || carried == "" || prompt == "" {
+		t.Fatalf("tokens: first %q carried %q prompt %q", first, carried, prompt)
+	}
+	f.clk.Advance(peerwire.QuotaRefreshEvery + time.Minute)
+	m.Send(peerwire.TypeTokenRefresh, peerwire.TokenRefreshBody()) // under the member's held token
+	m.IgnoreRevoked = true                                         // that token goes too: the answer carries a fresh one
+	f.pump()
+	if !f.p.issued[first].Denied {
+		t.Fatal("the older standing token was not revoked")
+	}
+	if !f.p.issued[prompt].Denied {
+		t.Fatal("the token the refresh came under (the re-minted one) was kept")
+	}
+	newest := ""
+	for j, tk := range f.p.issued {
+		if tk.ConnID == cid && tk.Kind == tokStanding && tk.Carried && (newest == "" || tk.Seq > f.p.issued[newest].Seq) {
+			newest = j
+		}
+	}
+	if f.p.issued[newest].Denied {
+		t.Fatal("the newest carried standing token was revoked")
+	}
+}
+
+// memberReconnected has the member reconnect, with tokens that outlast the
+// held ones; the member sends nothing after, so they stay carried.
+func memberReconnected(t *testing.T, f *fixture, m *peertest.Member, cid string) *CarriedTokens {
+	t.Helper()
+	f.clk.Advance(time.Hour)
+	m.Reconnect()
+	f.pump()
+	c := f.p.conns[cid]
+	r := c.carriedFor(c.LastEpochID)
+	if r == nil || !c.carriedUsable(r, f.clk.Now()) || epochOf(c) != m.KR.Current().ID() {
+		t.Fatal("no carried tokens after the member's reconnect")
+	}
+	return r
+}
+
+// Our hs.confirm for a member's reconnect goes on its carried standing
+// token (§6.3.1 "What they are used for before").
+func TestConfirmOnCarriedToken(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	var tokens []string
+	mb := f.p.conns[cid].Peer.Relay.Mailbox
+	f.failDeposit = func(mailbox, token string) error {
+		if mailbox == mb {
+			tokens = append(tokens, token)
+		}
+		return nil
+	}
+	r := memberReconnected(t, f, m, cid)
+	n := 0
+	for _, tk := range tokens {
+		if tk == r.Standing.Token {
+			n++
+		}
+	}
+	if n != 2 { // our hs.resp, and our hs.confirm
+		t.Fatalf("%d deposits on the carried token", n)
+	}
+}
+
+// While carried tokens wait, no reconnect starts for want of a valid
+// standing token; past their bound they are discarded and it starts.
+func TestCarriedWaitThenBound(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	r := memberReconnected(t, f, m, cid)
+	c := f.p.conns[cid]
+	st := c.Standing.Token
+	f.failDeposit = func(_, token string) error {
+		if token == st {
+			return errUnavailable
+		}
+		return nil
+	}
+	f.p.sendTo(c, "connection.note", []byte(`{}`), f.clk.Now())
+	c.Standing.Exp = f.clk.Now()
+	f.tick()
+	if c = f.p.conns[cid]; c.Reconnecting {
+		t.Fatal("a reconnect while carried tokens wait")
+	}
+	f.clk.Advance(r.Standing.Exp.Sub(f.clk.Now()) + time.Minute)
+	f.tick()
+	if c = f.p.conns[cid]; !c.Reconnecting || !c.confirmStopped() || !f.audited("carried_discarded") {
+		t.Fatalf("past the bound: reconnecting %v", c.Reconnecting)
+	}
+}
+
+// token_revoked on our hs.confirm's carried token: the member dropped
+// that handshake; the tokens are discarded and hs.confirm stops.
+func TestCarriedConfirmRevoked(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	mb := f.p.conns[cid].Peer.Relay.Mailbox
+	var carried string
+	f.failDeposit = func(mailbox, token string) error {
+		c := f.p.conns[cid]
+		if r := c.carriedFor(c.LastEpochID); mailbox == mb && r != nil && token == r.Standing.Token {
+			carried = token
+			return &relayclient.Error{Status: 403, Code: codeTokenRevoked}
+		}
+		return nil
+	}
+	f.clk.Advance(time.Hour)
+	m.Reconnect()
+	m.IgnoreRevoked = true
+	f.pump()
+	c := f.p.conns[cid]
+	if carried == "" || !c.confirmStopped() || !f.audited("carried_token_revoked") {
+		t.Fatalf("revoked %q, stopped %v", carried, c.confirmStopped())
+	}
+	f.clk.Advance(ConfirmResend + time.Minute)
+	f.tick()
+	if f.p.confirmQueued(f.p.conns[cid]) {
+		t.Fatal("hs.confirm again after the discard")
+	}
+}
+
+// Our own reconnect supersedes a member's carried tokens.
+func TestOwnReconnectSupersedesCarried(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	memberReconnected(t, f, m, cid)
+	f.beginReconnectNow(cid)
+	m.NoConfirm = true
+	f.pump()
+	c := f.p.conns[cid]
+	if !c.pendingReconnect() {
+		t.Fatal("not pending")
+	}
+	for _, r := range c.Carried {
+		if !r.Discarded {
+			t.Fatal("an earlier carried record is still waiting")
+		}
+	}
+}
+
+// sealedUnder seals a note under the member's current epoch now, to be
+// deposited later (as a copy of the member's vault holding that epoch
+// would).
+func sealedUnder(t *testing.T, m *peertest.Member, now time.Time) []byte {
+	t.Helper()
+	raw, err := m.KR.Current().Seal(&envelope.Inner{ID: m.NewID(), Type: "connection.note", TS: now, Body: []byte(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+// Rule E (§6.3.1): a reconnect naming the confirmed epoch while it is not
+// current destroys, at its hs.fin, the epochs after the confirmed one. A
+// later message under a destroyed epoch is refused when its ts is not
+// later than the hs.init's (superseded_epoch), and is fork evidence when
+// it is: the connection is suspended, reason epoch.
+func TestRuleEAndForkEvidence(t *testing.T) {
+	for _, later := range []bool{false, true} {
+		f := newFixture(t)
+		m := f.member(10)
+		cid := f.connect(m, "")
+		first, second := memberRekey(t, f, m, cid) // confirmed stays the first
+		if c := f.p.conns[cid]; !bytes.Equal(c.Confirmed, first[:]) {
+			t.Fatal("confirmed moved")
+		}
+		var held []byte
+		if !later {
+			held = sealedUnder(t, m, f.clk.Now())
+		}
+		f.clk.Advance(time.Second)
+		m.ReconnectNaming(first)
+		f.clk.Advance(time.Minute)
+		if later {
+			held = sealedUnder(t, m, f.clk.Now())
+		}
+		m.IgnoreStray = true
+		f.pump()
+		c := f.p.conns[cid]
+		if e := c.epochMeta(second[:]); e == nil || !e.Destroyed || epochOf(c) != m.KR.Current().ID() {
+			t.Fatalf("later %v: the epoch after the confirmed one was not destroyed", later)
+		}
+		m.DepositTo(m.SvcStand, held)
+		f.pump()
+		c = f.p.conns[cid]
+		if later {
+			if c.State != StateSuspended || !strings.Contains(f.logs.String(), "alarm=fork_suspected") {
+				t.Fatalf("state %s", c.State)
+			}
+			evs := f.ev.of(EventConnectionSuspended)
+			if len(evs) != 1 || evs[0].Reason != SuspendEpoch {
+				t.Fatalf("events %v", evs)
+			}
+		} else if c.State == StateSuspended || !f.audited("superseded_epoch") {
+			t.Fatalf("earlier ts: state %s", c.State)
+		}
+	}
+}
+
+// §3.4.1 "Fork by ctx": after the member's key moved on, a reconnect
+// naming an epoch older than the confirmed one, whose successor was signed
+// by the old key, is fork evidence: the connection is suspended at its
+// hs.fin.
+func TestForkByCtx(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	first, _ := memberRekey(t, f, m, cid)
+	m.Send("connection.note", []byte(`{}`)) // the second epoch is confirmed
+	f.pump()
+	m.RotateIdentity(40, false) // identity.rotate under the second, then a rekey under the new key
+	f.pump()
+	m.IgnoreStray = true
+	m.ReconnectNaming(first)
+	f.step() // answered: judged at its hs.fin
+	var issued []string
+	for _, aw := range f.p.awaiting {
+		if aw.ForkEp && aw.Reconnect != nil {
+			issued = aw.Reconnect.Issued
+		}
+	}
+	if len(issued) == 0 {
+		t.Fatal("not answered as a fork sign")
+	}
+	f.pump()
+	if c := f.p.conns[cid]; c.State != StateSuspended || !strings.Contains(f.logs.String(), "alarm=fork_suspected") {
+		t.Fatalf("state %s", c.State)
+	}
+	for _, j := range issued {
+		if tk := f.p.issued[j]; tk == nil || !tk.Denied {
+			t.Fatalf("token %s of our hs.resp not revoked", j)
+		}
+	}
+}
+
+// An epoch of ours abandoned while pending is accepted as a member
+// reconnect's ctx until a newer epoch is confirmed (§6.6).
+func TestAbandonedEpochAsCtx(t *testing.T) {
+	for _, newerConfirmed := range []bool{false, true} {
+		f := newFixture(t)
+		m := f.member(10)
+		cid := f.connect(m, "")
+		_, pend := ownRekeyPending(t, f, m, cid)
+		c := f.p.conns[cid]
+		c.RekeyNotBefore = f.clk.Now().Add(RekeyBackoffMax)
+		f.p.mu.Lock()
+		f.p.abandonPending(c, "test", false, f.clk.Now())
+		f.p.mu.Unlock()
+		if newerConfirmed {
+			f.p.mu.Lock()
+			c.Abandoned = nil // as setConfirmed does when a newer epoch is confirmed
+			f.p.mu.Unlock()
+		}
+		m.ReconnectNaming(pend)
+		f.step()
+		if answered := len(f.p.awaiting) == 1; answered == newerConfirmed {
+			t.Fatalf("newer confirmed %v: answered %v", newerConfirmed, answered)
+		}
+	}
+}
+
+// A newer confirmation forgets the abandoned epochs.
+func TestConfirmationForgetsAbandoned(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	ownRekeyPending(t, f, m, cid)
+	c := f.p.conns[cid]
+	f.p.mu.Lock()
+	f.p.abandonPending(c, "test", false, f.clk.Now())
+	f.p.mu.Unlock()
+	if len(c.Abandoned) != 1 {
+		t.Fatal("not kept")
+	}
+	c.RekeyNotBefore = f.clk.Now().Add(RekeyBackoffMax) // no rekey of ours meanwhile
+	m.IgnoreStray = true
+	m.ReconnectNaming(m.KR.Current().ID()) // the abandoned epoch, which the member holds
+	f.pump()
+	m.Send("connection.note", []byte(`{}`)) // confirms the reconnect's epoch
+	f.pump()
+	if c = f.p.conns[cid]; len(c.Abandoned) != 0 {
+		t.Fatal("kept after a newer confirmation")
+	}
+}
+
+// §6.3.1 "A stale reconnect answer ends at a later message" (0.88.9): a
+// message under a newer epoch with a later ts ends our open answer to a
+// reconnect that named an older one.
+func TestStaleReconnectAnswerEnds(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	first, _ := memberRekey(t, f, m, cid)
+	earlier := sealedUnder(t, m, f.clk.Now()) // under the newer epoch, before the hs.init
+	f.clk.Advance(time.Second)
+	m.ReconnectNaming(first)
+	f.step() // answered; its hs.fin will not come
+	if len(f.p.awaiting) != 1 {
+		t.Fatal("not answered")
+	}
+	m.DepositTo(m.SvcStand, earlier)
+	f.step()
+	if len(f.p.awaiting) != 1 {
+		t.Fatal("a message older than the hs.init ended the answer")
+	}
+	f.clk.Advance(time.Minute)
+	m.Send("connection.note", []byte(`{}`)) // under the newer epoch, later
+	f.step()
+	if len(f.p.awaiting) != 0 || !f.audited("answer_ended_stale") {
+		t.Fatal("the stale answer was kept")
+	}
+}
+
+// Held tokens: one over §7.1's lifetime for its kind, or already expired,
+// is refused (bad_issued_token, as vettid-vault #244); the held one stays.
+func TestHeldTokenBounds(t *testing.T) {
+	for _, tc := range []struct {
+		kind string
+		ttl  time.Duration
+		wait time.Duration
+	}{
+		{"reconnect", 366 * 24 * time.Hour, 0},
+		{"standing", 31 * 24 * time.Hour, 0},
+		{"reconnect", time.Minute, 2 * time.Minute},
+	} {
+		f := newFixture(t)
+		m := f.member(10)
+		cid := f.connect(m, "")
+		before := f.p.conns[cid].Reconnect
+		beforeSt := f.p.conns[cid].Standing
+		m.Send(peerwire.TypeTokenIssued, peerwire.TokenIssuedBody(tc.kind, m.Mint(tc.ttl)))
+		f.clk.Advance(tc.wait)
+		f.pump()
+		c := f.p.conns[cid]
+		if c.Reconnect.Token != before.Token || c.Standing.Token != beforeSt.Token || !f.audited("bad_issued_token") {
+			t.Fatalf("%s %v: adopted", tc.kind, tc.ttl)
+		}
+	}
+}
+
+// A held reconnect token the relay refuses as invalid or revoked is
+// dropped, never offered again.
+func TestRefusedReconnectTokenDropped(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	rt := f.p.conns[cid].Reconnect.Token
+	f.failDeposit = func(_, token string) error {
+		if token == rt {
+			return &relayclient.Error{Status: 401, Code: "token_invalid"}
+		}
+		return nil
+	}
+	f.beginReconnectNow(cid)
+	if c := f.p.conns[cid]; c.Reconnect.Token != "" || c.State != StateStale {
+		t.Fatalf("state %s, token kept %v", c.State, c.Reconnect.Token != "")
+	}
+}
+
+// adoptCarried replaces a held token only when the carried one's exp is
+// later: standing and reconnect alike.
+func TestAdoptCarriedOnlyLater(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	c := f.p.conns[cid]
+	held, heldRT := c.Standing, c.Reconnect
+	r := CarriedTokens{Epoch: bytes.Clone(c.LastEpochID), Standing: HeldToken{Token: "s", Exp: held.Exp.Add(-time.Hour)},
+		Reconnect: HeldToken{Token: "r", Exp: heldRT.Exp.Add(-time.Hour)}, Since: f.clk.Now()}
+	f.p.adoptCarried(c, &r)
+	if c.Standing != held || c.Reconnect != heldRT {
+		t.Fatal("an earlier carried token replaced a held one")
+	}
+	r.Standing.Exp, r.Reconnect.Exp = held.Exp.Add(time.Hour), heldRT.Exp.Add(time.Hour)
+	f.p.adoptCarried(c, &r)
+	if c.Standing.Token != "s" || c.Reconnect.Token != "r" {
+		t.Fatal("a later carried token was not adopted")
+	}
+}
+
+// Carried tokens are adopted when the confirmed epoch reaches a later
+// epoch reached from theirs by a rekey: here our own rekey, confirmed by
+// the member's hs.confirm, with nothing from the member under the
+// reconnect's epoch before.
+func TestCarriedAdoptedAtLaterEpoch(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	r := memberReconnected(t, f, m, cid)
+	tok := r.Standing.Token
+	f.clk.Advance(handshake.PolicyVaultToVault.MaxAge + time.Second)
+	f.tick() // our rekey
+	f.pump() // the member answers and confirms it
+	if c := f.p.conns[cid]; c.Standing.Token != tok || len(c.Carried) != 0 {
+		t.Fatal("not adopted at a later epoch")
+	}
+}
+
+// The carried wait ends once the confirmed epoch reaches the current one,
+// and its bound is capped at B from the activation.
+func TestCarriedWaitEndsAndCap(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	memberReconnected(t, f, m, cid)
+	c := f.p.conns[cid]
+	if !f.p.carriedWait(c, f.clk.Now()) {
+		t.Fatal("no wait")
+	}
+	r := c.carriedFor(c.LastEpochID)
+	r.Standing.Exp = f.clk.Now().Add(60 * 24 * time.Hour) // past B: the cap decides
+	if !c.carriedUsable(r, f.clk.Now().Add(PendingLife-time.Hour)) || c.carriedUsable(r, f.clk.Now().Add(PendingLife+time.Hour)) {
+		t.Fatal("the cap is not B from the activation")
+	}
+	m.Send("connection.note", []byte(`{}`))
+	f.pump()
+	if f.p.carriedWait(f.p.conns[cid], f.clk.Now()) {
+		t.Fatal("the wait outlived the confirmation")
+	}
+}
+
+// A member's reconnect may name our pending rekey epoch (§6.6).
+func TestReconnectNamingPendingRekey(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	_, pend := ownRekeyPending(t, f, m, cid)
+	f.p.conns[cid].RekeyNotBefore = f.clk.Now().Add(RekeyBackoffMax)
+	m.ReconnectNaming(pend)
+	f.step()
+	if len(f.p.awaiting) != 1 {
+		t.Fatal("a reconnect naming our pending epoch was refused")
+	}
+}
+
+// Only a link that verifies counts as making a key an ancestor.
+func TestAncestorsNeedVerifiedLinks(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	newIK := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{40}, 32))
+	newKEM, _ := suite.NewPrivateKey(bytes.Repeat([]byte{41}, 32))
+	r, err := handshake.NewRotation(m.IK, newIK, newKEM.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ancestors(f.p.conns[cid], []*handshake.Rotation{r})) != 1 {
+		t.Fatal("a valid link not counted")
+	}
+	r.OldIK = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{42}, 32)).Public().(ed25519.PublicKey) // its signature no longer holds
+	if len(ancestors(f.p.conns[cid], []*handshake.Rotation{r})) != 0 {
+		t.Fatal("a link that does not verify counted")
+	}
+}
+
+// The rekey's own checks include the ts window: a copy's hs.init dated
+// ahead is refused, not taken as fork evidence.
+func TestRekeyPrecheckTimeWindow(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	saved := m.SaveEpoch()
+	memberRekey(t, f, m, cid)
+	m.Send("connection.note", []byte(`{}`))
+	f.pump()
+	m.RotateIdentity(40, false)
+	f.pump()
+	f.clk.Advance(time.Hour) // dated an hour ahead
+	m.RekeyInitUnder(saved)
+	f.clk.Advance(-time.Hour)
+	f.step()
+	if c := f.p.conns[cid]; c.State == StateSuspended {
+		t.Fatal("an hs.init outside the ts window taken as fork evidence")
+	}
+}
+
+// The token a refresh came under is revoked even when it is one the
+// refresh would otherwise spare (the newest re-minted one).
+func TestRefreshRevokesItsOwnToken(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	c := f.p.conns[cid]
+	now := f.clk.Now()
+	f.p.issued["p"] = &IssuedToken{JTI: "p", Kind: tokStanding, ConnID: cid, Exp: now.Add(time.Hour), Seq: 1 << 40, Prompt: true}
+	f.p.msgJTI = "p"
+	f.p.revokeAtRefresh(c, now)
+	f.p.msgJTI = ""
+	if !f.p.issued["p"].Denied {
+		t.Fatal("the token the refresh came under was spared")
 	}
 }

@@ -76,6 +76,9 @@ func (p *Peer) makePending(c *Connection, og *outgoing, res *handshake.Result, c
 		p.abandonPending(c, "replaced", false, now)
 	}
 	c.kr.SetPending(res.Epoch, now)
+	if og.ini.Purpose() == handshake.PurposeReconnect {
+		p.supersedeCarried(c) // this reconnect supersedes earlier carried tokens
+	}
 	id := res.Epoch.ID()
 	pe := &PendingEpoch{ID: bytes.Clone(id[:]), Purpose: og.ini.Purpose(), FinAt: now, Issued: og.Issued,
 		OwnIK: bytes.Clone(p.cfg.Keys.IKPublic())}
@@ -142,8 +145,8 @@ func (p *Peer) confirmPending(c *Connection, now time.Time) {
 		c.clearReconnect()
 		// §6.3.1 "The prompt to adopt", §6.6 "Re-minted after every
 		// successful reconnect": fresh tokens under the new epoch.
-		p.issueTo(c, tokStanding, now)
-		p.issueTo(c, tokReconnect, now)
+		p.issue(c, tokStanding, true, now)
+		p.issue(c, tokReconnect, true, now)
 	}
 	if c.Reconnecting && !p.reconnectOpen(c) {
 		c.clearReconnect() // its last try ended above: the session is settled
@@ -152,7 +155,9 @@ func (p *Peer) confirmPending(c *Connection, now time.Time) {
 	p.log().Info("epoch confirmed", "connection_id", c.ID, "purpose", string(pe.Purpose))
 }
 
-// abandonPending abandons the service's pending epoch: its receive key is
+// abandonPending abandons the service's pending epoch (why: b_passed,
+// no_token, fin_revoked, link, crossing, peer_activated, reconnect,
+// replaced, suspended, stale): its receive key is
 // kept 16 days as a previous epoch's (messages under it are processed
 // without confirming it), the tokens its hs.init carried are revoked, and
 // its hs.fin, if still in the outbox, is dropped unsent (§6.3.1, R29-T2).
@@ -171,6 +176,11 @@ func (p *Peer) abandonPending(c *Connection, why string, restart bool, now time.
 		p.denyJTI(j, now)
 	}
 	p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == c.ID && bytes.Equal(e.FinEpoch, pe.ID) })
+	if why != "link" {
+		// Kept until a newer epoch is confirmed: a reconnect may name it
+		// (§6.6). One abandoned by a link is demoted instead (change 4).
+		c.Abandoned = append(c.Abandoned, bytes.Clone(pe.ID))
+	}
 	c.Pending = nil
 	p.markDirty(kindConn, c.ID)
 	p.audit("pending_abandoned_"+why, c.ID)
@@ -232,10 +242,16 @@ func (p *Peer) activeAgain(c *Connection) {
 // (tickPending), and the reconnect of a connection that has a waiting
 // entry and no valid standing token (RELEASE-29 §3 items 2 and 5).
 func (p *Peer) tickPendings(now time.Time) {
+	for id := range p.discardCheck {
+		if c := p.conns[id]; c != nil && c.State == StateActive {
+			p.afterCarriedDiscard(c, now)
+		}
+	}
+	p.discardCheck = nil
 	for _, c := range p.conns {
 		p.tickPending(c, now)
 		if c.State == StateActive && !c.Reconnecting && !c.standingValid(now) && p.standingWaiting(c) {
-			p.beginReconnect(c, now)
+			p.noTokenReconnect(c, now)
 		}
 	}
 }
@@ -250,7 +266,7 @@ func (p *Peer) tickPending(c *Connection, now time.Time) {
 	case pe == nil || c.State == StateSuspended:
 	case p.drained && now.Sub(pe.FinAt) > PendingLife:
 		p.abandonPending(c, "b_passed", true, now)
-	case pe.Purpose == handshake.PurposeRekey && !c.standingValid(now):
+	case pe.Purpose == handshake.PurposeRekey && !c.standingValid(now) && !p.carriedWait(c, now):
 		p.abandonPending(c, "no_token", true, now)
 	}
 }

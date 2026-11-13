@@ -106,15 +106,17 @@ func TestReconnectAfterRestoreFollowsRotation(t *testing.T) {
 	}
 }
 
-// A service vault answering a member keeps the exact ctx (§6.6, 0.72.0):
-// a reconnect naming an earlier epoch of the connection is refused, one
-// naming the last is taken.
+// A reconnect naming an epoch older than the confirmed one, with no
+// change of the member's key since, is refused (§6.6 "Accepting ctx");
+// one naming the last is taken.
 func TestMemberReconnectNamesLastEpochOnly(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
 	cid := f.connect(m, "")
 	first := m.KR.Current().ID()
 	m.StartRekey()
+	f.pump()
+	m.Send("connection.note", []byte(`{}`)) // the new epoch is confirmed
 	f.pump()
 	before := f.p.conns[cid].kr.Current().ID()
 	m.IgnoreStray = true
@@ -134,12 +136,15 @@ func TestMemberReconnectNamesLastEpochOnly(t *testing.T) {
 }
 
 // A member's reconnect changes nothing before its hs.fin: answering it
-// leaves the held tokens and the state as they were (§6.6, 0.72.0).
+// leaves the held tokens and the state as they were (§6.6, 0.72.0). Its
+// tokens are kept with the epoch at hs.fin, and adopted only when the
+// member sends something under it (§6.3.1, R29-T1).
 func TestMemberReconnectDeferredToFin(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
 	cid := f.connect(m, "")
 	held := f.p.conns[cid].Standing
+	f.clk.Advance(time.Hour) // the reconnect's tokens outlast the held ones
 	m.Reconnect()
 	if _, err := f.p.Step(context.Background(), 0); err != nil { // the hs.init, answered
 		t.Fatal(err)
@@ -148,8 +153,17 @@ func TestMemberReconnectDeferredToFin(t *testing.T) {
 		t.Fatal("the hs.init changed the connection before hs.fin")
 	}
 	f.pump()
-	if c := f.p.conns[cid]; c.Standing == held || len(f.p.awaiting) != 0 {
-		t.Fatal("hs.fin did not apply the reconnect")
+	c := f.p.conns[cid]
+	if c.Standing != held || len(f.p.awaiting) != 0 || epochOf(c) != m.KR.Current().ID() {
+		t.Fatal("hs.fin did not establish the reconnect, or adopted its tokens")
+	}
+	if r := c.carriedFor(c.LastEpochID); r == nil || r.Standing.Token == "" {
+		t.Fatal("the reconnect's tokens are not kept with its epoch")
+	}
+	m.Send("connection.note", []byte(`{}`))
+	f.pump()
+	if c = f.p.conns[cid]; c.Standing == held || len(c.Carried) != 0 {
+		t.Fatal("the carried tokens were not adopted at the confirmation")
 	}
 }
 

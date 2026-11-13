@@ -44,7 +44,8 @@ func (p *Peer) mintJTI(connID string, np *peerInfo, kind string, ttl time.Durati
 	}
 	// relayclient backdates iat by 60 s (RELAY-PROTOCOL §5.2); exp = iat + ttl.
 	exp := now.UTC().Truncate(time.Second).Add(-peerwire.TokenBackdate).Add(ttl)
-	p.issued[jti] = &IssuedToken{JTI: jti, Kind: kind, Sub: relayauth.EncodeKey(np.Relay.PK), ConnID: connID, Exp: exp}
+	p.seq++
+	p.issued[jti] = &IssuedToken{JTI: jti, Kind: kind, Sub: relayauth.EncodeKey(np.Relay.PK), ConnID: connID, Exp: exp, Seq: p.seq}
 	p.markDirty(kindToken, jti)
 	return tok, jti, nil
 }
@@ -57,7 +58,12 @@ func (p *Peer) mintRequest(connID string, np *peerInfo, now time.Time) (string, 
 
 // mintStanding issues a standing token with the peer-vault quota (§7.1).
 func (p *Peer) mintStanding(connID string, np *peerInfo, now time.Time) (string, error) {
-	return p.mint(connID, np, tokStanding, p.capTTL(peerwire.StandingMax),
+	tok, _, err := p.mintStandingJTI(connID, np, now)
+	return tok, err
+}
+
+func (p *Peer) mintStandingJTI(connID string, np *peerInfo, now time.Time) (string, string, error) {
+	return p.mintJTI(connID, np, tokStanding, p.capTTL(peerwire.StandingMax),
 		&relayauth.Quota{Msgs: i64(peerwire.PeerQuotaMsgs), Bytes: i64(peerwire.PeerQuotaBytes)}, now)
 }
 
@@ -76,26 +82,53 @@ func (p *Peer) mintReconnectPair(connID string, np *peerInfo, now time.Time) (st
 		p.denyJTI(j1, now)
 		return "", "", nil, err
 	}
+	p.issued[j1].Carried, p.issued[j2].Carried = true, true
 	return st, rt, []string{j1, j2}, nil
 }
 
 // mintReconnect issues a reconnect token (§6.6): ≤ 365 days and the relay
 // cap, 4 messages / 64 KiB.
 func (p *Peer) mintReconnect(connID string, np *peerInfo, now time.Time) (string, error) {
+	tok, _, err := p.mintReconnectJTI(connID, np, now)
+	return tok, err
+}
+
+func (p *Peer) mintReconnectJTI(connID string, np *peerInfo, now time.Time) (string, string, error) {
 	ttl := handshake.ReconnectTokenLifetime(time.Duration(p.limits.MaxTokenLifetimeSeconds) * time.Second)
-	return p.mint(connID, np, tokReconnect, ttl,
+	return p.mintJTI(connID, np, tokReconnect, ttl,
 		&relayauth.Quota{Msgs: i64(handshake.ReconnectTokenQuotaMsgs), Bytes: i64(handshake.ReconnectTokenQuotaBytes)}, now)
 }
 
 // heldToken checks a token a member's vault issued to the service
 // (peerwire.VerifyHeldToken).
-func (p *Peer) heldToken(tok string, np *peerInfo) (HeldToken, error) {
+// A token no honest issuer mints is refused (as vettid-vault #244): one
+// whose lifetime exp - iat is over §7.1's bound for its kind (a reconnect
+// token 365 days, any other 30 days), or whose iat is more than the inner
+// ts skew ahead. With "a later exp wins", a far-future token would
+// otherwise pin the held one.
+func (p *Peer) heldToken(tok string, np *peerInfo, kind string) (HeldToken, error) {
 	c, err := peerwire.VerifyHeldToken(tok, np.Relay.PK, np.Relay.Mailbox, np.Relay.URL, p.cfg.Keys.RelayPublic())
 	if err != nil {
 		return HeldToken{}, err
 	}
+	max := peerwire.StandingMax
+	if kind == tokReconnect {
+		max = maxReconnectLife
+	}
+	if c.Exp.Sub(c.Iat) > max || c.Iat.After(p.now().Add(heldIatSkew)) {
+		return HeldToken{}, errTokenBound
+	}
 	return HeldToken{Token: tok, Exp: c.Exp}, nil
 }
+
+// maxReconnectLife is §7.1's bound for a reconnect token; heldIatSkew how
+// far ahead a held token's iat may be (the inner ts skew, §8.4).
+const (
+	maxReconnectLife = 365 * 24 * time.Hour
+	heldIatSkew      = 5 * time.Minute
+)
+
+var errTokenBound = errors.New("peer: token over its lifetime bound")
 
 // denyJTI revokes one token (§7.4: invitations).
 func (p *Peer) denyJTI(jti string, now time.Time) {
@@ -150,18 +183,26 @@ func (p *Peer) remintIssued(now time.Time) {
 }
 
 func (p *Peer) issueTo(c *Connection, kind string, now time.Time) {
+	p.issue(c, kind, false, now)
+}
+
+// issue is issueTo; prompt marks a token re-minted at a confirmation.
+func (p *Peer) issue(c *Connection, kind string, prompt bool, now time.Time) {
 	if c.Reconnecting || p.outboxFor(c.ID) >= MaxOutboxPerConn {
 		return // not deliverable now: mint it when it can be sent
 	}
-	var tok string
+	var tok, jti string
 	var err error
 	if kind == tokReconnect {
-		tok, err = p.mintReconnect(c.ID, &c.Peer, now)
+		tok, jti, err = p.mintReconnectJTI(c.ID, &c.Peer, now)
 	} else {
-		tok, err = p.mintStanding(c.ID, &c.Peer, now)
+		tok, jti, err = p.mintStandingJTI(c.ID, &c.Peer, now)
 	}
 	if err != nil {
 		return
+	}
+	if t := p.issued[jti]; prompt && t != nil {
+		t.Prompt = true
 	}
 	p.sendTo(c, peerwire.TypeTokenIssued, peerwire.TokenIssuedBody(kind, tok), now)
 }
@@ -208,12 +249,22 @@ func (p *Peer) storeIssuedTo(c *Connection, body json.RawMessage) {
 		p.audit("bad_issued_token", c.ID)
 		return
 	}
-	ht, err := p.heldToken(tok, &c.Peer)
-	if err != nil {
+	if kind != tokReconnect {
+		kind = tokStanding
+	}
+	ht, err := p.heldToken(tok, &c.Peer, kind)
+	if err != nil || !p.now().Before(ht.Exp) {
 		p.audit("bad_issued_token", c.ID)
 		return
 	}
 	if kind == tokReconnect {
+		// Only one with a later exp, as for a handshake's carried token
+		// (§6.3.1, as vettid-vault #244): a copy holding the session's
+		// keys cannot swap in a shorter-lived one.
+		if !ht.Exp.After(c.Reconnect.Exp) {
+			p.audit("issued_token_not_newer", c.ID)
+			return
+		}
 		c.Reconnect = ht
 		p.markDirty(kindConn, c.ID)
 		return
@@ -251,13 +302,7 @@ func (p *Peer) answerTokenRefresh(c *Connection, now time.Time) (json.RawMessage
 		p.markDirty(kindConn, c.ID)
 	}
 	if quota {
-		for _, t := range p.issued {
-			if t.ConnID == c.ID && t.Kind == tokStanding && !t.Denied {
-				t.Denied = true
-				p.markDirty(kindToken, t.JTI)
-				p.queueRevoke(t.JTI, now)
-			}
-		}
+		p.revokeAtRefresh(c, now)
 		c.Refreshed = now
 		p.markDirty(kindConn, c.ID)
 	}
@@ -266,6 +311,83 @@ func (p *Peer) answerTokenRefresh(c *Connection, now time.Time) (json.RawMessage
 		return nil, errors.New("relay_error")
 	}
 	return peerwire.TokenIssuedBody(tokStanding, tok), nil
+}
+
+// revokeAtRefresh revokes, at a refresh after quota_exceeded, the standing
+// tokens issued to c that §6.3.1 "Revocation by the issuer" and §7.2 let
+// it (RELEASE-29 §12): the one the refresh was deposited under always;
+// never one a still-open handshake carried, the newest one a reconnect
+// carried, the newest one re-minted at a confirmation, nor one newer than
+// the one it came under; the others too.
+func (p *Peer) revokeAtRefresh(c *Connection, now time.Time) {
+	keep := map[string]bool{}
+	for _, aw := range p.awaiting {
+		if aw.ConnID == c.ID && aw.Reconnect != nil {
+			for _, j := range aw.Reconnect.Issued {
+				keep[j] = true
+			}
+		}
+	}
+	for _, og := range p.outgoing {
+		if og.ConnID == c.ID {
+			for _, j := range og.Issued {
+				keep[j] = true
+			}
+		}
+	}
+	if c.Pending != nil {
+		for _, j := range c.Pending.Issued {
+			keep[j] = true
+		}
+	}
+	// Newer: a later exp; at an equal exp a handshake's token (carried or
+	// re-minted at a confirmation) counts as newer; then the later mint.
+	hs := func(t *IssuedToken) bool { return t.Carried || t.Prompt }
+	newer := func(a, b *IssuedToken) bool {
+		switch {
+		case !a.Exp.Equal(b.Exp):
+			return a.Exp.After(b.Exp)
+		case hs(a) != hs(b):
+			return hs(a)
+		}
+		return a.Seq > b.Seq
+	}
+	var carried, prompt *IssuedToken
+	for _, t := range p.issued {
+		if t.ConnID != c.ID || t.Kind != tokStanding || t.Denied {
+			continue
+		}
+		if t.Carried && (carried == nil || newer(t, carried)) {
+			carried = t
+		}
+		if t.Prompt && (prompt == nil || newer(t, prompt)) {
+			prompt = t
+		}
+	}
+	for _, t := range []*IssuedToken{carried, prompt} {
+		if t != nil {
+			keep[t.JTI] = true
+		}
+	}
+	// The token the refresh came under; unknown (no collect jti, or not a
+	// standing token issued to this connection): every other is judged as
+	// before, all but the spared ones revoked.
+	under := p.issued[p.msgJTI]
+	if under != nil && (under.ConnID != c.ID || under.Kind != tokStanding) {
+		under = nil
+	}
+	for _, t := range p.issued {
+		if t.ConnID != c.ID || t.Kind != tokStanding || t.Denied {
+			continue
+		}
+		if t != under && (keep[t.JTI] || under != nil && newer(t, under)) {
+			continue
+		}
+		// The one it came under is always revoked, a handshake's too.
+		t.Denied = true
+		p.markDirty(kindToken, t.JTI)
+		p.queueRevoke(t.JTI, now)
+	}
 }
 
 // handleRefreshAnswer handles the answer to our relay.token.refresh.

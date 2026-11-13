@@ -18,12 +18,11 @@ import (
 // dispatch handles a decrypted session-mode message from an active
 // connection (§8.2, §8.3, §8.4, §7.3).
 func (p *Peer) dispatch(ctx context.Context, c *Connection, in *envelope.Inner, ep *handshake.Epoch, raw []byte, sender ed25519.PublicKey, msgID string, now time.Time) (disposition, error) {
-	p.markDirty(kindConn, c.ID)     // the epoch's receive count moved
-	if !c.relayKeyIs(sender, now) { // §6.3, or the key before a legacy relay.address.update
+	p.markDirty(kindConn, c.ID)                      // the epoch's receive count moved
+	if !suite.EqualPublic(sender, c.Peer.Relay.PK) { // §6.3
 		p.audit("sender_mismatch", c.ID)
 		return ackAfterFlush, nil
 	}
-	p.noteSender(c, sender, now)
 	if c.State == StateSuspended {
 		p.audit("connection_suspended", c.ID) // §3.4: nothing is accepted
 		return ackAfterFlush, nil
@@ -38,7 +37,9 @@ func (p *Peer) dispatch(ctx context.Context, c *Connection, in *envelope.Inner, 
 	// §6.3.1 before anything else is done with the message (the rate
 	// limit, the ts window, dedupe, its handler): the received flag and
 	// the confirmed epoch (RELEASE-29 §13, change 1).
-	p.noteFromMember(c, ep, now)
+	if p.noteFromMember(c, ep, in, now) {
+		return ackAfterFlush, nil
+	}
 	if in.Type == handshake.TypeInit {
 		_, seen, err := p.cfg.Store.Get(ctx, kindInner, rekeyKey(handshake.Th1(raw)))
 		if err != nil {
@@ -108,13 +109,13 @@ func (p *Peer) dispatch(ctx context.Context, c *Connection, in *envelope.Inner, 
 	case TypeRelayAddressUpdate:
 		// Refused from every member, as vettid-vault #241 makes the member
 		// vault do (the audit names differ: a service has no drop.peer_key
-		// record): it moved
-		// the connection's mailbox and tokens on the session's
-		// authentication alone, with no signed relay links and none of
-		// rule U's checks (VAULT-MESSAGING §3.4.1), so an old copy of a
-		// member's vault holding the session's keys could redirect our
-		// deposits. Release 29 rotates no relay key (§3.4.1 A5); §3.4.2's
-		// rules replace this (GC #9442). Acked, dropped, nothing changes.
+		// record). It moved the connection's mailbox and tokens on the
+		// session's authentication alone, with no signed relay links and
+		// none of rule U's checks (VAULT-MESSAGING §3.4.1), so an old copy
+		// of a member's vault holding the session's keys could redirect
+		// our deposits. Release 29 rotates no relay key (§3.4.1 A5);
+		// §3.4.2's rules replace this (GC #9442). Acked, dropped, nothing
+		// changes.
 		p.audit("address_update_refused", c.ID)
 	case peerwire.TypeConnAuthChallenge:
 		// The service has no member credential to sign with (§10.4); a
@@ -515,6 +516,7 @@ func (p *Peer) housekeeping(now time.Time) {
 		if c.kr != nil {
 			c.kr.Prune(now)
 		}
+		p.sweepCarried(c, now)
 		if c.Reconnecting {
 			p.checkReconnect(c, now)
 			continue
@@ -523,7 +525,10 @@ func (p *Peer) housekeeping(now time.Time) {
 			continue
 		}
 		if !c.standingValid(now) && p.standingWaiting(c) {
-			continue // tickPendings reconnects, after the batch
+			// tickPendings reconnects, after the batch, unless carried
+			// tokens wait; hs.confirm still goes again meanwhile.
+			p.tickConfirm(c, now)
+			continue
 		}
 		if c.kr != nil && c.kr.Current() != nil && c.kr.Current().NeedsRekey(now) {
 			p.startRekey(c, now)

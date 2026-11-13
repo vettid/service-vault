@@ -82,6 +82,12 @@ type Peer struct {
 	// reconfirm marks the connections the current batch owes an
 	// hs.confirm (§6.3.1 Responder; noteFromMember).
 	reconfirm map[string]bool
+	// msgJTI is the collect jti of the message being handled ("" when
+	// none): the token it was deposited under.
+	msgJTI string
+	// discardCheck marks the connections whose carried tokens a batch
+	// discarded at adoption: judged after the batch (tickPendings).
+	discardCheck map[string]bool
 	// drained is the start latch for B (RELEASE-29 §2): clear at every
 	// start and at a failed collect, set once a collect with fewer than
 	// MaxBatch messages has been processed and written.
@@ -214,7 +220,7 @@ func (p *Peer) Start(ctx context.Context) error {
 	}
 	for _, c := range p.conns {
 		if c.State == StateActive && !c.standingValid(p.now()) {
-			p.beginReconnect(c, p.now()) // §7.2 "On unlock" step 3 (RELEASE-29 §3 item 2)
+			p.noTokenReconnect(c, p.now()) // §7.2 "On unlock" step 3 (RELEASE-29 §3 item 2)
 		}
 	}
 	p.housekeeping(p.now())
@@ -582,7 +588,9 @@ func (p *Peer) handleMessage(ctx context.Context, m relayclient.Message, now tim
 		p.audit("bad_envelope", "")
 		return ackAfterFlush, nil
 	}
-	c := p.connByRelayKey(sender, now)
+	c := p.connByRelayKey(sender)
+	p.msgJTI = m.JTI
+	defer func() { p.msgJTI = "" }()
 	// §7.1 (0.10.3): a request token covers only the rest of a handshake
 	// awaiting approval and connection.approved / declined.
 	if t := p.issued[m.JTI]; m.JTI != "" && t != nil && t.Kind == tokRequest {
@@ -670,16 +678,10 @@ func kidEqual(b []byte, k suite.Kid) bool {
 	return x.Equal(k)
 }
 
-// connByRelayKey finds a connection by its member's relay key, or the
-// previous one within a legacy PrevRelayGrace (rotation.go).
-func (p *Peer) connByRelayKey(pk ed25519.PublicKey, now time.Time) *Connection {
+// connByRelayKey finds a connection by its member's relay key.
+func (p *Peer) connByRelayKey(pk ed25519.PublicKey) *Connection {
 	for _, c := range p.conns {
 		if suite.EqualPublic(c.Peer.Relay.PK, pk) {
-			return c
-		}
-	}
-	for _, c := range p.conns {
-		if c.relayKeyIs(pk, now) {
 			return c
 		}
 	}

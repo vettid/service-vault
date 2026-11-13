@@ -170,8 +170,8 @@ func (p *Peer) peerApproved(r *request, in *envelope.Inner, now time.Time) {
 		p.audit("bad_connection_approved", r.ID)
 		return
 	}
-	st, err1 := p.heldToken(tok, &r.Peer)
-	rt, err2 := p.heldToken(rtok, &r.Peer)
+	st, err1 := p.heldToken(tok, &r.Peer, tokStanding)
+	rt, err2 := p.heldToken(rtok, &r.Peer, tokReconnect)
 	if err1 != nil || err2 != nil {
 		p.audit("bad_connection_approved", r.ID)
 		return
