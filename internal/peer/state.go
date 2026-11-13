@@ -109,6 +109,10 @@ type Connection struct {
 	// deposits).
 	Reconnecting   bool `json:"reconnecting,omitempty"`
 	ReconnectTries int  `json:"reconnect_tries,omitempty"`
+	// ReconnectTriesFor is the epoch ReconnectTries counts tries for: a
+	// reconnect naming another epoch starts its count afresh (§3.4.1 "The
+	// reconnect bound": the third failed try for one named epoch).
+	ReconnectTriesFor []byte `json:"reconnect_tries_for,omitempty"`
 	// ReconnectSince is when the reconnect's first try started;
 	// ReconnectSlow is set once the reconnect_slow alarm was raised.
 	ReconnectSince time.Time `json:"reconnect_since,omitzero"`

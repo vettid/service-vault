@@ -85,7 +85,10 @@ type EpochMeta struct {
 // msg_id (§3.4.1 "Cut-off"; the service has one mailbox, so msg_id order
 // is the relay's order; a shorter one sorts first), or with either id
 // missing, a later deposited_at. (vettid-vault compares deposited_at
-// first; the spec orders by msg_id.)
+// first; the spec orders by msg_id.) msg_id order holds within one
+// mailbox only: when the service's own relay key rotates (§3.4.2, GC
+// #9442) and it collects from more than one mailbox, positions must carry
+// their mailbox and this order must change.
 func posAfter(at time.Time, id string, at2 time.Time, id2 string) bool {
 	if id != "" && id2 != "" {
 		// One mailbox: the relay's msg_id order is its order (a ULID it
