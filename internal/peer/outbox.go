@@ -137,7 +137,11 @@ func (p *Peer) drainOutbox(ctx context.Context) {
 		if c := p.conns[e.ConnID]; e.Op == opDeposit && e.Token == "" && !e.Handshake && c != nil && (c.Reconnecting || c.State == StateStale) {
 			// Nothing but the handshake while a reconnect is open (RELEASE-29
 			// §3); a stale connection's entries wait for a new epoch, which
-			// seals them again (§3.4.1: stale is not final).
+			// seals them again (§3.4.1: stale is not final). A held entry
+			// still ends at its exp or past its window (§8.3 cases 1, 2).
+			if !e.NotAfter.IsZero() && !now.Before(e.NotAfter) || p.heldDrop(e, now) {
+				done[e] = true
+			}
 			continue
 		}
 		if !e.NotAfter.IsZero() && !now.Before(e.NotAfter) {

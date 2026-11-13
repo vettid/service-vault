@@ -36,7 +36,9 @@ const ConfirmResend = 12 * 24 * time.Hour
 // serviceFeatures are the capabilities the service advertises, in every
 // message's inner features and in its profile.update (§10.8, §6.3.1
 // Capability; RELEASE-29 §6): sorted, each once. relay_follow is not
-// advertised until the spec settles what it asks of a service vault.
+// advertised: a vault advertises it only once it implements both §3.4.1
+// and §3.4.2 (VAULT-MESSAGING 0.90.0), and the service's §3.4.2 is not
+// built yet.
 var serviceFeatures = []string{handshake.CapConfirm}
 
 // features returns a copy of serviceFeatures for one message.
@@ -375,6 +377,34 @@ func (p *Peer) checkAtDeposit(e *outboxEntry, now time.Time) int {
 		p.log().Warn("deposited late: it may not be delivered", "reason", "unconfirmed_late", "connection_id", c.ID, "ref", in.ID, "type", in.Type)
 	}
 	return atDepositGo
+}
+
+// heldDrop reports whether a held durable entry (behind an open reconnect,
+// or to a stale connection) ends while it waits: its exp passed
+// (held_expired), or it was tried and is past the 16-day window
+// (undelivered_window), each audited (§8.3 cases 1, 2).
+func (p *Peer) heldDrop(e *outboxEntry, now time.Time) bool {
+	c := p.conns[e.ConnID]
+	if c == nil || e.Confirm || e.BestEffort || len(e.Payload) == 0 || c.kr == nil || c.kr.Current() == nil {
+		return false
+	}
+	env, err := envelope.Parse(e.Payload)
+	if err != nil {
+		return false
+	}
+	in, err := c.kr.Current().OpenSent(env)
+	if err != nil || in.Type == handshake.TypeInit || in.Type == handshake.TypeFin {
+		return false
+	}
+	switch {
+	case !in.Exp.IsZero() && !now.Before(in.Exp):
+		p.logDrop(c, "held_expired", in)
+		return true
+	case e.Tried && now.Sub(in.TS) >= DedupeRetention:
+		p.logDrop(c, "undelivered_window", in)
+		return true
+	}
+	return false
 }
 
 // logDrop audits one waiting message that is not delivered (§8.3 "Not

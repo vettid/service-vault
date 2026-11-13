@@ -258,7 +258,7 @@ func (p *Peer) finishReconnect(c *Connection, og *outgoing, res *handshake.Resul
 	// this one, whose message makes the change.
 	c.Reconnecting = false
 	if len(fresh) > 0 {
-		p.followRotation(c, res.ResponderIK, res.ResponderKEM, fresh)
+		p.followRotation(c, res.ResponderIK, res.ResponderKEM, fresh, false)
 	}
 	if c.State == StateSuspended {
 		// Following judged an answer's links: a fork. The suspension
@@ -270,6 +270,15 @@ func (p *Peer) finishReconnect(c *Connection, og *outgoing, res *handshake.Resul
 		}
 		p.markDirty(kindConn, c.ID)
 		return ackAfterFlush
+	}
+	// Our open answers to the member's rekeys end too, as at a crossing
+	// with our reconnect (§6.5: answered, then dropped when the reconnect
+	// completes; their links were judged above); kept, they would hold our rekeys back for up to L.
+	for aid, aw := range p.awaiting {
+		if aw.ConnID == c.ID && aw.New == nil && aw.Purpose == handshake.PurposeRekey {
+			p.audit("rekey_answer_ended_by_reconnect", c.ID)
+			p.dropAwaiting(aid, now)
+		}
 	}
 	c.Reconnecting = true
 	p.activeAgain(c)

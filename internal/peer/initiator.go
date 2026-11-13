@@ -47,6 +47,9 @@ type PendingEpoch struct {
 	// after an abandonment goes on the held reconnect token.
 	Standing  HeldToken `json:"standing,omitzero"`
 	Reconnect HeldToken `json:"reconnect,omitzero"`
+	// OwnIK is the service's identity key the handshake was made under: a
+	// pending epoch stored under another is abandoned at load (R29-I7).
+	OwnIK []byte `json:"own_ik,omitempty"`
 }
 
 // standingValid reports whether the service holds a standing token for
@@ -74,7 +77,8 @@ func (p *Peer) makePending(c *Connection, og *outgoing, res *handshake.Result, c
 	}
 	c.kr.SetPending(res.Epoch, now)
 	id := res.Epoch.ID()
-	pe := &PendingEpoch{ID: bytes.Clone(id[:]), Purpose: og.ini.Purpose(), FinAt: now, Issued: og.Issued}
+	pe := &PendingEpoch{ID: bytes.Clone(id[:]), Purpose: og.ini.Purpose(), FinAt: now, Issued: og.Issued,
+		OwnIK: bytes.Clone(p.cfg.Keys.IKPublic())}
 	if carried != nil {
 		pe.Standing, pe.Reconnect = carried.Standing, carried.Reconnect
 	}
@@ -133,6 +137,10 @@ func (p *Peer) confirmPending(c *Connection, now time.Time) {
 		}
 	case handshake.PurposeReconnect:
 		c.clearReconnect()
+		// §6.3.1 "The prompt to adopt", §6.6 "Re-minted after every
+		// successful reconnect": fresh tokens under the new epoch.
+		p.issueTo(c, tokStanding, now)
+		p.issueTo(c, tokReconnect, now)
 	}
 	if c.Reconnecting && !p.reconnectOpen(c) {
 		c.clearReconnect() // its last try ended above: the session is settled
@@ -216,7 +224,15 @@ func (p *Peer) activeAgain(c *Connection) {
 	}
 }
 
-// tickPending (housekeeping) applies B, judged only while the start latch
+// tickPendings runs tickPending for every connection, after a batch has
+// been processed (a confirmation in it comes first) and at a tick.
+func (p *Peer) tickPendings(now time.Time) {
+	for _, c := range p.conns {
+		p.tickPending(c, now)
+	}
+}
+
+// tickPending applies B, judged only while the start latch
 // is set, and abandons a pending rekey when the service holds no valid
 // standing token for the member (R29-I6; a pending reconnect is not: it
 // ends at B).

@@ -612,7 +612,15 @@ func (p *Peer) load(ctx context.Context) error {
 			// The pending epoch's record and its keys are written together;
 			// one without the other is abandoned, after the load
 			// (orphanPending), with its hs.fin and tokens.
-			if c.Pending != nil && kr.Pending() == nil {
+			if c.Pending != nil && len(c.Pending.OwnIK) > 0 && !bytes.Equal(c.Pending.OwnIK, p.cfg.Keys.IKPublic()) {
+				// Made under another identity key than the service's: never
+				// confirmable (R29-I7, RELEASE-29 §1).
+				p.log().Error("a stored pending epoch names another identity key than this service's: abandoned; check the service's keys and secrets",
+					"alarm", "outgoing_identity_changed", "connection_id", c.ID)
+				orphans = append(orphans, orphan{c, c.Pending.ID, c.Pending.Issued})
+				c.Pending = nil
+				kr.AbandonPending(p.now())
+			} else if c.Pending != nil && kr.Pending() == nil {
 				orphans = append(orphans, orphan{c, c.Pending.ID, c.Pending.Issued})
 				c.Pending = nil
 			} else if c.Pending == nil && kr.Pending() != nil {

@@ -76,7 +76,7 @@ func (p *Peer) identityRotate(c *Connection, body []byte, now time.Time) {
 		p.audit("bad_rotation", c.ID)
 		return
 	}
-	p.followRotation(c, final, kem, []*handshake.Rotation{r})
+	p.followRotation(c, final, kem, []*handshake.Rotation{r}, true)
 }
 
 // revisits reports whether following links would lead the connection's
@@ -100,8 +100,10 @@ func (p *Peer) revisits(c *Connection, links []*handshake.Rotation) bool {
 }
 
 // followRotation records links the connection's identity advanced through
-// and its new keys.
-func (p *Peer) followRotation(c *Connection, ik ed25519.PublicKey, kem *suite.PublicKey, links []*handshake.Rotation) {
+// and its new keys. restart is set when the links came in an
+// identity.rotate: only then is an open reconnect of ours started again
+// (a handshake's own links make the change it completes).
+func (p *Peer) followRotation(c *Connection, ik ed25519.PublicKey, kem *suite.PublicKey, links []*handshake.Rotation, restart bool) {
 	c.Peer.IK = ik
 	if kem != nil {
 		c.Peer.KEM = kem.Bytes()
@@ -124,7 +126,7 @@ func (p *Peer) followRotation(c *Connection, ik ed25519.PublicKey, kem *suite.Pu
 	now := p.now()
 	// Only a try of ours is restarted; a member's reconnect we yielded to
 	// is not ours to start again.
-	ownTry := c.Reconnecting && (p.outgoingReconnect(c) || c.pendingReconnect())
+	ownTry := restart && c.Reconnecting && (p.outgoingReconnect(c) || c.pendingReconnect())
 	p.dropConnOutgoing(c)
 	p.abandonPending(c, "link", false, now)
 	p.markDirty(kindConn, c.ID)
@@ -219,7 +221,7 @@ func (p *Peer) followAtFin(c *Connection, f *pendingFollow, now time.Time) bool 
 		return false
 	}
 	if len(fresh) > 0 {
-		p.followRotation(c, ik, kem, fresh)
+		p.followRotation(c, ik, kem, fresh, false)
 	}
 	return c.State != StateSuspended // following judged another answer's links
 }

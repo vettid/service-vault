@@ -330,7 +330,7 @@ func (p *Peer) applyReconnect(c *Connection, pend *pendingReconnect) error {
 			p.dropConnOutgoing(c)
 		}
 		if len(fresh) > 0 {
-			p.followRotation(c, ik, kem, fresh)
+			p.followRotation(c, ik, kem, fresh, false)
 		}
 		if c.State == StateSuspended {
 			return errSuspended // following judged another answer's links: a fork
@@ -370,7 +370,7 @@ func (p *Peer) applyReconnect(c *Connection, pend *pendingReconnect) error {
 		p.dropConnOutgoing(c)
 	}
 	if len(links) > 0 {
-		p.followRotation(c, pend.IK, kem, links)
+		p.followRotation(c, pend.IK, kem, links, false)
 	}
 	if c.State == StateSuspended {
 		return errSuspended
@@ -567,10 +567,17 @@ func (p *Peer) handleFin(id string, raw []byte, sender ed25519.PublicKey, now ti
 			}
 		}
 	}
-	// Activating the member's handshake as responder abandons the
-	// service's own pending epoch (§6.3.1 Responder; a verified hs.fin
-	// comes first, R29-X2).
+	// A verified hs.fin comes first (§6.5, §6.6, R29-X2): activating the
+	// member's handshake as responder abandons every handshake of the
+	// service's own with the member (its rekeys and reconnect awaiting
+	// hs.resp, and its pending epoch), and an open reconnect of its is
+	// settled: the session is common again, at this epoch.
+	p.dropConnOutgoing(c)
 	p.abandonPending(c, "peer_activated", false, now)
+	if c.Reconnecting {
+		c.clearReconnect()
+		p.audit("reconnect_settled_by_member", c.ID)
+	}
 	p.installEpoch(c, fr.Epoch, now)
 	p.activeAgain(c)
 	// The member's vault holds the epoch pending until a message from us
@@ -729,8 +736,8 @@ func (p *Peer) startRekey(c *Connection, now time.Time) {
 		}
 	}
 	for _, aw := range p.awaiting {
-		if aw.ConnID == c.ID && aw.Purpose == handshake.PurposeRekey {
-			return // the member's rekey is in flight
+		if aw.ConnID == c.ID && aw.New == nil {
+			return // an answer of ours awaits the member's hs.fin (§6.5, S5)
 		}
 	}
 	ini, err := handshake.NewInitiator(handshake.InitiatorConfig{
@@ -799,7 +806,7 @@ func (p *Peer) handleResp(id string, raw []byte, sender ed25519.PublicKey, now t
 		return ackAfterFlush
 	}
 	if len(fresh) > 0 {
-		p.followRotation(c, res.ResponderIK, res.ResponderKEM, fresh)
+		p.followRotation(c, res.ResponderIK, res.ResponderKEM, fresh, false)
 	}
 	if c.State == StateSuspended {
 		// Following judged an answer's links: a fork. No hs.fin, no epoch.

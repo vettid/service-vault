@@ -1,7 +1,6 @@
 # Release 29 in the service vault
 
-**Status:** 0.5.0, draft (2026-11-12). Against VAULT-MESSAGING 0.89.2, and
-0.90.0 for `relay_follow` (section 6).
+**Status:** 0.5.1, draft (2026-11-13). Against VAULT-MESSAGING 0.90.1.
 
 VAULT-MESSAGING §6.3.1 ("Lifetimes and activation on confirmation",
 release 29) asks a service vault to follow its rules "on either side as
@@ -85,7 +84,9 @@ current epoch unless stated:
    the second change the service made the connection `stale` and
    dropped its other entries.) A reconnect's own `hs.init`
    answered `token_revoked` is a failed try at once, as §8.6 says (it can
-   never be answered); a carried token's refusal is not a try at all;
+   never be answered), and as the service then holds no other reconnect
+   token, the connection becomes `stale` at once (no try can start); a
+   carried token's refusal is not a try at all;
 5. after `quota_exceeded` on its standing token, at once and also while
    its own rekey is pending (which the reconnect abandons), when the
    refresh itself is refused for the token's quota, when a deposit is
@@ -413,8 +414,11 @@ separately. The README's release-29 status paragraph shrinks with each.
    service's own reconnect's `hs.resp` are kept with its pending epoch,
    its `hs.fin` going on the carried standing token, and adopted at its
    confirmation (§6.3.1), so that a new try after an abandonment goes on
-   the held reconnect token; the rest of carried tokens is the third
-   change's. A pending epoch
+   the held reconnect token; at that confirmation the service also
+   re-mints a standing and a reconnect token for the member ("The prompt
+   to adopt", §6.6), and a verified `hs.fin` of the member's ends every
+   open handshake of the service's own and settles its reconnect (X2,
+   §6.5). The rest of carried tokens is the third change's. A pending epoch
    abandoned by a link (K2) is abandoned here; its demotion from the
    start, which refuses messages under it, comes with the fourth.
 3. **Forks and tokens.** Rule E (section 9) and its fork evidence; a
@@ -452,6 +456,9 @@ separately. The README's release-29 status paragraph shrinks with each.
 
 ## Changes
 
+- **0.5.1 (2026-11-13):** pinned to VAULT-MESSAGING 0.90.1; §3 item 4, a
+  reconnect `hs.init` refused `token_revoked` makes the connection
+  `stale` at once; §14, the prompt to adopt and X2 in the second change.
 - **0.5.0 (2026-11-12):** §6, `relay_follow` is not advertised
   (VAULT-MESSAGING 0.90.0); §14, the service's own reconnect adopts its
   carried tokens at confirmation in the second change; §3 item 8, a

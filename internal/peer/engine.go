@@ -218,6 +218,7 @@ func (p *Peer) Start(ctx context.Context) error {
 		}
 	}
 	p.housekeeping(p.now())
+	p.tickPendings(p.now())
 	if err := p.flush(ctx); err != nil {
 		return err
 	}
@@ -319,6 +320,7 @@ func (p *Peer) Tick(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.housekeeping(p.now())
+	p.tickPendings(p.now())
 	return p.flushAndDrain(ctx)
 }
 
@@ -408,6 +410,7 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 		}
 	}
 	p.reconfirmAll(now)
+	p.tickPendings(now) // after the batch: a confirmation in it comes first
 	if err := p.flush(ctx); err != nil {
 		return len(msgs), err
 	}

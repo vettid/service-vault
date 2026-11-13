@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/vettid/service-vault/internal/peer/peertest"
 
+	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
@@ -583,4 +585,408 @@ func TestReconnectFinRevokedRetriesOnHeldToken(t *testing.T) {
 	if c.Reconnecting || c.State != StateActive || epochOf(c) != m.KR.Current().ID() || c.Standing.Token == refused[0] {
 		t.Fatalf("reconnecting %v, state %s", c.Reconnecting, c.State)
 	}
+}
+
+// beginReconnectNow starts a reconnect of the service's at once and
+// deposits its hs.init.
+func (f *fixture) beginReconnectNow(cid string) {
+	f.t.Helper()
+	f.p.mu.Lock()
+	f.p.beginReconnect(f.p.conns[cid], f.clk.Now())
+	f.p.mu.Unlock()
+	if err := f.p.Tick(context.Background()); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// answerBeforeReconnect has the service answer a member's rekey (with
+// links when links is set) and then start a reconnect of its own, before
+// the member collects anything.
+func answerBeforeReconnect(t *testing.T, f *fixture, m *peertest.Member, cid string, links bool) {
+	t.Helper()
+	if links {
+		m.RotateIdentity(40, true)
+		m.StartRekeyWithLinks()
+	} else {
+		m.StartRekey()
+	}
+	f.step() // answered; its hs.resp is deposited
+	f.beginReconnectNow(cid)
+	if c := f.p.conns[cid]; !c.Reconnecting || len(f.p.outgoing) != 1 || len(f.p.awaiting) != 1 {
+		t.Fatalf("reconnecting %v, %d outgoing, %d awaiting", c.Reconnecting, len(f.p.outgoing), len(f.p.awaiting))
+	}
+}
+
+// A verified hs.fin comes first (R29-X2): the member's hs.fin for a rekey
+// we answered ends our open reconnect try and settles the reconnect; the
+// session goes on at the member's epoch, and what waited goes.
+func TestMemberFinSettlesOurReconnect(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	answerBeforeReconnect(t, f, m, cid, false)
+	id := f.p.sendTo(f.p.conns[cid], "connection.note", []byte(`{}`), f.clk.Now())
+	m.IgnoreStray, m.IgnoreRevoked = true, true
+	m.Step() // our hs.resp: the member sends hs.fin; then it answers our reconnect
+	f.step()
+	c := f.p.conns[cid]
+	if c.Reconnecting || len(f.p.outgoing) != 0 || c.Pending != nil || !f.audited("reconnect_settled_by_member") {
+		t.Fatalf("reconnecting %v, %d outgoing, pending %v", c.Reconnecting, len(f.p.outgoing), c.Pending)
+	}
+	f.pump()
+	got := false
+	for _, g := range m.Got {
+		got = got || g.ID == id
+	}
+	if c = f.p.conns[cid]; epochOf(c) != m.KR.Current().ID() || !got {
+		t.Fatalf("epoch split or message not delivered (got %v)", got)
+	}
+}
+
+// Our reconnect's hs.resp ends our open answers to the member's rekeys
+// (§6.5): they no longer hold our rekeys back.
+func TestOurReconnectEndsOurRekeyAnswers(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	st := f.p.conns[cid].Standing.Token
+	f.failDeposit = func(_, token string) error {
+		if token == st {
+			// Our hs.resp to the member's rekey waits for a token; deposits
+			// on a token of their own pass it.
+			return &relayclient.Error{Status: 401, Code: codeTokenExpired}
+		}
+		return nil
+	}
+	m.StartRekey()
+	f.step()
+	f.beginReconnectNow(cid)
+	m.IgnoreStray, m.IgnoreRevoked = true, true
+	m.Step() // the member answers our reconnect
+	f.step()
+	if !f.audited("rekey_answer_ended_by_reconnect") {
+		t.Fatal("our rekey answer was not ended")
+	}
+	for _, aw := range f.p.awaiting {
+		if aw.Purpose == handshake.PurposeRekey {
+			t.Fatal("our rekey answer still awaits its hs.fin")
+		}
+	}
+}
+
+// Links followed at a member's hs.fin do not restart our reconnect (only
+// an identity.rotate does, H5): the hs.fin settles it instead.
+func TestFollowAtFinDoesNotRestart(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	answerBeforeReconnect(t, f, m, cid, true)
+	m.IgnoreStray, m.IgnoreRevoked = true, true
+	before := strings.Count(f.logs.String(), "reconnect started")
+	m.Step()
+	f.step()
+	c := f.p.conns[cid]
+	if c.ReconnectRestartIK != nil || strings.Count(f.logs.String(), "reconnect started") != before || c.Reconnecting {
+		t.Fatalf("restarted: %v, reconnecting %v", c.ReconnectRestartIK != nil, c.Reconnecting)
+	}
+}
+
+// At its confirmation, a message waiting under the old epoch is sealed
+// again under the new one with the same inner id (§8.3).
+func TestConfirmationResealsWaiting(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	old, pend := ownRekeyPending(t, f, m, cid)
+	mb := f.p.conns[cid].Peer.Relay.Mailbox
+	f.failDeposit = func(mailbox, _ string) error {
+		if mailbox == mb {
+			return errUnavailable
+		}
+		return nil
+	}
+	c := f.p.conns[cid]
+	id := f.p.sendTo(c, "connection.note", []byte(`{}`), f.clk.Now())
+	m.Send("connection.note", []byte(`{}`)) // under our pending epoch
+	f.step()
+	if c = f.p.conns[cid]; epochOf(c) != pend {
+		t.Fatal("not confirmed")
+	}
+	found := false
+	for _, e := range f.p.outbox {
+		if in, ok := openUnder(e, c.kr.Current()); ok && in.ID == id {
+			found = true
+		}
+		if _, ok := openUnder(e, c.kr.Find(old)); ok && !e.Handshake {
+			t.Fatal("an entry is still sealed under the old epoch")
+		}
+	}
+	if !found {
+		t.Fatal("the waiting message was not sealed again under the new epoch")
+	}
+}
+
+// Abandoning a pending reconnect revokes the tokens its hs.init carried.
+func TestAbandonRevokesCarriedTokens(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	f.beginReconnectNow(cid)
+	m.NoConfirm = true
+	f.pump()
+	c := f.p.conns[cid]
+	if !c.pendingReconnect() || len(c.Pending.Issued) == 0 {
+		t.Fatal("no pending reconnect")
+	}
+	issued := c.Pending.Issued
+	f.p.mu.Lock()
+	f.p.abandonPending(c, "test", false, f.clk.Now())
+	f.p.mu.Unlock()
+	for _, j := range issued {
+		if tk := f.p.issued[j]; tk == nil || !tk.Denied {
+			t.Fatalf("token %s not revoked", j)
+		}
+	}
+}
+
+// With our reconnect pending, only its epoch is accepted as a member
+// reconnect's ctx (R29-X5).
+func TestPendingReconnectCtx(t *testing.T) {
+	for _, namePending := range []bool{true, false} {
+		f := newFixture(t)
+		m := f.member(10)
+		cid := f.connect(m, "")
+		cur := epochOf(f.p.conns[cid])
+		f.beginReconnectNow(cid)
+		m.NoConfirm = true
+		f.pump()
+		c := f.p.conns[cid]
+		var pend [suite.EpochIDSize]byte
+		copy(pend[:], c.Pending.ID)
+		if namePending {
+			m.ReconnectNaming(pend)
+		} else {
+			m.ReconnectNaming(cur)
+		}
+		f.step()
+		answered := len(f.p.awaiting) == 1
+		if answered != namePending {
+			t.Fatalf("naming the pending epoch %v: answered %v", namePending, answered)
+		}
+	}
+}
+
+// The H5 restart is spent once per change of the member's ik: with that
+// change stored as spent, the try is not started again, and the next one
+// counts.
+func TestH5RestartOncePerChange(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	f.beginReconnectNow(cid)
+	newIK := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{40}, 32))
+	f.p.conns[cid].ReconnectRestartIK = newIK.Public().(ed25519.PublicKey) // spent before a restart
+	m.IgnoreStray, m.IgnoreRevoked = true, true
+	m.RotateIdentity(40, false)
+	f.step()
+	c := f.p.conns[cid]
+	if len(f.p.outgoing) != 0 || c.ReconnectTries != 1 {
+		t.Fatalf("%d outgoing, tries %d", len(f.p.outgoing), c.ReconnectTries)
+	}
+	f.tick()
+	if c = f.p.conns[cid]; len(f.p.outgoing) != 1 || c.ReconnectTries != 2 {
+		t.Fatalf("next try: %d outgoing, tries %d", len(f.p.outgoing), c.ReconnectTries)
+	}
+}
+
+// failingStore lets *ok writes through, then fails every write while
+// fail is set.
+type failingStore struct {
+	*MemStore
+	fail *bool
+	ok   *int
+}
+
+func (s failingStore) Apply(ctx context.Context, ch []Change) error {
+	if *s.fail {
+		if *s.ok == 0 {
+			return errors.New("store down")
+		}
+		*s.ok--
+	}
+	return s.MemStore.Apply(ctx, ch)
+}
+
+// The start latch: clear at every start, cleared by a batch that comes
+// back after a store error, and not set by a full batch.
+func TestLatchRules(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	f.connect(m, "")
+	f.clk.Advance(time.Hour)
+	f.step()
+	if !f.p.drained {
+		t.Fatal("not set")
+	}
+	if err := f.p.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if f.p.drained {
+		t.Fatal("a start left it set")
+	}
+	f.clk.Advance(time.Hour)
+	f.step()
+	fail, ok := true, 1 // the lease mark is written; the batch's write fails
+	f.p.cfg.Store = failingStore{f.store, &fail, &ok}
+	m.Send("connection.note", []byte(`{}`))
+	if _, err := f.p.Step(context.Background(), 0); err == nil {
+		t.Fatal("no store error")
+	}
+	if f.p.drained {
+		t.Fatal("a failed batch left it set")
+	}
+	fail = false
+	f.clk.Advance(time.Hour)
+	f.step()
+	for i := 0; i < MaxBatch; i++ {
+		m.Send("connection.note", []byte(`{}`))
+	}
+	f.p.drained = false
+	f.clk.Advance(time.Hour)
+	if n, err := f.p.Step(context.Background(), 0); err != nil || n != MaxBatch {
+		t.Fatalf("%d collected (%v)", n, err)
+	}
+	if f.p.drained {
+		t.Fatal("a full batch set it")
+	}
+}
+
+// B is 32 days: a pending epoch a minute short of it stays.
+func TestPendingLifeIs32Days(t *testing.T) {
+	if PendingLife != 32*24*time.Hour {
+		t.Fatalf("B %v", PendingLife)
+	}
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	ownRekeyPending(t, f, m, cid)
+	c := f.p.conns[cid]
+	c.Standing.Exp = f.clk.Now().Add(90 * 24 * time.Hour)
+	f.clk.Advance(PendingLife - time.Minute)
+	f.step()
+	f.tick()
+	if f.p.conns[cid].Pending == nil {
+		t.Fatal("abandoned before B")
+	}
+}
+
+// Starting a reconnect abandons a pending rekey, and drops its unsent
+// hs.fin (§6.6: a reconnect names the current epoch).
+func TestReconnectAbandonsPendingRekey(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	ownRekeyPending(t, f, m, cid)
+	f.beginReconnectNow(cid)
+	c := f.p.conns[cid]
+	if c.Pending != nil || !f.audited("pending_abandoned_reconnect") || !c.Reconnecting {
+		t.Fatalf("pending %v", c.Pending)
+	}
+}
+
+// At confirmation a carried token replaces the held one only if its exp is
+// later (§6.3.1).
+func TestAdoptOnlyLaterExp(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	f.beginReconnectNow(cid)
+	m.NoConfirm = true
+	f.pump()
+	c := f.p.conns[cid]
+	held := c.Standing
+	held.Exp = c.Pending.Standing.Exp.Add(time.Hour)
+	c.Standing = held
+	m.Send("connection.note", []byte(`{}`))
+	f.step()
+	if c = f.p.conns[cid]; c.Pending != nil || c.Standing.Token != held.Token {
+		t.Fatal("a carried token with an earlier exp replaced the held one")
+	}
+}
+
+// With no standing token held, a deposit on it waits for one.
+func TestNoStandingWaits(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	c := f.p.conns[cid]
+	f.p.sendTo(c, "connection.note", []byte(`{}`), f.clk.Now())
+	c.Standing = HeldToken{}
+	f.p.mu.Lock()
+	f.p.drainOutbox(context.Background())
+	f.p.mu.Unlock()
+	waiting := 0
+	for _, e := range f.p.outbox {
+		if e.ConnID == cid && e.Token == "" && e.AwaitToken && !e.NotBefore.IsZero() {
+			waiting++
+		}
+	}
+	if waiting != 1 {
+		t.Fatalf("%d waiting", waiting)
+	}
+}
+
+// A refresh is not asked while one is queued, nor while a reconnect is
+// open.
+func TestRefreshGuards(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	c := f.p.conns[cid]
+	f.failDeposit = func(string, string) error { return errUnavailable }
+	f.p.mu.Lock()
+	f.p.refreshHeld(c, f.clk.Now(), true)
+	c.RefreshID, c.RefreshAfter = "", time.Time{}
+	f.p.refreshHeld(c, f.clk.Now(), true)
+	c.RefreshID, c.RefreshAfter = "", time.Time{}
+	f.p.dropOutbox(func(e *outboxEntry) bool { return e.Refresh })
+	c.Reconnecting = true
+	f.p.refreshHeld(c, f.clk.Now(), true)
+	c.Reconnecting = false
+	f.p.mu.Unlock()
+	n := 0
+	for _, e := range f.p.outbox {
+		if e.Refresh {
+			n++
+		}
+	}
+	if n != 0 || c.RefreshID != "" {
+		t.Fatalf("%d refreshes queued while reconnecting", n)
+	}
+	f.p.mu.Lock()
+	f.p.refreshHeld(c, f.clk.Now(), true)
+	c.RefreshID, c.RefreshAfter = "", time.Time{}
+	f.p.refreshHeld(c, f.clk.Now(), true)
+	f.p.mu.Unlock()
+	for _, e := range f.p.outbox {
+		if e.Refresh {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d refreshes queued", n)
+	}
+}
+
+// openUnder opens a waiting deposit under ep (nil: no).
+func openUnder(e *outboxEntry, ep *handshake.Epoch) (*envelope.Inner, bool) {
+	if ep == nil || len(e.Payload) == 0 {
+		return nil, false
+	}
+	env, err := envelope.Parse(e.Payload)
+	if err != nil {
+		return nil, false
+	}
+	in, err := ep.OpenSent(env)
+	return in, err == nil
 }

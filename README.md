@@ -526,7 +526,8 @@ nothing is leaked). So the first start after `table restore` reconnects
 every active connection (§6.6): it names its last epoch, which the
 member's vault still keeps in its history, carries fresh tokens, and
 follows any identity rotation the member made since; it logs
-`restored: reconnects started` and `reconnected` per connection. A
+`restored: reconnects started`, and per connection `reconnected: epoch
+pending` and then `epoch confirmed`. A
 reconnect completes when the member's vault next collects, usually
 within minutes; until the member's vault confirms it nothing but the
 handshake is sent on that connection: messages and sign-in challenges
@@ -600,7 +601,7 @@ cluster and the service share the name):
    high or too low. Note such a restore with the results.
 4. If the image changes too, deploy it now. Start the service:
    `aws ecs update-service --cluster T --service T --desired-count 1`.
-5. Check `/health`, the TLS pin, the `reconnected` lines and a member's
+5. Check `/health`, the TLS pin, the `epoch confirmed` lines and a member's
    sign-in. Then delete `T-restore`.
 
 The operator needs: `dynamodb:CreateBackup`, `ListBackups`,
@@ -616,7 +617,7 @@ Rolling the image back past the reconnect after a restore (to
 `53a8c41` or older) is safe only when no member's reconnect awaits its
 `hs.fin`: an older image would install the epoch without the tokens and
 rotation links the reconnect brought. Check the logs for
-`reconnected` / `epoch installed` lines settling every reconnect first.
+`epoch confirmed` / `epoch installed` lines settling every reconnect first.
 
 The KMS key must be the one the backup was made under: the stack's key,
 which is retained and never deleted with the stack.

@@ -188,12 +188,11 @@ func (p *Peer) refreshHeld(c *Connection, now time.Time, force bool) {
 			return // not while one is still queued (§8.6)
 		}
 	}
-	if id := p.sendTo(c, peerwire.TypeTokenRefresh, peerwire.TokenRefreshBody(), now); id != "" {
-		c.RefreshID, c.RefreshAfter = id, now.Add(refreshWait)
+	in := &envelope.Inner{ID: p.newID(now), Type: peerwire.TypeTokenRefresh, TS: now, Body: peerwire.TokenRefreshBody()}
+	if e := p.sendEntry(c, in, now); e != nil {
+		e.Refresh = true
+		c.RefreshID, c.RefreshAfter = in.ID, now.Add(refreshWait)
 		p.markDirty(kindConn, c.ID)
-		if e := p.outbox[len(p.outbox)-1]; e.ConnID == c.ID {
-			e.Refresh = true // sendTo queued it last
-		}
 	}
 }
 
