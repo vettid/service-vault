@@ -234,6 +234,18 @@ func (p *Peer) finishReconnect(c *Connection, og *outgoing, res *handshake.Resul
 		p.reconnectFailed(c)
 		return ackAfterFlush
 	}
+	// Rule C first (R29-K8): a link that gives a key a second successor,
+	// against those followed or seen, suspends; no hs.fin, no epoch.
+	for _, r := range res.Resp.Rotations {
+		if p.rotationConflictRec(c, r, true, now) {
+			c.clearReconnect()
+			res.Epoch.Destroy()
+			for _, j := range og.Issued {
+				p.denyJTI(j, now)
+			}
+			return ackAfterFlush
+		}
+	}
 	fresh := res.Resp.Rotations[handshake.KnownPrefix(chainOf(c), res.Resp.Rotations):]
 	if p.revisits(c, fresh) {
 		p.audit("bad_rotation", c.ID)

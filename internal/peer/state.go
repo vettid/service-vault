@@ -147,6 +147,14 @@ type Connection struct {
 	// Chain is the member's identity.rotate links followed (§3.4), for
 	// "one successor per key"; the last MaxRotations are kept.
 	Chain []json.RawMessage `json:"chain,omitempty"`
+	// Seen are the member's valid identity links that passed rule C but
+	// were not followed (one in an identity.rotate then refused, in a
+	// handshake that did not complete; a rekey's only once it passed
+	// rekeyPrecheck): at most one per old key, only from the current key,
+	// an ancestor or a key a seen link reaches, and at most MaxSeen
+	// (§3.4.1 rule C, R29-K8). A later different successor of that key is
+	// a second successor.
+	Seen []json.RawMessage `json:"seen_links,omitempty"`
 	// RevokedHeld are the jtis of tokens we held that the relay answered
 	// token_revoked, each kept until its exp: one offered again is refused
 	// (as vettid-vault #244).

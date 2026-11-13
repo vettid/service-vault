@@ -776,6 +776,7 @@ func TestForkJudgedAtReconnectFinStaysSuspended(t *testing.T) {
 	if _, err := f.p.Step(context.Background(), 0); err != nil {
 		t.Fatal(err)
 	}
+	f.p.conns[cid].Seen = nil // as a record from before seen links (R29-K8): the fork is judged at hs.fin
 	m.IK, m.Rotations = orig, nil
 	m.RotateIdentity(40, true) // A->X, the other copy
 	m.StartRekeyWithLinks()
@@ -813,6 +814,7 @@ func TestForkJudgedAtRekeyFinStaysSuspended(t *testing.T) {
 	if _, err := f.p.Step(context.Background(), 0); err != nil {
 		t.Fatal(err)
 	}
+	f.p.conns[cid].Seen = nil // as a record from before seen links (R29-K8): the fork is judged at hs.fin
 	m.IK, m.Rotations = orig, nil
 	m.RotateIdentity(40, true) // A->X
 	m.StartRekeyWithLinks()
@@ -1105,6 +1107,7 @@ func TestForkJudgedAtLegacyReconnectFinStaysSuspended(t *testing.T) {
 	for _, aw := range f.p.awaiting {
 		aw.Reconnect.Signer = nil // as stored by the previous build
 	}
+	f.p.conns[cid].Seen = nil // as a record from before seen links (R29-K8): the fork is judged at hs.fin
 	m.IK, m.Rotations = orig, nil
 	m.RotateIdentity(40, true) // A->X
 	m.StartRekeyWithLinks()
@@ -1145,7 +1148,7 @@ func TestRotationCycleRefused(t *testing.T) {
 	m.SendRotation(back)
 	f.pump()
 	c := f.p.conns[cid]
-	if !keyB.Equal(c.Peer.IK) || len(c.Chain) != 1 || !strings.Contains(f.logs.String(), "reason=bad_rotation") {
+	if !keyB.Equal(c.Peer.IK) || len(c.Chain) != 1 || !strings.Contains(f.logs.String(), "reason=ik_rollback") {
 		t.Fatalf("a cycle was followed: chain %d", len(c.Chain))
 	}
 }
@@ -1294,7 +1297,7 @@ func TestRotationCycleTwoBack(t *testing.T) {
 	m.SendRotation(back)
 	f.pump()
 	c := f.p.conns[cid]
-	if !m.IK.Public().(ed25519.PublicKey).Equal(c.Peer.IK) || len(c.Chain) != 2 || !strings.Contains(f.logs.String(), "reason=bad_rotation") {
+	if !m.IK.Public().(ed25519.PublicKey).Equal(c.Peer.IK) || len(c.Chain) != 2 || !strings.Contains(f.logs.String(), "reason=ik_rollback") {
 		t.Fatalf("a cycle was followed: chain %d", len(c.Chain))
 	}
 }

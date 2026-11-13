@@ -34,6 +34,11 @@ func (p *Peer) dispatch(ctx context.Context, c *Connection, in *envelope.Inner, 
 		// (R29-T3; RELEASE-29 §5).
 		return ackAfterFlush, nil
 	}
+	// §3.4.1 acceptFrom step 3 (R29-K8): rule C on every link the message
+	// carries, before anything may refuse it.
+	if p.evidenceFirst(c, in, now) {
+		return ackAfterFlush, nil
+	}
 	// §6.3.1 before anything else is done with the message (the rate
 	// limit, the ts window, dedupe, its handler): the received flag and
 	// the confirmed epoch (RELEASE-29 §13, change 1).

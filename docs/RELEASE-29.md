@@ -1,6 +1,6 @@
 # Release 29 in the service vault
 
-**Status:** 0.6.2, draft (2026-11-13). Against VAULT-MESSAGING 0.90.3.
+**Status:** 0.7.0, draft (2026-11-13). Against VAULT-MESSAGING 0.90.6.
 
 VAULT-MESSAGING §6.3.1 ("Lifetimes and activation on confirmation",
 release 29) asks a service vault to follow its rules "on either side as
@@ -438,13 +438,22 @@ separately. The README's release-29 status paragraph shrinks with each.
    (as vettid-vault #244). The own relay's limit is the one read at the
    service's last registration: if the relay raises it, a longer honest
    token is refused until the service registers again (a restart).
-4. **`ik` links and the marker.** The `rotations` of `identity.rotate`;
-   demotion by position and the held outbox; strict F1 and the
-   reconnects of section 3 item 9; seen links; epochs abandoned while
-   pending at the member's `identity.rotate`; the links of a refused
-   reconnect still applied (X4's second half); messages held after a
-   demotion (section 13); the marker and the end of records without it
-   (section 11).
+4. **`ik` links and the marker**, in two parts, each reviewed on its own.
+   **4a:** the `rotations` of `identity.rotate` with Table B's
+   identity.rotate column (an ancestor first: `unexpected`; another key:
+   `unknown_ik`; a new key that is the stored key or an ancestor:
+   `ik_rollback`); seen links (rule C: at most 32, checked before
+   anything may refuse the message carrying them, a rekey's recorded once
+   it passes its own checks, and judged on the `hs.resp` to the
+   service's own handshakes too). **4b:** demotion by position and the
+   held outbox; strict F1, including for links applied at an `hs.fin`
+   (VAULT-MESSAGING 0.90.4, E the epoch the rekey's `hs.init` traveled
+   under or the reconnect named, with no reconnect naming E then) and
+   without pending, abandoned or destroyed epochs (0.90.6), and the
+   reconnects of section 3 item 9; epochs abandoned while pending at the
+   member's `identity.rotate`; the links of a refused reconnect still
+   applied (X4's second half); messages held after a demotion (section
+   13); the marker and the end of records without it (section 11).
 
 | Rule | Change | Rule | Change |
 |---|---|---|---|
@@ -455,18 +464,21 @@ separately. The README's release-29 status paragraph shrinks with each.
 | I1 to I7 | 2 | X4 one reconnect at a time | 2; a refused reconnect's links 4 |
 | R1 | done (service-vault #147), its abandonment part 2 | X5 the reconnect's `ctx` | 2 (while a reconnect is pending), 3 (the rest) |
 | R2, R3 | 1 | X6 a sealed-mode rekey refused | done (before release 29) |
-| R4 | 3 | K1 | 4 |
+| R4 | 3 | K1 | 4a |
 | R5 rule E | 3 | K2 a pending epoch at a link | 2 |
 | F1 | 3 | K3 | n/a (section 1) |
 | F3 | 1 | K4, K5, K7 | 4 |
 | T1 | 3 | K6 the reconnect bound | 2 |
-| T2 items 1 to 3 | 2 | K8 | 4 |
+| T2 items 1 to 3 | 2 | K8 | 4a |
 | T2 item 4 | 1 | K9 | 4 |
 | T2 item 5 (0.88.9) | 3 | D1 to D4 | n/a (section 1) |
 | T3 `th1` mark; `hs.fin` ignored | 1 | | |
 
 ## Changes
 
+- **0.7.0 (2026-11-13):** pinned to VAULT-MESSAGING 0.90.6; §14 item 4
+  in two parts: 4a (K1, K8) is built; 4b carries strict F1 at `hs.fin`
+  (0.90.4) and its exclusions (0.90.6).
 - **0.6.2 (2026-11-13):** pinned to VAULT-MESSAGING 0.90.3; §14 item 3,
   the held-token checks follow vettid-vault #244 in full (exp after iat,
   the own relay's max_token_lifetime, revoked held tokens refused if

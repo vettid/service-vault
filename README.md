@@ -62,9 +62,12 @@ fourth. Done so far:
   issuer may; an answer to a reconnect the member has moved past ends at
   its next message;
 - after a rekey of its own fails, it waits an hour before the next,
-  doubling to a day.
+  doubling to a day;
+- **`ik` links, first part** (change 4a): `identity.rotate` carries the
+  whole chain (S8, R29-K1), and links seen but not followed count for
+  "one successor per key" (rule C, R29-K8).
 
-Not yet: the `ik` demotion rules and the release marker (change 4); the
+Not yet: the `ik` demotion rules and the release marker (change 4b); the
 relay-key rules of §3.4.2, after which it advertises `relay_follow`.
 
 This repository replaces
@@ -849,8 +852,16 @@ connection survives those; it does not follow a relay key, which release
   that "one successor per key" can still be judged. One gap: a second successor carried in an `hs.resp`
   to the service's own rekey is refused by the handshake library before
   the service sees it, so it shows only as failed rekeys (backed off),
-  not as `rotate_conflict`. `identity.rotate` itself still reads only its
-  one link, not the `rotations` chain S8 lets it carry. If two different
+  not as `rotate_conflict`, unless it contradicts a link the service has
+  seen (below). `identity.rotate` carries the whole chain (`rotations`,
+  S8): links already followed are skipped, and the first one not followed
+  must start at the stored key (otherwise `unknown_ik`, or `unexpected`
+  for an ancestor); a new key that is the stored key or an ancestor is
+  refused (`ik_rollback`). Valid links the service has seen but not
+  followed (in a handshake not completed, an `identity.rotate` refused, a
+  rekey that passed its own checks) are kept, at most 32, and count for
+  "one successor per key" too (§3.4.1 rule C), checked before anything
+  else may refuse the message that carries them. If two different
   successors of one key arrive ("one successor per key"), the connection
   is suspended: nothing is sent or accepted, its sign-ins and
   approvals can't be answered, an ERROR with `alarm: rotate_conflict` is
