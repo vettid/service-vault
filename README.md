@@ -146,6 +146,15 @@ deploy doesn't add the rule.
 destination.
 - `rotate_conflict`: a member's identity key got two successors, so a
   connection is suspended (see "When a member moves phones").
+- `fork_suspected`: a message or handshake showed that a second or old
+  copy of a member's vault used a session epoch it should no longer hold
+  (VAULT-MESSAGING §6.3.1 rule E, §3.4.1 "Fork by `ctx`"), so the
+  connection is suspended (`connection.suspended`, reason `epoch`). The
+  member connects again from a new invitation.
+- `relay_moved_unlinked`: at start, a connection that a
+  `relay.address.update` moved before the service refused such updates
+  was marked stale: the address it holds may be a copy's. No honest
+  member sent one; that member connects again from a new invitation.
 - `webhook_dropped`: a webhook was given up after 24 hours, so the
   application missed an event.
 - `outgoing_identity_changed`: at start, a stored handshake this
