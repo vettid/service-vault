@@ -1126,7 +1126,7 @@ func TestPendingAbandonedAtLinkSuspensionAndStale(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			f.p.followRotation(c, newIK.Public().(ed25519.PublicKey), newKEM.Public(), []*handshake.Rotation{r}, true)
+			f.p.followRotation(c, newIK.Public().(ed25519.PublicKey), newKEM.Public(), []*handshake.Rotation{r}, nil, true)
 		case "suspended":
 			f.p.suspend(c, now)
 		case "stale":

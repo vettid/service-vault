@@ -333,7 +333,7 @@ func (p *Peer) applyReconnect(c *Connection, pend *pendingReconnect) error {
 			p.dropConnOutgoing(c)
 		}
 		if len(fresh) > 0 {
-			p.followRotation(c, ik, kem, fresh, false)
+			p.followRotation(c, ik, kem, fresh, pend.Named, false)
 		}
 		if c.State == StateSuspended {
 			return errSuspended // following judged another answer's links: a fork
@@ -372,7 +372,7 @@ func (p *Peer) applyReconnect(c *Connection, pend *pendingReconnect) error {
 		p.dropConnOutgoing(c)
 	}
 	if len(links) > 0 {
-		p.followRotation(c, pend.IK, kem, links, false)
+		p.followRotation(c, pend.IK, kem, links, pend.Named, false)
 	}
 	if c.State == StateSuspended {
 		return errSuspended
@@ -507,7 +507,7 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 	// (dispatch, rekey_init_replayed).
 	p.mark(kindInner, rekeyKey(th1), []byte{1}, now.Add(DedupeRetention+envelope.MaxClockSkewFuture))
 	aw := &awaiting{ID: id, ConnID: c.ID, Purpose: handshake.PurposeRekey, Th1: th1[:], Created: now,
-		Expires: now.Add(HandshakeTTL), NamedConf: namedConf, InitTS: in.TS, r: resp}
+		Expires: now.Add(HandshakeTTL), NamedConf: namedConf, InitTS: in.TS, InitEpoch: initEpochID(ep), r: resp}
 	aw.Follow = newPendingFollow(body)
 	p.awaiting[id] = aw
 	p.markDirty(kindAwait, id)
@@ -602,7 +602,7 @@ func (p *Peer) handleFin(id string, raw []byte, sender ed25519.PublicKey, now ti
 		// The rekey's signer, checked again against the key and links
 		// followed meanwhile, and its links not yet followed, now that
 		// sig_I verified under it.
-		if !p.followAtFin(c, aw.Follow, now) {
+		if !p.followAtFin(c, aw.Follow, aw.InitEpoch, now) {
 			fr.Epoch.Destroy()
 			return ackAfterFlush
 		}
@@ -679,7 +679,9 @@ func (p *Peer) installEpoch(c *Connection, ep *handshake.Epoch, now time.Time) {
 	}
 	eid := ep.ID()
 	c.LastEpochID = eid[:]
-	p.recordActivated(c, eid[:], false, now)
+	// Established by the message being handled: the member's hs.fin (or a
+	// first contact's message that activates it).
+	p.recordActivated(c, eid[:], false, epochPos{at: p.relayAt, msg: p.msgID}, now)
 	if ep.Suite() > c.Suite {
 		c.Suite = ep.Suite() // §13.4 pin
 	}
@@ -783,8 +785,8 @@ func (p *Peer) admitHandshake(connID string, purpose handshake.Purpose, th1 [32]
 // reached the vault-to-vault limit (§6.5: the side that hits the limit
 // initiates).
 func (p *Peer) startRekey(c *Connection, now time.Time) {
-	if c.kr == nil || c.kr.Current() == nil || c.Standing.Token == "" || c.State != StateActive {
-		return
+	if c.kr == nil || c.kr.Current() == nil || c.Standing.Token == "" || c.State != StateActive || c.currentDemoted() {
+		return // a demoted epoch is replaced by a reconnect (§3.4.1 K5)
 	}
 	if now.Before(c.RekeyNotBefore) && c.RekeyNotBefore.Sub(now) <= RekeyBackoffMax {
 		return // a rekey of ours failed lately: backing off (a wait longer than the most: the clock went back)
@@ -878,7 +880,7 @@ func (p *Peer) handleResp(id string, raw []byte, sender ed25519.PublicKey, now t
 		return ackAfterFlush
 	}
 	if len(fresh) > 0 {
-		p.followRotation(c, res.ResponderIK, res.ResponderKEM, fresh, false)
+		p.followRotation(c, res.ResponderIK, res.ResponderKEM, fresh, nil, false)
 	}
 	if c.State == StateSuspended {
 		// Following judged an answer's links: a fork. No hs.fin, no epoch.

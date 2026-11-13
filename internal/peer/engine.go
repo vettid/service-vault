@@ -85,6 +85,11 @@ type Peer struct {
 	// msgJTI is the collect jti of the message being handled ("" when
 	// none): the token it was deposited under.
 	msgJTI string
+	// relayAt and msgID are the relay position (deposited_at, msg_id) of
+	// the message being handled (zero when none): §3.4.1 judges epochs by
+	// the position of the message that established them.
+	relayAt time.Time
+	msgID   string
 	// discardCheck marks the connections whose carried tokens a batch
 	// discarded at adoption: judged after the batch (tickPendings).
 	discardCheck map[string]bool
@@ -589,8 +594,11 @@ func (p *Peer) handleMessage(ctx context.Context, m relayclient.Message, now tim
 		return ackAfterFlush, nil
 	}
 	c := p.connByRelayKey(sender)
-	p.msgJTI = m.JTI
-	defer func() { p.msgJTI = "" }()
+	p.msgJTI, p.msgID, p.relayAt = m.JTI, m.MsgID, time.Time{}
+	if t, err := time.Parse(time.RFC3339Nano, m.DepositedAt); err == nil {
+		p.relayAt = t.UTC()
+	}
+	defer func() { p.msgJTI, p.msgID, p.relayAt = "", "", time.Time{} }()
 	// §7.1 (0.10.3): a request token covers only the rest of a handshake
 	// awaiting approval and connection.approved / declined.
 	if t := p.issued[m.JTI]; m.JTI != "" && t != nil && t.Kind == tokRequest {

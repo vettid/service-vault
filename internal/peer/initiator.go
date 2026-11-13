@@ -50,6 +50,12 @@ type PendingEpoch struct {
 	// OwnIK is the service's identity key the handshake was made under: a
 	// pending epoch stored under another is abandoned at load (R29-I7).
 	OwnIK []byte `json:"own_ik,omitempty"`
+	// Signer is the member's key its hs.resp was signed under, and RespAt
+	// and RespMsg that hs.resp's relay position: the epoch was established
+	// there (§3.4.1 "Epochs after an ik link").
+	Signer  []byte    `json:"signer,omitempty"`
+	RespAt  time.Time `json:"resp_at,omitzero"`
+	RespMsg string    `json:"resp_msg,omitempty"`
 }
 
 // standingValid reports whether the service holds a standing token for
@@ -81,7 +87,7 @@ func (p *Peer) makePending(c *Connection, og *outgoing, res *handshake.Result, c
 	}
 	id := res.Epoch.ID()
 	pe := &PendingEpoch{ID: bytes.Clone(id[:]), Purpose: og.ini.Purpose(), FinAt: now, Issued: og.Issued,
-		OwnIK: bytes.Clone(p.cfg.Keys.IKPublic())}
+		OwnIK: bytes.Clone(p.cfg.Keys.IKPublic()), Signer: bytes.Clone(res.ResponderIK), RespAt: p.relayAt, RespMsg: p.msgID}
 	if carried != nil {
 		pe.Standing, pe.Reconnect = carried.Standing, carried.Reconnect
 	}
@@ -115,7 +121,7 @@ func (p *Peer) confirmPending(c *Connection, now time.Time) {
 	ep := c.kr.ConfirmPending(now)
 	eid := ep.ID()
 	c.LastEpochID = bytes.Clone(eid[:])
-	p.recordActivated(c, eid[:], true, now)
+	p.recordActivated(c, eid[:], true, epochPos{at: pe.RespAt, msg: pe.RespMsg, signer: pe.Signer}, now)
 	p.setConfirmed(c, eid[:], now) // an epoch the service activated at confirmation is confirmed
 	if ep.Suite() > c.Suite {
 		c.Suite = ep.Suite() // §13.4 pin
@@ -179,9 +185,11 @@ func (p *Peer) abandonPending(c *Connection, why string, restart bool, now time.
 	p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == c.ID && bytes.Equal(e.FinEpoch, pe.ID) })
 	if why != "link" {
 		// Kept until a newer epoch is confirmed: a reconnect may name it
-		// (§6.6). One abandoned by a link is demoted instead (change 4).
+		// (§6.6). One abandoned by a link is demoted from the start
+		// ("Pending epochs at a link", K2): never named.
 		c.Abandoned = append(c.Abandoned, bytes.Clone(pe.ID))
 	}
+	p.recordAbandoned(c, pe, why == "link", now)
 	c.Pending = nil
 	p.markDirty(kindConn, c.ID)
 	p.audit("pending_abandoned_"+why, c.ID)
@@ -203,7 +211,7 @@ func (p *Peer) abandonPending(c *Connection, why string, restart bool, now time.
 // clearReconnect ends the record of an open reconnect of the service's.
 func (c *Connection) clearReconnect() {
 	c.Reconnecting, c.ReconnectTries, c.ReconnectSlow, c.ReconnectSince = false, 0, false, time.Time{}
-	c.ReconnectRestore, c.ReconnectRestartIK = false, nil
+	c.ReconnectRestore, c.ReconnectRestartIK, c.ReconnectNamed = false, nil, nil
 }
 
 // standingWaiting reports whether a deposit to c on the standing token

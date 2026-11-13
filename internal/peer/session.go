@@ -110,7 +110,8 @@ func (p *Peer) dispatch(ctx context.Context, c *Connection, in *envelope.Inner, 
 	case peerwire.TypeConnAuthRotated:
 		p.connAuthRotated(c, in.Body)
 	case TypeIdentityRotate:
-		p.identityRotate(c, in.Body, now)
+		eid := ep.ID()
+		p.identityRotate(c, in.Body, eid[:], now)
 	case TypeRelayAddressUpdate:
 		// Refused from every member, as vettid-vault #241 makes the member
 		// vault do (the audit names differ: a service has no drop.peer_key
@@ -522,11 +523,16 @@ func (p *Peer) housekeeping(now time.Time) {
 			c.kr.Prune(now)
 		}
 		p.sweepCarried(c, now)
+		p.pruneAbandoned(c, now)
 		if c.Reconnecting {
 			p.checkReconnect(c, now)
 			continue
 		}
 		if c.State != StateActive {
+			continue
+		}
+		if c.currentDemoted() {
+			p.tickDemoted(c, now) // §3.4.1 K5: only the reconnect goes
 			continue
 		}
 		if !c.standingValid(now) && p.standingWaiting(c) {

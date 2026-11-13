@@ -150,7 +150,7 @@ func (p *Peer) reconnectFailed(c *Connection) {
 // tokens. A rekey of ours in flight is dropped: it travels in an epoch the
 // member may no longer hold.
 func (p *Peer) startReconnect(c *Connection, now time.Time) bool {
-	if c.State != StateActive && c.State != StateStale || len(c.LastEpochID) == 0 ||
+	if c.State != StateActive && c.State != StateStale || len(c.reconnectTarget()) == 0 ||
 		c.Reconnect.Token == "" || !now.Before(c.Reconnect.Exp) || c.ReconnectTries >= MaxReconnectTries {
 		p.log().Warn("reconnect not possible", "connection_id", c.ID, "state", c.State, "tries", c.ReconnectTries)
 		return false
@@ -175,8 +175,9 @@ func (p *Peer) startReconnect(c *Connection, now time.Time) bool {
 		p.log().Warn("reconnect: mint tokens", "connection_id", c.ID, "err", errCode(err))
 		return false
 	}
+	named := c.reconnectTarget() // the current epoch, or after a demotion the one K5 or strict F1 names
 	var eid [suite.EpochIDSize]byte
-	copy(eid[:], c.LastEpochID)
+	copy(eid[:], named)
 	ini, err := handshake.NewInitiator(handshake.InitiatorConfig{
 		Purpose: handshake.PurposeReconnect, Ctx: handshake.EpochCtx(eid),
 		Identity: p.cfg.Keys.IK, StaticKEM: p.cfg.Keys.KEM.Public(), Relay: p.ownAddr(),
@@ -199,7 +200,7 @@ func (p *Peer) startReconnect(c *Connection, now time.Time) bool {
 	id := p.newID(now)
 	kid, th1 := ini.EphKid(), ini.Th1()
 	og := &outgoing{ID: id, ConnID: c.ID, EphKid: kid[:], Th1: th1[:], Init: s, Created: now, Issued: jtis,
-		Named: bytes.Clone(c.LastEpochID), ini: ini}
+		Named: bytes.Clone(named), ini: ini}
 	p.outgoing[id] = og
 	p.markDirty(kindOutgoing, id)
 	if c.ReconnectSince.IsZero() {
@@ -271,7 +272,7 @@ func (p *Peer) finishReconnect(c *Connection, og *outgoing, res *handshake.Resul
 	// this one, whose message makes the change.
 	c.Reconnecting = false
 	if len(fresh) > 0 {
-		p.followRotation(c, res.ResponderIK, res.ResponderKEM, fresh, false)
+		p.followRotation(c, res.ResponderIK, res.ResponderKEM, fresh, nil, false)
 	}
 	if c.State == StateSuspended {
 		// Following judged an answer's links: a fork. The suspension

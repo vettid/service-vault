@@ -61,8 +61,46 @@ type EpochMeta struct {
 	Destroyed bool      `json:"destroyed,omitempty"`
 	DestroyTS time.Time `json:"destroy_ts,omitzero"`
 	// Signer is the member's identity key when the epoch became current
-	// (§3.4.1 "Fork by ctx" judges by it); empty on older records.
+	// (§3.4.1 "Fork by ctx" judges by it); empty on older records. For an
+	// epoch the service began, the key the member's hs.resp was signed
+	// under.
 	Signer []byte `json:"signer,omitempty"`
+	// EstAt and EstMsg are the relay position (deposited_at, msg_id) of the
+	// message that established the epoch: the member's hs.fin, or for an
+	// epoch the service began, the member's hs.resp (§3.4.1 "Epochs after
+	// an ik link"). Zero on records from before change 4b, which a
+	// demotion by position then skips.
+	EstAt  time.Time `json:"est_at,omitzero"`
+	EstMsg string    `json:"est_msg,omitempty"`
+	// Demoted is set when §3.4.1 demoted the epoch (by position, or by
+	// strict F1), at the position (DemotedAt, DemotedMsg) of the message
+	// carrying the link: a message under it deposited after that is
+	// refused, one deposited before it is accepted and judged.
+	Demoted    bool      `json:"demoted,omitempty"`
+	DemotedAt  time.Time `json:"demoted_at,omitzero"`
+	DemotedMsg string    `json:"demoted_msg,omitempty"`
+}
+
+// posAfter reports whether position (at, id) is after (at2, id2): a later
+// deposited_at, or the same with a later msg_id (§3.4.1 "Cut-off"; the
+// service has one mailbox, so msg_id order is the relay's order). A
+// shorter msg_id sorts first.
+func posAfter(at time.Time, id string, at2 time.Time, id2 string) bool {
+	if !at.Equal(at2) {
+		return at.After(at2)
+	}
+	if len(id) != len(id2) {
+		return len(id) > len(id2)
+	}
+	return id > id2
+}
+
+// epochPos is where an epoch was established: the relay position, and
+// the member's key its establishing message was signed under.
+type epochPos struct {
+	at     time.Time
+	msg    string
+	signer []byte
 }
 
 func (c *Connection) epochIndex(id []byte) int {
@@ -101,8 +139,8 @@ func (c *Connection) initEpochs() {
 
 // recordActivated records id as the connection's current epoch: the
 // previous ones are superseded now. A connection's first epoch is its
-// confirmed epoch.
-func (p *Peer) recordActivated(c *Connection, id []byte, mine bool, now time.Time) {
+// confirmed epoch. pos is where it was established.
+func (p *Peer) recordActivated(c *Connection, id []byte, mine bool, pos epochPos, now time.Time) {
 	for i := range c.Epochs {
 		if e := &c.Epochs[i]; e.Superseded.IsZero() && !bytes.Equal(e.ID, id) {
 			e.Superseded = now
@@ -111,7 +149,12 @@ func (p *Peer) recordActivated(c *Connection, id []byte, mine bool, now time.Tim
 	if e := c.epochMeta(id); e != nil {
 		e.Superseded = time.Time{}
 	} else {
-		c.Epochs = append(c.Epochs, EpochMeta{ID: bytes.Clone(id), Mine: mine, Signer: bytes.Clone(c.Peer.IK)})
+		signer := pos.signer
+		if len(signer) == 0 {
+			signer = c.Peer.IK
+		}
+		c.Epochs = append(c.Epochs, EpochMeta{ID: bytes.Clone(id), Mine: mine, Signer: bytes.Clone(signer),
+			EstAt: pos.at, EstMsg: pos.msg})
 	}
 	if c.Confirmed == nil {
 		c.Confirmed = bytes.Clone(id)
@@ -170,6 +213,12 @@ func (p *Peer) noteFromMember(c *Connection, ep *handshake.Epoch, in *envelope.I
 		p.destroyedEpochMessage(c, e, in, now) // rule E: refused, or fork evidence
 		return true
 	}
+	if e := c.epochMeta(id); e != nil && e.Demoted {
+		return p.demotedMessage(c, e, now) // §3.4.1: refused, or judged when it sets the flag
+	}
+	if a := c.abandonedMeta(id); a != nil && p.abandonedMessage(c, a, now) {
+		return true // K9 ended (fork evidence), or abandoned by a link (K2)
+	}
 	if pe := c.Pending; pe != nil && bytes.Equal(pe.ID, id) {
 		p.confirmPending(c, now) // §6.3.1 Initiator: first, in this write
 	}
@@ -221,8 +270,8 @@ func (p *Peer) replaceStaleConfirm(c *Connection, now time.Time) {
 // (ConfirmAt then keeps the last one's time, so tickConfirm sends it
 // later).
 func (p *Peer) queueConfirm(c *Connection, now time.Time) bool {
-	if c.kr == nil || c.kr.Current() == nil || c.State != StateActive || c.Reconnecting {
-		return false
+	if c.kr == nil || c.kr.Current() == nil || c.State != StateActive || c.Reconnecting || c.currentDemoted() {
+		return false // §3.4.1 K5: not sent, nor held, after a demotion
 	}
 	in := &envelope.Inner{ID: p.newID(now), Type: handshake.TypeConfirm, TS: now, Body: json.RawMessage(`{}`), Features: features()}
 	raw, err := c.kr.Current().Seal(in)
