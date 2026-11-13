@@ -152,7 +152,7 @@ type Connection struct {
 	Activated time.Time `json:"activated"`
 
 	// Chain is the member's identity.rotate links followed (§3.4), for
-	// "one successor per key"; the last MaxRotations are kept.
+	// "one successor per key"; every link is kept.
 	Chain []json.RawMessage `json:"chain,omitempty"`
 	// Seen are the member's valid identity links that passed rule C but
 	// were not followed (one in an identity.rotate then refused, in a

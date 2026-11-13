@@ -856,8 +856,12 @@ connection survives those; it does not follow a relay key, which release
   seen (below). `identity.rotate` carries the whole chain (`rotations`,
   S8): links already followed are skipped, and the first one not followed
   must start at the stored key (otherwise `unknown_ik`, or `unexpected`
-  for an ancestor); a new key that is the stored key or an ancestor is
-  refused (`ik_rollback`). Valid links the service has seen but not
+  for an ancestor); a new key that is an ancestor is refused
+  (`ik_rollback`), and so is one that is the stored key, which goes
+  beyond Table B and the member vault (it fails closed: such a link
+  could only lead back to a key already held). A malformed
+  `identity.rotate` (`bad_rotation`) is refused before rule C, as on the
+  member vault. Valid links the service has seen but not
   followed (in a handshake not completed, an `identity.rotate` refused, a
   rekey that passed its own checks) are kept, at most 32, and count for
   "one successor per key" too (§3.4.1 rule C), checked before anything
