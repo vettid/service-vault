@@ -193,9 +193,9 @@ design: vettid/votes, docs/VOTES-SITE.md).
   goes up with the document and with the message that carries it to
   vaults (§8.5 "Rekor profile").
 - **Checked before it is sent** (0.13.13): before a proposal or an
-  extension is sent to any member, the service verifies its bundle as a
-  member's vault will (VAULT-MESSAGING §10.19.4 step 6), with the
-  vaults' own verifier, under its anchor key, against the trusted roots
+  extension is sent to any member, the service verifies its bundle with
+  the vaults' verifier (VAULT-MESSAGING §10.19.4 step 6, without the
+  service-list lookup), under its current anchor key, against the trusted roots
   of **every supported vault release** of its Sigstore instance: a
   release that registers the `vote` feature and is listed `active` or
   `deprecated` in that channel's signed manifest, or is a `candidate`
@@ -982,8 +982,8 @@ item.
 ## Changes
 
 - **0.13.13 (2026-11-12):** (GC #1343, Ballot P1) §3.3: the service
-  checks a proposal's and an extension's bundle, as a member's vault
-  will, against the pinned roots of every supported vault release
+  checks a proposal's and an extension's bundle with the vaults'
+  verifier, against the pinned roots of every supported vault release
   (defined there) before sending it, and pushes nothing on a failure (a
   vault that asks or reads the site still gets it and checks it). No
   change to the messages, the documents, the vectors or what a member's

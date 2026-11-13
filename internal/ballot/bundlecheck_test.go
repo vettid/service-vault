@@ -83,6 +83,47 @@ func TestCreateWithoutCheckRefusesEarly(t *testing.T) {
 	}
 }
 
+// Publish with no check (a stored proposal, the check gone) sends nothing.
+func TestPublishWithoutCheckSendsNothing(t *testing.T) {
+	ctx := context.Background()
+	m, s, _ := newManager(t)
+	m.CheckBundle = refuseBundle
+	c, err := m.Create(ctx, "apv", input())
+	if c == nil || !errors.Is(err, ErrBundleUnverified) {
+		t.Fatalf("create: %v", err)
+	}
+	m.CheckBundle = nil
+	if n, err := m.Publish(ctx, c.ProposalID); !errors.Is(err, ErrNoBundleCheck) || n != 0 {
+		t.Fatalf("Publish without a check: sending %d, %v", n, err)
+	}
+	m.Wait()
+	if len(s.sent) != 0 {
+		t.Fatalf("sent %d without a check", len(s.sent))
+	}
+}
+
+// Extend with no check refuses before the approval is used or anything
+// is published, and sends nothing.
+func TestExtendWithoutCheckRefusesEarly(t *testing.T) {
+	ctx := context.Background()
+	m, s, a, pid, x := extendFixture(t)
+	approveExtension(t, a, "a", pid, x)
+	p := m.Publisher.(*fakePublisher)
+	consumed, calls, sent := a.consumed, p.calls, len(s.sent)
+	m.CheckBundle = nil
+	if e, err := m.Extend(ctx, pid, "a", x); !errors.Is(err, ErrNoBundleCheck) || e != nil {
+		t.Fatalf("extended without a check: %v %v", e, err)
+	}
+	m.Wait()
+	if a.consumed != consumed || p.calls != calls || len(s.sent) != sent {
+		t.Fatalf("without a check: approvals used %d -> %d, publications %d -> %d, sends %d -> %d",
+			consumed, a.consumed, calls, p.calls, sent, len(s.sent))
+	}
+	if extended(t, m, pid) != 0 {
+		t.Fatal("an extension is in effect without a check")
+	}
+}
+
 // An extension whose bundle a member vault would refuse is published and
 // in effect (the site holds it), but not sent; the alarm is raised. It is
 // checked against the close it extends, as a vault does.

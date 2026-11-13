@@ -735,6 +735,8 @@ func (s *Server) extendProposal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "extension_pending")
 	case errors.Is(err, ballot.ErrNoPublisher):
 		writeError(w, http.StatusServiceUnavailable, "publication_not_configured")
+	case errors.Is(err, ballot.ErrNoBundleCheck):
+		writeError(w, http.StatusServiceUnavailable, "bundle_check_not_configured")
 	case errors.Is(err, ballot.ErrProposalChanged):
 		writeError(w, http.StatusConflict, "conflict") // another task saved it: retry
 	case err != nil:

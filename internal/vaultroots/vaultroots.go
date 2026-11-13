@@ -1,6 +1,7 @@
 // Package vaultroots checks a proposal's or an extension's Sigstore
-// bundle as a member vault will (VAULT-MESSAGING §10.19.4 step 6),
-// after the service publishes it and before it sends it: with vettid-vault's own
+// bundle with the member vaults' verifier (VAULT-MESSAGING §10.19.4 step
+// 6, without the service-list lookup), after the service publishes it
+// and before it sends it: with vettid-vault's own
 // verifier (vms/votewire) and the trusted roots pinned in each vault
 // release that may receive it.
 //
@@ -132,8 +133,8 @@ func Sets(instance string) ([]Set, error) {
 	return all[instance], nil
 }
 
-// Check verifies bundle for doc against every root set of instance, as
-// a member vault does: under one of the accepted anchor keys (SPKI DER),
+// Check verifies bundle for doc against every root set of instance with
+// the member vaults' verifier: under one of the accepted anchor keys (SPKI DER),
 // timestamped at most Slack after now, and no later than notAfter when
 // that is set and earlier (an extension: before the close it extends).
 func Check(instance string, accepted [][]byte, doc, bundle []byte, now, notAfter time.Time) error {

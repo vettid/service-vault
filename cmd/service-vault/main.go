@@ -545,8 +545,9 @@ func serve(args []string) error {
 				return anchor.TimestampTime(cfg.Sigstore, bundle, doc)
 			}
 			mgr.AuthorityTime = authorityTime(as.anc, cfg.Sigstore)
-			// What members are sent is checked as their vaults will: the
-			// current anchor key, every supported release's pinned roots.
+			// What members are sent is checked with their vaults'
+			// verifier: the current anchor key, every supported release's
+			// pinned roots (not the signed service list; README).
 			// With none pinned for this instance there is no check, and
 			// creating a proposal answers bundle_check_not_configured
 			// before its approval is used.

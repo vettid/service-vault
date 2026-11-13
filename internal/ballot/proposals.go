@@ -111,8 +111,9 @@ type Manager struct {
 	// after the close in force (BALLOT-PROTOCOL §7, 0.13.12). Nil counts
 	// nothing (fail closed).
 	AuthorityTime func(ctx context.Context) (int64, error)
-	// CheckBundle checks a proposal's or an extension's Sigstore bundle as
-	// a member vault will, against the trusted roots every supported vault
+	// CheckBundle checks a proposal's or an extension's Sigstore bundle with
+	// the member vaults' verifier (not the service list; README), against
+	// the trusted roots every supported vault
 	// release pins (internal/vaultroots), before members are sent it, with
 	// the latest time the bundle's stamp may have (zero: the vaults' limit
 	// for a message sent now). Nil sends nothing (fail closed), and Create

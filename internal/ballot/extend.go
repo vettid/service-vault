@@ -126,6 +126,12 @@ func (m *Manager) Extend(ctx context.Context, id, approvalID string, in Extensio
 	if m.Publisher == nil || !ok || !ok2 {
 		return nil, ErrNoPublisher
 	}
+	// As Create: with no bundle check nothing published could be sent,
+	// so refuse before the approval is used or anything is published.
+	if m.CheckBundle == nil {
+		m.log().Error("no bundle check: extensions are refused", "alarm", "proposal_bundle_unverified", "proposal_id", id)
+		return nil, ErrNoBundleCheck
+	}
 	o, err := m.Store.OpenProposalFresh(ctx, id)
 	if err != nil {
 		return nil, err

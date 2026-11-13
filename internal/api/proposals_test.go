@@ -161,6 +161,10 @@ func TestProposalRoutes(t *testing.T) {
 		m["proposal_id"] != "p1" || m["reason"] != "bundle_unverified" {
 		t.Fatalf("not published, bundle unverified: %d %v", rec.Code, m)
 	}
+	fp.err = ballot.ErrNoBundleCheck
+	if rec, m := do(t, h, "POST", "/v1/proposals/ok/extend", apiKey, `{"approval_id":"A1","closes_at":9,"outage":{"from":1,"to":5000,"source":"s"}}`); rec.Code != 503 || m["error"] != "bundle_check_not_configured" {
+		t.Fatalf("extend without a check: %d %v", rec.Code, m)
+	}
 	fp.err = nil
 	for id, want := range map[string]struct {
 		code int

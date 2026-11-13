@@ -292,9 +292,22 @@ destination.
   so a proposal anchored under an earlier key is refused even though
   vaults accept any listed key (fail closed). With no roots pinned for
   the service's Sigstore instance (`SV_SIGSTORE`), the alarm is raised
-  at start and creating a proposal answers `503
+  at start, and creating a proposal or an extension answers `503
   bundle_check_not_configured` before its approval is used. The ERROR
-  line names the proposal and the error. A new
+  line names the proposal and the error.
+
+  What this check does not cover:
+  - **One verifier for every release.** The service runs the `votewire`
+    of the vettid-vault version in `go.mod` against each release's
+    roots, not each release's own `votewire`. Today they are the same
+    code for staging 25–29, but nothing here checks that they stay so:
+    a release whose verifier changes may refuse what this accepts.
+  - **The signed service list.** The anchor key is not looked up in the
+    signed service list. A key missing from it passes here, and member
+    vaults then refuse the bundle (`service_list`). That fails closed at
+    the vault, but this check does not catch it.
+
+  A new
   Sigstore key that no supported vault release pins yet means a vault
   release with the new roots must ship first (the scheduled roots check
   opens an issue when Sigstore's trusted root changes). Each new vault

@@ -43,6 +43,11 @@ jobs:
   sigstore:
     runs-on: ubuntu-26.04
     timeout-minutes: 10
+    outputs:
+      # rootwatch's exit status: 1 the roots differ, 2 it could not
+      # compare (a TUF fetch failed, or sigstore-go's embedded TUF root
+      # is too old), empty if it did not run.
+      code: ${{ steps.watch.outputs.code }}
     defaults:
       run:
         working-directory: tools/rootwatch
@@ -53,8 +58,15 @@ jobs:
           go-version-file: tools/rootwatch/go.mod
       - run: go mod verify
       - run: go vet .
+      - run: go build -o "$RUNNER_TEMP/rootwatch" .
       - name: Sigstore's trusted root matches the pinned copies
-        run: go run . -roots ../../internal/vaultroots/roots
+        id: watch
+        run: |
+          set +e
+          "$RUNNER_TEMP/rootwatch" -roots ../../internal/vaultroots/roots
+          code=$?
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          exit "$code"
 
   issue:
     # One issue per failing check; while one is open, each further failed
@@ -72,6 +84,7 @@ jobs:
           RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           ROOTSCHECK: ${{ needs.rootscheck.result }}
           SIGSTORE: ${{ needs.sigstore.result }}
+          SIGSTORE_CODE: ${{ needs.sigstore.outputs.code }}
         run: |
           report() {
             title="vault-roots: $1"
@@ -86,5 +99,9 @@ jobs:
             report "a pinned vault root copy is missing, differs or is left over" "A copy under internal/vaultroots/roots differs from its vault release, is missing for a supported release that registers vote, or is left over from one no longer supported (README \"proposal_bundle_unverified\")."
           fi
           if [ "$SIGSTORE" = failure ]; then
-            report "Sigstore's trusted root differs from the pinned vault roots" "Sigstore's trusted root no longer matches the newest root a vault release pins. Until a vault release pins the new roots, bundles under a new key are not sent (alarm proposal_bundle_unverified, README)."
+            if [ "$SIGSTORE_CODE" = 1 ]; then
+              report "Sigstore's trusted root differs from the pinned vault roots" "Sigstore's trusted root no longer matches the newest root a vault release pins. Until a vault release pins the new roots, bundles under a new key are not sent (alarm proposal_bundle_unverified, README)."
+            else
+              report "the Sigstore trusted-root watch could not run" "rootwatch could not compare (exit ${SIGSTORE_CODE:-none}): a TUF fetch failed, sigstore-go's embedded TUF root is too old (bump sigstore-go in tools/rootwatch), or a step before it failed. Nothing is known about Sigstore's trusted root until it runs again."
+            fi
           fi
