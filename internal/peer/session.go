@@ -37,7 +37,9 @@ func (p *Peer) dispatch(ctx context.Context, c *Connection, in *envelope.Inner, 
 	// §6.3.1 before anything else is done with the message (the rate
 	// limit, the ts window, dedupe, its handler): the received flag and
 	// the confirmed epoch (RELEASE-29 §13, change 1).
-	p.noteFromMember(c, ep, now)
+	if p.noteFromMember(c, ep, in, now) {
+		return ackAfterFlush, nil
+	}
 	if in.Type == handshake.TypeInit {
 		_, seen, err := p.cfg.Store.Get(ctx, kindInner, rekeyKey(handshake.Th1(raw)))
 		if err != nil {

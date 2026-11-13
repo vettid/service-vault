@@ -174,6 +174,11 @@ func (p *Peer) abandonPending(c *Connection, why string, restart bool, now time.
 		p.denyJTI(j, now)
 	}
 	p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == c.ID && bytes.Equal(e.FinEpoch, pe.ID) })
+	if why != "link" {
+		// Kept until a newer epoch is confirmed: a reconnect may name it
+		// (§6.6). One abandoned by a link is demoted instead (change 4).
+		c.Abandoned = append(c.Abandoned, bytes.Clone(pe.ID))
+	}
 	c.Pending = nil
 	p.markDirty(kindConn, c.ID)
 	p.audit("pending_abandoned_"+why, c.ID)

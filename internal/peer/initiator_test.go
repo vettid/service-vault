@@ -1570,3 +1570,161 @@ func TestOwnReconnectSupersedesCarried(t *testing.T) {
 		}
 	}
 }
+
+// sealedUnder seals a note under the member's current epoch now, to be
+// deposited later (as a copy of the member's vault holding that epoch
+// would).
+func sealedUnder(t *testing.T, m *peertest.Member, now time.Time) []byte {
+	t.Helper()
+	raw, err := m.KR.Current().Seal(&envelope.Inner{ID: m.NewID(), Type: "connection.note", TS: now, Body: []byte(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+// Rule E (§6.3.1): a reconnect naming the confirmed epoch while it is not
+// current destroys, at its hs.fin, the epochs after the confirmed one. A
+// later message under a destroyed epoch is refused when its ts is not
+// later than the hs.init's (superseded_epoch), and is fork evidence when
+// it is: the connection is suspended, reason epoch.
+func TestRuleEAndForkEvidence(t *testing.T) {
+	for _, later := range []bool{false, true} {
+		f := newFixture(t)
+		m := f.member(10)
+		cid := f.connect(m, "")
+		first, second := memberRekey(t, f, m, cid) // confirmed stays the first
+		if c := f.p.conns[cid]; !bytes.Equal(c.Confirmed, first[:]) {
+			t.Fatal("confirmed moved")
+		}
+		var held []byte
+		if !later {
+			held = sealedUnder(t, m, f.clk.Now())
+		}
+		f.clk.Advance(time.Second)
+		m.ReconnectNaming(first)
+		f.clk.Advance(time.Minute)
+		if later {
+			held = sealedUnder(t, m, f.clk.Now())
+		}
+		m.IgnoreStray = true
+		f.pump()
+		c := f.p.conns[cid]
+		if e := c.epochMeta(second[:]); e == nil || !e.Destroyed || epochOf(c) != m.KR.Current().ID() {
+			t.Fatalf("later %v: the epoch after the confirmed one was not destroyed", later)
+		}
+		m.DepositTo(m.SvcStand, held)
+		f.pump()
+		c = f.p.conns[cid]
+		if later {
+			if c.State != StateSuspended || !strings.Contains(f.logs.String(), "alarm=fork_suspected") {
+				t.Fatalf("state %s", c.State)
+			}
+			evs := f.ev.of(EventConnectionSuspended)
+			if len(evs) != 1 || evs[0].Reason != SuspendEpoch {
+				t.Fatalf("events %v", evs)
+			}
+		} else if c.State == StateSuspended || !f.audited("superseded_epoch") {
+			t.Fatalf("earlier ts: state %s", c.State)
+		}
+	}
+}
+
+// §3.4.1 "Fork by ctx": after the member's key moved on, a reconnect
+// naming an epoch older than the confirmed one, whose successor was signed
+// by the old key, is fork evidence: the connection is suspended at its
+// hs.fin.
+func TestForkByCtx(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	first, _ := memberRekey(t, f, m, cid)
+	m.Send("connection.note", []byte(`{}`)) // the second epoch is confirmed
+	f.pump()
+	m.RotateIdentity(40, false) // identity.rotate under the second, then a rekey under the new key
+	f.pump()
+	m.IgnoreStray = true
+	m.ReconnectNaming(first)
+	f.pump()
+	if c := f.p.conns[cid]; c.State != StateSuspended || !strings.Contains(f.logs.String(), "alarm=fork_suspected") {
+		t.Fatalf("state %s", c.State)
+	}
+}
+
+// An epoch of ours abandoned while pending is accepted as a member
+// reconnect's ctx until a newer epoch is confirmed (§6.6).
+func TestAbandonedEpochAsCtx(t *testing.T) {
+	for _, newerConfirmed := range []bool{false, true} {
+		f := newFixture(t)
+		m := f.member(10)
+		cid := f.connect(m, "")
+		_, pend := ownRekeyPending(t, f, m, cid)
+		c := f.p.conns[cid]
+		c.RekeyNotBefore = f.clk.Now().Add(RekeyBackoffMax)
+		f.p.mu.Lock()
+		f.p.abandonPending(c, "test", false, f.clk.Now())
+		f.p.mu.Unlock()
+		if newerConfirmed {
+			f.p.mu.Lock()
+			c.Abandoned = nil // as setConfirmed does when a newer epoch is confirmed
+			f.p.mu.Unlock()
+		}
+		m.ReconnectNaming(pend)
+		f.step()
+		if answered := len(f.p.awaiting) == 1; answered == newerConfirmed {
+			t.Fatalf("newer confirmed %v: answered %v", newerConfirmed, answered)
+		}
+	}
+}
+
+// A newer confirmation forgets the abandoned epochs.
+func TestConfirmationForgetsAbandoned(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	ownRekeyPending(t, f, m, cid)
+	c := f.p.conns[cid]
+	f.p.mu.Lock()
+	f.p.abandonPending(c, "test", false, f.clk.Now())
+	f.p.mu.Unlock()
+	if len(c.Abandoned) != 1 {
+		t.Fatal("not kept")
+	}
+	c.RekeyNotBefore = f.clk.Now().Add(RekeyBackoffMax) // no rekey of ours meanwhile
+	m.IgnoreStray = true
+	m.ReconnectNaming(m.KR.Current().ID()) // the abandoned epoch, which the member holds
+	f.pump()
+	m.Send("connection.note", []byte(`{}`)) // confirms the reconnect's epoch
+	f.pump()
+	if c = f.p.conns[cid]; len(c.Abandoned) != 0 {
+		t.Fatal("kept after a newer confirmation")
+	}
+}
+
+// §6.3.1 "A stale reconnect answer ends at a later message" (0.88.9): a
+// message under a newer epoch with a later ts ends our open answer to a
+// reconnect that named an older one.
+func TestStaleReconnectAnswerEnds(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	first, _ := memberRekey(t, f, m, cid)
+	earlier := sealedUnder(t, m, f.clk.Now()) // under the newer epoch, before the hs.init
+	f.clk.Advance(time.Second)
+	m.ReconnectNaming(first)
+	f.step() // answered; its hs.fin will not come
+	if len(f.p.awaiting) != 1 {
+		t.Fatal("not answered")
+	}
+	m.DepositTo(m.SvcStand, earlier)
+	f.step()
+	if len(f.p.awaiting) != 1 {
+		t.Fatal("a message older than the hs.init ended the answer")
+	}
+	f.clk.Advance(time.Minute)
+	m.Send("connection.note", []byte(`{}`)) // under the newer epoch, later
+	f.step()
+	if len(f.p.awaiting) != 0 || !f.audited("answer_ended_stale") {
+		t.Fatal("the stale answer was kept")
+	}
+}

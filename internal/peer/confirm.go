@@ -60,6 +60,9 @@ type EpochMeta struct {
 	// a later message under it is fork evidence.
 	Destroyed bool      `json:"destroyed,omitempty"`
 	DestroyTS time.Time `json:"destroy_ts,omitzero"`
+	// Signer is the member's identity key when the epoch became current
+	// (§3.4.1 "Fork by ctx" judges by it); empty on older records.
+	Signer []byte `json:"signer,omitempty"`
 }
 
 func (c *Connection) epochIndex(id []byte) int {
@@ -99,7 +102,7 @@ func (p *Peer) recordActivated(c *Connection, id []byte, mine bool, now time.Tim
 	if e := c.epochMeta(id); e != nil {
 		e.Superseded = time.Time{}
 	} else {
-		c.Epochs = append(c.Epochs, EpochMeta{ID: bytes.Clone(id), Mine: mine})
+		c.Epochs = append(c.Epochs, EpochMeta{ID: bytes.Clone(id), Mine: mine, Signer: bytes.Clone(c.Peer.IK)})
 	}
 	if c.Confirmed == nil {
 		c.Confirmed = bytes.Clone(id)
@@ -116,6 +119,7 @@ func (p *Peer) setConfirmed(c *Connection, id []byte, now time.Time) {
 		return
 	}
 	c.Confirmed = bytes.Clone(id)
+	c.Abandoned = nil // a newer epoch is confirmed (§6.3.1 Initiator)
 	p.markDirty(kindConn, c.ID)
 	p.adoptReached(c, id, now) // before the handler of the message that moved it
 	if old != nil && !bytes.Equal(old, c.LastEpochID) && c.kr != nil {
@@ -140,17 +144,23 @@ func (p *Peer) pruneEpochs(c *Connection, now time.Time) {
 
 // noteFromMember applies §6.3.1 to a message from the member, other than
 // hs.fin, that opened under ep and passed the sender and suspension
-// checks, before anything else is done with it: the confirmation of the
-// service's pending epoch, the received flag, the
+// checks, before anything else is done with it: a destroyed epoch's
+// refusal or fork evidence (it reports true: the message is dealt with),
+// the confirmation of the service's pending epoch, the received flag, the
 // confirmed epoch, and hs.confirm again for a message under a confirmed
 // epoch that is not current, while the current one is a member's the
-// service activated as responder (queued once per batch, reconfirmAll).
-func (p *Peer) noteFromMember(c *Connection, ep *handshake.Epoch, now time.Time) {
+// service activated as responder (queued once per batch, reconfirmAll),
+// and a stale reconnect answer's end.
+func (p *Peer) noteFromMember(c *Connection, ep *handshake.Epoch, in *envelope.Inner, now time.Time) bool {
 	if ep == nil {
-		return
+		return false
 	}
 	eid := ep.ID()
 	id := eid[:]
+	if e := c.epochMeta(id); e != nil && e.Destroyed {
+		p.destroyedEpochMessage(c, e, in, now) // rule E: refused, or fork evidence
+		return true
+	}
 	if pe := c.Pending; pe != nil && bytes.Equal(pe.ID, id) {
 		p.confirmPending(c, now) // §6.3.1 Initiator: first, in this write
 	}
@@ -166,6 +176,8 @@ func (p *Peer) noteFromMember(c *Connection, ep *handshake.Epoch, now time.Time)
 		}
 		p.reconfirm[c.ID] = true
 	}
+	p.dropStaleReconnectAnswers(c, id, in.TS, now)
+	return false
 }
 
 // reconfirmAll queues hs.confirm for each connection the batch marked.

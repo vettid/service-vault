@@ -283,6 +283,12 @@ func (p *Peer) rotationConflict(c *Connection, r *handshake.Rotation, now time.T
 // sends and accepts nothing, and its sign-ins and approvals cannot be
 // answered.
 func (p *Peer) suspend(c *Connection, now time.Time) {
+	p.suspendFor(c, SuspendRotationConflict, now)
+}
+
+// suspendFor suspends a connection for a reason: rotation_conflict, or
+// epoch for fork evidence (rule E, fork by ctx; RELEASE-29 §7).
+func (p *Peer) suspendFor(c *Connection, reason string, now time.Time) {
 	if c.State == StateSuspended {
 		return
 	}
@@ -297,6 +303,10 @@ func (p *Peer) suspend(c *Connection, now time.Time) {
 		}
 	}
 	p.markDirty(kindConn, c.ID)
-	p.emit(&Event{Type: EventConnectionSuspended, ConnectionID: c.ID, Tag: c.Tag, Reason: SuspendRotationConflict}, now)
+	p.emit(&Event{Type: EventConnectionSuspended, ConnectionID: c.ID, Tag: c.Tag, Reason: reason}, now)
+	if reason == SuspendEpoch {
+		p.log().Error("fork evidence: connection suspended", "alarm", "fork_suspected", "connection_id", c.ID)
+		return
+	}
 	p.log().Error("member identity rotation conflict: connection suspended", "alarm", "rotate_conflict", "connection_id", c.ID)
 }

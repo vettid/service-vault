@@ -106,15 +106,17 @@ func TestReconnectAfterRestoreFollowsRotation(t *testing.T) {
 	}
 }
 
-// A service vault answering a member keeps the exact ctx (§6.6, 0.72.0):
-// a reconnect naming an earlier epoch of the connection is refused, one
-// naming the last is taken.
+// A reconnect naming an epoch older than the confirmed one, with no
+// change of the member's key since, is refused (§6.6 "Accepting ctx");
+// one naming the last is taken.
 func TestMemberReconnectNamesLastEpochOnly(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
 	cid := f.connect(m, "")
 	first := m.KR.Current().ID()
 	m.StartRekey()
+	f.pump()
+	m.Send("connection.note", []byte(`{}`)) // the new epoch is confirmed
 	f.pump()
 	before := f.p.conns[cid].kr.Current().ID()
 	m.IgnoreStray = true

@@ -207,13 +207,6 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 		pi.Discard()
 		return
 	}
-	var eid [suite.EpochIDSize]byte
-	copy(eid[:], c.LastEpochID)
-	if c.pendingReconnect() {
-		// Having sent hs.fin for its own reconnect, the service accepts
-		// only that epoch as ctx (§6.6 "Accepting ctx", R29-X5).
-		copy(eid[:], c.Pending.ID)
-	}
 	body := pi.Init()
 	// A valid link that gives a key a second successor suspends the
 	// connection (§3.4), whatever else the hs.init carries: such a chain
@@ -241,6 +234,18 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 		}
 		start, fresh = body.Rotations[0].OldIK, body.Rotations[known:]
 	}
+	// §6.6 "Accepting ctx" (R29-X5): with our reconnect pending only its
+	// epoch; else the current, our pending, the confirmed (rule E at
+	// hs.fin) or an abandoned epoch; an older one may be fork evidence
+	// (§3.4.1 "Fork by ctx", judged at hs.fin).
+	named, namedConf, forkEp, ok := p.classifyCtx(c, body.Ctx, fresh)
+	if !ok {
+		p.audit("reconnect_refused", c.ID)
+		pi.Discard()
+		return
+	}
+	var eid [suite.EpochIDSize]byte
+	copy(eid[:], named)
 	cfg := handshake.ResponderConfig{
 		Identity: p.cfg.Keys.IK, Policy: handshake.PolicyVaultToVault, PinnedSuite: c.Suite,
 		CollectSender: sender, RecordRelayKey: c.Peer.Relay.PK, KnownInitiatorIK: start,
@@ -290,7 +295,7 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 		}
 		p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == c.ID && e.Token != "" && e.Token == c.Reconnect.Token })
 	}
-	pend := &pendingReconnect{Standing: st, Reconnect: rt, Issued: jtis, Signer: newPendingFollow(body)}
+	pend := &pendingReconnect{Standing: st, Reconnect: rt, Issued: jtis, Signer: newPendingFollow(body), Named: bytes.Clone(named)}
 	if len(fresh) > 0 {
 		pend.IK, pend.KEM = body.From.IK, body.From.KEM.Bytes()
 		for _, r := range fresh {
@@ -301,7 +306,7 @@ func (p *Peer) respondReconnect(pi *handshake.PendingInit, c *Connection, sender
 	th1 := pi.Th1()
 	exp := now.Add(HandshakeTTL)
 	p.awaiting[id] = &awaiting{ID: id, ConnID: c.ID, Purpose: handshake.PurposeReconnect, Th1: th1[:], Created: now,
-		Expires: exp, Reconnect: pend, r: resp}
+		Expires: exp, Reconnect: pend, NamedConf: namedConf, ForkEp: forkEp, InitTS: pi.Inner().TS, r: resp}
 	p.markDirty(kindAwait, id)
 	// On the standing token the hs.init brought: ours may have expired.
 	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Token: st.Token, Payload: env, Handshake: true, CarriedTok: true}, now)
@@ -380,9 +385,16 @@ func (p *Peer) applyReconnect(c *Connection, pend *pendingReconnect) error {
 // handleRekeyInit handles a rekey hs.init that arrived in session mode
 // (§6.2, §6.5).
 func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.Epoch, raw []byte, sender ed25519.PublicKey, now time.Time) disposition {
+	namedConf := false
 	if c.kr == nil || c.kr.Current() != ep {
-		p.audit("rekey_not_current_epoch", c.ID)
-		return ackAfterFlush
+		// A rekey naming the confirmed epoch while it is not current is
+		// accepted as if it were current (§6.3.1 Responder); rule E applies
+		// at its hs.fin.
+		if eid := ep.ID(); c.kr == nil || len(c.Confirmed) == 0 || !bytes.Equal(eid[:], c.Confirmed) {
+			p.audit("rekey_not_current_epoch", c.ID)
+			return ackAfterFlush
+		}
+		namedConf = true
 	}
 	if c.Reconnecting {
 		p.audit("rekey_while_reconnecting", c.ID) // the reconnect settles the session
@@ -429,6 +441,15 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 		p.noTokenReconnect(c, now)
 		return ackAfterFlush
 	}
+	if namedConf {
+		// The service abandons its own open rekey for it (§6.3.1
+		// Responder): ours named an epoch the member has left.
+		for id, og := range p.outgoing {
+			if og.ConnID == c.ID && og.ini != nil && og.ini.Purpose() == handshake.PurposeRekey {
+				p.dropOutgoing(id)
+			}
+		}
+	}
 	// Crossing rekeys: the lower th1 wins (§6.5).
 	for id, og := range p.outgoing {
 		if og.ConnID != c.ID {
@@ -464,7 +485,7 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 	// (dispatch, rekey_init_replayed).
 	p.mark(kindInner, rekeyKey(th1), []byte{1}, now.Add(DedupeRetention+envelope.MaxClockSkewFuture))
 	aw := &awaiting{ID: id, ConnID: c.ID, Purpose: handshake.PurposeRekey, Th1: th1[:], Created: now,
-		Expires: now.Add(HandshakeTTL), r: resp}
+		Expires: now.Add(HandshakeTTL), NamedConf: namedConf, InitTS: in.TS, r: resp}
 	aw.Follow = newPendingFollow(body)
 	p.awaiting[id] = aw
 	p.markDirty(kindAwait, id)
@@ -528,6 +549,14 @@ func (p *Peer) handleFin(id string, raw []byte, sender ed25519.PublicKey, now ti
 		fr.Epoch.Destroy()
 		return ackAfterFlush
 	}
+	if aw.ForkEp {
+		// §3.4.1 "Fork by ctx": its hs.init named an epoch older than the
+		// confirmed one, after which the member's key moved on; sig_I has
+		// verified, so it is evidence of a second copy.
+		fr.Epoch.Destroy()
+		p.suspendFor(c, SuspendEpoch, now)
+		return ackAfterFlush
+	}
 	if aw.Reconnect != nil {
 		if err := p.applyReconnect(c, aw.Reconnect); err != nil {
 			if !errors.Is(err, errSuspended) && !errors.Is(err, errSignerMoved) {
@@ -573,6 +602,9 @@ func (p *Peer) handleFin(id string, raw []byte, sender ed25519.PublicKey, now ti
 	if c.Reconnecting {
 		c.clearReconnect()
 		p.audit("reconnect_settled_by_member", c.ID)
+	}
+	if aw.NamedConf {
+		p.ruleE(c, aw.InitTS, now) // §6.3.1 rule E, in this write
 	}
 	p.installEpoch(c, fr.Epoch, now)
 	if aw.Reconnect != nil {

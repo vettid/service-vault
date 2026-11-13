@@ -119,6 +119,9 @@ type Connection struct {
 	// Pending is the service's own rekey or reconnect epoch awaiting
 	// confirmation (§6.3.1 Initiator; initiator.go).
 	Pending *PendingEpoch `json:"pending,omitempty"`
+	// Abandoned are the ids of pending epochs of ours abandoned since the
+	// last confirmation: a member's reconnect may name one (§6.6).
+	Abandoned [][]byte `json:"abandoned,omitempty"`
 	// Carried are the tokens a member's reconnect carried, kept with the
 	// epoch it established until the confirmed epoch reaches it
 	// (carried.go).
@@ -235,6 +238,12 @@ type awaiting struct {
 	// RespEntry is the outbox entry of a rekey answer's hs.resp, dropped
 	// with the answer if not yet deposited.
 	RespEntry string `json:"resp_entry,omitempty"`
+	// NamedConf: its hs.init named the confirmed epoch while not current
+	// (rule E at hs.fin); ForkEp: it named an older epoch that is fork
+	// evidence (suspend at hs.fin); InitTS: the hs.init's inner ts.
+	NamedConf bool      `json:"named_conf,omitempty"`
+	ForkEp    bool      `json:"fork_ep,omitempty"`
+	InitTS    time.Time `json:"init_ts,omitzero"`
 
 	r *handshake.Responder
 }
@@ -254,6 +263,8 @@ type pendingReconnect struct {
 	// hs.fin (checkSigner); IK, KEM and Links are kept for a record from
 	// before it.
 	Signer *pendingFollow `json:"signer,omitempty"`
+	// Named is the epoch its ctx named.
+	Named []byte `json:"named,omitempty"`
 }
 
 // pendingFollow is what a member's rekey or reconnect hs.init named: the
