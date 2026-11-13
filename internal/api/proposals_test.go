@@ -66,6 +66,8 @@ func (f *fakeProposals) Publish(_ context.Context, id string) (int, error) {
 		return 3, nil
 	case "unverified":
 		return 0, fmt.Errorf("%w: proposal of unverified: not under the pinned roots", ballot.ErrBundleUnverified)
+	case "nocheck":
+		return 0, fmt.Errorf("proposal of nocheck: %w", ballot.ErrNoBundleCheck)
 	}
 	return 0, ballot.ErrUnknownProposal
 }
@@ -160,9 +162,12 @@ func TestProposalRoutes(t *testing.T) {
 		t.Fatalf("not published, bundle unverified: %d %v", rec.Code, m)
 	}
 	fp.err = nil
-	for id, want := range map[string]int{"p1": 200, "nope": 404, "unverified": 503} {
+	for id, want := range map[string]struct {
+		code int
+		err  string
+	}{"p1": {200, ""}, "nope": {404, "not_found"}, "unverified": {503, "bundle_unverified"}, "nocheck": {503, "bundle_check_not_configured"}} {
 		rec, m := do(t, h, "POST", "/v1/proposals/"+id+"/publish", apiKey, "")
-		if rec.Code != want || (want == 200 && m["sending"] != float64(3)) || (want == 503 && m["error"] != "bundle_unverified") {
+		if rec.Code != want.code || (want.code == 200 && m["sending"] != float64(3)) || (want.err != "" && m["error"] != want.err) {
 			t.Errorf("publish %s: %d %v", id, rec.Code, m)
 		}
 	}

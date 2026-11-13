@@ -692,6 +692,8 @@ func (s *Server) publishProposal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "publication_not_configured")
 	case errors.Is(err, ballot.ErrProposalChanged):
 		writeError(w, http.StatusConflict, "conflict") // another task saved it: retry
+	case errors.Is(err, ballot.ErrNoBundleCheck):
+		writeError(w, http.StatusServiceUnavailable, "bundle_check_not_configured")
 	case errors.Is(err, ballot.ErrBundleUnverified):
 		// Published, not sent: a member vault would refuse its bundle.
 		writeError(w, http.StatusServiceUnavailable, "bundle_unverified")

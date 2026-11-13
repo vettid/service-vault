@@ -174,7 +174,10 @@ func (m *Manager) checkBundle(what, id string, doc []byte, bundle json.RawMessag
 	}
 	m.log().Error("an anchor bundle a member vault would refuse: nothing is sent", "alarm", "proposal_bundle_unverified",
 		"proposal_id", id, "document", what, "err", err.Error())
-	return fmt.Errorf("%w: %s of %s: %v", ErrBundleUnverified, what, id, err)
+	if errors.Is(err, ErrBundleUnverified) {
+		return fmt.Errorf("%s of %s: %w", what, id, err) // ErrNoBundleCheck: already says so
+	}
+	return fmt.Errorf("%w: %s of %s: %w", ErrBundleUnverified, what, id, err)
 }
 
 func (m *Manager) tsaTime(bundle json.RawMessage, doc []byte) (int64, error) {

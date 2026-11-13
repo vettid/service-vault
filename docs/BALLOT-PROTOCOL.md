@@ -984,7 +984,8 @@ item.
 - **0.13.13 (2026-11-12):** (GC #1343, Ballot P1) §3.3: the service
   checks a proposal's and an extension's bundle, as a member's vault
   will, against the pinned roots of every supported vault release
-  (defined there) before sending it, and sends nothing on a failure. No
+  (defined there) before sending it, and pushes nothing on a failure (a
+  vault that asks or reads the site still gets it and checks it). No
   change to the messages, the documents, the vectors or what a member's
   vault checks.
 - **0.13.12 (2026-11-11):** (owner decision 2026-11-11; service-vault
