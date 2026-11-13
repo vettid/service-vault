@@ -1058,6 +1058,9 @@ func TestForkJudgedAtOurReconnectRespStaysSuspended(t *testing.T) {
 	}
 	f.failDeposit = nil
 	f.restore(f.backup(), true) // our reconnect starts; the answer stays
+	// As a record from before seen links (R29-K8): the fork is found only
+	// once the hs.resp's links are followed, which this test covers.
+	f.p.conns[cid].Seen = nil
 	for _, aw := range f.p.awaiting {
 		rid := aw.RespEntry
 		f.p.dropOutbox(func(e *outboxEntry) bool { return e.ID == rid }) // its hs.resp is lost

@@ -223,18 +223,7 @@ func (p *Peer) startReconnect(c *Connection, now time.Time) bool {
 // epoch, which is pending until the member confirms it (§6.3.1
 // Initiator). The reconnect stays open until then.
 func (p *Peer) finishReconnect(c *Connection, og *outgoing, res *handshake.Result, now time.Time) disposition {
-	st, err1 := p.heldTokenFor(c, res.Resp.Token, tokStanding)
-	rt, err2 := p.heldTokenFor(c, res.Resp.ReconnectToken, tokReconnect)
-	if err1 != nil || err2 != nil {
-		p.audit("reconnect_bad_token", c.ID)
-		res.Epoch.Destroy()
-		for _, j := range og.Issued {
-			p.denyJTI(j, now)
-		}
-		p.reconnectFailed(c)
-		return ackAfterFlush
-	}
-	// Rule C first (R29-K8): a link that gives a key a second successor,
+	// Rule C first, before anything may refuse it (R29-K8): a link that gives a key a second successor,
 	// against those followed or seen, suspends; no hs.fin, no epoch.
 	for _, r := range res.Resp.Rotations {
 		if p.rotationConflictRec(c, r, true, now) {
@@ -245,6 +234,17 @@ func (p *Peer) finishReconnect(c *Connection, og *outgoing, res *handshake.Resul
 			}
 			return ackAfterFlush
 		}
+	}
+	st, err1 := p.heldTokenFor(c, res.Resp.Token, tokStanding)
+	rt, err2 := p.heldTokenFor(c, res.Resp.ReconnectToken, tokReconnect)
+	if err1 != nil || err2 != nil {
+		p.audit("reconnect_bad_token", c.ID)
+		res.Epoch.Destroy()
+		for _, j := range og.Issued {
+			p.denyJTI(j, now)
+		}
+		p.reconnectFailed(c)
+		return ackAfterFlush
 	}
 	fresh := res.Resp.Rotations[handshake.KnownPrefix(chainOf(c), res.Resp.Rotations):]
 	if p.revisits(c, fresh) {

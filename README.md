@@ -861,7 +861,9 @@ connection survives those; it does not follow a relay key, which release
   followed (in a handshake not completed, an `identity.rotate` refused, a
   rekey that passed its own checks) are kept, at most 32, and count for
   "one successor per key" too (§3.4.1 rule C), checked before anything
-  else may refuse the message that carries them. If two different
+  else may refuse a session message or an `hs.resp` that carries them (a
+  reconnect `hs.init` is checked once it passes its own form, replay and
+  rate checks). If two different
   successors of one key arrive ("one successor per key"), the connection
   is suspended: nothing is sent or accepted, its sign-ins and
   approvals can't be answered, an ERROR with `alarm: rotate_conflict` is

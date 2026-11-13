@@ -237,3 +237,50 @@ func TestSeenLinkJudgedAtReconnectResp(t *testing.T) {
 		t.Fatalf("state %s, chain %d, epoch moved %v", c.State, len(c.Chain), c.kr.Current().ID() != epoch)
 	}
 }
+
+// Table B: a chain whose first link not followed starts at an ancestor
+// (here a followed link A->B signed again with another KEM, so it is not
+// "already followed", yet no second successor) is refused unexpected.
+func TestIdentityRotateAncestorFirstUnexpected(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	orig := m.IK
+	m.SendRotation(m.RotateIdentity(40, true)) // A->B, followed
+	f.pump()
+	c := f.p.conns[cid]
+	if len(c.Chain) != 1 {
+		t.Fatalf("chain %d", len(c.Chain))
+	}
+	kem2, err := suite.NewPrivateKey(bytes.Repeat([]byte{99}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := handshake.NewRotation(orig, m.IK, kem2.Public()) // A->B, another KEM
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.SendRotations(again)
+	f.pump()
+	if len(c.Chain) != 1 || !f.audited("unexpected") || c.State != StateActive {
+		t.Fatalf("chain %d, state %s", len(c.Chain), c.State)
+	}
+}
+
+// A rekey hs.init's links are checked by rule C before anything else, but
+// recorded as seen only once it passes its own checks: one outside the ts
+// window records nothing.
+func TestRekeyLinksNotSeenBeforePrecheck(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	m.RotateIdentity(50, true) // A->B
+	m.StartRekeyWithLinks()
+	f.clk.Advance(envelope.MaxDurableAge + time.Hour) // stale when it is handled
+	if _, err := f.p.Step(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if c := f.p.conns[cid]; len(c.Seen) != 0 {
+		t.Fatalf("seen %d: a rekey that failed its own checks recorded its links", len(c.Seen))
+	}
+}
