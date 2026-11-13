@@ -48,11 +48,22 @@ fourth. Done so far:
   (7 days after a restore, 16 otherwise), and ends a reconnect `stale`
   at the bounds of §3.4.1; `token_revoked` on its standing token ends
   that token only, and the entries wait;
+- **forks and tokens** (change 3): a member's rekey or reconnect may name
+  the service's confirmed epoch while it is not current, and at its
+  `hs.fin` rule E destroys the epochs after it; a later message under a
+  destroyed epoch is fork evidence and suspends the connection (reason
+  `epoch`, alarm `fork_suspected`), as does a reconnect naming an older
+  epoch after the member's key moved on (fork by `ctx`); a reconnect may
+  also name a pending epoch of the service's, or one it abandoned; a
+  member's reconnect's tokens are kept with its epoch and adopted when
+  the member sends under it, and no reconnect starts for want of a token
+  meanwhile; a refresh after `quota_exceeded` revokes only what the
+  issuer may; an answer to a reconnect the member has moved past ends at
+  its next message;
 - after a rekey of its own fails, it waits an hour before the next,
   doubling to a day.
 
-Not yet: rule E, fork by `ctx` and a handshake's carried tokens (change
-3); the `ik` demotion rules and the release marker (change 4); the
+Not yet: the `ik` demotion rules and the release marker (change 4); the
 relay-key rules of §3.4.2, after which it advertises `relay_follow`.
 
 This repository replaces

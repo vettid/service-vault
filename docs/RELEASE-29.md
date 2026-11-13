@@ -1,6 +1,6 @@
 # Release 29 in the service vault
 
-**Status:** 0.5.2, draft (2026-11-13). Against VAULT-MESSAGING 0.90.1.
+**Status:** 0.6.0, draft (2026-11-13). Against VAULT-MESSAGING 0.90.1.
 
 VAULT-MESSAGING §6.3.1 ("Lifetimes and activation on confirmation",
 release 29) asks a service vault to follow its rules "on either side as
@@ -294,8 +294,8 @@ which a migration would take as confirmed and so never confirm again.)
 ## 12. Revocations at a refresh (R29-T1)
 
 After `quota_exceeded`, a member asks for a fresh standing token, and
-the service answers with one. Today the service also revokes every
-standing token it issued to that member. Under §6.3.1 "Revocation by
+the service answers with one. Before the third change the service also
+revoked every standing token it issued to that member. Under §6.3.1 "Revocation by
 the issuer" the refresh never revokes: a token that a still-open
 handshake carried; the standing token of the newest token-carrying
 handshake with the member; the newest standing token the service
@@ -424,7 +424,11 @@ separately. The README's release-29 status paragraph shrinks with each.
    tokens adopted at confirmation, on both sides, with the refresh's
    revocations (section 12) and the reconnects that rest on carried
    tokens (section 3, items 3 and 7, and the exceptions in items 2, 4
-   and 5); a stale reconnect answer ending at a later message.
+   and 5); a stale reconnect answer ending at a later message. Also: a
+   connection a `relay.address.update` moved before it was refused is
+   marked `stale` at load, with an alarm (no honest member sent one), and
+   a reconnect token issued to the service is adopted only if valid and
+   later than the held one.
 4. **`ik` links and the marker.** The `rotations` of `identity.rotate`;
    demotion by position and the held outbox; strict F1 and the
    reconnects of section 3 item 9; seen links; epochs abandoned while
@@ -454,6 +458,12 @@ separately. The README's release-29 status paragraph shrinks with each.
 
 ## Changes
 
+- **0.6.0 (2026-11-13):** the third change is built: §12 describes it
+  as done; §14 item 3 adds, from the lead's review of #152, that a
+  connection a `relay.address.update` moved before it was refused is
+  marked `stale` at load (alarm `relay_moved_unlinked`), and that a
+  reconnect token issued to the service replaces the held one only if it
+  is valid and lasts longer.
 - **0.5.2 (2026-11-13):** §3 item 8, `relay.address.update` is refused
   (as vettid-vault #241 makes a member vault do), so the restart it made
   is gone.
