@@ -385,6 +385,18 @@ func (p *Peer) applyReconnect(c *Connection, pend *pendingReconnect) error {
 // handleRekeyInit handles a rekey hs.init that arrived in session mode
 // (§6.2, §6.5).
 func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.Epoch, raw []byte, sender ed25519.PublicKey, now time.Time) disposition {
+	// Rule C (R29-K8): its links were checked before anything else
+	// (evidenceFirst); once it passes its own checks they are recorded as
+	// seen, whatever happens to it next, as vettid-vault does.
+	if _, err := p.rekeyPrecheck(c, in, ep, sender, now); err == nil {
+		if b, err := handshake.ParseInit(in.Body); err == nil {
+			for _, r := range b.Rotations {
+				if p.rotationConflictRec(c, r, true, now) {
+					return ackAfterFlush
+				}
+			}
+		}
+	}
 	namedConf := false
 	if c.kr == nil || c.kr.Current() != ep {
 		// A rekey naming the confirmed epoch while it is not current is
@@ -432,7 +444,9 @@ func (p *Peer) handleRekeyInit(c *Connection, in *envelope.Inner, ep *handshake.
 	// never before (checkSigner).
 	body := pi.Init()
 	for _, r := range body.Rotations {
-		if r.Verify() == nil && p.rotationConflict(c, r, now) {
+		// Not recorded here: only a rekey that passed rekeyPrecheck records
+		// its links as seen (above).
+		if p.rotationConflictRec(c, r, false, now) {
 			pi.Discard()
 			return ackAfterFlush
 		}
@@ -836,11 +850,21 @@ func (p *Peer) handleResp(id string, raw []byte, sender ed25519.PublicKey, now t
 		res.Epoch.Destroy()
 		return ackAfterFlush
 	}
-	// No rule C check on the hs.resp's links here: a link that gives a
-	// key a second successor is off the path the handshake resolves, so
-	// HandleResp has refused the hs.resp already (an abort, above), and
-	// the fork shows only as failed rekeys. Judging it needs the refused
-	// hs.resp's links, which the handshake library does not return.
+	// A link that gives a followed key a second successor is off the path
+	// the handshake resolves, so HandleResp has refused such an hs.resp
+	// already (an abort, above), and that fork shows only as failed
+	// rekeys: judging it needs the refused hs.resp's links, which the
+	// handshake library does not return. A link that contradicts a seen
+	// link (rule C, R29-K8) can be on the path: it is judged here, before
+	// anything is followed (finishReconnect for a reconnect).
+	if og.ini.Purpose() == handshake.PurposeRekey {
+		for _, r := range res.Resp.Rotations {
+			if p.rotationConflictRec(c, r, true, now) {
+				res.Epoch.Destroy()
+				return ackAfterFlush
+			}
+		}
+	}
 	if og.ini.Purpose() == handshake.PurposeReconnect {
 		return p.finishReconnect(c, og, res, now)
 	}

@@ -223,6 +223,18 @@ func (p *Peer) startReconnect(c *Connection, now time.Time) bool {
 // epoch, which is pending until the member confirms it (§6.3.1
 // Initiator). The reconnect stays open until then.
 func (p *Peer) finishReconnect(c *Connection, og *outgoing, res *handshake.Result, now time.Time) disposition {
+	// Rule C first, before anything may refuse it (R29-K8): a link that gives a key a second successor,
+	// against those followed or seen, suspends; no hs.fin, no epoch.
+	for _, r := range res.Resp.Rotations {
+		if p.rotationConflictRec(c, r, true, now) {
+			c.clearReconnect()
+			res.Epoch.Destroy()
+			for _, j := range og.Issued {
+				p.denyJTI(j, now)
+			}
+			return ackAfterFlush
+		}
+	}
 	st, err1 := p.heldTokenFor(c, res.Resp.Token, tokStanding)
 	rt, err2 := p.heldTokenFor(c, res.Resp.ReconnectToken, tokReconnect)
 	if err1 != nil || err2 != nil {

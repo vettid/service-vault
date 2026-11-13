@@ -847,6 +847,24 @@ func (m *Member) SendRotation(r *handshake.Rotation) {
 	m.Send("identity.rotate", body)
 }
 
+// RotateBody is an identity.rotate body with the whole chain (S8):
+// `rotations` and, as `rotation`, last.
+func RotateBody(last *handshake.Rotation, links ...*handshake.Rotation) []byte {
+	arr := make([]json.RawMessage, len(links))
+	for i, r := range links {
+		arr[i] = r.Marshal()
+	}
+	ra, _ := json.Marshal(arr)
+	body, _ := json.Marshal(map[string]json.RawMessage{"rotation": last.Marshal(), "rotations": ra})
+	return body
+}
+
+// SendRotations sends one identity.rotate carrying the whole chain (S8).
+func (m *Member) SendRotations(links ...*handshake.Rotation) {
+	m.t.Helper()
+	m.Send("identity.rotate", RotateBody(links[len(links)-1], links...))
+}
+
 // Reconnect sends a reconnect hs.init (§6.6) on the service's reconnect
 // token, carrying the rotations since the last epoch.
 func (m *Member) Reconnect() { m.ReconnectNaming(m.KR.Current().ID()) }

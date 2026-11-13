@@ -3,7 +3,6 @@ package peer
 import (
 	"bytes"
 	"crypto/ed25519"
-	"encoding/json"
 	"errors"
 	"time"
 
@@ -41,34 +40,58 @@ const SuspendRotationConflict = "rotation_conflict"
 // (legacyRelayMove).
 const SuspendRelayMoved = "relay_moved_unlinked"
 
-// identityRotate follows one link of the member's rotation chain (§3.4):
-// both signatures, old_ik the stored key, and one successor per key. The
-// member's vault rekeys next (§3.4 step 3), under the new key.
+// identityRotate is Table B's identity.rotate column (§3.4.1, R29-K1): the
+// whole chain the member sent (S8), rule C on every link, then the links
+// already followed are skipped (all of them: ignored); the first one not
+// followed must start at the stored key (an ancestor: refused unexpected;
+// any other key: unknown_ik); the rest must verify as a chain from it, and
+// no new key may be the stored key or an ancestor (ik_rollback) or come
+// back to a key already passed (bad_rotation). The member's vault rekeys
+// next (§3.4 step 3), under the new key.
 func (p *Peer) identityRotate(c *Connection, body []byte, now time.Time) {
-	var b struct {
-		Rotation json.RawMessage `json:"rotation"`
-	}
-	if json.Unmarshal(body, &b) != nil || len(b.Rotation) == 0 {
+	links, err := rotateLinks(body)
+	if err != nil {
 		p.audit("bad_rotation", c.ID)
 		return
 	}
-	r, err := handshake.ParseRotation(b.Rotation)
-	if err != nil || r.Verify() != nil {
+	for _, r := range links {
+		if p.rotationConflictRec(c, r, true, now) {
+			return
+		}
+	}
+	if c.State == StateSuspended {
+		return
+	}
+	i := handshake.KnownPrefix(chainOf(c), links)
+	if i == len(links) {
+		return // every link already followed: ignored
+	}
+	switch first := links[i].OldIK; {
+	case suite.EqualPublic(first, c.Peer.IK):
+	case isAncestor(c, first):
+		p.audit("unexpected", c.ID) // Table B: an ancestor is only "all followed"
+		return
+	default:
+		p.audit("unknown_ik", c.ID)
+		return
+	}
+	app := links[i:]
+	final, kem, err := handshake.ResolveChain(c.Peer.IK, app)
+	if err != nil {
 		p.audit("bad_rotation", c.ID)
 		return
 	}
-	if p.rotationConflict(c, r, now) {
-		return
+	for _, r := range app {
+		if suite.EqualPublic(r.NewIK, c.Peer.IK) || isAncestor(c, r.NewIK) {
+			p.audit("ik_rollback", c.ID)
+			return
+		}
 	}
-	if p.knownSuccessor(c, r) {
-		return // the same statement again
-	}
-	final, kem, err := handshake.ResolveChain(c.Peer.IK, []*handshake.Rotation{r})
-	if err != nil || p.revisits(c, []*handshake.Rotation{r}) {
+	if p.revisits(c, app) {
 		p.audit("bad_rotation", c.ID)
 		return
 	}
-	p.followRotation(c, final, kem, []*handshake.Rotation{r}, true)
+	p.followRotation(c, final, kem, app, true)
 }
 
 // revisits reports whether following links would lead the connection's
@@ -103,11 +126,11 @@ func (p *Peer) followRotation(c *Connection, ik ed25519.PublicKey, kem *suite.Pu
 	for _, r := range links {
 		c.Chain = append(c.Chain, r.Marshal())
 	}
-	if len(c.Chain) > handshake.MaxRotations {
-		// Only the last links matter for one-successor checks of keys
-		// still in use; the chain a peer may send is at most this long.
-		c.Chain = c.Chain[len(c.Chain)-handshake.MaxRotations:]
-	}
+	// The whole chain is kept, as the member vault keeps it: ancestry
+	// (Table B) and rule C read every link followed, so a link from a key
+	// many rotations back is still judged (a member rotates at a phone
+	// transfer, a recovery or a credential.rotate: rarely).
+	pruneSeen(c) // a followed link is no longer only seen; irrelevant ones go
 	// §3.4.1 H5: the service's open handshakes pinned to the member's
 	// previous ik are abandoned: its rekeys and reconnect awaiting hs.resp,
 	// and its pending epoch ("Pending epochs at a link", R29-K2). Its open
@@ -268,19 +291,11 @@ func (p *Peer) knownSuccessor(c *Connection, r *handshake.Rotation) bool {
 	return false
 }
 
-// rotationConflict applies "One successor per key" (§3.4): a valid link
-// whose old_ik already has a different accepted successor suspends the
-// connection.
+// rotationConflict applies "One successor per key" (§3.4) with rule C's
+// seen links (rotationConflictRec), recording a link not yet followed or
+// seen as seen.
 func (p *Peer) rotationConflict(c *Connection, r *handshake.Rotation, now time.Time) bool {
-	for _, raw := range c.Chain {
-		prev, err := handshake.ParseRotation(raw)
-		if err != nil || !suite.EqualPublic(prev.OldIK, r.OldIK) || suite.EqualPublic(prev.NewIK, r.NewIK) {
-			continue
-		}
-		p.suspend(c, now)
-		return true
-	}
-	return false
+	return p.rotationConflictRec(c, r, true, now)
 }
 
 // suspend stops a connection after a rotation conflict: it is kept (the
