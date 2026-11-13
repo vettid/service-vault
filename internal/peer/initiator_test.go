@@ -587,6 +587,9 @@ func TestReconnectFinRevokedRetriesOnHeldToken(t *testing.T) {
 	if c.Reconnecting || c.State != StateActive || epochOf(c) != m.KR.Current().ID() || c.Standing.Token == refused[0] {
 		t.Fatalf("reconnecting %v, state %s", c.Reconnecting, c.State)
 	}
+	if len(c.RevokedHeld) != 1 { // the refused carried token, recorded
+		t.Fatalf("%d revoked tokens recorded", len(c.RevokedHeld))
+	}
 }
 
 // beginReconnectNow starts a reconnect of the service's at once and
@@ -2537,4 +2540,37 @@ func TestOwnReconnectTokensCarriedAtConfirmation(t *testing.T) {
 	if c := f.p.conns[cid]; c.Reconnecting || !f.p.issued[issued[0]].Carried {
 		t.Fatal("not carried after the confirmation")
 	}
+}
+
+// An empty token offered with no reconnect token held is refused and
+// audited, not taken for the held one offered again.
+func TestEmptyIssuedTokenAudited(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	f.p.conns[cid].Reconnect = HeldToken{}
+	m.Send(peerwire.TypeTokenIssued, []byte(`{"kind":"reconnect","token":""}`))
+	f.pump()
+	if !f.audited("bad_issued_token") {
+		t.Fatal("an empty token not audited")
+	}
+}
+
+// The own relay's lifetime cap does not apply to a member on another
+// relay.
+func TestOwnRelayCapOnlyOnOurRelay(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	now := f.clk.Now()
+	f.p.limits.MaxTokenLifetimeSeconds = int64(10 * 24 * 3600)
+	np := f.p.conns[cid].Peer
+	np.Relay.URL = "https://relay.example.org"
+	if _, err := f.p.heldToken(m.MintAtAud(now, now.Add(11*24*time.Hour), "far", np.Relay.URL), &np, tokStanding); err != nil {
+		t.Fatalf("a member on another relay held to ours: %v", err)
+	}
+	if _, err := f.p.heldToken(m.MintAt(now, now.Add(11*24*time.Hour), "near"), &f.p.conns[cid].Peer, tokStanding); err == nil {
+		t.Fatal("a member on our relay not held to it")
+	}
+	f.p.limits.MaxTokenLifetimeSeconds = 0
 }

@@ -665,9 +665,14 @@ func (m *Member) SvcRelayPK() ed25519.PublicKey { return m.svc.Relay.PK }
 // MintAt mints a deposit token for the service on the Member's mailbox
 // with the given iat and exp (an honest issuer sets exp = iat + ttl).
 func (m *Member) MintAt(iat, exp time.Time, jti string) string {
+	return m.MintAtAud(iat, exp, jti, RelayURL)
+}
+
+// MintAtAud is MintAt for a token whose audience is relay aud.
+func (m *Member) MintAtAud(iat, exp time.Time, jti, aud string) string {
 	m.t.Helper()
 	tok, err := relayauth.MintToken(m.rk, relayauth.Claims{Iss: m.Addr.Mailbox, Sub: relayauth.EncodeKey(m.svc.Relay.PK),
-		Aud: RelayURL, Iat: iat, Exp: exp, Jti: jti})
+		Aud: aud, Iat: iat, Exp: exp, Jti: jti})
 	if err != nil {
 		m.t.Fatal(err)
 	}
