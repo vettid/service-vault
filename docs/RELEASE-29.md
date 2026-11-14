@@ -1,6 +1,6 @@
 # Release 29 in the service vault
 
-**Status:** 0.9.0, draft (2026-11-13). Against VAULT-MESSAGING 0.90.6.
+**Status:** 0.9.1, draft (2026-11-14). Against VAULT-MESSAGING 0.90.6.
 
 VAULT-MESSAGING §6.3.1 ("Lifetimes and activation on confirmation",
 release 29) asks a service vault to follow its rules "on either side as
@@ -363,18 +363,21 @@ best-effort notices (`connection.removed`) are not covered.
   logs these; the application is not told. A member vault tells its
   member (`message.delivery_unconfirmed`); the service has no member to
   tell, and its application learns of a failed delivery the way it does
-  today, from the missing answer. **Except** a message lost to a
-  member's relay-key rotation (RELAY-ROTATION.md section 4, once its
-  switch is on): `message.not_delivered` and
+  today, from the missing answer. **Except (not built yet)** a message
+  lost to a member's relay-key rotation (RELAY-ROTATION.md section 4,
+  once its switch is on): `message.not_delivered` and
   `message.delivery_unconfirmed` are emitted to the application then,
   since no missing answer would show it.
-- **Held entries** (RELAY-ROTATION.md section 4, once its switch is on):
-  an entry refused `mailbox_unknown` is held, not ended (case 5 then
-  applies only past the hold's 60 days). The start rule above skips held
-  entries, and the `mailbox_unknown` attempt doesn't make an entry tried.
-  At re-address, an entry no attempt can have delivered takes a fresh
-  `ts` and case 2 doesn't apply to it; one an earlier attempt may have
-  delivered keeps its `ts`, and case 2 applies.
+- **Waiting for a newer mailbox (not built yet;** RELAY-ROTATION.md
+  section 4, RK14's hold, once its switch is on; a different state from
+  the held-after-demotion entries below): an entry refused
+  `mailbox_unknown` waits for the member's newer mailbox instead of
+  ending (case 5 then applies only past the 60-day limit). The start
+  rule above skips such entries, and the `mailbox_unknown` attempt
+  doesn't make an entry tried. When it is re-addressed, an entry no
+  attempt can have delivered takes a fresh `ts`, and case 2 applies to
+  it only from its first attempt after that; one an earlier attempt may
+  have delivered keeps its `ts`, and case 2 applies as written.
 - **Not delivered**, each with its own audit entry (`ref` the inner
   `id`), never silently (§8.3 cases):
   1. an entry whose `exp` passed while it waited: `drop.held_expired`;
@@ -507,6 +510,10 @@ separately. The README's release-29 status paragraph shrinks with each.
 
 ## Changes
 
+- **0.9.1 (2026-11-14):** §13, two additions for RELAY-ROTATION.md, not
+  built yet: the application is told of messages lost to a member's
+  relay-key rotation, and entries waiting for a newer mailbox (their
+  start rule, tried mark and `ts`).
 - **0.9.0 (2026-11-13):** §11, the runbook step's one-shot setting
   (owner decision a, GC #10082); claims carry the marker and are ended
   too (lead's decision, GC #10114); §14 item 4c is built.

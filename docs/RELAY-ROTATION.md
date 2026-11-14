@@ -1,6 +1,6 @@
 # Relay-key rotation in the service vault
 
-**Status:** 0.3.0, draft (2026-11-14). Against VAULT-MESSAGING 0.90.11
+**Status:** 0.4.0, draft (2026-11-14). Against VAULT-MESSAGING 0.90.11
 (§3.4.1, §3.4.2). GC #9442.
 
 VAULT-MESSAGING §3.4.2 RK0 asks a service vault to follow the relay-key
@@ -55,11 +55,16 @@ as one task, and one lock (the peer's) covers every state change.
     the connection `stale` (`peer_stale`) and drops **every** entry
     waiting for it, `undelivered_mailbox_unknown` (outbox.go).
 - **The switch (chosen; not in the spec).** All of this is built behind
-  one setting, off by default, so `main` stays deployable for ballot and
-  ops fixes while the PRs land (section 6). While it is off, today's
-  three behaviours above stay exactly as they are. The last PR turns it
-  on together with advertising `relay_follow`; it is never on without
-  it, and never advertised without it.
+  one switch, a constant in the code, not an operator setting, off until
+  PR 5, so `main` stays deployable for ballot and ops fixes while the PRs
+  land (section 6). While it is off, today's three behaviours above stay
+  exactly as they are. PR 5 turns it on together with advertising
+  `relay_follow`; it is never on without it, and never advertised
+  without it. **It is one-way:** once members have seen `relay_follow`,
+  their gate (§3.4.1 "The gate", RK0) lets them rotate toward the
+  service, so turning it off again would refuse their updates and strand
+  them. Going back means a release that keeps it on. PR 5's switch also
+  waits on the spec's answer to the restore question (section 4).
 
 ## 2. What it depends on
 
@@ -127,14 +132,21 @@ as one task, and one lock (the peer's) covers every state change.
   tokens kept (a `reconnect_token` that fails rule T is ignored, no
   reason to refuse). After it:
   - `relay.token.issued` for the new key (standing and reconnect),
-    whenever the current epoch isn't demoted;
+    whenever the current epoch isn't demoted and no reconnect of the
+    service's own is open (as `tokens.go` already waits today); it goes
+    once that ends;
   - the reconnect tokens issued to the passed keys revoked (those that
     open answers and pending epochs carry included);
   - the reconnect token held for the passed mailbox replaced by the
     update's, if kept (without one, RK6's wait);
-  - the member's cached `relay.token.refresh` answers (`kindResp`) are
-    deleted, so a resent request is answered afresh rather than with a
-    standing token for the passed key (RK2).
+  - the member's cached `relay.token.refresh` answers are deleted
+    (`kindResp`, kept 24 hours, `ResponseRetention`). They are found by
+    reading that connection's `kindResp` records (ids start with the
+    connection id and `|`) and keeping those whose cached inner is a
+    `relay.token.refresh` answer. The request's `kindInner` mark stays,
+    so a resent request is **not answered**: the follow's
+    `relay.token.issued` carries the tokens, and no standing token for
+    the passed key goes out (RK2).
   - **A duplicate** (every link already followed) is answered with a
     fresh `relay.token.issued`, at most one an hour per member, **on the
     same clock as the answers to `relay.token.refresh`** (the spec's
@@ -167,9 +179,9 @@ as one task, and one lock (the peer's) covers every state change.
   - at most two visibility timeouts of **60 seconds** (the relay's value
     is not read: the spec's fail-closed reading), counted from the
     first time it was seen, stored by `msg_id` in a record kind of its
-    own, `defer`, so a restart doesn't reset it. `kindUnacked` is not
-    used: it feeds the public `counts.unhandled` (chosen; not in the
-    spec);
+    own, `defer` (listed in `peer.Kinds()`), so a restart doesn't reset
+    it. `kindUnacked` is not used: it feeds the public
+    `counts.unhandled` (chosen; not in the spec);
   - at most 8 deferred messages per member and reason, each kept at most
     16 days;
   - a deferred message takes no dedupe mark: session.go marks the inner
@@ -204,8 +216,9 @@ as one task, and one lock (the peer's) covers every state change.
     deleted (section 3): the follow's `relay.token.issued` gives the
     member fresh tokens. `connection.approved` goes before activation on
     the request's own token and is not kept (below). No other message
-    the service sends carries a token. (Worth a spec line: RK2 moves
-    such entries without saying they are minted again.)
+    the service sends carries a token. (The lead takes this into the
+    spec erratum: RK2 moves such entries without saying they are minted
+    again.)
 - **RK6.** At a follow (by rule U or RK8), the service's own open
   reconnects whose `hs.init` carried tokens naming the passed key and
   that have sent no `hs.fin` are abandoned, their tokens revoked, and
@@ -222,10 +235,12 @@ as one task, and one lock (the peer's) covers every state change.
     own S1) and does not judge "no reconnect token" meanwhile. Past the
     wait without one, the connection becomes `stale` by the reconnect
     bound, except while "No reconnect while carried tokens wait" holds.
-  - **An owed restart** is not an open reconnect (it has no `hs.init`),
-    but it blocks starting another one, as an open reconnect does (RK1-a),
-    and the follow's `relay.token.issued` still goes whenever the
-    current epoch isn't demoted.
+  - **An owed restart (a reading; not in the spec)** is not an open
+    reconnect (it has no `hs.init`), but it blocks starting another one,
+    as an open reconnect does under RK1-a, so that two tries don't spend
+    the member's reconnect token's deposits; the follow's
+    `relay.token.issued` still goes whenever the current epoch isn't
+    demoted.
   - Any epoch established with P after the follow ends an owed restart,
     unless the current epoch is demoted.
 - **RK7.** Past its cut-off, an earlier key's message still goes to
@@ -272,8 +287,10 @@ as one task, and one lock (the peer's) covers every state change.
     in the write that processes it after `sig_R` verifies. If every link
     is already followed, the follow changes nothing and the handshake
     goes on.
-  - **After an RK8 follow** the service sends its `relay.token.issued` for
-    the new key, as after rule U's. Only an `hs.confirm` goes on the
+  - **After an RK8 follow** the service does all of rule U's after-steps
+    (section 3): its `relay.token.issued` for the new key, the
+    revocations, the held reconnect token replaced, the cached refresh
+    answers deleted. Only an `hs.confirm` goes on the
     `hs.init`'s carried token not yet adopted; the `relay.token.issued`
     goes on a held token for the new mailbox (the member's prompt
     `relay.token.issued`, kept by rule T). Without it the member's S1
@@ -289,20 +306,28 @@ as one task, and one lock (the peer's) covers every state change.
     refusal, then the connection becomes `stale`. Except after a restore
     (below).
   - Every other refusal is as "The reconnect bound" says.
-- **A restore across a member's follow (chosen; not in the spec).** A
-  table restore can bring back a connection from before the service
-  followed a member's relay link: the earlier key current, no cut-offs.
-  - **Within the member's grace** (14 days from its rotate) it heals by
-    itself: the restore's reconnect goes to the old mailbox, which still
-    lives, and the member answers by RK8 with links to its new key (RK3
-    lets it deposit with the token's key), which the service follows.
-  - **Past the grace,** the reconnect meets `mailbox_unknown`, and the
-    member's deposits from its new key are refused `foreign_sender` (the
-    member will not send the links again, its S1 being over). Waiting 60
-    days would only delay what README "Restoring the table" already says
-    happens: the member connects again. So for a restore's reconnect a
-    `mailbox_unknown` with no newer mailbox followed ends the reconnect
-    at once, `reconnect_failed`, the connection `stale`, with the alarm.
+- **A restore across a member's follow (open; gates PR 5).** A table
+  restore can bring back a connection from before the service followed a
+  member's relay link: the earlier key current, no cut-offs, and the
+  followed relay and identity links forgotten. The member's S1 toward
+  the service ended when the service first followed, so the member sends
+  no links again (RK8's links travel only during S1): its deposits from
+  its new key are refused `foreign_sender`, and the restore's reconnect
+  goes to the old mailbox, which is gone once the grace has passed.
+  Nothing in the spec heals it yet. **The lead's decision (GC #10490):**
+  the question goes into the spec erratum (for example, a P that
+  receives a reconnect whose tokens name an earlier key of its own sends
+  its links again), and PR 5's switch stays off until the spec answers
+  it. Until then:
+  - for a restore's reconnect, a `mailbox_unknown` with no newer mailbox
+    followed ends the reconnect at once, `reconnect_failed`, the
+    connection `stale`, with the alarm, rather than waiting 60 days
+    (chosen; not in the spec): README "Restoring the table" already says
+    such a member connects again;
+  - a `foreign_sender` refusal from a member while a restore's reconnect
+    with it is open raises the alarm `restore_relay_moved` once per
+    connection (chosen; not in the spec), so the operator sees which
+    members moved.
 - **RK12.** While a connection is suspended, relay links that pass rule
   C are still kept as seen (step 1).
 - **RK14, the hold.** With the switch on, replacing today's handling
@@ -314,10 +339,16 @@ as one task, and one lock (the peer's) covers every state change.
     (`connection.removed`) are not durable and are not held either;
   - neither `stale` nor an update the service refuses or doesn't follow
     ends a hold;
-  - held entries are not attempted while held;
+  - held entries are not attempted while held. A new durable entry
+    queued for that member while `relay_held` is set is queued held and
+    untried, without an attempt (chosen; not in the spec);
   - at a follow, held deposits are re-addressed to the new mailbox and
     sealed again under the current epoch (below for their `ts`), and
-    `relay_held` ends (a later refusal starts a new episode);
+    `relay_held` ends (a later refusal starts a new episode). The
+    re-address is **idempotent at load**: an entry whose mailbox isn't
+    the member's current one (and isn't a handshake's own) is
+    re-addressed again at the next start, so a crash partway through a
+    large re-address loses nothing;
   - at the connection's end, they end as §8.3 says;
   - at 60 days after the episode's first refusal, every held entry for
     that member ends undelivered (`undelivered_mailbox_unknown`), and the
@@ -336,14 +367,16 @@ as one task, and one lock (the peer's) covers every state change.
     entries: none is attempted while held, so no lost write can hide an
     accepted deposit of one;
   - at re-address, an entry no attempt can have delivered takes a fresh
-    `ts` and a new `seq`, and §13's case 2 (16 days from the first
-    attempt) does not apply to it; an entry an earlier attempt may have
-    delivered keeps its `ts`, and §13 applies as written (case 2 past 16
-    days), so the member's dedupe still covers any earlier copy.
+    `ts` and a new `seq`; §13's case 2 does not apply to it until its
+    first attempt after the re-address, from which §13 runs as for any
+    entry. An entry an earlier attempt may have delivered keeps its `ts`
+    (chosen; not in the spec, pending the lead's RK14 erratum), and §13
+    applies as written (case 2 past 16 days), so the member's dedupe
+    still covers any earlier copy.
 
-  RELEASE-29 §13 is amended to say so. (The same gap is in
-  VAULT-MESSAGING RK14's re-deposit `ts` rule; the lead takes that
-  erratum.)
+  RELEASE-29 §13 says so, marked not built yet. ("Held" here is RK14's
+  hold for a newer mailbox; §13's held-after-demotion entries are a
+  different state, and the code keeps them apart.)
 - **The outbox bound (chosen; not in the spec).** Held entries count
   toward `MaxOutboxPerConn` (256). So that the hold can't block its own
   way out:
@@ -353,17 +386,23 @@ as one task, and one lock (the peer's) covers every state change.
     oldest first, each still bound by its cutoff; the rest wait in the
     keep, not in the outbox;
   - during a long hold, other new sends past the bound are refused at
-    once (`outbox_full`; `SendMessage` returns its error). An answer to a
+    once (`outbox_full`; `SendMessage` returns `ErrBusy`). An answer to a
     member's request (`respond`, a `vote.*` reply) refused this way is
-    cached but not queued, as today; the member's resend of the request
-    gets the cached answer again once there is room.
+    cached for 24 hours but not queued, as today; the member's resend of
+    the request within that time gets the cached answer again once there
+    is room.
 - **What the application sees (chosen; not in the spec).** The service
   has no member feed. The connection record carries `relay_held:
   {since}`, shown in the connection API. Its start and end are events to
-  the application, `connection.held` and `connection.released`. An entry
-  that is a "member message" (below) ended undelivered also emits
-  `message.not_delivered`, and one given up on after a telling emits
-  `message.delivery_unconfirmed`, each with the request it came from.
+  the application, `connection.held` and `connection.released`. For a
+  "member message" (below):
+  - `message.not_delivered`: the relay never stored it (the hold's
+    60-day end, or a `mailbox_unknown` past it);
+  - `message.delivery_unconfirmed`: it may or may not have been
+    delivered (a pinned entry given up at a cutoff or with no telling,
+    and the dropped-entries record);
+
+  each with the request it came from.
   This reverses RELEASE-29 §13's "Told to whom" for these cases only:
   a message lost to a member's rotation has no missing answer the
   application could notice, unlike §13's cases. §13 is amended to say
@@ -379,9 +418,11 @@ as one task, and one lock (the peer's) covers every state change.
     - `profile.update`, upkeep, audited only.
 
     Not kept: handshakes, `hs.confirm`, `relay.token.issued` and
-    `relay.token.refresh`, `connection.removed`, and `connection.approved`
-    (sent before activation on the request's token, it carries tokens,
-    and the member's activation shows it arrived).
+    `relay.token.refresh`, `connection.removed`, and `connection.approved`.
+    The last is a choice against step 3's list (chosen; not in the spec;
+    the lead takes it into the erratum): it is sent before activation on
+    the request's token, it carries tokens (RK2), and it is never sent
+    again once the member has activated the connection.
   - **When an entry leaves the keep:** at its 60 days; when its `exp`
     passes (a pinned one is audited `drop.held_expired`, an unpinned one
     ends silently; the service's challenges carry `exp`); at the
@@ -390,18 +431,25 @@ as one task, and one lock (the peer's) covers every state change.
     oldest dropped first, with the record of dropped member messages
     (count, highest `msg_id`, first inner `id`) the spec describes.
   - **Storage (chosen; not in the spec).** A record kind of its own,
-    `keep`, one record per kept entry, id `<connection id>/<msg_id>`, so
-    the store's existing ordered `Page` reads one member's entries in
-    `msg_id` order, oldest first, by a prefix range: no new query, and
-    the cap finds the oldest without reading the rest. Each record is
-    written in the same state write that records its `201`. The
-    connection record carries the member's kept count and bytes, kept in
-    the same writes, so the cap is checked at each `201` without reading
-    the records. They are not loaded at start; they are read per member
-    at a follow or a telling, and pruned in batches at housekeeping.
-    Records are sealed like every record; they stay in the table's
-    backups for as long as the backups are kept, with the content of up
-    to 60 days of the service's sends.
+    `keep` (listed in `peer.Kinds()`), one record per kept entry, id
+    `<connection id>/<msg_id>`; connection ids hold no `/`, so the `/`
+    ends the prefix. The store's ordered `Page` (the `Pager` interface,
+    which the sealed store and the table implement; `peer.Store` itself
+    has no paging) reads one member's entries in `msg_id` order, oldest
+    first, from the prefix: no new query, and the cap finds the oldest
+    without reading the rest. Each record carries the mailbox its `201`
+    came from, its first `201` time and, once covered by a telling, that
+    telling's cutoff. It is written in the same write that records its
+    `201`, and in that write's order before the outbox entry's deletion
+    (below). The connection record carries the member's kept count and
+    bytes, kept in the same writes, so the cap is checked at each `201`
+    without reading the records; housekeeping recomputes them from the
+    records now and then, since a partial write can make them drift.
+    Keep records are not loaded at start; they are read per member at a
+    follow or a telling, and pruned in batches at housekeeping. They are
+    sealed like every record, and stay in the table's backups for as
+    long as the backups are kept, with the content of up to 60 days of
+    the service's sends.
   - **Size:** a ballot sends a member a few messages of a few KiB each,
     so a member's keep is tens of KiB in practice; with 15,000 members,
     a few hundred MiB. The 8 MiB cap per member bounds a misbehaving
@@ -410,21 +458,46 @@ as one task, and one lock (the peer's) covers every state change.
   - **At a follow** the entries kept for the passed mailbox are pinned
     until P's `relay.mailbox.closed` for it, or 60 days after the follow.
     A deposit in flight at the follow whose `201` lands after it is kept
-    and pinned with the others for that mailbox. The pin is a record on
-    the connection (`{mailbox, since, cutoff, cursor}`), not a mark on
-    each entry.
+    and pinned with the others for that mailbox. The pins are a list on
+    the connection record, one per passed mailbox (two rotations within
+    60 days give two): `{mailbox, since, telling, cursor}`, where
+    `telling` is unset until one arrives. Entries are matched to a pin
+    by the mailbox each keep record carries.
   - **The telling** is accepted only for such a pinned mailbox, never for
-    P's current one (acked and ignored otherwise). Entries above
-    `last_msg_id` are deposited again to P's current mailbox; the rest are
-    dropped. A `last_msg_id` of `null` means every pinned entry goes
-    again.
-  - **The order of the writes.** `Apply` splits a write at 100 items or
-    3 MiB, so a telling's re-deposits can't be one write. Each batch
-    queues its re-deposits (outbox records) in the same write as it
-    deletes their keep records, and advances the pin's cursor last. A
-    crash between batches leaves the cursor at the last batch done, and
-    the next run goes on from it: nothing is lost, and nothing is queued
-    twice.
+    P's current one (acked and ignored otherwise). The write that
+    accepts it stores in the pin, before any re-deposit: its
+    `last_msg_id` (`null` included), its `deposited_at` and the cutoff 60
+    days after it, and its inner `id` (the dedupe mark), so a crash
+    partway resumes the same telling. Entries above `last_msg_id` are
+    deposited again to P's current mailbox; the rest are dropped. A
+    `last_msg_id` of `null` means every pinned entry goes again. **A
+    second telling for the same mailbox (chosen; not in the spec)** is
+    acked and ignored, audited `telling_repeated` with both values: the
+    first one accepted binds.
+  - **The order of the writes.** `Peer.flush` writes its dirty records
+    sorted by kind (`conn` before `keep` before `outbox`), and `Apply`
+    splits a write at 100 items or 3 MiB, so a split could commit the
+    pin's cursor and the keep deletions without the re-deposits. So these
+    writes are ordered explicitly, each step its own `Apply`, in this
+    order:
+    1. the outbox records of a batch's re-deposits (each carrying its
+       entry's cutoff and first `201` time);
+    2. the deletion of those keep records;
+    3. the connection record with the pin's cursor advanced.
+
+    A batch is sized to fit one `Apply`. A crash after step 1 queues the
+    batch again at the next run: the re-deposits carry the same inner
+    `id`, so the member's dedupe drops a second copy, and the queue
+    holds at most one batch twice. Nothing is lost. The same order holds
+    on the `201` path (the keep record before the outbox entry's
+    deletion) and at a follow's re-address (re-addressed outbox records
+    before the connection record). `peer.Store`'s "all or nothing"
+    comment (store.go) is corrected to say a large `Apply` is several
+    transactions.
+  - **Re-deposits waiting in the keep.** An entry covered by a telling
+    that has not been queued yet (the outbox has no room) stays in the
+    keep until it is queued or its cutoff passes; at the cutoff it is
+    told (a member message) or audited (anything else).
   - **The cutoff.** A re-deposit goes only within 60 days of the
     telling's `deposited_at`; a re-deposited entry keeps the first
     telling's cutoff across later rotations. The cutoff binds every
@@ -472,11 +545,13 @@ so each can be merged and deployed on its own.
    rule, RK12.
 4. **The hold:** RK14's hold, its §13 rules and the outbox exemptions,
    `relay_held` in the connection API, the `connection.held` and
-   `connection.released` events, the 60-day end; RELEASE-29 §13 amended.
+   `connection.released` events, the 60-day end; RELEASE-29 §13's
+   additions marked built.
 5. **The keep and the telling:** the `keep` kind with its counters, cap
    and ordered ids, the pin record and cursor, `relay.mailbox.closed`,
-   the re-deposits and the cutoffs, the notices. Then the switch is
-   turned on and `relay_follow` advertised (RK0). A change of the
+   the re-deposits and the cutoffs, the notices. Then, **once the spec
+   answers the restore question (section 4),** the switch is turned on
+   and `relay_follow` advertised (RK0). A change of the
    advertised features sends existing connections a `profile.update` at
    their next version, as a change of `contract` does (contract.go);
    RELEASE-29 §6 and the README say so.
@@ -510,12 +585,36 @@ showing today's behaviour unchanged.
    this document's reading of §3.4.2 step 3 for a service: `vote.*` and
    `connection.authenticate.challenge` and `.withdraw`.
 4. **What changes toward today's vaults once the switch is on,** even
-   before any member rotates: up to 60 days of the service's sends kept
-   (sealed) in the table and its backups; a `mailbox_unknown` from a
-   member's mailbox holds instead of ending the connection `stale`.
+   before any member rotates:
+   - up to 60 days of the service's sends kept (sealed) in the table and
+     its backups;
+   - a `mailbox_unknown` from a member's mailbox holds instead of ending
+     the connection `stale`;
+   - every existing connection gets a `profile.update` advertising
+     `relay_follow` (a fan-out to every member at that start), and with
+     it every member's gate (RK0) opens: member vaults that implement
+     §3.4.2 may then rotate toward the service. That is why the switch
+     is one-way (section 1).
+5. **For the spec (the lead's erratum):** a restore across a member's
+   follow (section 4, gating PR 5); RK14's re-deposit `ts`;
+   `connection.approved` in step 3's list; RK2's token-carrying entries.
+
+**Residual.** A table restore forgets the relay and identity links the
+service followed since the backup. Until the spec answers question 5's
+first item, a member that rotated since then must connect again.
 
 ## Changes
 
+- **0.4.0 (2026-11-14):** the write order made explicit (outbox, keep,
+  connection record; batches sized to one `Apply`; a re-address
+  idempotent at load; counters recomputed); the telling stored in a
+  list of pins before any re-deposit, a second telling ignored; a
+  restore across a follow is open and gates PR 5, with an alarm and the
+  residual; new entries during a hold queued held; re-deposits waiting
+  in the keep; refresh answers not answered after a follow; the switch
+  a one-way code constant; the kept-`ts` and `connection.approved`
+  readings marked chosen; `message.not_delivered` against
+  `.delivery_unconfirmed`; nits.
 - **0.3.0 (2026-11-14):** RK8 accepts the current key too, with the
   chain-end check at parse; held entries against RELEASE-29 §13 (the
   start rule, case 2, when a re-addressed entry takes a fresh `ts`); the
