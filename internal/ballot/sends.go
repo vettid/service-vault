@@ -201,7 +201,8 @@ func (m *Manager) runJob(job *sendJob) {
 	// confirmed deposited (dropped). They count this send's messages so
 	// far, earlier runs of the same send included, and a timed-out send
 	// that still went, so they can exceed accepted (or fall short after a
-	// crash: peer.sendLeft); the proposal's status follows them later.
+	// crash: peer.sendLeft); they may lag the peer by a drain
+	// (peer.SendCounts), and the proposal's status follows them later.
 	args := []any{"send", job.key, "accepted", accepted, "failed", failed, "body_errors", bodyErrs,
 		"of", len(job.conns), "stopped", ctx.Err() != nil, "gave_up", gaveUp}
 	if counted {

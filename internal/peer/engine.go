@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vettid/vettid-relay/relayauth"
@@ -118,7 +119,8 @@ type Peer struct {
 	issued     map[string]*IssuedToken
 	outbox     []*outboxEntry
 	challenges map[string]*challenge
-	sends      map[string]*sendTally // by ref (sendtally.go)
+	sends      map[string]*sendTally        // by ref (sendtally.go)
+	sendView   atomic.Pointer[[]SendCounts] // what SendCounts reports (sendtally.go)
 	events     []*Event
 	// What Caught reads. lastMsgMS is the relay time of the latest message
 	// handled (lastMsgAt the start of its collect) and emptyAt the start

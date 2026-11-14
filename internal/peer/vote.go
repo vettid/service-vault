@@ -161,11 +161,7 @@ func (p *Peer) sendMessage(ctx context.Context, connID, typ string, body json.Ra
 		e.Vote, e.NotAfter = true, notAfter
 		if ref != "" {
 			// Counted from here: the drain below may deposit it already.
-			until := notAfter
-			if until.IsZero() {
-				until = now
-			}
-			p.tally(ref, until)
+			p.tally(ref, tallyUntil(notAfter, now))
 			e.Ref = ref
 		}
 	}
