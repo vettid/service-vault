@@ -235,6 +235,25 @@ func TestContractRetriedUntilQueued(t *testing.T) {
 	}
 }
 
+// A malformed features member is logged as ignored, not as a drop, and
+// the update is applied.
+func TestFeaturesMemberIgnored(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	ik := m.IK.Public().(ed25519.PublicKey)
+	logs := len(f.logs.String())
+	m.Send(peerwire.TypeProfileUpdate, withMember(t, peerwire.ProfileUpdateBody(2, "Nora", "Bad", ik, nil), "features", `["vote","Vote"]`))
+	f.pump()
+	line := f.logs.String()[logs:]
+	if c := f.p.conns[cid]; c.ProfileVersion != 2 || len(c.Features) != 0 {
+		t.Fatalf("version %d, features %v", c.ProfileVersion, c.Features)
+	}
+	if !strings.Contains(line, "reason=profile_member_malformed member=features") || strings.Contains(line, "msg=drop") {
+		t.Fatalf("logged:\n%s", line)
+	}
+}
+
 // A full outbox is logged once while the update retries at every
 // housekeeping, and again only after a send was queued in between.
 func TestOutboxFullLoggedOnce(t *testing.T) {

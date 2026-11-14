@@ -261,7 +261,6 @@ func (p *Peer) sendEntry(c *Connection, in *envelope.Inner, now time.Time) *outb
 		}
 		return nil
 	}
-	delete(p.outboxFull, c.ID)
 	raw, err := c.kr.Current().Seal(in)
 	if err != nil {
 		return nil
@@ -269,6 +268,7 @@ func (p *Peer) sendEntry(c *Connection, in *envelope.Inner, now time.Time) *outb
 	p.markDirty(kindConn, c.ID) // the epoch's send count moved
 	e := &outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: raw}
 	p.queueDeposit(e, now)
+	delete(p.outboxFull, c.ID) // queued: a full outbox later is a new episode
 	return e
 }
 
@@ -402,6 +402,7 @@ func (p *Peer) removeConnectionFor(c *Connection, dir, reason string, now time.T
 	}
 	delete(p.conns, c.ID)
 	delete(p.rates, c.ID)
+	delete(p.outboxFull, c.ID)
 	p.markDirty(kindConn, c.ID)
 	d := dir
 	if d == "replaced" {

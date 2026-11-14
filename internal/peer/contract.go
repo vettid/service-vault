@@ -54,7 +54,7 @@ func (p *Peer) sendProfile(c *Connection, version uint64, now time.Time) bool {
 // with its next version when the contract last sent to it differs from
 // this release's, a value never sent included (§10.8 "Sending"): at the
 // first start under such a release, and again at each housekeeping until
-// it is queued (sendEntry audits why it was not); once queued it is
+// it is queued (sendEntry logs why it was not, once per episode); once queued it is
 // retried with the connection's other messages (the outbox).
 func (p *Peer) sendContract(c *Connection, now time.Time) {
 	if c.SentContract == Contract {
