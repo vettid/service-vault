@@ -473,8 +473,12 @@ type outboxEntry struct {
 	// Vote is a deposit SendMessage queued: only these count toward
 	// MaxSendOutbox and MaxSendOutboxBytes.
 	Vote bool `json:"vote,omitempty"`
+	// Challenge is the request id of the connection.authenticate.challenge
+	// the entry carries, or "" (challenge.Entry).
+	Challenge string `json:"challenge,omitempty"`
 
-	dropped bool // removed by dropOutbox: a drain in progress skips it
+	dropped   bool // removed by dropOutbox: a drain in progress skips it
+	deposited bool // the relay took it: it leaves the outbox delivered
 }
 
 // challenge is a connection.authenticate.challenge we sent (§10.4).
@@ -495,6 +499,13 @@ type challenge struct {
 	// vault: forgotten for every purpose but that count, until Exp plus
 	// ClockSkew.
 	Gone bool `json:"gone,omitempty"`
+	// Entry is the id of the outbox entry carrying the challenge while it
+	// waits there (behind an open reconnect, a stale connection, a missing
+	// token or the relay's refusals); "" once it has left the outbox, and
+	// on a record from before this field. Undelivered: it left without
+	// being deposited (ChallengeDelivery).
+	Entry       string `json:"entry,omitempty"`
+	Undelivered bool   `json:"undelivered,omitempty"`
 }
 
 type cachedResponse struct {

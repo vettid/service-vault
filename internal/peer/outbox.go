@@ -89,11 +89,28 @@ func (p *Peer) dropOutbox(drop func(*outboxEntry) bool) {
 		if drop(e) {
 			e.dropped = true
 			p.markDirty(kindOutbox, e.ID)
+			p.challengeLeft(e)
 			continue
 		}
 		kept = append(kept, e)
 	}
 	p.outbox = kept
+}
+
+// challengeLeft notes that e left the outbox: the challenge it carries
+// was deposited, or, if not, is Undelivered (ChallengeDelivery). One that
+// may have reached the relay without an answer (Tried) and was then
+// dropped counts as undelivered too: its admin may be reminded.
+func (p *Peer) challengeLeft(e *outboxEntry) {
+	if e.Challenge == "" {
+		return
+	}
+	ch := p.challenges[e.Challenge]
+	if ch == nil || ch.Entry != e.ID {
+		return
+	}
+	ch.Entry, ch.Undelivered = "", !e.deposited
+	p.markDirty(kindAuth, ch.ID)
 }
 
 // retryConn makes a connection's waiting entries eligible again (after a
@@ -178,6 +195,7 @@ func (p *Peer) drainOutbox(ctx context.Context) {
 		switch e.Op {
 		case opDeposit:
 			finished, err = p.deposit(ctx, e, now)
+			e.deposited = err == nil && !finished
 		case opRevoke:
 			err = p.cfg.Relay.Revoke(ctx, relayclient.Revocation{Kind: "jti", Value: e.Value})
 		case opDeleteClaim:

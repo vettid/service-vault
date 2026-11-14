@@ -126,14 +126,18 @@ func (p *Peer) authenticate(ctx context.Context, connID, ctxt, purpose, matchCod
 	wc.Purpose = purpose
 	wc.MatchCode = matchCode
 	exp := now.Add(ttl).UTC().Truncate(time.Millisecond)
-	if p.sendInnerExp(c, peerwire.TypeConnAuthChallenge, wc.Marshal(), exp, now) == "" {
+	in := newInner(p.newID(now), peerwire.TypeConnAuthChallenge, wc.Marshal(), now)
+	in.Exp = exp
+	e := p.sendEntry(c, in, now)
+	if e == nil {
 		if c.State == StateActive && p.outboxFor(c.ID) >= MaxOutboxPerConn {
 			return "", ErrBusy
 		}
 		return "", ErrNotFound
 	}
+	e.Challenge = wc.RequestID
 	p.challenges[wc.RequestID] = &challenge{ID: wc.RequestID, ConnID: connID, Nonce: wc.Nonce, Context: ctxt, Purpose: purpose,
-		MatchCode: matchCode, Exp: exp}
+		MatchCode: matchCode, Exp: exp, Entry: e.ID}
 	p.markDirty(kindAuth, wc.RequestID)
 	if err := p.flushAndDrain(ctx); err != nil {
 		return "", err
@@ -196,6 +200,19 @@ func (p *Peer) CancelChallenge(ctx context.Context, requestID string) (bool, err
 	}
 	withdrawn := false
 	now := p.now()
+	if e := p.outboxByID(ch.Entry); ch.Entry != "" && e != nil && !e.Tried {
+		// Still in the outbox, never tried: it has not reached the relay, so
+		// it holds no place at the member vault and needs no withdraw.
+		// Dropped unsent, it is not delivered after its cancel.
+		p.dropOutbox(func(o *outboxEntry) bool { return o == e })
+		delete(p.challenges, requestID)
+		p.markDirty(kindAuth, requestID)
+		if err := p.flushAndDrain(ctx); err != nil {
+			return false, err
+		}
+		p.log().Info("challenge cancelled", "connection_id", ch.ConnID, "request_id", requestID, "unsent", true)
+		return true, nil
+	}
 	if now.Before(ch.Exp) {
 		if c := p.conns[ch.ConnID]; c != nil {
 			withdrawn = p.sendInnerExp(c, peerwire.TypeConnAuthWithdraw, peerwire.ConnAuthWithdrawBody(requestID), ch.Exp, now) != ""
@@ -214,6 +231,44 @@ func (p *Peer) CancelChallenge(ctx context.Context, requestID string) (bool, err
 	}
 	p.log().Info("challenge cancelled", "connection_id", ch.ConnID, "request_id", requestID, "withdrawn", withdrawn)
 	return true, nil
+}
+
+// Delivery is where a challenge stands on its way to the member's vault
+// (ChallengeDelivery).
+type Delivery string
+
+const (
+	// DeliveryNone: no pending challenge has that id (answered, expired,
+	// cancelled, or the peer has not loaded its state yet).
+	DeliveryNone Delivery = ""
+	// DeliverySent: the relay took it. A challenge recorded before the
+	// peer noted deliveries counts as sent.
+	DeliverySent Delivery = "sent"
+	// DeliveryQueued: it waits in the outbox, behind a reconnect, for a
+	// stale connection's new epoch, for a standing token, or for the relay.
+	DeliveryQueued Delivery = "queued"
+	// DeliveryUndelivered: it left the outbox without being deposited
+	// (§8.3 "Not delivered").
+	DeliveryUndelivered Delivery = "undelivered"
+)
+
+// ChallengeDelivery reports whether the challenge with requestID has
+// reached the relay: accepted by Authenticate is not sent.
+func (p *Peer) ChallengeDelivery(requestID string) Delivery {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	ch := p.challenges[requestID]
+	switch {
+	case ch == nil || ch.Gone:
+		return DeliveryNone
+	case ch.Undelivered:
+		return DeliveryUndelivered
+	case ch.Entry == "":
+		return DeliverySent
+	case p.outboxByID(ch.Entry) == nil:
+		return DeliveryUndelivered // gone without its leaving noted: not known to be sent
+	}
+	return DeliveryQueued
 }
 
 func (p *Peer) sendInnerExp(c *Connection, typ string, body []byte, exp, now time.Time) string {

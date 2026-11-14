@@ -252,7 +252,13 @@ MEMBER-SERVICE-PLAN §4.5 and §5.2; the operator's view is in the README,
   (ids only), queues the `approval.challenge_expired` webhook with the
   save, and the approval's status lists the admin in `remind_needed`
   (admins asked, not answered, holding no live challenge) until a
-  reminder sends a new one. An admin at the ask limit (approval
+  reminder sends a new one. A challenge accepted for a connection that
+  cannot take deposits now (its reconnect is open, say) waits in the
+  outbox and is not sent: the status lists its admin in `queued`, not in
+  `remind_needed`, a reminder leaves them out (a new challenge would wait
+  the same way), and the audit entry marks it `queued: true`. It goes
+  once the connection can take it; if it leaves the outbox undelivered,
+  the admin moves to `remind_needed` and a reminder replaces it. An admin at the ask limit (approval
   challenges still counting, against the member vault's ask gate of 5
   per 24 hours) is skipped by every send and
   shows in `remind_needed`, and in an optional `ask_budget` list

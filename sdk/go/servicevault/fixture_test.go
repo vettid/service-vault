@@ -88,6 +88,7 @@ func (p *fakePeer) HasPendingSignIn(conn string) bool {
 }
 
 func (*fakePeer) CancelChallenge(context.Context, string) (bool, error)      { return true, nil }
+func (*fakePeer) ChallengeDelivery(string) peer.Delivery                     { return peer.DeliverySent }
 func (*fakePeer) PinGov(context.Context, string, []byte, bool) (bool, error) { return true, nil }
 func (*fakePeer) RepinGov(context.Context, string, []byte) (bool, error)     { return true, nil }
 

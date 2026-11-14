@@ -192,5 +192,6 @@ func (ikPeer) Authenticate(context.Context, string, string, string, time.Duratio
 	return "r", nil
 }
 func (ikPeer) CancelChallenge(context.Context, string) (bool, error)      { return true, nil }
+func (ikPeer) ChallengeDelivery(string) peer.Delivery                     { return peer.DeliverySent }
 func (ikPeer) PinGov(context.Context, string, []byte, bool) (bool, error) { return true, nil }
 func (ikPeer) RepinGov(context.Context, string, []byte) (bool, error)     { return true, nil }
