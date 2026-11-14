@@ -864,6 +864,14 @@ func (p *Peer) load(ctx context.Context) error {
 		if e.Op == opDeposit {
 			e.Tried = true
 		}
+		// A flush split across writes (auth before outbox) may have stored a
+		// challenge as having left the outbox while its entry stayed: the
+		// entry goes out, so the challenge waits with it again, and may
+		// reach the member (counted, withdrawn at a cancel).
+		if ch := p.challenges[e.Challenge]; e.Challenge != "" && ch != nil && ch.Entry != e.ID {
+			ch.Entry, ch.Undelivered, ch.Unsent = e.ID, false, false
+			p.markDirty(kindAuth, ch.ID)
+		}
 	}
 	sort.Slice(p.events, func(i, j int) bool { return p.events[i].Seq < p.events[j].Seq })
 	for _, e := range p.outbox {

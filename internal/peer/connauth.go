@@ -223,7 +223,7 @@ func (p *Peer) CancelChallenge(ctx context.Context, requestID string) (bool, err
 		if err := p.flushAndDrain(ctx); err != nil {
 			return false, err
 		}
-		p.log().Info("challenge cancelled", "connection_id", ch.ConnID, "request_id", requestID, "unsent", true)
+		p.log().Info("challenge cancelled", "connection_id", ch.ConnID, "request_id", requestID, "withdrawn", false, "unsent", true)
 		return true, nil
 	}
 	if now.Before(ch.Exp) {
@@ -270,6 +270,22 @@ const (
 func (p *Peer) ChallengeDelivery(requestID string) Delivery {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.delivery(requestID)
+}
+
+// ChallengeDeliveries is ChallengeDelivery for each of requestIDs, under
+// one hold of the peer's lock (which a drain holds across its deposits).
+func (p *Peer) ChallengeDeliveries(requestIDs []string) map[string]Delivery {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make(map[string]Delivery, len(requestIDs))
+	for _, id := range requestIDs {
+		out[id] = p.delivery(id)
+	}
+	return out
+}
+
+func (p *Peer) delivery(requestID string) Delivery {
 	ch := p.challenges[requestID]
 	switch {
 	case ch == nil || ch.Gone:

@@ -166,9 +166,10 @@ type Peer interface {
 	Connection(id string) (peer.ConnectionInfo, bool)
 	Authenticate(ctx context.Context, connID, ctxt, purpose string, ttl time.Duration) (string, error)
 	CancelChallenge(ctx context.Context, requestID string) (bool, error)
-	// ChallengeDelivery reports whether a challenge Authenticate accepted
-	// has been deposited, waits in the outbox, or left it undelivered.
-	ChallengeDelivery(requestID string) peer.Delivery
+	// ChallengeDeliveries reports, for each request id, whether the
+	// challenge Authenticate accepted has been deposited, waits in the
+	// outbox, or left it undelivered.
+	ChallengeDeliveries(requestIDs []string) map[string]peer.Delivery
 	// PinGov pins a connection's governance key to key, or to its
 	// credential key as it is now when key is empty (with onlyIfEmpty only
 	// if none is pinned). RepinGov moves it to key if that is still the
@@ -966,7 +967,8 @@ func (m *Manager) challenge(ctx context.Context, b *batch, r *record, conns []st
 		r.Pending[c] = reqID
 		b.changes = append(b.changes, peer.Change{Kind: kindReq, ID: reqID, Data: []byte(r.ID),
 			Expires: r.Exp.Add(reqRetention)})
-		sent = append(sent, Challenge{ConnectionID: c, RequestID: reqID, Queued: m.Peer.ChallengeDelivery(reqID) != peer.DeliverySent})
+		d := m.Peer.ChallengeDeliveries([]string{reqID})[reqID]
+		sent = append(sent, Challenge{ConnectionID: c, RequestID: reqID, Queued: d == peer.DeliveryQueued || d == peer.DeliveryUndelivered})
 	}
 	return sent, skipped, full
 }
@@ -982,20 +984,32 @@ func queued(chs []Challenge) int {
 	return n
 }
 
-// delivery is where admin a's live challenge for r stands: "" when they
-// hold none.
-func (m *Manager) delivery(r *record, a string) peer.Delivery {
-	req := r.Pending[a]
-	if req == "" {
-		return peer.DeliveryNone
+// deliveries is where each admin's live challenge for r stands, by
+// admin, asked of the peer at once; an admin who holds none is absent
+// (peer.DeliveryNone).
+func (m *Manager) deliveries(r *record) map[string]peer.Delivery {
+	reqs := make([]string, 0, len(r.Pending))
+	for _, req := range r.Pending {
+		if req != "" {
+			reqs = append(reqs, req)
+		}
 	}
-	if d := m.Peer.ChallengeDelivery(req); d != peer.DeliveryNone {
-		return d
+	ds := m.Peer.ChallengeDeliveries(reqs)
+	out := make(map[string]peer.Delivery, len(r.Pending))
+	for a, req := range r.Pending {
+		if req == "" {
+			continue
+		}
+		d := ds[req]
+		if d == peer.DeliveryNone {
+			// Recorded, but the peer has no such challenge pending: it ended
+			// and its signin.expired has not been handled yet, or the peer has
+			// not loaded its state. As before the peer noted deliveries: live.
+			d = peer.DeliverySent
+		}
+		out[a] = d
 	}
-	// Recorded, but the peer has no such challenge pending: it ended and
-	// its signin.expired has not been handled yet, or the peer has not
-	// loaded its state. As before the peer noted deliveries: live.
-	return peer.DeliverySent
+	return out
 }
 
 // errAskFull is an admin whose askLog is full (askBudget).
@@ -1113,11 +1127,12 @@ func (m *Manager) Status(ctx context.Context, id string) (*Status, error) {
 		if err != nil {
 			return nil, err
 		}
+		ds := m.deliveries(r)
 		for _, a := range r.Admins {
 			if !slices.Contains(set, a) || r.answered(a) {
 				continue
 			}
-			switch m.delivery(r, a) {
+			switch ds[a] {
 			case peer.DeliveryNone, peer.DeliveryUndelivered:
 				st.RemindNeeded = append(st.RemindNeeded, a)
 			case peer.DeliveryQueued:
@@ -1215,6 +1230,10 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 	// Admins to remind; of those, left out for a full or unreadable ask
 	// log; admins left out because their challenge waits in the outbox.
 	cands, limited, waiting := 0, 0, 0
+	var ds map[string]peer.Delivery
+	if len(force) == 0 {
+		ds = m.deliveries(r)
+	}
 	for _, a := range r.Admins {
 		if len(force) > 0 {
 			break // only the named admins
@@ -1222,7 +1241,7 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 		if !slices.Contains(set, a) || r.answered(a) {
 			continue
 		}
-		d := m.delivery(r, a)
+		d := ds[a]
 		if d == peer.DeliveryQueued {
 			// Its challenge waits in the outbox (behind a reconnect, say) and
 			// goes once the connection can take it; another would wait the

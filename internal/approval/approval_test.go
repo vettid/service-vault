@@ -48,13 +48,17 @@ type fakePeer struct {
 	queue map[string]bool
 }
 
-func (p *fakePeer) ChallengeDelivery(req string) peer.Delivery {
+func (p *fakePeer) ChallengeDeliveries(reqs []string) map[string]peer.Delivery {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if d, ok := p.delivery[req]; ok {
-		return d
+	out := map[string]peer.Delivery{}
+	for _, req := range reqs {
+		out[req] = peer.DeliverySent
+		if d, ok := p.delivery[req]; ok {
+			out[req] = d
+		}
 	}
-	return peer.DeliverySent
+	return out
 }
 
 // deliver sets where request req stands.
