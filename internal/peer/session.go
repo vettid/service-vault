@@ -174,14 +174,21 @@ func (p *Peer) profileUpdate(c *Connection, body []byte) {
 	// name out removes it.
 	var ok bool
 	if c.Features, ok = parseFeatures(u.Members["features"]); !ok {
-		p.audit("profile_features_malformed", c.ID)
+		p.memberIgnored(c.ID, "features")
 	}
 	// The contract it claims (0.90.10): an update without one, or with one
 	// of another type or form, clears it, and is applied all the same.
 	if c.PeerContract, ok = parseContract(u.Members["contract"]); !ok {
-		p.audit("profile_contract_malformed", c.ID)
+		p.memberIgnored(c.ID, "contract")
 	}
 	p.markDirty(kindConn, c.ID)
+}
+
+// memberIgnored logs a profile.update member of the wrong form. The
+// member counts as absent and the update is applied (§10.8), so this is
+// not a drop.
+func (p *Peer) memberIgnored(connID, member string) {
+	p.log().Warn("profile member ignored", "reason", "profile_member_malformed", "member", member, "connection_id", connID)
 }
 
 // parseFeatures reads a profile.update's features (§10.8, 0.81.0): absent,
@@ -389,6 +396,7 @@ func (p *Peer) removeConnectionFor(c *Connection, dir, reason string, now time.T
 	}
 	delete(p.conns, c.ID)
 	delete(p.rates, c.ID)
+	delete(p.outboxFull, c.ID)
 	p.markDirty(kindConn, c.ID)
 	d := dir
 	if d == "replaced" {

@@ -179,8 +179,12 @@ func TestPeerContract(t *testing.T) {
 		if ignored := c.ProfileVersion != tc.version || c.Peer.LastName != last; ignored && tc.raw != `"3.0"` {
 			t.Fatalf("v%d %s: the update was not applied", tc.version, tc.raw)
 		}
-		if got := strings.Contains(f.logs.String()[logs:], "reason=profile_contract_malformed"); got != tc.malformed {
-			t.Fatalf("v%d %s: audited %v", tc.version, tc.raw, got)
+		line := f.logs.String()[logs:]
+		if got := strings.Contains(line, "reason=profile_member_malformed member=contract"); got != tc.malformed {
+			t.Fatalf("v%d %s: logged %v:\n%s", tc.version, tc.raw, got, line)
+		}
+		if strings.Contains(line, "msg=drop") {
+			t.Fatalf("v%d %s: an applied update logged as a drop:\n%s", tc.version, tc.raw, line)
 		}
 	}
 	f.start()
@@ -228,6 +232,91 @@ func TestContractRetriedUntilQueued(t *testing.T) {
 	f.pump()
 	if got := profilesTo(t, m); len(got) != 2 || string(got[1].Contract) != `"1.0"` || c.SentContract != Contract {
 		t.Fatalf("not sent once the outbox had room: %+v", got)
+	}
+}
+
+// A malformed features member is logged as ignored, not as a drop, and
+// the update is applied.
+func TestFeaturesMemberIgnored(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	ik := m.IK.Public().(ed25519.PublicKey)
+	logs := len(f.logs.String())
+	m.Send(peerwire.TypeProfileUpdate, withMember(t, peerwire.ProfileUpdateBody(2, "Nora", "Bad", ik, nil), "features", `["vote","Vote"]`))
+	f.pump()
+	line := f.logs.String()[logs:]
+	if c := f.p.conns[cid]; c.ProfileVersion != 2 || len(c.Features) != 0 {
+		t.Fatalf("version %d, features %v", c.ProfileVersion, c.Features)
+	}
+	if !strings.Contains(line, "reason=profile_member_malformed member=features") || strings.Contains(line, "msg=drop") {
+		t.Fatalf("logged:\n%s", line)
+	}
+}
+
+// A full outbox is logged once while the contract update waits on it at
+// every housekeeping; every other refused send still logs its own line;
+// the marker ends with the update queued, or with the connection.
+func TestOutboxFullLoggedOnce(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	p := f.p
+	c := p.conns[cid]
+	fill := func() {
+		p.mu.Lock()
+		for p.outboxFor(cid) < MaxOutboxPerConn {
+			p.queueDeposit(&outboxEntry{ConnID: cid, Mailbox: c.Peer.Relay.Mailbox, Payload: []byte("x"), NotBefore: f.clk.Now().Add(1000 * time.Hour)},
+				f.clk.Now())
+		}
+		p.mu.Unlock()
+	}
+	empty := func() {
+		p.mu.Lock()
+		p.outbox = slices.DeleteFunc(p.outbox, func(e *outboxEntry) bool { return string(e.Payload) == "x" })
+		p.mu.Unlock()
+	}
+	p.mu.Lock()
+	c.SentContract = ""
+	p.mu.Unlock()
+	fill()
+	for range 3 {
+		f.clk.Advance(time.Minute)
+		f.tick()
+	}
+	if n := strings.Count(f.logs.String(), "reason=outbox_full"); n != 1 || c.SentContract != "" {
+		t.Fatalf("%d outbox_full lines, sent %q", n, c.SentContract)
+	}
+	empty()
+	f.tick() // queued: the episode ends
+	if c.SentContract != Contract {
+		t.Fatal("not sent once the outbox had room")
+	}
+	fill()
+	p.mu.Lock()
+	for range 2 {
+		if p.sendTo(c, "vote.test", json.RawMessage(`{}`), f.clk.Now()) != "" {
+			t.Error("queued past a full outbox")
+		}
+	}
+	p.mu.Unlock()
+	if n := strings.Count(f.logs.String(), "reason=outbox_full"); n != 3 {
+		t.Fatalf("%d outbox_full lines: each other refused send logs its own", n)
+	}
+	// A new wait of the update logs once again.
+	p.mu.Lock()
+	c.SentContract = ""
+	p.mu.Unlock()
+	f.tick()
+	f.tick()
+	if n := strings.Count(f.logs.String(), "reason=outbox_full"); n != 4 || !p.outboxFull[cid] {
+		t.Fatalf("%d outbox_full lines in the second wait", n)
+	}
+	p.mu.Lock()
+	p.removeConnection(c, "in", f.clk.Now())
+	p.mu.Unlock()
+	if p.outboxFull[cid] {
+		t.Fatal("the marker outlived the connection")
 	}
 }
 
