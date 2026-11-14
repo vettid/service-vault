@@ -42,10 +42,19 @@ type SendCounts struct {
 
 // SendMessageRef is SendMessage, with the message counted under ref
 // (SendCounts). Give a notAfter: a message with none keeps its ref's
-// tally only SendTallyRetention from its send, and may outlive it,
-// uncounted.
+// tally only SendTallyRetention from its send (or from the last start),
+// and may outlive it, uncounted.
 func (p *Peer) SendMessageRef(ctx context.Context, connID, typ string, body json.RawMessage, notAfter time.Time, ref string) (string, error) {
 	return p.sendMessage(ctx, connID, typ, body, notAfter, ref)
+}
+
+// tallyUntil is how long a message with notAfter keeps its send's tally:
+// until its notAfter, or from now with none.
+func tallyUntil(notAfter, now time.Time) time.Time {
+	if notAfter.IsZero() {
+		return now
+	}
+	return notAfter
 }
 
 // tally returns ref's tally, made if new, kept at least until until.
@@ -89,24 +98,44 @@ func (p *Peer) sendLeft(e *outboxEntry) {
 	p.markDirty(kindSend, e.Ref)
 }
 
-// SendCounts reports the sends whose ref starts with prefix, by ref.
+// SendCounts reports the sends whose ref starts with prefix, by ref, as of
+// the peer's load or its last flush that wrote the outbox or a tally
+// (whether or not the write went through): it takes no lock, so it never
+// waits behind a drain (which holds the peer's lock while it calls the
+// relay), and may lag one.
 func (p *Peer) SendCounts(prefix string) []SendCounts {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	v := p.sendView.Load()
+	if v == nil {
+		return nil
+	}
+	var out []SendCounts
+	for _, c := range *v {
+		if strings.HasPrefix(c.Ref, prefix) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// viewSends makes what SendCounts reports from the tallies and the outbox
+// (under p.mu): at load, and at each flush that wrote either.
+func (p *Peer) viewSends() {
+	if len(p.sends) == 0 {
+		p.sendView.Store(&[]SendCounts{})
+		return
+	}
 	queued := map[string]int{}
 	for _, e := range p.outbox {
-		if e.Ref != "" && strings.HasPrefix(e.Ref, prefix) {
+		if e.Ref != "" {
 			queued[e.Ref]++
 		}
 	}
-	var out []SendCounts
+	out := make([]SendCounts, 0, len(p.sends))
 	for ref, t := range p.sends {
-		if strings.HasPrefix(ref, prefix) {
-			out = append(out, SendCounts{Ref: ref, Sent: t.Deposited, Queued: queued[ref], Dropped: t.Dropped})
-		}
+		out = append(out, SendCounts{Ref: ref, Sent: t.Deposited, Queued: queued[ref], Dropped: t.Dropped})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Ref < out[j].Ref })
-	return out
+	p.sendView.Store(&out)
 }
 
 // pruneSends (housekeeping) forgets the tallies past their retention.

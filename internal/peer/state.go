@@ -679,6 +679,15 @@ func (p *Peer) flush(ctx context.Context) error {
 		changes = append(changes, c)
 	}
 	changes = append(changes, p.extra...)
+	counted := false
+	for k := range p.dirty {
+		counted = counted || k.kind == kindOutbox || k.kind == kindSend
+	}
+	if counted {
+		// Made even if the write fails: the records stay dirty, written at
+		// the next flush, and the send that wrote them reports them now.
+		defer p.viewSends()
+	}
 	if err := p.cfg.Store.Apply(ctx, changes); err != nil {
 		return fmt.Errorf("peer: flush: %w", err)
 	}
@@ -889,6 +898,16 @@ func (p *Peer) load(ctx context.Context) error {
 			ch.Entry, ch.Undelivered, ch.Unsent = e.ID, false, false
 			p.markDirty(kindAuth, ch.ID)
 		}
+		// A flush split across writes (outbox before send) may have stored a
+		// counted message without its send's tally, or without the tally's
+		// longer Until: the tally is made again (counted from here; what
+		// left the outbox before is lost from the counts: short, never
+		// double) and kept until the latest notAfter of its messages. A
+		// message with no notAfter recreates, at each start, a tally pruned
+		// SendTallyRetention after its send (ballot sends always give one).
+		if e.Ref != "" {
+			p.tally(e.Ref, tallyUntil(e.NotAfter, p.now()))
+		}
 	}
 	sort.Slice(p.events, func(i, j int) bool { return p.events[i].Seq < p.events[j].Seq })
 	for _, e := range p.outbox {
@@ -927,6 +946,7 @@ func (p *Peer) load(ctx context.Context) error {
 		}
 	}
 
+	p.viewSends()
 	return nil
 }
 

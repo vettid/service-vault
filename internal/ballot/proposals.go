@@ -7,14 +7,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/vettid/service-vault/internal/peer"
-	"github.com/vettid/service-vault/vote"
 	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/vettid/service-vault/internal/peer"
+	"github.com/vettid/service-vault/vote"
 )
 
 // Proposals (BALLOT-PROTOCOL §3, §4.1): creating a proposal from the
@@ -47,6 +48,9 @@ type SendCounter interface {
 	SendMessageRef(ctx context.Context, connID, typ string, body json.RawMessage, notAfter time.Time, ref string) (string, error)
 	SendCounts(prefix string) []peer.SendCounts
 }
+
+// The peer is the SendCounter the service runs with.
+var _ SendCounter = (*peer.Peer)(nil)
 
 // SendStatus is where one send's messages stand: deposited with the relay
 // (Sent), waiting in the outbox (Queued), or ended there undelivered
