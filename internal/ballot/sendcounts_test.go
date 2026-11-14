@@ -84,7 +84,7 @@ func TestSendCountsSplit(t *testing.T) {
 			line = l
 		}
 	}
-	for _, want := range []string{"accepted=3", "deposited=1", "queued=1", "dropped=1"} {
+	for _, want := range []string{"accepted=3", "sent=1", "queued=1", "dropped=1"} {
 		if !strings.Contains(line, want) {
 			t.Fatalf("log line %q lacks %s", line, want)
 		}

@@ -41,8 +41,9 @@ type SendCounts struct {
 }
 
 // SendMessageRef is SendMessage, with the message counted under ref
-// (SendCounts). A message with no notAfter is counted for
-// SendTallyRetention from now.
+// (SendCounts). Give a notAfter: a message with none keeps its ref's
+// tally only SendTallyRetention from its send, and may outlive it,
+// uncounted.
 func (p *Peer) SendMessageRef(ctx context.Context, connID, typ string, body json.RawMessage, notAfter time.Time, ref string) (string, error) {
 	return p.sendMessage(ctx, connID, typ, body, notAfter, ref)
 }
@@ -54,14 +55,24 @@ func (p *Peer) tally(ref string, until time.Time) *sendTally {
 		t = &sendTally{Ref: ref}
 		p.sends[ref] = t
 	}
-	if until.After(t.Until) {
-		t.Until = until.UTC().Truncate(time.Millisecond)
+	// Compared as stored, so that a send whose notAfter carries
+	// sub-millisecond time doesn't write its tally at every message.
+	if u := until.UTC().Truncate(time.Millisecond); u.After(t.Until) {
+		t.Until = u
 		p.markDirty(kindSend, ref)
 	}
 	return t
 }
 
 // sendLeft counts e, a message of a send, as it leaves the outbox.
+// Dropped means not confirmed deposited: one tried without an answer (a
+// timeout, a 5xx) may have reached the relay. The counts may fall short
+// after a crash: a flush split across writes stores the outbox entries'
+// removal before the tally (records go by kind), and a crash between the
+// two loses those messages from every count. Short, not double: the
+// other order would count a message re-deposited after the crash twice.
+// And they may exceed what the sender saw accepted: a send whose first
+// flush failed is still in the outbox, counted.
 func (p *Peer) sendLeft(e *outboxEntry) {
 	if e.Ref == "" {
 		return

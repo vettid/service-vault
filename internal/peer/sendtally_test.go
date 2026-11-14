@@ -60,6 +60,22 @@ func TestSendCounts(t *testing.T) {
 	if got := counts("p2/"); got != "[{p2/closed/p2 1 0 1}]" {
 		t.Fatalf("past its notAfter: %s", got)
 	}
+	// A notAfter with sub-millisecond time, as stored: the tally isn't
+	// written again for each message.
+	f.p.mu.Lock()
+	u := f.p.sends["p2/closed/p2"].Until.Add(500 * time.Microsecond)
+	f.p.tally("p2/closed/p2", u)
+	f.p.markDirty(kindSend, "p2/closed/p2") // written with the first, below
+	if err := f.p.flush(context.Background()); err != nil {
+		f.p.mu.Unlock()
+		t.Fatal(err)
+	}
+	f.p.tally("p2/closed/p2", u)
+	_, dirty := f.p.dirty[key{kindSend, "p2/closed/p2"}]
+	f.p.mu.Unlock()
+	if dirty {
+		t.Fatal("the tally is written again for the same notAfter")
+	}
 	f.clk.Advance(SendTallyRetention + time.Hour)
 	f.tick()
 	if got := counts(""); got != "[]" {

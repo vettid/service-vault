@@ -195,11 +195,13 @@ func (m *Manager) runJob(job *sendJob) {
 		inARow = 0
 		accepted++
 	}
-	// Accepted is not sent: the split says how many members it has reached
-	// so far (deposited), how many wait in the outbox (queued: their
-	// connection is mid-reconnect, say) and how many ended there
-	// undelivered. They count this send's messages so far, earlier runs of
-	// the same send included; the proposal's status follows them later.
+	// Accepted is not sent: the split says how many messages were deposited
+	// with the relay so far (sent), how many wait in the outbox (queued:
+	// their connection is mid-reconnect, say) and how many ended there not
+	// confirmed deposited (dropped). They count this send's messages so
+	// far, earlier runs of the same send included, and a timed-out send
+	// that still went, so they can exceed accepted (or fall short after a
+	// crash: peer.sendLeft); the proposal's status follows them later.
 	args := []any{"send", job.key, "accepted", accepted, "failed", failed, "body_errors", bodyErrs,
 		"of", len(job.conns), "stopped", ctx.Err() != nil, "gave_up", gaveUp}
 	if counted {
@@ -209,7 +211,7 @@ func (m *Manager) runJob(job *sendJob) {
 				n = c
 			}
 		}
-		args = append(args, "deposited", n.Sent, "queued", n.Queued, "dropped", n.Dropped)
+		args = append(args, "sent", n.Sent, "queued", n.Queued, "dropped", n.Dropped)
 	}
 	m.log().Info(job.typ+" send ended", args...)
 }
