@@ -54,12 +54,23 @@ func (p *Peer) sendProfile(c *Connection, version uint64, now time.Time) bool {
 // with its next version when the contract last sent to it differs from
 // this release's, a value never sent included (§10.8 "Sending"): at the
 // first start under such a release, and again at each housekeeping until
-// it is queued (sendEntry logs why it was not, once per episode); once queued it is
-// retried with the connection's other messages (the outbox).
+// it is queued; once queued it is retried with the connection's other
+// messages (the outbox). While the connection's outbox is full it is not
+// tried: outbox_full is logged once for it (outboxFull) rather than at
+// every housekeeping, and every other send still logs its own refusal.
 func (p *Peer) sendContract(c *Connection, now time.Time) {
 	if c.SentContract == Contract {
+		delete(p.outboxFull, c.ID)
 		return
 	}
+	if p.outboxFor(c.ID) >= MaxOutboxPerConn {
+		if !p.outboxFull[c.ID] {
+			p.outboxFull[c.ID] = true
+			p.audit("outbox_full", c.ID)
+		}
+		return
+	}
+	delete(p.outboxFull, c.ID)
 	p.sendProfile(c, nextProfileVersion(c, now), now)
 }
 

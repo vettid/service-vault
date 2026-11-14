@@ -254,8 +254,9 @@ func TestFeaturesMemberIgnored(t *testing.T) {
 	}
 }
 
-// A full outbox is logged once while the update retries at every
-// housekeeping, and again only after a send was queued in between.
+// A full outbox is logged once while the contract update waits on it at
+// every housekeeping; every other refused send still logs its own line;
+// the marker ends with the update queued, or with the connection.
 func TestOutboxFullLoggedOnce(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
@@ -299,8 +300,23 @@ func TestOutboxFullLoggedOnce(t *testing.T) {
 		}
 	}
 	p.mu.Unlock()
-	if n := strings.Count(f.logs.String(), "reason=outbox_full"); n != 2 {
-		t.Fatalf("%d outbox_full lines after a second episode", n)
+	if n := strings.Count(f.logs.String(), "reason=outbox_full"); n != 3 {
+		t.Fatalf("%d outbox_full lines: each other refused send logs its own", n)
+	}
+	// A new wait of the update logs once again.
+	p.mu.Lock()
+	c.SentContract = ""
+	p.mu.Unlock()
+	f.tick()
+	f.tick()
+	if n := strings.Count(f.logs.String(), "reason=outbox_full"); n != 4 || !p.outboxFull[cid] {
+		t.Fatalf("%d outbox_full lines in the second wait", n)
+	}
+	p.mu.Lock()
+	p.removeConnection(c, "in", f.clk.Now())
+	p.mu.Unlock()
+	if p.outboxFull[cid] {
+		t.Fatal("the marker outlived the connection")
 	}
 }
 

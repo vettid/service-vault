@@ -252,13 +252,8 @@ func (p *Peer) sendEntry(c *Connection, in *envelope.Inner, now time.Time) *outb
 	}
 	if p.outboxFor(c.ID) >= MaxOutboxPerConn {
 		// The member's mailbox has not taken our deposits for a while: what
-		// would pile up is dropped, not kept without bound. Logged once
-		// until a send to the connection is queued again (a retry at every
-		// housekeeping would log it each time).
-		if !p.outboxFull[c.ID] {
-			p.outboxFull[c.ID] = true
-			p.audit("outbox_full", c.ID)
-		}
+		// would pile up is dropped, not kept without bound.
+		p.audit("outbox_full", c.ID)
 		return nil
 	}
 	raw, err := c.kr.Current().Seal(in)
@@ -268,7 +263,6 @@ func (p *Peer) sendEntry(c *Connection, in *envelope.Inner, now time.Time) *outb
 	p.markDirty(kindConn, c.ID) // the epoch's send count moved
 	e := &outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: raw}
 	p.queueDeposit(e, now)
-	delete(p.outboxFull, c.ID) // queued: a full outbox later is a new episode
 	return e
 }
 

@@ -135,8 +135,8 @@ type Peer struct {
 	instance   string
 	seq        uint64
 	rates      map[string]*rateWindow
-	// outboxFull marks the connections whose outbox_full is logged, until
-	// a send to them is queued again (sendEntry).
+	// outboxFull marks the connections whose contract update waits on a
+	// full outbox, its outbox_full already logged (sendContract).
 	outboxFull map[string]bool
 
 	dirty    map[key]struct{}
