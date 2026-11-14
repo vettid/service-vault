@@ -62,8 +62,10 @@ type fixture struct {
 	failDeposit func(mailbox, token string) error
 	// failCollect, when set, is the error of the service's collects.
 	failCollect error
-	revokes     map[string]int
-	logs        lockedBuffer
+	// failRegister, when set, is the error of the service's registrations.
+	failRegister error
+	revokes      map[string]int
+	logs         lockedBuffer
 }
 
 // lockedBuffer collects the service's log lines.
@@ -98,6 +100,13 @@ func (r testRelay) Deposit(ctx context.Context, mailboxID, token string, payload
 		}
 	}
 	return r.View.Deposit(ctx, mailboxID, token, payload)
+}
+
+func (r testRelay) Register(ctx context.Context) (relayclient.Registration, error) {
+	if r.f.failRegister != nil {
+		return relayclient.Registration{}, r.f.failRegister
+	}
+	return r.View.Register(ctx)
 }
 
 func (r testRelay) Collect(ctx context.Context, wait time.Duration, max int) ([]relayclient.Message, error) {

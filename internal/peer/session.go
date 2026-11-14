@@ -573,6 +573,7 @@ func (p *Peer) housekeeping(now time.Time) {
 		}
 		p.refreshHeld(c, now, false)
 	}
+	p.remintLost(now) // a lost mailbox's tokens first (mailbox.go)
 	p.remintIssued(now)
 	p.pruneIssued(now)
 	for id, w := range p.rates {

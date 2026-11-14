@@ -251,6 +251,21 @@ destination.
     previous release once under the right keys, which drops it
     (`outgoing_identity_changed`), then roll forward; or restore the
     table from a backup without it.
+- `relay_mailbox_lost`: at start, the relay made the service's mailbox
+  afresh: it was deleted while the service was down (the relay lost
+  it, or someone holding the service's relay key deleted it). What
+  members deposited since the service's last collect is gone, with no
+  way to recover it here (relay-key rotation, GC #9442, is where it
+  would be). The relay now refuses every token the old mailbox issued,
+  so 241 seconds after the answer the service mints every member's
+  standing and reconnect tokens again and sends them
+  (`relay.token.issued`); until then members' deposits to the service
+  fail, and a member whose vault is offline gets them when it next
+  collects. A start whose registration got no answer before is treated
+  the same at its next `200`, since that attempt may have made the
+  mailbox afresh unseen. A deleted mailbox may also mean the relay key
+  is exposed: look at the relay's logs, and consider new keys and new
+  invitations until the service can rotate its relay key.
 - `outgoing_identity_changed`: at start, a stored handshake this
   service started (a rekey or a reconnect) names another identity key
   than the table's, although the table's identity record names the key

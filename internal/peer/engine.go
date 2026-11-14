@@ -135,6 +135,9 @@ type Peer struct {
 	instance   string
 	seq        uint64
 	rates      map[string]*rateWindow
+	// remintAt is a lost mailbox's re-mint owed (mailbox.go), zero when
+	// none.
+	remintAt time.Time
 	// outboxFull marks the connections whose contract update waits on a
 	// full outbox, its outbox_full already logged (sendContract).
 	outboxFull map[string]bool
@@ -216,13 +219,8 @@ func (p *Peer) Start(ctx context.Context) error {
 			return err
 		}
 	}
-	reg, err := p.cfg.Relay.Register(ctx)
-	if err != nil {
-		return fmt.Errorf("peer: register: %w", err)
-	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.limits = reg.Limits
 	p.drained = false // B waits for this start's first short collect (RELEASE-29 §2)
 	// An earlier process, or this one before a restart, may have left
 	// messages leased.
@@ -231,6 +229,13 @@ func (p *Peer) Start(ctx context.Context) error {
 		if err := p.load(ctx); err != nil {
 			return err
 		}
+	}
+	// After the load, so that a lost mailbox is told from a first
+	// registration (mailbox.go, GC #10525).
+	if err := p.register(ctx); err != nil {
+		return err
+	}
+	if !p.started {
 		if err := p.endAllOnce(ctx, p.now()); err != nil {
 			return err
 		}

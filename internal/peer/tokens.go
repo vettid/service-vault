@@ -242,10 +242,11 @@ func (p *Peer) issueTo(c *Connection, kind string, now time.Time) {
 	p.issue(c, kind, false, now)
 }
 
-// issue is issueTo; prompt marks a token re-minted at a confirmation.
-func (p *Peer) issue(c *Connection, kind string, prompt bool, now time.Time) {
+// issue is issueTo; prompt marks a token re-minted at a confirmation. It
+// reports whether the token was queued.
+func (p *Peer) issue(c *Connection, kind string, prompt bool, now time.Time) bool {
 	if c.Reconnecting || p.outboxFor(c.ID) >= MaxOutboxPerConn {
-		return // not deliverable now: mint it when it can be sent
+		return false // not deliverable now: mint it when it can be sent
 	}
 	var tok, jti string
 	var err error
@@ -255,12 +256,12 @@ func (p *Peer) issue(c *Connection, kind string, prompt bool, now time.Time) {
 		tok, jti, err = p.mintStandingJTI(c.ID, &c.Peer, now)
 	}
 	if err != nil {
-		return
+		return false
 	}
 	if t := p.issued[jti]; prompt && t != nil {
 		t.Prompt = true
 	}
-	p.sendTo(c, peerwire.TypeTokenIssued, peerwire.TokenIssuedBody(kind, tok), now)
+	return p.sendTo(c, peerwire.TypeTokenIssued, peerwire.TokenIssuedBody(kind, tok), now) != ""
 }
 
 // refreshWait is how long a relay.token.refresh may stay unanswered
