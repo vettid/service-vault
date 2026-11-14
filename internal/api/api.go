@@ -21,7 +21,6 @@ import (
 	"github.com/vettid/service-vault/internal/ballot"
 	"github.com/vettid/service-vault/internal/connect"
 	"github.com/vettid/service-vault/internal/signin"
-	"github.com/vettid/service-vault/vote"
 )
 
 // Invites makes connection invitations, remembering the email the member
@@ -176,9 +175,10 @@ type Proposals interface {
 	Close(ctx context.Context, id string) (*ballot.ResultsSummary, error)
 	// Results returns a vote's results once counted, or nil.
 	Results(ctx context.Context, id string) (*ballot.PublishedResults, error)
-	// Extend publishes an extension for a relay outage, as an approval
-	// (vote.extend) approved, and uses the approval up.
-	Extend(ctx context.Context, id, approvalID string, in ballot.ExtensionInput) (*vote.Extension, error)
+	// ExtendSending publishes an extension for a relay outage, as an
+	// approval (vote.extend) approved, uses the approval up, and says
+	// whether it is being sent.
+	ExtendSending(ctx context.Context, id, approvalID string, in ballot.ExtensionInput) (*ballot.Extended, error)
 	// Publish publishes a proposal if it isn't yet, sends it to every
 	// eligible member, and returns how many it sent.
 	Publish(ctx context.Context, id string) (int, error)
@@ -718,7 +718,7 @@ func (s *Server) extendProposal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, approval.CodeApprovalRequired)
 		return
 	}
-	e, err := s.Proposals.Extend(r.Context(), r.PathValue("id"), b.ApprovalID, b.ExtensionInput)
+	e, err := s.Proposals.ExtendSending(r.Context(), r.PathValue("id"), b.ApprovalID, b.ExtensionInput)
 	var ei *ballot.ErrInput
 	switch {
 	case approvalProblem(w, err):

@@ -744,7 +744,11 @@ func (c *Client) CreateProposal(ctx context.Context, approvalID string, in json.
 // the id of the admins' approval of it. The approval is an
 // ActionVoteExtend approval whose payload is {"proposal_id", "closes_at",
 // "outage"} in canonical form (no summary); it is used up by this call.
-// It is not retried.
+// It is not retried. The answer is the extension, with `sending` (how
+// many members vote.extended is queued to: queued, not delivered) and,
+// when it is 0, `reason`: "bundle_unverified" (its bundle failed the
+// check) or "stopping" (the service is stopping). The extension is in
+// effect all the same.
 func (c *Client) ExtendProposal(ctx context.Context, id, approvalID string, in json.RawMessage) (json.RawMessage, error) {
 	if id == "" {
 		return nil, errors.New("servicevault: empty proposal id")
