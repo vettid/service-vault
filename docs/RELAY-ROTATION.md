@@ -1,6 +1,6 @@
 # Relay-key rotation in the service vault
 
-**Status:** 0.7.1, draft (2026-11-14). Against VAULT-MESSAGING 0.90.11
+**Status:** 0.7.2, draft (2026-11-14). Against VAULT-MESSAGING 0.90.11
 (§3.4, §3.4.1, §3.4.2). GC #9442.
 
 VAULT-MESSAGING §3.4.2 RK0 asks a service vault to follow the relay-key
@@ -607,7 +607,8 @@ as one task, and one lock (the peer's) covers every state change.
     start's registration a **registration attempted** mark is stored on
     the current key; a `201`, or a `200` after an attempt that got no
     answer or a `5xx`, stores a durable **re-mint owed** mark before
-    anything else, so a crash after it still re-mints at the next start.
+    anything else, in the same write that clears the attempted mark, so
+    a crash after it still re-mints at the next start.
 
   On the running path too (a collect's `mailbox_unknown`), the re-mint
   owed mark is stored before any registration of the current key.
@@ -693,15 +694,18 @@ as one task, and one lock (the peer's) covers every state change.
     registration, the table's keys are compared with the log. If the log
     names a key newer than any key the table holds:
     - the service **recovers** only when it can carry on without a
-      second successor: the newest key's seed is in the SSM escrow, and
-      every link from the table's current key to it is in the log
-      (signed, so the chain can be sent again, whichever seeds are gone).
-      It then stores that key again as pending, with the anchor taken
-      from the log's pending entry for it (written before its first
-      rotate), and prepares the updates again with that chain, so
-      members follow the same links they may have followed already. If
-      the log shows it made current, it goes through completing (3.1 to
-      3.5) with the rotate skipped, never stored current directly. A key
+      second successor: the newest key the log doesn't show discarded
+      has its seed in the SSM escrow, and every link from the table's
+      current key to it is in the log (signed, so the chain can be sent
+      again, whichever seeds are gone). It then stores that key again as
+      pending, with the anchor taken from the log's first pending entry
+      for it (written before its first rotate; a later, rewritten entry
+      keeps that first time), and prepares the updates again with that
+      chain, so members follow the same links they may have followed
+      already. If the log shows it made current, it goes through
+      completing (3.1 to 3.5) with the rotate skipped, never stored
+      current directly, and S1's clock takes the first time the log
+      shows it made current. A key
       the log shows discarded is dropped, not recovered. Each
       intermediate key on the chain whose mailbox the table never told
       about gets a telling with `last_msg_id` null;
@@ -710,14 +714,19 @@ as one task, and one lock (the peer's) covers every state change.
       relay down), they go ahead after that attempt, announcing the
       current key, and cover a re-mint the restore may have lost. The
       unconfirmed state (below) is stored in `relaykeys` before the
-      restore marker is cleared, and its 241 seconds count from the end
-      of that attempt;
+      restore marker is cleared, in a write that also bumps the mint
+      generation (so 3.1 skips no connection a backup taken mid-3.1
+      marked at an older generation), and its 241 seconds count from the
+      end of that attempt;
     - otherwise it raises the alarm `relay_key_rolled_back`, registers
       nothing for any key the log has superseded, and refuses any
       rotation until the operator confirms; README "Restoring the table"
       says every member then connects again;
     - completing a restored pending key equal to the log's newest is
       not refused;
+    - escrow parameters for keys in neither the table nor the log
+      (orphans of a crash or a restore between steps 1.1 and 1.4, or a
+      next key escrowed at 3.2) are deleted;
   - **at the first start after a restore** (the restore marker), every
     pending key is treated as unconfirmed, as after 0.90.11's lost run:
     completed only after the 241-second wait, with every held token
@@ -767,7 +776,7 @@ as one task, and one lock (the peer's) covers every state change.
 
      At load, held updates and tokens are deleted when they name a key
      that is neither the pending key nor, if not yet marked released,
-     the current key (a crash during step 3.4 leaves those). A key still
+     the current key (a crash during step 3.5 leaves those). A key still
      preparing resumes at step 3. No other key is generated while one is
      preparing, pending or refused, except the next key a pending key's
      flip stores when a rotation is owed (below).
@@ -818,8 +827,8 @@ as one task, and one lock (the peer's) covers every state change.
         an update, and those ended lose theirs;
      2. the SSM log entry for the new key as current, with its signed
         link and the flip's time; and, when a rotation is owed (the gate,
-        the P switch and the grace checked again), the SSM escrow of the
-        next key's seed;
+        the P switch, the grace and `message_ttl_seconds` checked again),
+        the SSM escrow of the next key's seed;
      3. **the flip,** one write of the `relaykeys` record and nothing
         else: the new key current, the old one deposit-only with its
         anchor, S1's clock started at the flip's time (RK13), a lost
@@ -846,8 +855,12 @@ as one task, and one lock (the peer's) covers every state change.
     on its own. It is attempted again at each start, daily while running,
     and when the operator runs the command (chosen; not in the spec).
     Meanwhile the service collects the old mailbox if it still lives (a
-    refused rotate), and otherwise (a refused registration) receives
-    nothing; the alarm says which. A plain run of the command while
+    refused rotate). When it doesn't (a refused registration, or the
+    current mailbox lost while the pending key is refused), the service
+    registers its current key again as a lost mailbox (above), with
+    `relay_mailbox_lost` and the re-mint, rather than receive nothing
+    (chosen; the spec's member vault receives nothing then); the alarm
+    says which. A plain run of the command while
     refused keeps the refused key and owes a rotation, as a member
     vault's transfer does. **The way out (chosen; not in the spec):** the
     command with `-discard-refused` discards the refused key, its tokens
@@ -1179,6 +1192,13 @@ first item, a member that rotated since then must connect again.
 
 ## Changes
 
+- **0.7.2 (2026-11-14):** a restore's unconfirmed write bumps the mint
+  generation; orphaned escrow parameters deleted at start; a refused
+  pending key with the current mailbox lost re-registers the current
+  key; `message_ttl_seconds` checked again at the flip; "the newest key
+  not discarded"; the re-mint owed set with the attempted mark's clear;
+  the anchor and a recovered key's S1 clock from the log's first times;
+  the step-3.5 reference.
 - **0.7.1 (2026-11-14):** the mint generation defined, and completing's
   marker apart from preparing's; a lost mailbox takes the
   re-registration branch whenever a rotation can't start, and the
