@@ -114,8 +114,13 @@ func TestExtendRetriesPendingByteForByte(t *testing.T) {
 			}
 			pendingDoc, pendingSig := o.Pending.Doc, o.Pending.Sig
 			e.pub.failAfter = false
-			if _, err := e.m.Extend(ctx, e.id, "apv", e.req(7200)); err != nil {
+			got, err := e.m.ExtendSending(ctx, e.id, "apv", e.req(7200))
+			if err != nil {
 				t.Fatalf("the retry: %v", err)
+			}
+			// The first attempt sent nothing: the retry sends to everyone.
+			if got.Sending != len(o.Members) || got.Sending == 0 || got.Reason != "" {
+				t.Fatalf("the retry: sending %d of %d members, reason %q", got.Sending, len(o.Members), got.Reason)
 			}
 			if e.ap.consumed-e.base != 1 {
 				t.Fatalf("approval used %d times", e.ap.consumed)

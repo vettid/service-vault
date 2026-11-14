@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 
@@ -203,6 +204,19 @@ func TestProposalRoutes(t *testing.T) {
 	}
 	if rec, m := do(t, h, "POST", "/v1/proposals/unverified/extend", apiKey, ext); m["sending"] != float64(0) || m["reason"] != "bundle_unverified" || m["closes_at"] != float64(9) {
 		t.Errorf("extend unverified: %d %v", rec.Code, m)
+	}
+	// The extension's own fields and the two added, no more: a field of
+	// the extension named like one added would hide it.
+	for id, want := range map[string]string{"ok": "closes_at n outage proposal_id sending v", "unverified": "closes_at n outage proposal_id reason sending v"} {
+		_, m := do(t, h, "POST", "/v1/proposals/"+id+"/extend", apiKey, ext)
+		keys := make([]string, 0, len(m))
+		for k := range m {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		if got := strings.Join(keys, " "); got != want {
+			t.Errorf("extend %s keys: %s, want %s", id, got, want)
+		}
 	}
 	if rec, m := do(t, h, "GET", "/v1/proposals/done/results", apiKey, ""); rec.Code != 200 || m["results"] != `{"v":1}` {
 		t.Fatalf("%d %v", rec.Code, m)

@@ -127,8 +127,9 @@ func (m *Manager) Extend(ctx context.Context, id, approvalID string, in Extensio
 type Extended struct {
 	*vote.Extension
 	// Sending is how many members vote.extended is being sent to, in the
-	// background: 0 when it is not sent (Reason), when a send of it is
-	// already running, or when the service is stopping.
+	// background: 0 when it is not sent (Reason), or with no Reason when
+	// the service is stopping or the vote has no members. It is not sent
+	// again later: members learn of the extension from the site.
 	Sending int `json:"sending"`
 	// Reason, when it is not sent: "bundle_unverified", its bundle is one
 	// a member vault would refuse (alarm proposal_bundle_unverified). The
