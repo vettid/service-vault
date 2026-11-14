@@ -176,6 +176,11 @@ func (p *Peer) profileUpdate(c *Connection, body []byte) {
 	if c.Features, ok = parseFeatures(u.Members["features"]); !ok {
 		p.audit("profile_features_malformed", c.ID)
 	}
+	// The contract it claims (0.90.10): an update without one, or with one
+	// of another type or form, clears it, and is applied all the same.
+	if c.PeerContract, ok = parseContract(u.Members["contract"]); !ok {
+		p.audit("profile_contract_malformed", c.ID)
+	}
 	p.markDirty(kindConn, c.ID)
 }
 
@@ -553,6 +558,7 @@ func (p *Peer) housekeeping(now time.Time) {
 			p.startRekey(c, now)
 		}
 		p.tickConfirm(c, now)
+		p.sendContract(c, now) // §10.8 "Sending" (0.90.10)
 		if c.RefreshID != "" && !now.Before(c.RefreshAfter) {
 			c.RefreshID = "" // unanswered: ask again
 			p.markDirty(kindConn, c.ID)

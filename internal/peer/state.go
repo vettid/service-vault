@@ -96,6 +96,17 @@ type Connection struct {
 	// Features are the optional features the member's vault advertised in
 	// that profile.update (§10.8, 0.81.0), such as "vote".
 	Features []string `json:"features,omitempty"`
+	// PeerContract is the contract the member's vault last claimed: the
+	// `contract` of the last profile.update kept, "" when it had none or
+	// one of another form (§10.8, 0.90.10). Informational only; it may be
+	// stale after the vault's rollback.
+	PeerContract string `json:"peer_contract,omitempty"`
+	// SentProfileVersion and SentContract are the version and the contract
+	// of the last profile.update the service queued to the member (§10.8
+	// "Sending"); zero on records from before contract, which were sent
+	// version 1 at activation.
+	SentProfileVersion uint64 `json:"sent_profile_version,omitempty"`
+	SentContract       string `json:"sent_contract,omitempty"`
 
 	Standing  HeldToken `json:"standing"`
 	Reconnect HeldToken `json:"reconnect"`

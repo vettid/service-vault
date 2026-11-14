@@ -401,9 +401,10 @@ func (p *Peer) resealAtKeyChange(c *Connection, next *handshake.Epoch, now time.
 func rekeyKey(th1 [32]byte) string { return "rekey|" + hex.EncodeToString(th1[:]) }
 
 // profileExtras are the members the service adds to its profile.update
-// after the core (§10.8): no items, and its features.
+// after the core (§10.8): no items, its features and (0.90.10) its
+// contract.
 var profileExtras = func() []byte {
-	b, _ := json.Marshal(map[string]any{"items": []any{}, "features": serviceFeatures})
+	b, _ := json.Marshal(map[string]any{"items": []any{}, "features": serviceFeatures, "contract": Contract})
 	return b
 }()
 

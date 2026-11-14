@@ -205,8 +205,7 @@ func (p *Peer) activateRequest(r *request, now time.Time) {
 	if e := c.epochMeta(c.LastEpochID); e != nil {
 		e.Received = true
 	}
-	p.sendTo(c, peerwire.TypeProfileUpdate, peerwire.ProfileUpdateBody(1, p.cfg.Profile.FirstName, p.cfg.Profile.LastName,
-		p.cfg.Keys.IKPublic(), profileExtras), now)
+	p.sendProfile(c, 1, now)
 	p.endInvite(r.InviteID, InviteConnected, now)
 	p.emit(&Event{Type: EventConnectionAdded, ConnectionID: c.ID, InviteID: c.InviteID, Name: c.Name(), Tag: c.Tag}, now)
 }
