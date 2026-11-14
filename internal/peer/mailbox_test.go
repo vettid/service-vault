@@ -615,3 +615,58 @@ func TestRegisterRunningTimeout(t *testing.T) {
 		t.Fatalf("a running registration bounded to %s", f.regDeadline)
 	}
 }
+
+// A deposit refused token_expired during the wait (our standing token
+// still valid on our clock) asks for no refresh then: the member could
+// only answer on a refused token. The refresh goes once its tokens are
+// re-minted, and the message after it.
+func TestLostMailboxRefreshAfterRemint(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	f.w.DeleteMailbox(f.keys.Mailbox())
+	if _, err := f.p.Step(context.Background(), 0); err == nil {
+		t.Fatal("no loss seen")
+	}
+	c := f.p.conns[cid]
+	expired := c.Standing.Token
+	f.failDeposit = func(_, token string) error {
+		if token == expired {
+			return &relayclient.Error{Status: 401, Code: codeTokenExpired}
+		}
+		return nil
+	}
+	f.p.mu.Lock()
+	id := f.p.sendTo(c, "connection.note", []byte(`{"x":1}`), f.clk.Now())
+	f.p.mu.Unlock()
+	f.step()
+	f.tick()
+	f.pump()
+	if c.RefreshID != "" {
+		t.Fatal("a refresh asked for during the wait")
+	}
+	f.clk.Advance(FreshMailboxWait)
+	f.tick() // the re-mint
+	if c.RefreshID != "" {
+		t.Fatal("a refresh asked for before the member's re-mint")
+	}
+	f.pump()
+	f.clk.Advance(time.Minute)
+	f.tick() // the refresh
+	if c.RefreshID == "" {
+		t.Fatal("no refresh after the re-mint")
+	}
+	f.failDeposit = nil
+	f.clk.Advance(time.Hour)
+	f.tick()
+	f.pump()
+	n := 0
+	for _, g := range m.Got {
+		if g.ID == id {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("the member got it %d times", n)
+	}
+}

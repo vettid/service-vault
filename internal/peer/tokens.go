@@ -278,6 +278,15 @@ func (p *Peer) refreshHeld(c *Connection, now time.Time, force bool) {
 	if c.State != StateActive || c.Reconnecting || c.Standing.Token == "" || now.Before(c.RefreshAfter) {
 		return
 	}
+	if p.mintWait(now) || p.remintOwed(c) {
+		// A lost mailbox (mailbox.go): the member could only answer on a
+		// token the relay refuses. A forced refresh goes once the member's
+		// tokens are re-minted (housekeeping).
+		if force {
+			p.refreshOwed[c.ID] = true
+		}
+		return
+	}
 	if !now.Before(c.Standing.Exp) {
 		return // past its exp a refresh could not be deposited: a waiting entry reconnects instead (§8.6)
 	}

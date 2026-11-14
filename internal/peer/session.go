@@ -573,7 +573,7 @@ func (p *Peer) housekeeping(now time.Time) {
 		if c.State != StateActive {
 			continue
 		}
-		if !p.remintAt.IsZero() && !c.MailboxRemint.Equal(p.remintAt) {
+		if p.remintOwed(c) {
 			// A lost mailbox's re-mint not yet done for this member: what
 			// would ask it for an answer (a rekey, a refresh) waits, since
 			// it could only answer on a token the relay refuses.
@@ -598,7 +598,8 @@ func (p *Peer) housekeeping(now time.Time) {
 			c.RefreshID = "" // unanswered: ask again
 			p.markDirty(kindConn, c.ID)
 		}
-		p.refreshHeld(c, now, false)
+		p.refreshHeld(c, now, p.refreshOwed[c.ID])
+		delete(p.refreshOwed, c.ID)
 	}
 	p.remintIssued(now)
 	p.pruneIssued(now)

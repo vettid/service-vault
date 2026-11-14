@@ -39,6 +39,8 @@ type fakePeer struct {
 	// credential key (pinned); present and empty: none pinned.
 	gov       map[string][]byte
 	changedAt map[string]time.Time // connection id -> AuthKeyChangedAt
+	// notStarted: RepinGov answers as a peer whose start hasn't finished.
+	notStarted bool
 }
 
 func (p *fakePeer) authKey(id string) []byte {
@@ -70,6 +72,9 @@ func (p *fakePeer) PinGov(_ context.Context, id string, key []byte, onlyIfEmpty 
 func (p *fakePeer) RepinGov(_ context.Context, id string, key []byte) (bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.notStarted {
+		return false, fmt.Errorf("%w (%w)", peer.ErrNotStarted, peer.ErrNotFound)
+	}
 	if !p.active[id] && p.states[id] == "" {
 		return false, peer.ErrNotFound
 	}
@@ -304,6 +309,14 @@ func (p *fakePeer) first(conn string) sent {
 
 func (f *fixture) answerTo(s sent, how string) *peer.Event {
 	f.t.Helper()
+	e := f.answerEvent(s, how)
+	f.deliver(e)
+	return e
+}
+
+// answerEvent is the event of conn's answer to s, not delivered.
+func (f *fixture) answerEvent(s sent, how string) *peer.Event {
+	f.t.Helper()
 	conn := s.conn
 	if s.req == "" {
 		f.t.Fatalf("no challenge to %s", conn)
@@ -337,7 +350,6 @@ func (f *fixture) answerTo(s sent, how string) *peer.Event {
 		e.Type = peer.EventSignInExpired
 		e.Exp = s.at.Add(s.ttl)
 	}
-	f.deliver(e)
 	return e
 }
 

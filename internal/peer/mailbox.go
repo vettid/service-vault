@@ -131,6 +131,12 @@ var errMintWait = errors.New("peer: the relay mailbox was made again: tokens can
 // ErrMailboxRenewing is what CreateInvite answers during that wait.
 var ErrMailboxRenewing = errMintWait
 
+// remintOwed reports whether a lost mailbox's re-mint is owed and not yet
+// done for c.
+func (p *Peer) remintOwed(c *Connection) bool {
+	return !p.remintAt.IsZero() && !c.MailboxRemint.Equal(p.remintAt)
+}
+
 // registerRunningTimeout bounds a registration while running.
 const registerRunningTimeout = 5 * time.Second
 

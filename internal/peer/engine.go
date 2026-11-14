@@ -145,6 +145,9 @@ type Peer struct {
 	// outboxFull marks the connections whose contract update waits on a
 	// full outbox, its outbox_full already logged (sendContract).
 	outboxFull map[string]bool
+	// refreshOwed marks the connections whose forced token refresh
+	// (token_expired) waited out a lost mailbox's re-mint (refreshHeld).
+	refreshOwed map[string]bool
 
 	dirty    map[key]struct{}
 	extra    []Change
@@ -182,7 +185,7 @@ func New(cfg Config) (*Peer, error) {
 	return &Peer{cfg: cfg, instance: hex.EncodeToString(inst),
 		conns: map[string]*Connection{}, invites: map[string]*InviteRecord{}, awaiting: map[string]*awaiting{},
 		requests: map[string]*request{}, outgoing: map[string]*outgoing{}, issued: map[string]*IssuedToken{},
-		challenges: map[string]*challenge{}, rates: map[string]*rateWindow{}, outboxFull: map[string]bool{},
+		challenges: map[string]*challenge{}, rates: map[string]*rateWindow{}, outboxFull: map[string]bool{}, refreshOwed: map[string]bool{},
 		dirty: map[key]struct{}{}, versions: map[key]uint64{}, evWake: make(chan struct{}, 1)}, nil
 }
 
