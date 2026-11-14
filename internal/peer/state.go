@@ -679,6 +679,15 @@ func (p *Peer) flush(ctx context.Context) error {
 		changes = append(changes, c)
 	}
 	changes = append(changes, p.extra...)
+	counted := false
+	for k := range p.dirty {
+		counted = counted || k.kind == kindOutbox || k.kind == kindSend
+	}
+	if counted {
+		// Made even if the write fails: the records stay dirty, written at
+		// the next flush, and the send that wrote them reports them now.
+		defer p.viewSends()
+	}
 	if err := p.cfg.Store.Apply(ctx, changes); err != nil {
 		return fmt.Errorf("peer: flush: %w", err)
 	}
@@ -693,15 +702,8 @@ func (p *Peer) flush(ctx context.Context) error {
 			p.versions[k]++
 		}
 	}
-	counted := false
-	for k := range p.dirty {
-		counted = counted || k.kind == kindOutbox || k.kind == kindSend
-	}
 	clear(p.dirty)
 	p.extra = p.extra[:0]
-	if counted {
-		p.viewSends()
-	}
 	return nil
 }
 

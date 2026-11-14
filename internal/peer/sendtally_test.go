@@ -3,6 +3,7 @@ package peer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"testing"
@@ -112,6 +113,30 @@ func TestSendTallyRecreatedAtLoad(t *testing.T) {
 	f.pump()
 	if got := fmt.Sprint(f.p.SendCounts("")); got != "[{p1/proposal/p1 1 0 0}]" {
 		t.Fatalf("after the confirmation: %s", got)
+	}
+	f.start() // the tally made again was stored
+	if got := fmt.Sprint(f.p.SendCounts("")); got != "[{p1/proposal/p1 1 0 0}]" {
+		t.Fatalf("after a second start: %s", got)
+	}
+}
+
+// failApply is a store whose writes all fail.
+type failApply struct{ *MemStore }
+
+func (failApply) Apply(context.Context, []Change) error { return errors.New("store down") }
+
+// A send whose flush fails is still counted as it stands in memory: its
+// records stay dirty, for the next flush.
+func TestSendCountsFlushFails(t *testing.T) {
+	f := newFixture(t)
+	c := f.connect(f.member(10), "")
+	f.beginReconnectNow(c)
+	f.p.cfg.Store = failApply{f.store}
+	if _, err := f.p.SendMessageRef(context.Background(), c, "vote.proposal", json.RawMessage(`{}`), f.clk.Now().Add(time.Hour), "p1/proposal/p1"); err == nil {
+		t.Fatal("sent with the store down")
+	}
+	if got := fmt.Sprint(f.p.SendCounts("")); got != "[{p1/proposal/p1 0 1 0}]" {
+		t.Fatalf("%s", got)
 	}
 }
 

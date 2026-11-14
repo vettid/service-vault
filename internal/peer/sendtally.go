@@ -98,9 +98,11 @@ func (p *Peer) sendLeft(e *outboxEntry) {
 	p.markDirty(kindSend, e.Ref)
 }
 
-// SendCounts reports the sends whose ref starts with prefix, by ref, as
-// last stored: it takes no lock, so it never waits behind a drain (which
-// holds the peer's lock while it calls the relay); it may lag one.
+// SendCounts reports the sends whose ref starts with prefix, by ref, as of
+// the peer's load or its last flush that wrote the outbox or a tally
+// (whether or not the write went through): it takes no lock, so it never
+// waits behind a drain (which holds the peer's lock while it calls the
+// relay), and may lag one.
 func (p *Peer) SendCounts(prefix string) []SendCounts {
 	v := p.sendView.Load()
 	if v == nil {
@@ -116,8 +118,12 @@ func (p *Peer) SendCounts(prefix string) []SendCounts {
 }
 
 // viewSends makes what SendCounts reports from the tallies and the outbox
-// (under p.mu): at load, and after each flush that wrote either.
+// (under p.mu): at load, and at each flush that wrote either.
 func (p *Peer) viewSends() {
+	if len(p.sends) == 0 {
+		p.sendView.Store(&[]SendCounts{})
+		return
+	}
 	queued := map[string]int{}
 	for _, e := range p.outbox {
 		if e.Ref != "" {
