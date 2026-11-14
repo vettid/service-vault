@@ -162,6 +162,10 @@ func TestPeerContract(t *testing.T) {
 		{13, `"2.3"`, "2.3", false},
 		{13, `"3.0"`, "2.3", false}, // not a higher version: ignored
 		{14, `["1.0"]`, "", true},
+		{15, `" 1.0"`, "", true},
+		{16, `"1.0\n"`, "", true},
+		{17, `"1.01"`, "", true},
+		{18, `"1.0"`, "1.0", false},
 	} {
 		step++
 		last := "Step" + strings.Repeat("x", step)
@@ -179,8 +183,6 @@ func TestPeerContract(t *testing.T) {
 			t.Fatalf("v%d %s: audited %v", tc.version, tc.raw, got)
 		}
 	}
-	m.Send(peerwire.TypeProfileUpdate, withMember(t, peerwire.ProfileUpdateBody(15, "Nora", "Kept", ik, nil), "contract", `"1.0"`))
-	f.pump()
 	f.start()
 	if c := f.p.conns[cid]; c.PeerContract != "1.0" {
 		t.Fatalf("not kept across a restart: %q", c.PeerContract)
@@ -188,12 +190,12 @@ func TestPeerContract(t *testing.T) {
 	// A dropped update changes nothing: a malformed core, another ik.
 	other := ed25519.NewKeyFromSeed(make([]byte, 32)).Public().(ed25519.PublicKey)
 	for _, body := range [][]byte{
-		peerwire.ProfileUpdateBody(16, "", "Empty", ik, nil),
-		peerwire.ProfileUpdateBody(17, "Nora", "Other", other, nil),
+		peerwire.ProfileUpdateBody(19, "", "Empty", ik, nil),
+		peerwire.ProfileUpdateBody(20, "Nora", "Other", other, nil),
 	} {
 		m.Send(peerwire.TypeProfileUpdate, withMember(t, body, "contract", `"2.0"`))
 		f.pump()
-		if c := f.p.conns[cid]; c.PeerContract != "1.0" || c.ProfileVersion != 15 {
+		if c := f.p.conns[cid]; c.PeerContract != "1.0" || c.ProfileVersion != 18 {
 			t.Fatalf("a dropped update changed: %q v%d", c.PeerContract, c.ProfileVersion)
 		}
 	}
@@ -226,6 +228,79 @@ func TestContractRetriedUntilQueued(t *testing.T) {
 	f.pump()
 	if got := profilesTo(t, m); len(got) != 2 || string(got[1].Contract) != `"1.0"` || c.SentContract != Contract {
 		t.Fatalf("not sent once the outbox had room: %+v", got)
+	}
+}
+
+// clearSent sets the connection back to a record from before contract, as
+// stored.
+func clearSent(t *testing.T, f *fixture, cid string) {
+	t.Helper()
+	f.p.mu.Lock()
+	defer f.p.mu.Unlock()
+	c := f.p.conns[cid]
+	c.SentProfileVersion, c.SentContract = 0, ""
+	f.p.markDirty(kindConn, cid)
+	if err := f.p.flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A connection reconnecting at the start (after a restore) is not sent the
+// update then, and is sent it at a later housekeeping once the reconnect
+// has finished.
+func TestContractAfterReconnect(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	clearSent(t, f, cid)
+	b := f.backup()
+	m.StartRekey()
+	f.pump() // this process sends its update now
+	before := len(profilesTo(t, m))
+	f.restore(b, true) // the restored record has none sent, and reconnects
+	if c := f.p.conns[cid]; !c.Reconnecting || c.SentContract != "" {
+		t.Fatalf("at the start: reconnecting %v, sent %q", c.Reconnecting, c.SentContract)
+	}
+	f.pump()
+	f.clk.Advance(2 * time.Minute)
+	f.tick()
+	f.pump()
+	c := f.p.conns[cid]
+	got := profilesTo(t, m)
+	if c.Reconnecting || c.SentContract != Contract || len(got) != before+1 || string(got[len(got)-1].Contract) != `"1.0"` {
+		t.Fatalf("after the reconnect: reconnecting %v, sent %q, %d updates (%d before)", c.Reconnecting, c.SentContract, len(got), before)
+	}
+}
+
+// A queued update that the relay hasn't taken yet survives a restart in
+// the outbox, and goes once the relay takes deposits; it is not queued a
+// second time.
+func TestContractQueuedSurvivesRestart(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	clearSent(t, f, cid)
+	f.failDeposit = func(string, string) error { return errUnavailable }
+	f.tick()
+	f.start()
+	if c := f.p.conns[cid]; c.SentContract != Contract || len(profilesTo(t, m)) != 1 {
+		t.Fatalf("sent %q, %d updates", c.SentContract, len(profilesTo(t, m)))
+	}
+	queued := 0
+	for _, e := range f.p.outbox {
+		if e.ConnID == cid {
+			queued++
+		}
+	}
+	if queued != 1 {
+		t.Fatalf("%d entries waiting after the restart", queued)
+	}
+	f.failDeposit = nil
+	f.clk.Advance(time.Hour)
+	f.tick()
+	f.pump()
+	if got := profilesTo(t, m); len(got) != 2 || string(got[1].Contract) != `"1.0"` {
+		t.Fatalf("updates: %+v", got)
 	}
 }
 
