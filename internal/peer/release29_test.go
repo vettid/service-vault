@@ -409,6 +409,62 @@ func TestStaleOutgoingDroppedAtStart(t *testing.T) {
 // A start under another identity key than the table's spends no
 // reconnect try and changes nothing: identity_test.go (GC #9109).
 
+// A stored reconnect hs.init under another key than the table's (a mixed
+// table: the record names the configured key) is dropped at start, its
+// tokens revoked and its waiting hs.init dropped, but the reconnect stays
+// open and a fresh try starts under the table's key; one already on its
+// second try starts its third and last.
+func TestStaleReconnectDroppedAtStart(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		tries, want int
+	}{{"first try", 1, 2}, {"second try", 2, 3}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			m := f.member(10)
+			cid := f.connect(m, "")
+			b := f.backup()
+			m.StartRekey()
+			f.pump()
+			f.failDeposit = func(string, string) error { return errUnavailable } // the hs.init waits
+			f.restore(b, true)
+			f.failDeposit = nil
+			c := f.p.conns[cid]
+			c.ReconnectTries = tc.tries
+			f.p.markDirty(kindConn, cid)
+			if err := f.p.flush(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			var issued []string
+			var entry string
+			for _, og := range f.p.outgoing {
+				issued, entry = og.Issued, og.InitEntry
+			}
+			if len(issued) == 0 || entry == "" {
+				t.Fatalf("no reconnect waiting: %d tokens, entry %q", len(issued), entry)
+			}
+			f.keys.IK = wrongKey
+			setIdentityRecord(t, f.store, f.keys.IKPublic())
+			f.start()
+			if !strings.Contains(f.logs.String(), "alarm=outgoing_identity_changed") || strings.Contains(f.logs.String(), "alarm=reconnect_failed") {
+				t.Fatalf("alarms:\n%s", f.logs.String())
+			}
+			for _, j := range issued {
+				if tk := f.p.issued[j]; tk == nil || !tk.Denied {
+					t.Fatalf("token %s of the dropped hs.init not revoked", j)
+				}
+			}
+			if slices.ContainsFunc(f.p.outbox, func(e *outboxEntry) bool { return e.ID == entry }) {
+				t.Fatal("the dropped hs.init is still waiting")
+			}
+			c = f.p.conns[cid]
+			if !c.Reconnecting || c.State != StateActive || c.ReconnectTries != tc.want || len(f.p.outgoing) != 1 {
+				t.Fatalf("reconnecting %v, state %s, tries %d, %d outgoing", c.Reconnecting, c.State, c.ReconnectTries, len(f.p.outgoing))
+			}
+		})
+	}
+}
+
 // A rekey of ours that no hs.resp answers within HandshakeTTL is dropped,
 // and the next one waits RekeyBackoff.
 func TestRekeyUnansweredBacksOff(t *testing.T) {

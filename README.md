@@ -209,24 +209,42 @@ destination.
   member's sign-in, and the record keeps it until the table is restored.
   The service never rotates its identity key, so the keystore and the
   records don't belong together: a wrong or partial restore, or another
-  service's table. An identity record that can't be read (for example
-  after a rollback to a release without it, then a record-key rotation,
-  which leaves it sealed under a retired key) holds too.
+  service's table. A record the check needs that can't be opened (the
+  identity record, or in a table without it the records it reads) holds
+  too, with `from` `unreadable`: for example after a rollback to a
+  release without the record, then a record-key rotation, which leaves it
+  sealed under a retired key. One that opens but doesn't decode (a
+  connection, a stored handshake, an event or an audit entry) makes the
+  start fail instead, as loading it would.
 
   The service stays up, held: it keeps the heartbeat and answers
   `/health` 200, but every other request gets 503
-  `identity_key_mismatch`. It doesn't publish its TLS pin, and nothing
-  loads the records, signs, sends or answers a member, so no reconnect
-  try is spent and nothing is deposited. (A record-key rotation or seal
-  migration you asked for with `SV_RECORD_KEY_VERSION` or
-  `SV_RECORD_SEAL_MIGRATE` still runs first; it reseals the records,
-  their contents unchanged.) The alarm fires once per start, and then
+  `identity_key_mismatch`. It doesn't publish its TLS pin, so the
+  application keeps the right one and, while held, sees a TLS pin
+  failure if it calls the service. Nothing loads the records, signs,
+  sends or answers a member, so no reconnect try is spent and nothing is
+  deposited. (A record-key rotation or seal migration you asked for with
+  `SV_RECORD_KEY_VERSION` or `SV_RECORD_SEAL_MIGRATE` still runs first,
+  and reading records may reseal ones under an older version; their
+  contents don't change.) `admin bootstrap` refuses while the keys
+  differ; `admin reseal-blobs` refuses while the heartbeat shows the
+  service running, held or not. The alarm fires once per start, and then
   the stack looks healthy: ECS neither replaces the task nor rolls back
-  a held deploy. Put the right table or keystore item back (or restore
-  both from one backup) and restart; the service then goes on from the
-  table as it was. If the keys are right and the table holds a stray
-  handshake from another table (the alarm's `from` is `state`), restore
-  the table from a backup without it.
+  a held deploy.
+
+  The ways out:
+  - **The keys are wrong:** put the right keystore item or table back (or
+    restore both from one backup) and restart; the service goes on from
+    the table as it was.
+  - **The record is wrong** (it was written from a wrong key, at the
+    first start of this release over an old table that held no evidence):
+    stop the service, delete the item `pk = rec#identity`, `sk = ik`,
+    and start it under the right keys, which writes the record again.
+  - **The keys are right but an old table holds a stray handshake** from
+    another table (`from` `state`, naming that handshake's key): start the
+    previous release once under the right keys, which drops it
+    (`outgoing_identity_changed`), then roll forward; or restore the
+    table from a backup without it.
 - `outgoing_identity_changed`: at start, a stored handshake this
   service started (a rekey or a reconnect) names another identity key
   than the table's, although the table's identity record names the key

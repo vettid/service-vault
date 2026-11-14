@@ -417,21 +417,18 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
-	// The table's identity key (GC #9109), before anything that reads the
-	// records, signs, sends, answers or publishes this keystore's TLS pin:
-	// under another key the service stays up, held (owner a, #10417).
-	if m, err := identityHeld(ctx, records, keys.IK); err != nil {
-		return err
-	} else if m != nil {
-		return runHeld(ctx, stop, cfg.Listen, tlsid.ServerConfig(cert), tbl, log, m)
-	}
 	publishPin := func(ctx context.Context) error {
 		_, err := sc.PutParameter(ctx, &ssm.PutParameterInput{Name: aws.String(cfg.TLSPinParam), Value: aws.String(pin),
 			Type: ssmtypes.ParameterTypeString, Overwrite: aws.Bool(true)})
 		return err
 	}
-	if err := publishPin(ctx); err != nil {
-		return fmt.Errorf("publish TLS pin: %w", err)
+	// The table's identity key (GC #9109), before anything that reads the
+	// records, signs, sends, answers or publishes this keystore's TLS pin:
+	// under another key the service stays up, held (owner a, #10417).
+	if m, err := identityThenPin(ctx, records, keys.IK, publishPin); err != nil {
+		return err
+	} else if m != nil {
+		return runHeld(ctx, stop, cfg.Listen, tlsid.ServerConfig(cert), tbl, log, m)
 	}
 	// Published again every hour: a stack update that touches the
 	// parameter puts back its "unset", and the API's client would then
@@ -690,6 +687,24 @@ func identityHeld(ctx context.Context, records interface {
 		return m, nil
 	}
 	return nil, err
+}
+
+// identityThenPin is serve's first step on the table: the identity check
+// and, only when it passes, the TLS pin's first publication. A mismatch
+// is returned for runHeld with the pin untouched, so the application's
+// client keeps the right one.
+func identityThenPin(ctx context.Context, records interface {
+	peer.Store
+	peer.Pager
+}, ik ed25519.PrivateKey, publishPin func(context.Context) error) (*peer.IdentityMismatch, error) {
+	m, err := identityHeld(ctx, records, ik)
+	if err != nil || m != nil {
+		return m, err
+	}
+	if err := publishPin(ctx); err != nil {
+		return nil, fmt.Errorf("publish TLS pin: %w", err)
+	}
+	return nil, nil
 }
 
 // runHeld runs the service held by an identity-key mismatch (GC #9109;
@@ -960,6 +975,11 @@ func admin(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// Nothing is written into a table whose identity key isn't this
+	// keystore's (GC #9109): the daemon holds on it, and so does this.
+	if err := identityVerified(ctx, kc, cfg.KMSKeyID, tbl.Blobs(), records); err != nil {
+		return err
+	}
 	if *conn != "" {
 		return confirmBootstrap(ctx, records, *conn, *fprint, out)
 	}
@@ -1050,6 +1070,29 @@ func confirmBootstrap(ctx context.Context, st peer.Store, conn, fp string, out i
 	}
 	fmt.Fprintln(out, "admin bootstrap confirmed: the running service makes the connection the first admin within seconds")
 	return nil
+}
+
+// identityVerified checks, without writing, that the keystore's identity
+// key is the table's (peer.VerifyIdentity, the audit log as evidence),
+// for a command that writes the table outside the daemon.
+func identityVerified(ctx context.Context, kc keystore.KMS, keyID string, blobs keystore.Blobs, records interface {
+	peer.Store
+	peer.Pager
+}) error {
+	secrets, err := keystore.LoadOrCreate(ctx, kc, keyID, blobs, keystore.SecretsName,
+		func() (*keystore.Secrets, error) { return nil, errNoSecrets })
+	if err != nil {
+		return fmt.Errorf("keystore: %w", err)
+	}
+	keys, err := peer.KeysFromSeeds(secrets.Peer)
+	if err != nil {
+		return err
+	}
+	err = peer.VerifyIdentity(ctx, records, keys.IK, peer.ServiceIKIn(records, approval.KindAudit))
+	if errors.Is(err, peer.ErrIdentityMismatch) {
+		return fmt.Errorf("refused: the service is held (README \"identity_key_mismatch\"): %w", err)
+	}
+	return err
 }
 
 // armBootstrap computes the email's index key under the service vault's

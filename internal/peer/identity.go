@@ -31,19 +31,33 @@ type identityRecord struct {
 // or sent: the caller holds or stops.
 var ErrIdentityMismatch = errors.New("peer: the configured identity key is not the one this table's records were made under")
 
+// ErrUnreadable is a stored record that can't be opened (a store wraps
+// its own error so that errors.Is finds this one; internal/sealstore
+// does): the identity check holds on it rather than trusting or skipping
+// the record.
+var ErrUnreadable = errors.New("peer: a stored record can't be read")
+
 // IdentityMismatch details ErrIdentityMismatch (errors.As).
 type IdentityMismatch struct {
-	// Recorded is the table's key; nil when the table has no record and a
-	// stored handshake's key was not readable (only that it differs).
+	// Recorded is the table's key; nil when it isn't known (an unreadable
+	// record).
 	Recorded   ed25519.PublicKey
 	Configured ed25519.PublicKey
-	// From says where the table's key came from: "record", or "state" for
-	// a table without the record whose stored handshakes name another key.
+	// From says where the table's key came from: "record"; "state" for a
+	// table without the record whose stored records name another key; or
+	// "unreadable" for an identity record, or one the check needed, that
+	// can't be opened or read.
 	From string
+	// Detail is what could not be read ("" otherwise).
+	Detail string
 }
 
 func (e *IdentityMismatch) Error() string {
-	return fmt.Sprintf("%v (from the %s: table %s, configured %s)", ErrIdentityMismatch, e.From, keyText(e.Recorded), keyText(e.Configured))
+	s := fmt.Sprintf("%v (from the %s: table %s, configured %s)", ErrIdentityMismatch, e.From, keyText(e.Recorded), keyText(e.Configured))
+	if e.Detail != "" {
+		s += ": " + e.Detail
+	}
+	return s
 }
 
 func (e *IdentityMismatch) Unwrap() error { return ErrIdentityMismatch }
@@ -65,20 +79,40 @@ func keyText(k ed25519.PublicKey) string {
 // key (a pending epoch's, an hs.init it started, a stored event's, or what
 // the caller's evidence finds, such as the approvals' audit log) names
 // another key, that is a mismatch and nothing is written; otherwise the
-// record is written with the configured key. A record of those kinds that
-// can't be read fails the check, and nothing is written. Nothing else is
-// read into memory or changed.
+// record is written with the configured key. A record the check needs
+// that can't be opened (ErrUnreadable) holds as From "unreadable"; one
+// that opens but doesn't decode fails the check with an error (the start
+// fails, as the load would). Nothing is written then. Nothing else is read
+// into memory or changed (a store may reseal what it reads, contents
+// unchanged).
 func CheckIdentity(ctx context.Context, st Store, ik ed25519.PrivateKey, evidence ...Evidence) error {
+	return checkIdentity(ctx, st, ik, true, evidence)
+}
+
+// VerifyIdentity is CheckIdentity without the write: a table without the
+// record and without evidence against the key is nil, and stays without
+// it. For tools that write the table outside the daemon.
+func VerifyIdentity(ctx context.Context, st Store, ik ed25519.PrivateKey, evidence ...Evidence) error {
+	return checkIdentity(ctx, st, ik, false, evidence)
+}
+
+func checkIdentity(ctx context.Context, st Store, ik ed25519.PrivateKey, write bool, evidence []Evidence) error {
 	own := ik.Public().(ed25519.PublicKey)
+	unreadable := func(what string, err error) error {
+		if errors.Is(err, ErrUnreadable) {
+			return &IdentityMismatch{Configured: own, From: "unreadable", Detail: what + ": " + err.Error()}
+		}
+		return fmt.Errorf("peer: identity: %s: %w", what, err)
+	}
 	for range 2 {
 		data, ok, err := st.Get(ctx, kindIdentity, identityID)
 		if err != nil {
-			return fmt.Errorf("peer: identity record: %w", err)
+			return unreadable("the identity record", err)
 		}
 		if ok {
 			var r identityRecord
 			if err := json.Unmarshal(data, &r); err != nil || len(r.IK) != ed25519.PublicKeySize {
-				return &IdentityMismatch{Configured: own, From: "unreadable"}
+				return &IdentityMismatch{Configured: own, From: "unreadable", Detail: "the identity record doesn't decode"}
 			}
 			if !bytes.Equal(r.IK, own) {
 				return &IdentityMismatch{Recorded: r.IK, Configured: own, From: "record"}
@@ -87,18 +121,21 @@ func CheckIdentity(ctx context.Context, st Store, ik ed25519.PrivateKey, evidenc
 		}
 		if m, err := stateIdentity(ctx, st, ik); err != nil || m != nil {
 			if err != nil {
-				return err
+				return unreadable("the stored state", err)
 			}
 			return m
 		}
 		for _, ev := range evidence {
 			k, err := ev(ctx)
 			if err != nil {
-				return fmt.Errorf("peer: identity evidence: %w", err)
+				return unreadable("the evidence", err)
 			}
 			if len(k) > 0 && !bytes.Equal(k, own) {
 				return &IdentityMismatch{Recorded: k, Configured: own, From: "state"}
 			}
+		}
+		if !write {
+			return nil
 		}
 		b, _ := json.Marshal(identityRecord{IK: own})
 		err = st.Apply(ctx, []Change{{Kind: kindIdentity, ID: identityID, Data: b, IfAbsent: true}})
@@ -188,7 +225,11 @@ func stateIdentity(ctx context.Context, st Store, ik ed25519.PrivateKey) (*Ident
 		}
 		ini, err := handshake.RestoreInitiator(og.Init, ik)
 		if errors.Is(err, handshake.ErrIdentity) {
-			return &IdentityMismatch{Configured: own, From: "state"}, nil
+			m := &IdentityMismatch{Configured: own, From: "state", Detail: "an hs.init the service started"}
+			if in, err := handshake.ParseInit(og.Init.Body); err == nil {
+				m.Recorded = in.From.IK
+			}
+			return m, nil
 		}
 		if err != nil {
 			return nil, fmt.Errorf("peer: identity: %s %s: %w", kindOutgoing, r.ID, err)

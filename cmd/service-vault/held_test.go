@@ -11,6 +11,7 @@ import (
 
 	"github.com/vettid/service-vault/internal/approval"
 	"github.com/vettid/service-vault/internal/peer"
+	"github.com/vettid/service-vault/internal/sealstore"
 )
 
 // While held (GC #9109), /health answers 200 and every other request,
@@ -33,6 +34,67 @@ func TestHeldHandler(t *testing.T) {
 		if rec.Code != tc.code || !strings.Contains(rec.Body.String(), tc.body) || rec.Header().Get("Cache-Control") != "no-store" {
 			t.Errorf("%s %s: %d %s", tc.method, tc.path, rec.Code, rec.Body)
 		}
+	}
+}
+
+// serve's first step: the TLS pin is published only once the identity
+// check passes; held, it is left as it was.
+func TestIdentityThenPin(t *testing.T) {
+	ctx := context.Background()
+	ik := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{1}, 32))
+	other := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{2}, 32))
+	st := peer.NewMemStore()
+	pins := 0
+	publish := func(context.Context) error { pins++; return nil }
+	if m, err := identityThenPin(ctx, st, ik, publish); m != nil || err != nil || pins != 1 {
+		t.Fatalf("right key: %v %v, %d pins", m, err, pins)
+	}
+	if m, err := identityThenPin(ctx, st, other, publish); m == nil || err != nil || pins != 1 {
+		t.Fatalf("held: %v %v, %d pins", m, err, pins)
+	}
+}
+
+// A record sealed under a record-key version that is gone (a rollback,
+// then a rotation that retired it) can't be opened: held as unreadable,
+// not an exit. The same for the stored state of a table without the
+// record.
+func TestIdentityUnreadableSealed(t *testing.T) {
+	ctx := context.Background()
+	ik := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{1}, 32))
+	k1, k2 := bytes.Repeat([]byte{9}, 32), bytes.Repeat([]byte{7}, 32)
+	for _, tc := range []struct {
+		name  string
+		setup func(*sealstore.Store)
+	}{
+		{"the record", func(v1 *sealstore.Store) {
+			if m, err := identityHeld(ctx, v1, ik); m != nil || err != nil {
+				t.Fatalf("v1: %v %v", m, err)
+			}
+		}},
+		{"the state", func(v1 *sealstore.Store) {
+			if err := v1.Apply(ctx, []peer.Change{{Kind: "conn", ID: "c1", Data: []byte(`{"id":"c1"}`)}}); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := peer.NewMemStore()
+			v1, err := sealstore.New(mem, map[uint32][]byte{1: k1}, 1, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			v1.Pages = mem
+			tc.setup(v1)
+			v2, err := sealstore.New(mem, map[uint32][]byte{2: k2}, 2, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			v2.Pages = mem
+			m, err := identityHeld(ctx, v2, ik)
+			if err != nil || m == nil || m.From != "unreadable" {
+				t.Fatalf("v1 retired: %+v %v", m, err)
+			}
+		})
 	}
 }
 

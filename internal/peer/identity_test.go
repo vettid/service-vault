@@ -184,6 +184,23 @@ func TestIdentityRecordRace(t *testing.T) {
 	}
 }
 
+// VerifyIdentity, for tools: it never writes the record, and holds as
+// CheckIdentity does.
+func TestVerifyIdentity(t *testing.T) {
+	ctx := context.Background()
+	st := NewMemStore()
+	if err := VerifyIdentity(ctx, st, wrongKey); err != nil {
+		t.Fatalf("an empty table: %v", err)
+	}
+	if got := recordedIdentity(t, st); got != nil {
+		t.Fatalf("written: %x", got)
+	}
+	setIdentityRecord(t, st, thirdKey.Public().(ed25519.PublicKey))
+	if err := VerifyIdentity(ctx, st, wrongKey); !errors.Is(err, ErrIdentityMismatch) {
+		t.Fatalf("another key: %v", err)
+	}
+}
+
 // A record that can't be read holds, as a mismatch, rather than being
 // trusted or failing the start.
 func TestIdentityRecordUnreadable(t *testing.T) {

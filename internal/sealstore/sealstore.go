@@ -76,11 +76,20 @@ func VersionOf(data []byte) uint32 {
 }
 
 // ErrPlaintext is a record that is not sealed, read after the migration.
-var ErrPlaintext = errors.New("sealstore: record is not sealed")
+// It is also a peer.ErrUnreadable.
+var ErrPlaintext error = &unreadable{"sealstore: record is not sealed"}
 
 // ErrOpen is a sealed record that does not open: another key, a version
-// whose key is gone, another record's place, or tampered.
-var ErrOpen = errors.New("sealstore: record does not open")
+// whose key is gone, another record's place, or tampered. It is also a
+// peer.ErrUnreadable.
+var ErrOpen error = &unreadable{"sealstore: record does not open"}
+
+// unreadable is an error that is also peer.ErrUnreadable (errors.Is), so
+// that the peer's identity check holds on it (GC #9109).
+type unreadable struct{ msg string }
+
+func (e *unreadable) Error() string        { return e.msg }
+func (e *unreadable) Is(target error) bool { return target == peer.ErrUnreadable }
 
 // RecordKey is the record key as the keystore keeps it.
 type RecordKey struct {
