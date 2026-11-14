@@ -1037,7 +1037,10 @@ func (m *Manager) canAsk(ctx context.Context, connID, action string, now time.Ti
 // send or the approval's batch then fails (counting one never sent only
 // refuses more). So sends that fail before going out (an admin not
 // reachable now, the peer's limits) still fill the log, and may refuse a
-// later forced reminder to that admin. It refuses (errAskFull) when the
+// later forced reminder to that admin; so does a challenge dropped from
+// the outbox unsent (a force replacing it while it waited there): the
+// log never takes one back, so it never counts fewer than reached the
+// member's vault. It refuses (errAskFull) when the
 // log is already full, so no send is a sixth.
 func (m *Manager) logAsk(ctx context.Context, connID, action string, exp time.Time) error {
 	l, ver, err := m.asksVersion(ctx, connID)
@@ -1286,11 +1289,27 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 	if now.Before(r.LastSent.Add(RemindInterval)) {
 		return nil, errCode(CodeTooSoon)
 	}
-	m.cancel(ctx, to)
 	ctxt, err := ChallengeContext(m.ServiceName, r.Action, r.Summary, r.Hash)
 	if err != nil {
 		return nil, err
 	}
+	if len(to) > 0 {
+		// The challenges replaced leave Pending in a write of their own,
+		// before they are withdrawn: a crash or a store error after the
+		// withdraw must not leave the stored record naming a challenge the
+		// peer has forgotten, its admin shown as holding a live one and
+		// left out of remind_needed (a withdrawn challenge has no expiry
+		// event to clear it). An answer to one stops counting here, as it
+		// would at the save below (Answer counts the outstanding one only).
+		pre := m.batch(now)
+		if err := pre.save(r); err != nil {
+			return nil, err
+		}
+		if err := pre.apply(ctx); err != nil {
+			return nil, err
+		}
+	}
+	m.cancel(ctx, to)
 	if r.Pending == nil {
 		r.Pending = map[string]string{}
 	}

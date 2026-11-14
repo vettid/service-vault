@@ -389,6 +389,10 @@ type Admins struct {
 type AuditChallenge struct {
 	ConnectionID string `json:"connection_id"`
 	RequestID    string `json:"request_id"`
+	// Queued: when the entry was written, the challenge had not been
+	// deposited: it waited in the outbox (Approval.Queued), or had left it
+	// undelivered.
+	Queued bool `json:"queued,omitempty"`
 }
 
 // AuditEntry is one entry of the audit log (README "Admin approvals").
