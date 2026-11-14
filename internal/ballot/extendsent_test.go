@@ -35,7 +35,7 @@ func TestExtendSendingCounts(t *testing.T) {
 }
 
 // An extension made while the service is stopping is in effect but not
-// sent: sending 0, with no reason.
+// sent: sending 0, reason stopping.
 func TestExtendSendingStopping(t *testing.T) {
 	ctx := context.Background()
 	m, s, a, pid, x := extendFixture(t)
@@ -45,7 +45,7 @@ func TestExtendSendingStopping(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Sending != 0 || got.Reason != "" || got.ClosesAt != x.ClosesAt {
+	if got.Sending != 0 || got.Reason != ReasonStopping || got.ClosesAt != x.ClosesAt {
 		t.Fatalf("%+v", got)
 	}
 	if extended(t, m, pid) != 1 {

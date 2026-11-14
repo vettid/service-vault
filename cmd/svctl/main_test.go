@@ -632,9 +632,8 @@ type fakeProposals struct {
 	created   int
 	caught    bool
 	unsigned  int
-	// unverified: an extension in effect but not sent (its bundle failed
-	// the check).
-	unverified bool
+	// notSent: an extension in effect but not sent, for this reason.
+	notSent string
 }
 
 func (p *fakeProposals) Create(_ context.Context, approvalID string, in ballot.ProposalInput) (*ballot.Created, error) {
@@ -679,8 +678,8 @@ func (p *fakeProposals) ExtendSending(_ context.Context, id, approvalID string, 
 		return nil, &approval.Error{Code: approval.CodeApprovalNotApproved}
 	}
 	e := &ballot.Extended{Extension: &vote.Extension{V: 1, ProposalID: id, N: 1, ClosesAt: in.ClosesAt, Outage: in.Outage}, Sending: 3}
-	if p.unverified {
-		e.Sending, e.Reason = 0, ballot.ReasonBundleUnverified
+	if p.notSent != "" {
+		e.Sending, e.Reason = 0, p.notSent
 	}
 	return e, nil
 }
@@ -858,13 +857,15 @@ func TestProposalNeedsApproval(t *testing.T) {
 	if !strings.Contains(out, `"sending": 3`) || strings.Contains(errOut, "not sent") {
 		t.Fatalf("extend, sent: %s\n%s", out, errOut)
 	}
-	// In effect but not sent: said on stderr.
-	fp.unverified = true
-	code, out, errOut = f.run(t, "proposal", "extend", "01JBQZ0000000000000000000A", "-in", ext, "-approval", "a1")
-	if code != exitOK || !strings.Contains(out, `"reason": "bundle_unverified"`) || !strings.Contains(errOut, "was not sent to the members") {
-		t.Fatalf("extend, not sent: exit %d\n%s\n%s", code, out, errOut)
+	// In effect but not sent: said on stderr, with why.
+	for reason, why := range map[string]string{ballot.ReasonBundleUnverified: "a member vault would refuse", ballot.ReasonStopping: "the service was stopping", "new": `reason "new"`} {
+		fp.notSent = reason
+		code, out, errOut = f.run(t, "proposal", "extend", "01JBQZ0000000000000000000A", "-in", ext, "-approval", "a1")
+		if code != exitOK || !strings.Contains(out, `"reason": "`+reason+`"`) || !strings.Contains(errOut, "was not sent to the members: ") || !strings.Contains(errOut, why) {
+			t.Fatalf("extend, not sent (%s): exit %d\n%s\n%s", reason, code, out, errOut)
+		}
 	}
-	fp.unverified = false
+	fp.notSent = ""
 	// An existing approval of another action is not used.
 	if code, _, errOut := f.run(t, "proposal", "create", "-in", in, "-approval", "a1"); code != exitError || !strings.Contains(errOut, "not an approved proposal.create") {
 		t.Fatalf("exit %d %s", code, errOut)

@@ -86,6 +86,8 @@ func (f *fakeProposals) ExtendSending(_ context.Context, id, approvalID string, 
 		return nil, &ballot.ErrInput{Err: errors.New("short")}
 	case "unverified":
 		return &ballot.Extended{Extension: &vote.Extension{V: 1, ProposalID: id, N: 1, ClosesAt: in.ClosesAt}, Reason: ballot.ReasonBundleUnverified}, nil
+	case "stopping":
+		return &ballot.Extended{Extension: &vote.Extension{V: 1, ProposalID: id, N: 1, ClosesAt: in.ClosesAt}, Reason: ballot.ReasonStopping}, nil
 	}
 	return &ballot.Extended{Extension: &vote.Extension{V: 1, ProposalID: id, N: 1, ClosesAt: in.ClosesAt}, Sending: 3}, nil
 }
@@ -207,7 +209,8 @@ func TestProposalRoutes(t *testing.T) {
 	}
 	// The extension's own fields and the two added, no more: a field of
 	// the extension named like one added would hide it.
-	for id, want := range map[string]string{"ok": "closes_at n outage proposal_id sending v", "unverified": "closes_at n outage proposal_id reason sending v"} {
+	for id, want := range map[string]string{"ok": "closes_at n outage proposal_id sending v", "unverified": "closes_at n outage proposal_id reason sending v",
+		"stopping": "closes_at n outage proposal_id reason sending v"} {
 		_, m := do(t, h, "POST", "/v1/proposals/"+id+"/extend", apiKey, ext)
 		keys := make([]string, 0, len(m))
 		for k := range m {
