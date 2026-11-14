@@ -429,6 +429,12 @@ func (p *Peer) DeliverEvents(ctx context.Context) {
 	if p.cfg.Events == nil {
 		return
 	}
+	p.mu.Lock()
+	started := p.started
+	p.mu.Unlock()
+	if !started {
+		return // the start may still be waiting (mailbox.go) before its housekeeping
+	}
 	for ctx.Err() == nil {
 		p.mu.Lock()
 		var e *Event

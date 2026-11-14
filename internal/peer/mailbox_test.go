@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/vettid/service-vault/internal/peer/peertest"
 	"github.com/vettid/vettid-relay/relayclient"
+	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/peerwire"
 )
 
@@ -67,19 +69,47 @@ func TestLostMailboxReminted(t *testing.T) {
 }
 
 // A start stopped during the wait (a crash after the 201): the owed mark
-// is stored, so the next start (a plain 200) waits the rest and re-mints.
+// is stored, so the next start (a plain 200) raises the alarm again (no
+// connection was done yet), waits the rest and re-mints. A peer whose
+// start hasn't finished changes nothing for the application's calls.
 func TestLostMailboxStoppedDuringWait(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
 	cid := f.connect(m, "")
+	inv := f.invite("")
 	before := issuedTo(m)
 	f.w.DeleteMailbox(f.keys.Mailbox())
 	f.stopSleep = true
 	if err := f.startErr(); err == nil {
 		t.Fatal("a stopped wait started")
 	}
+	ctx, now := context.Background(), f.clk.Now()
+	if err := f.p.Remove(ctx, cid); !errors.Is(err, ErrNotStarted) {
+		t.Errorf("Remove: %v", err)
+	}
+	if err := f.p.CancelInvite(ctx, inv.ID); !errors.Is(err, ErrNotStarted) {
+		t.Errorf("CancelInvite: %v", err)
+	}
+	if _, err := f.p.PinGov(ctx, cid, nil, false); !errors.Is(err, ErrNotStarted) || !errors.Is(err, ErrNotFound) {
+		t.Errorf("PinGov: %v", err)
+	}
+	if _, err := f.p.RepinGov(ctx, cid, []byte("k")); !errors.Is(err, ErrNotStarted) || !errors.Is(err, ErrNotFound) {
+		t.Errorf("RepinGov: %v", err)
+	}
+	if _, _, err := f.p.Caught(ctx, now, now, now, now); !errors.Is(err, ErrNotStarted) {
+		t.Errorf("Caught: %v", err)
+	}
+	nev := len(f.ev.evs)
+	f.p.events = append(f.p.events, &Event{ID: "e-test", Type: "test"})
+	f.p.DeliverEvents(ctx)
+	if len(f.ev.evs) != nev {
+		t.Error("events delivered before the start")
+	}
 	f.stopSleep = false
 	f.start()
+	if lostAlarms(f) != 2 {
+		t.Fatalf("%d alarms; the restart found the re-mint owed and none done", lostAlarms(f))
+	}
 	f.pump()
 	if got := issuedTo(m) - before; got != 2 || !f.signIn(m, cid) {
 		t.Fatalf("%d tokens re-minted after the stop", got)
@@ -116,14 +146,21 @@ func (s *splitStore) Apply(ctx context.Context, changes []Change) error {
 	return nil
 }
 
-// Many members, and a store write that fails partway through the
-// re-mint: no member is left marked done without its tokens; the next
-// start re-mints everyone who didn't get them, and the mark clears only
-// then.
+// More than 100 members (a write that took them all would split), and a
+// store write that fails partway through the re-mint, at several points:
+// no member is left marked done without its tokens; the next start
+// re-mints everyone who didn't get them, raises the alarm again only if
+// none was done, and the mark clears only then.
 func TestLostMailboxRemintSplitWrites(t *testing.T) {
+	for _, k := range []int{1, 2, 5, 8} {
+		t.Run(fmt.Sprint(k), func(t *testing.T) { remintSplit(t, k) })
+	}
+}
+
+func remintSplit(t *testing.T, k int) {
 	f := newFixture(t)
 	var ms []*peertest.Member
-	for i := range 40 {
+	for i := range 110 {
 		m := f.member(byte(20 + i))
 		f.connect(m, "")
 		ms = append(ms, m)
@@ -133,13 +170,20 @@ func TestLostMailboxRemintSplitWrites(t *testing.T) {
 		before[i] = issuedTo(m)
 	}
 	f.w.DeleteMailbox(f.keys.Mailbox())
-	st := &splitStore{MemStore: f.store, failTokenApply: 2}
+	st := &splitStore{MemStore: f.store, failTokenApply: k}
 	f.storeWrap = st
 	if err := f.startErr(); err == nil {
 		t.Fatal("the failing write didn't fail the start")
 	}
 	st.failTokenApply = 0
 	f.start()
+	want := 1
+	if k == 1 {
+		want = 2
+	}
+	if lostAlarms(f) != want {
+		t.Fatalf("%d alarms, want %d", lostAlarms(f), want)
+	}
 	f.pump()
 	for i, m := range ms {
 		if got := issuedTo(m) - before[i]; got < 2 {
@@ -328,6 +372,10 @@ func TestLostMailboxWhileRunningUnanswered(t *testing.T) {
 		t.Fatal("no error")
 	}
 	f.failRegister = nil
+	// The loss is proven: nothing mints until the registration is made.
+	if _, err := f.p.CreateInvite(context.Background(), ""); !errors.Is(err, ErrMailboxRenewing) {
+		t.Fatalf("an invitation with the registration owed: %v", err)
+	}
 	// The unanswered attempt did make the mailbox afresh.
 	if _, err := f.sv.Register(context.Background()); err != nil {
 		t.Fatal(err)
@@ -413,5 +461,157 @@ func TestRegisterOneAttempt(t *testing.T) {
 		if got := registerMadeNothing(tc.err); got != tc.none {
 			t.Errorf("%v: made nothing %v, want %v", tc.err, got, tc.none)
 		}
+	}
+}
+
+// A deposit to a member refused token_revoked during the wait (the
+// member's relay ended our standing token) starts a reconnect, which is
+// held, not failed: the connection stays active and reconnects after the
+// wait; the message goes once.
+func TestLostMailboxDepositRefusedDuringWait(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	f.w.DeleteMailbox(f.keys.Mailbox())
+	if _, err := f.p.Step(context.Background(), 0); err == nil {
+		t.Fatal("no loss seen")
+	}
+	c := f.p.conns[cid]
+	revoked := c.Standing.Token
+	f.failDeposit = func(_, token string) error {
+		if token == revoked {
+			return &relayclient.Error{Status: 403, Code: codeTokenRevoked}
+		}
+		return nil
+	}
+	f.p.mu.Lock()
+	id := f.p.sendTo(c, "connection.note", []byte(`{"x":1}`), f.clk.Now())
+	f.p.mu.Unlock()
+	f.step()
+	f.tick()
+	c = f.p.conns[cid]
+	if c.State != StateActive || !c.Reconnecting || c.ReconnectTries != 0 || len(f.p.outgoing) != 0 {
+		t.Fatalf("during the wait: state %s, reconnecting %v, tries %d, %d outgoing", c.State, c.Reconnecting, c.ReconnectTries, len(f.p.outgoing))
+	}
+	if strings.Contains(f.logs.String(), "reconnect_failed") {
+		t.Fatal("reconnect_failed during the wait")
+	}
+	f.failDeposit = nil
+	f.clk.Advance(FreshMailboxWait)
+	f.tick()
+	f.pump()
+	c = f.p.conns[cid]
+	if c.State != StateActive || c.Reconnecting || epochOf(c) != m.KR.Current().ID() {
+		t.Fatalf("after the wait: state %s, reconnecting %v", c.State, c.Reconnecting)
+	}
+	if strings.Contains(f.logs.String(), "reconnect_slow") {
+		t.Fatal("reconnect_slow for a held reconnect")
+	}
+	n := 0
+	for _, g := range m.Got {
+		if g.ID == id {
+			n++
+		}
+	}
+	if n != 1 || !f.signIn(m, cid) {
+		t.Fatalf("the member got it %d times", n)
+	}
+}
+
+// A rekey due during the wait starts only after it, and after the
+// member's tokens are re-minted: the member's hs.resp would come on a
+// token the relay refuses.
+func TestLostMailboxNoRekeyDuringWait(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	old := m.KR.Current().ID()
+	f.clk.Advance(handshake.PolicyVaultToVault.MaxAge + time.Second)
+	f.w.DeleteMailbox(f.keys.Mailbox())
+	if _, err := f.p.Step(context.Background(), 0); err == nil {
+		t.Fatal("no loss seen")
+	}
+	f.tick()
+	if len(f.p.outgoing) != 0 {
+		t.Fatalf("%d rekeys started during the wait", len(f.p.outgoing))
+	}
+	f.clk.Advance(FreshMailboxWait)
+	f.tick() // the re-mint
+	f.pump()
+	if m.KR.Current().ID() != old {
+		t.Fatal("the rekey started before the member's tokens were re-minted")
+	}
+	f.clk.Advance(time.Minute)
+	f.tick() // the rekey
+	f.pump()
+	if m.KR.Current().ID() == old || epochOf(f.p.conns[cid]) != m.KR.Current().ID() || !f.signIn(m, cid) {
+		t.Fatal("the rekey after the wait did not complete")
+	}
+}
+
+// A second loss while the first's re-mint is still owed moves the wait to
+// the second answer: nothing is minted at the first's time.
+func TestLostMailboxSecondDuringWait(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	before := issuedTo(m)
+	f.w.DeleteMailbox(f.keys.Mailbox())
+	if _, err := f.p.Step(context.Background(), 0); err == nil {
+		t.Fatal("no loss seen")
+	}
+	f.clk.Advance(200 * time.Second)
+	f.w.DeleteMailbox(f.keys.Mailbox())
+	if _, err := f.p.Step(context.Background(), 0); err == nil {
+		t.Fatal("no second loss seen")
+	}
+	f.clk.Advance(100 * time.Second) // past the first wait, not the second
+	f.tick()
+	f.pump()
+	if issuedTo(m) != before {
+		t.Fatal("minted inside the second loss's wait")
+	}
+	f.clk.Advance(FreshMailboxWait)
+	f.tick()
+	f.pump()
+	if got := issuedTo(m) - before; got != 2 || !f.signIn(m, cid) || lostAlarms(f) != 2 {
+		t.Fatalf("%d tokens, %d alarms", got, lostAlarms(f))
+	}
+}
+
+// While a registration after a mailbox_unknown is owed, nothing that asks
+// a member for an answer starts (here a rekey due): the loss is proven,
+// though no re-mint time is set yet.
+func TestLostMailboxNoRekeyWhileOwed(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	f.connect(m, "")
+	f.clk.Advance(handshake.PolicyVaultToVault.MaxAge + time.Second)
+	f.w.DeleteMailbox(f.keys.Mailbox())
+	f.failRegister = errors.New("connection reset")
+	if _, err := f.p.Step(context.Background(), 0); err == nil {
+		t.Fatal("no error")
+	}
+	if err := f.p.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.p.outgoing) != 0 {
+		t.Fatalf("%d rekeys started with the registration owed", len(f.p.outgoing))
+	}
+}
+
+// A registration while running (under the peer's lock) is cut short
+// sooner than one at a start.
+func TestRegisterRunningTimeout(t *testing.T) {
+	f := newFixture(t)
+	if f.regDeadline != 0 {
+		t.Fatalf("a start's registration bounded to %s", f.regDeadline)
+	}
+	f.w.DeleteMailbox(f.keys.Mailbox())
+	if _, err := f.p.Step(context.Background(), 0); err == nil {
+		t.Fatal("no loss seen")
+	}
+	if f.regDeadline <= 0 || f.regDeadline > registerRunningTimeout {
+		t.Fatalf("a running registration bounded to %s", f.regDeadline)
 	}
 }

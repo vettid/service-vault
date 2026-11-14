@@ -261,12 +261,19 @@ destination.
   would be). The relay now refuses every token the old mailbox issued,
   and any minted in the next 241 seconds, so the service mints none
   until then: a start waits that long before its reconnects and
-  housekeeping, and while running, housekeeping pauses and a new
-  invitation is refused. Then it mints every active member's standing
+  housekeeping (the API refuses changes meanwhile, `ErrNotStarted`), and
+  while running, housekeeping pauses, a new invitation is refused and a
+  reconnect is held, not failed. A registration while running that got
+  no answer is made again before the next collect (each one is cut
+  short after 5 seconds), with the same pause until it is answered.
+  Then it mints every active member's standing
   and reconnect tokens again and sends them (`relay.token.issued`), in
   steps that each store a group of members' tokens before marking them
   done; a member reconnecting or with a full outbox gets them at a later
-  minute, and the owed re-mint survives a restart. Until then members'
+  minute, and the owed re-mint survives a restart (a start that finds
+  it owed with no member done yet raises the alarm again). A rekey or
+  token refresh with a member waits until that member's tokens are
+  re-minted, since it could only answer on a refused one. Until then members'
   deposits to the service fail, and a member whose vault is offline gets
   the tokens when it next collects. Not re-minted: stale and suspended
   connections (they get fresh tokens when they reconnect), connections
@@ -276,10 +283,11 @@ destination.
   raises nothing, though its invitations stop working. If the relay's
   `max_token_lifetime` is now shorter, a member may keep its refused
   token where its exp is later than the new one's, until it refreshes.
-  The alarm also fires, harmlessly (the re-mint changes nothing then),
-  whenever a registration got no answer or a `5xx` and the next one a
-  `200` (a timeout, a stop, a TLS failure at a start), since that attempt
-  may have made the mailbox afresh unseen. A deleted mailbox may also
+  The alarm also fires when nothing was lost, whenever a registration got
+  no answer or a `5xx` and the next one a `200` (a timeout, a stop, a TLS
+  failure at a start), since that attempt may have made the mailbox
+  afresh unseen. Such a false alarm costs a 241-second delay (at a start,
+  before the service runs) and two messages to each member. A deleted mailbox may also
   mean the relay key is exposed: look at the relay's logs, and consider
   new keys and new invitations until the service can rotate its relay
   key.

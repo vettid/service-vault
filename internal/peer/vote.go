@@ -247,6 +247,9 @@ func (p *Peer) Caught(ctx context.Context, t, emptyAfter, from, until time.Time)
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if !p.started {
+		return false, 0, ErrNotStarted
+	}
 	// The stored set is every process's, across restarts (unacked.go).
 	p.writeUnacked(ctx)
 	if err := p.loadUnacked(ctx); err != nil {

@@ -239,6 +239,7 @@ func (p *Peer) Start(ctx context.Context) error {
 	if err := p.register(ctx); err != nil {
 		return err
 	}
+	p.registerOwed = false
 	// A lost mailbox: nothing that mints a token (the restore's
 	// reconnects, rekeys, answers) runs before the relay accepts tokens
 	// for it again. The lock is let go meanwhile; calls that would mint

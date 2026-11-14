@@ -102,10 +102,30 @@ func (p *Peer) reconnectIfIdle(c *Connection, now time.Time) {
 
 // retryReconnect starts a new try of an open reconnect, or ends it.
 func (p *Peer) retryReconnect(c *Connection, now time.Time) {
+	if p.holdReconnect(c, now) {
+		return
+	}
 	if !p.startReconnect(c, now) {
 		c.Reconnecting = true // startReconnect cleared it
 		p.reconnectFailed(c)
 	}
+}
+
+// holdReconnect keeps a reconnect open and untried while no token may be
+// minted (a lost mailbox's wait, mailbox.go): a try would fail to mint
+// and end the connection stale. Nothing of it starts (no epoch is
+// abandoned, no earlier hs.init dropped); checkReconnect starts it after
+// the wait.
+func (p *Peer) holdReconnect(c *Connection, now time.Time) bool {
+	if !p.mintWait(now) {
+		return false
+	}
+	if c.ReconnectSince.IsZero() {
+		c.ReconnectSince = now // reconnect_slow counts from here
+	}
+	c.Reconnecting = true
+	p.markDirty(kindConn, c.ID)
+	return true
 }
 
 // checkReconnect (housekeeping) raises reconnect_slow after a day, and

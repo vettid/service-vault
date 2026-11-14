@@ -67,8 +67,14 @@ func (p *Peer) writeRelayReg(ctx context.Context, r relayReg) error {
 // before is refused from now on (§6.10), and what members deposited since
 // the service's last collect is gone. A 200 after an attempt whose answer
 // was never recorded may hide such a 201, and counts as one. Then the
-// alarm relay_mailbox_lost is raised once and a re-mint is owed,
-// FreshMailboxWait after the answer.
+// alarm relay_mailbox_lost is raised and a re-mint is owed,
+// FreshMailboxWait after the answer. A start that finds a re-mint owed
+// that no connection has been done for raises the alarm again: its first
+// raising may have been lost to a crash after the record's write.
+//
+// While running (after a collect's mailbox_unknown), the relay call gets
+// registerRunningTimeout: it runs under p.mu, and the loss is proven, so
+// an answer cut short costs nothing a full one wouldn't.
 func (p *Peer) register(ctx context.Context) error {
 	r, err := p.readRelayReg(ctx)
 	if err != nil {
@@ -79,7 +85,13 @@ func (p *Peer) register(ctx context.Context) error {
 	if err := p.writeRelayReg(ctx, r); err != nil {
 		return fmt.Errorf("peer: register: %w", err)
 	}
-	reg, err := p.cfg.Relay.Register(ctx)
+	rctx := ctx
+	if p.started {
+		var cancel context.CancelFunc
+		rctx, cancel = context.WithTimeout(ctx, registerRunningTimeout)
+		defer cancel()
+	}
+	reg, err := p.cfg.Relay.Register(rctx)
 	if err != nil {
 		if registerMadeNothing(err) {
 			// This attempt made nothing: the mark goes back to what an
@@ -100,6 +112,9 @@ func (p *Peer) register(ctx context.Context) error {
 		return fmt.Errorf("peer: register: %w", err)
 	}
 	p.remintAt = r.RemintAfter
+	if !lost && !p.started && !r.RemintAfter.IsZero() && !p.remintBegun(r.RemintAfter) {
+		lost = true // raised again: see above
+	}
 	if lost {
 		// After the write, so that a crash before it raises the alarm again
 		// at the next start rather than never.
@@ -116,10 +131,25 @@ var errMintWait = errors.New("peer: the relay mailbox was made again: tokens can
 // ErrMailboxRenewing is what CreateInvite answers during that wait.
 var ErrMailboxRenewing = errMintWait
 
+// registerRunningTimeout bounds a registration while running.
+const registerRunningTimeout = 5 * time.Second
+
+// remintBegun reports whether any connection has been done for the
+// re-mint owed at t.
+func (p *Peer) remintBegun(t time.Time) bool {
+	for _, c := range p.conns {
+		if c.MailboxRemint.Equal(t) {
+			return true
+		}
+	}
+	return false
+}
+
 // mintWait reports whether no token may be minted now: a lost mailbox's
-// FreshMailboxWait has not passed.
+// FreshMailboxWait has not passed, or a registration after a collect's
+// mailbox_unknown (which proves the loss) is still owed.
 func (p *Peer) mintWait(now time.Time) bool {
-	return !p.remintAt.IsZero() && now.Before(p.remintAt)
+	return p.registerOwed || !p.remintAt.IsZero() && now.Before(p.remintAt)
 }
 
 // registerMadeNothing reports whether a failed registration certainly

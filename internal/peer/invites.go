@@ -55,6 +55,9 @@ func (p *Peer) Invite(id string) (InviteRecord, bool) {
 func (p *Peer) CancelInvite(ctx context.Context, id string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if !p.started {
+		return ErrNotStarted
+	}
 	inv := p.invites[id]
 	if inv == nil || inv.Used || inv.Withdrew {
 		return ErrNotFound
