@@ -56,6 +56,8 @@ func TestRemindSaveFailsAfterWithdraw(t *testing.T) {
 		}
 
 		// The store fails before anything is withdrawn: nothing changes.
+		// (This part guards the order: save, then withdraw. The next one
+		// guards what the order is for: no stale Pending after a withdraw.)
 		f.m.Store = &failAfterStore{Store: f.st, kind: kindApproval}
 		if _, err := f.m.Remind(ctx, c.ID, args...); err == nil {
 			t.Fatalf("force %v: reminded with the store down", force)

@@ -1286,6 +1286,10 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 	if now.Before(r.LastSent.Add(RemindInterval)) {
 		return nil, errCode(CodeTooSoon)
 	}
+	ctxt, err := ChallengeContext(m.ServiceName, r.Action, r.Summary, r.Hash)
+	if err != nil {
+		return nil, err
+	}
 	if len(to) > 0 {
 		// The challenges replaced leave Pending in a write of their own,
 		// before they are withdrawn: a crash or a store error after the
@@ -1303,10 +1307,6 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 		}
 	}
 	m.cancel(ctx, to)
-	ctxt, err := ChallengeContext(m.ServiceName, r.Action, r.Summary, r.Hash)
-	if err != nil {
-		return nil, err
-	}
 	if r.Pending == nil {
 		r.Pending = map[string]string{}
 	}
