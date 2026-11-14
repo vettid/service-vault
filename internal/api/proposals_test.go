@@ -72,7 +72,7 @@ func (f *fakeProposals) Publish(_ context.Context, id string) (int, error) {
 	return 0, ballot.ErrUnknownProposal
 }
 
-func (f *fakeProposals) Extend(_ context.Context, id, approvalID string, in ballot.ExtensionInput) (*vote.Extension, error) {
+func (f *fakeProposals) ExtendSending(_ context.Context, id, approvalID string, in ballot.ExtensionInput) (*ballot.Extended, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -83,8 +83,10 @@ func (f *fakeProposals) Extend(_ context.Context, id, approvalID string, in ball
 		return nil, ballot.ErrProposalChanged
 	case "bad":
 		return nil, &ballot.ErrInput{Err: errors.New("short")}
+	case "unverified":
+		return &ballot.Extended{Extension: &vote.Extension{V: 1, ProposalID: id, N: 1, ClosesAt: in.ClosesAt}, Reason: ballot.ReasonBundleUnverified}, nil
 	}
-	return &vote.Extension{V: 1, ProposalID: id, N: 1, ClosesAt: in.ClosesAt}, nil
+	return &ballot.Extended{Extension: &vote.Extension{V: 1, ProposalID: id, N: 1, ClosesAt: in.ClosesAt}, Sending: 3}, nil
 }
 
 func TestProposalRoutes(t *testing.T) {
@@ -190,10 +192,17 @@ func TestProposalRoutes(t *testing.T) {
 	}
 	fp.err = nil
 	ext := `{"approval_id":"A1","closes_at":9,"outage":{"from":1,"to":5000,"source":"https://status.vettid.org/"}}`
-	for id, want := range map[string]int{"ok": 200, "late": 409, "bad": 400, "changed": 409} {
+	for id, want := range map[string]int{"ok": 200, "late": 409, "bad": 400, "changed": 409, "unverified": 200} {
 		if rec, m := do(t, h, "POST", "/v1/proposals/"+id+"/extend", apiKey, ext); rec.Code != want {
 			t.Errorf("extend %s: %d %v", id, rec.Code, m)
 		}
+	}
+	// The extension, and whether it is being sent.
+	if rec, m := do(t, h, "POST", "/v1/proposals/ok/extend", apiKey, ext); m["sending"] != float64(3) || m["reason"] != nil || m["closes_at"] != float64(9) || m["n"] != float64(1) {
+		t.Errorf("extend ok: %d %v", rec.Code, m)
+	}
+	if rec, m := do(t, h, "POST", "/v1/proposals/unverified/extend", apiKey, ext); m["sending"] != float64(0) || m["reason"] != "bundle_unverified" || m["closes_at"] != float64(9) {
+		t.Errorf("extend unverified: %d %v", rec.Code, m)
 	}
 	if rec, m := do(t, h, "GET", "/v1/proposals/done/results", apiKey, ""); rec.Code != 200 || m["results"] != `{"v":1}` {
 		t.Fatalf("%d %v", rec.Code, m)

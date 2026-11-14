@@ -857,6 +857,12 @@ func (c *cli) proposal(ctx context.Context, args []string) error {
 		if err != nil {
 			fmt.Fprintf(c.err, "approval %s may be used up whatever the outcome (a refusal of the input itself, such as an outage not over, leaves it unused): a new vote.extend needs a new approval\n", id)
 		}
+		var ex struct {
+			Reason string `json:"reason"`
+		}
+		if err == nil && json.Unmarshal(b, &ex) == nil && ex.Reason == ballot.ReasonBundleUnverified {
+			fmt.Fprintf(c.err, "the extension is in effect (the site holds it) but was not sent to the members: its bundle is one a member vault would refuse (alarm proposal_bundle_unverified); members learn of it from the site\n")
+		}
 	case "status", "publish", "close", "results":
 		if err := c.flags(flag.NewFlagSet("proposal "+sub, flag.ContinueOnError), args, 1); err != nil {
 			return err

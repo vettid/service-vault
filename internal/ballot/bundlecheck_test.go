@@ -143,8 +143,12 @@ func TestExtensionChecksBundle(t *testing.T) {
 		gotNotAfter = notAfter
 		return refuseBundle(doc, b, notAfter)
 	}
-	if _, err := m.Extend(ctx, pid, "a", x); err != nil {
+	got, err := m.ExtendSending(ctx, pid, "a", x)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if got.Sending != 0 || got.Reason != ReasonBundleUnverified || got.Extension == nil || got.ClosesAt != x.ClosesAt {
+		t.Fatalf("refused: %+v", got)
 	}
 	m.Wait()
 	if !gotNotAfter.Equal(time.Unix(prevClose-1, 0)) {

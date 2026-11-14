@@ -116,6 +116,32 @@ var ErrExtensionPending = errors.New("ballot: another extension is pending")
 // the bundle this service anchored for it (Manager.Timestamp), as the site decides:
 // before the close it extends, or it does not apply (ErrTooLate).
 func (m *Manager) Extend(ctx context.Context, id, approvalID string, in ExtensionInput) (*vote.Extension, error) {
+	x, err := m.ExtendSending(ctx, id, approvalID, in)
+	if x == nil {
+		return nil, err
+	}
+	return x.Extension, err
+}
+
+// Extended is an extension in effect, and whether it is being sent.
+type Extended struct {
+	*vote.Extension
+	// Sending is how many members vote.extended is being sent to, in the
+	// background: 0 when it is not sent (Reason), when a send of it is
+	// already running, or when the service is stopping.
+	Sending int `json:"sending"`
+	// Reason, when it is not sent: "bundle_unverified", its bundle is one
+	// a member vault would refuse (alarm proposal_bundle_unverified). The
+	// extension is in effect all the same: the site holds it.
+	Reason string `json:"reason,omitempty"`
+}
+
+// ReasonBundleUnverified is Extended.Reason for an extension not sent
+// because its bundle failed the check.
+const ReasonBundleUnverified = "bundle_unverified"
+
+// ExtendSending is Extend, and says whether the extension is being sent.
+func (m *Manager) ExtendSending(ctx context.Context, id, approvalID string, in ExtensionInput) (*Extended, error) {
 	unlock, err := m.lock(ctx, id)
 	if err != nil {
 		return nil, err
@@ -271,7 +297,7 @@ func (m *Manager) Extend(ctx context.Context, id, approvalID string, in Extensio
 	// "proposal_bundle_unverified"). A vault takes an extension's stamp
 	// only before the close it extends (VAULT-MESSAGING §10.19.4).
 	if err := m.checkBundle("extension "+strconv.FormatInt(e.N, 10), id, doc, bundle, time.Unix(prevClose-1, 0)); err != nil {
-		return e, nil
+		return &Extended{Extension: e, Reason: ReasonBundleUnverified}, nil
 	}
 	body, _ := json.Marshal(struct {
 		ProposalID   string          `json:"proposal_id"`
@@ -279,10 +305,14 @@ func (m *Manager) Extend(ctx context.Context, id, approvalID string, in Extensio
 		ExtensionSig []byte          `json:"extension_sig"`
 		Bundle       json.RawMessage `json:"bundle"`
 	}{id, doc, sig, bundle})
-	m.sendInBackground(id, fmt.Sprintf("extended/%s/%d", id, e.N), TypeExtended, sortedConns(o.Members), voteSendUntil(o.ClosesAt),
-		func(string) (json.RawMessage, error) { return body, nil })
-	m.log().Info("vote extended", "proposal_id", id, "n", e.N, "closes_at", e.ClosesAt)
-	return e, nil
+	conns := sortedConns(o.Members)
+	sending := 0
+	if m.sendInBackground(id, fmt.Sprintf("extended/%s/%d", id, e.N), TypeExtended, conns, voteSendUntil(o.ClosesAt),
+		func(string) (json.RawMessage, error) { return body, nil }) {
+		sending = len(conns)
+	}
+	m.log().Info("vote extended", "proposal_id", id, "n", e.N, "closes_at", e.ClosesAt, "sending", sending)
+	return &Extended{Extension: e, Sending: sending}, nil
 }
 
 // RebuildAll puts back, for every proposal still running, the ballots the

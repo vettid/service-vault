@@ -632,6 +632,9 @@ type fakeProposals struct {
 	created   int
 	caught    bool
 	unsigned  int
+	// unverified: an extension in effect but not sent (its bundle failed
+	// the check).
+	unverified bool
 }
 
 func (p *fakeProposals) Create(_ context.Context, approvalID string, in ballot.ProposalInput) (*ballot.Created, error) {
@@ -670,12 +673,16 @@ func (p *fakeProposals) Results(context.Context, string) (*ballot.PublishedResul
 	return nil, nil
 }
 
-func (p *fakeProposals) Extend(_ context.Context, id, approvalID string, in ballot.ExtensionInput) (*vote.Extension, error) {
+func (p *fakeProposals) ExtendSending(_ context.Context, id, approvalID string, in ballot.ExtensionInput) (*ballot.Extended, error) {
 	p.approvals = append(p.approvals, approvalID)
 	if approvalID != "a1" {
 		return nil, &approval.Error{Code: approval.CodeApprovalNotApproved}
 	}
-	return &vote.Extension{V: 1, ProposalID: id, N: 1, ClosesAt: in.ClosesAt, Outage: in.Outage}, nil
+	e := &ballot.Extended{Extension: &vote.Extension{V: 1, ProposalID: id, N: 1, ClosesAt: in.ClosesAt, Outage: in.Outage}, Sending: 3}
+	if p.unverified {
+		e.Sending, e.Reason = 0, ballot.ReasonBundleUnverified
+	}
+	return e, nil
 }
 
 func (p *fakeProposals) Publish(context.Context, string) (int, error) { return 3, nil }
@@ -848,6 +855,16 @@ func TestProposalNeedsApproval(t *testing.T) {
 	if f.apv.req.Action != "vote.extend" {
 		t.Fatalf("approval request %+v", f.apv.req)
 	}
+	if !strings.Contains(out, `"sending": 3`) || strings.Contains(errOut, "not sent") {
+		t.Fatalf("extend, sent: %s\n%s", out, errOut)
+	}
+	// In effect but not sent: said on stderr.
+	fp.unverified = true
+	code, out, errOut = f.run(t, "proposal", "extend", "01JBQZ0000000000000000000A", "-in", ext, "-approval", "a1")
+	if code != exitOK || !strings.Contains(out, `"reason": "bundle_unverified"`) || !strings.Contains(errOut, "was not sent to the members") {
+		t.Fatalf("extend, not sent: exit %d\n%s\n%s", code, out, errOut)
+	}
+	fp.unverified = false
 	// An existing approval of another action is not used.
 	if code, _, errOut := f.run(t, "proposal", "create", "-in", in, "-approval", "a1"); code != exitError || !strings.Contains(errOut, "not an approved proposal.create") {
 		t.Fatalf("exit %d %s", code, errOut)
