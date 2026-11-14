@@ -1,6 +1,6 @@
 # Relay-key rotation in the service vault
 
-**Status:** 0.5.0, draft (2026-11-14). Against VAULT-MESSAGING 0.90.11
+**Status:** 0.6.0, draft (2026-11-14). Against VAULT-MESSAGING 0.90.11
 (§3.4, §3.4.1, §3.4.2). GC #9442.
 
 VAULT-MESSAGING §3.4.2 RK0 asks a service vault to follow the relay-key
@@ -62,10 +62,10 @@ as one task, and one lock (the peer's) covers every state change.
   service, so turning it off again would refuse their updates and strand
   them. Going back means a release that keeps it on. That holds on
   staging too: turning it on there is one-way for staging's members.
-  Tests set it through a test hook, so every test also runs with it off. PR 5's switch also
-  waits on the spec's answer to the restore question (section 4). The
-  P side (section 5) is built behind the same switch and adds no
-  switch of its own: with it off, the rotation command refuses.
+  Tests set it through a test hook, so every test also runs with it
+  off. PR 5's switch also waits on the spec's answer to the restore
+  question (section 4). The P side (section 5) has a second one-way
+  switch of its own, turned on in PR 8, after this one.
 
 ## 2. What it depends on
 
@@ -564,63 +564,109 @@ as one task, and one lock (the peer's) covers every state change.
 ## 5. The service as P: rotating its own relay key
 
 - **When it rotates (chosen; not in the spec).** The service has no
-  recovery, transfer or `credential.rotate`. A rotation starts only from
-  an operator command, `service-vault admin rotate-relay`, run with the
+  recovery, transfer or `credential.rotate`. A rotation starts from an
+  operator command, `service-vault admin rotate-relay`, run with the
   owner's go in the service's environment (like `admin bootstrap`, it
-  refuses while the identity key isn't the table's). The command writes
-  only a **request** record, as `admin bootstrap` arms a bootstrap; the
-  running daemon picks it up and, in its own writes, records the
-  **relay-key rotation owed** mark with the request's time (a mark
-  already set keeps its earlier time, so a second run can't push its
-  deadline back) and does the rest below. The reasons to run it:
+  refuses while the identity key isn't the table's), or from a lost
+  mailbox (below). The command writes only a **request** record, as
+  `admin bootstrap` arms a bootstrap; the running daemon picks it up and,
+  in one `Apply`, deletes the request and records the **relay-key
+  rotation owed** mark with the request's time (a mark already set keeps
+  its earlier time, so a second run can't push its deadline back, and a
+  replayed request can't start a second rotation). The reasons to run
+  it:
   - a suspected exposure of the relay key (§3.4's MUST, for what the
     relay key alone covers: an exposure of the whole state, the `ik`
     included, still means new keys and new invitations);
-  - a new URL for the same relay.
+  - a new URL for the same relay (the command's `-relay-url`; each key's
+    URL is kept with it, and the service's own address comes from the
+    current key's).
 
   **A move to a different relay** has no path in the spec: §3.4's order
   makes the successor mailbox with the current relay's rotate, signed by
-  the current key, on that relay. It is an open question for the lead
+  the current key, on that relay. It is a question for the spec erratum
   (section 7), not something the command does.
-- **A mailbox already lost** (`mailbox_unknown` on the service's
-  current mailbox, no key pending) is the spec's re-registration of the
-  current key (§12.2; RELAY-PROTOCOL §6.10), not a rotation (chosen; not
-  in the spec: §6.10 recommends a new key, which needs the gate; the
-  re-registration doesn't). The relay then refuses the tokens the old
-  mailbox issued until 90 seconds after its deletion, so the service
-  mints new standing and reconnect tokens for every member with `iat`
-  at least that late, and sends them in `relay.token.issued` on the
-  tokens the members issued to it (their mailboxes are unaffected); the
-  connections go on. Today's service only re-registers at start, and
-  its collect loop backs off on `mailbox_unknown`; PR 6 adds the
-  re-mint and the sends.
+- **What a holder of the relay key can do** while a rotation waits (the
+  exposure the rotation answers): collect, ack or delete what members
+  deposit in the service's mailbox, so the service misses it; revoke the
+  tokens that mailbox issued; rotate or delete the mailbox. It cannot
+  read those deposits (they are sealed under the epochs' keys) or forge
+  the service's messages (they are signed by its `ik`). Members ended
+  `stale` by a per-incident move (below) have the tokens the old mailbox
+  issued them revoked (S7).
+- **A mailbox already lost** (`mailbox_unknown` on the service's current
+  mailbox, from the collect loop or a start, no key pending). Only its
+  key's holder, or the relay losing data, deletes a current mailbox, so
+  the key is probably exposed (the lead's decision, following the
+  owner's b, GC #10521):
+  - **With the gate open:** a rotation, on the registration path: a
+    fresh key is generated (the gate is not a reason to keep a key whose
+    mailbox no longer exists, §3.4.1 "The gate"), stored by the first
+    write and registered (§3.4 "After the grace"); the telling (RK14)
+    covers what members deposited.
+  - **With the gate closed:** the current key is registered again
+    (§12.2; RELAY-PROTOCOL §6.10), with the alarm `relay_mailbox_lost`
+    and a relay-key rotation owed. The cost, stated in the alarm: the
+    relay refuses for good the tokens the old mailbox issued, so the
+    service mints new standing and reconnect tokens for every member,
+    after the 241-second wait of a fresh mailbox (it can't know the
+    deletion's time), and sends them in `relay.token.issued` on the
+    tokens the members issued to it; members' deposits refused
+    `mailbox_unknown` meanwhile are held by them and end at their hold's
+    60 days, since no follow comes (a gap in the spec, in the lead's
+    erratum).
+  - A key `relay_key_rolled_back` flags (below) is never registered
+    again.
+  - While a key is pending, a `mailbox_unknown` from the collect loop
+    starts §3.4's rotate-then-registration path instead.
 - **Where the relay keys live (chosen; not in the spec).** Today the
-  relay key is a seed in the keystore item, loaded once. A rotation must
-  store the pending key in the same write as its tokens and held updates
-  (§3.4 step 1), so the relay keys move into a sealed peer record of
-  their own (`relaykeys`: the current key, a pending one with its
-  `retry_after`, refused mark and fresh-mailbox time, and the old keys
-  with their anchors, stops and `last_msg_id`), written with the peer's
-  other records. At the first start of this release it is created from
-  the keystore's seed; the keystore's seed is never used again after
-  that. The peer's own address (`ownAddr`) then comes from this record.
+  relay key is a seed in the keystore item, loaded once. They move into
+  a sealed peer record of their own, `relaykeys` (listed in
+  `peer.Kinds()` with the request record): the current key with its URL,
+  its registration limits and its anchor; a pending key with its state
+  (preparing, prepared, refused), `retry_after`, registration-attempted
+  mark and fresh-mailbox time; and the old keys with their anchors,
+  stops, `last_msg_id` and telling cursor. PR 6 creates it from the
+  keystore's seed at the first start, whatever the switches say.
+  - **The keystore (outside the table)** keeps the current key's seed
+    and, from the first write on, the pending key's (an escrow, below).
+    At the flip the old seed is removed from it: a release rollback to
+    before PR 6 then loads the current key, never a superseded one. Old
+    keys are kept, deposit-only, in `relaykeys`.
+  - The registration limits are stored with each key, since a start
+    with a key pending registers nothing; a rotate's or registration's
+    answer refreshes them.
 - **A table restore across the service's own rotation (chosen; not in
   the spec).** The relay keys live in the table, so a restore takes them
-  back too. Restored to before a rotation's first write, a new rotation
-  would make a second successor of the old key, and every member that
-  followed the first would see a relay fork and suspend the connection
-  (§3.4.1 Residuals). So the daemon also writes each relay public key it
-  makes current, with its time, to an SSM parameter outside the table.
-  At start, if the table's current relay key is older than the newest
-  one there, it raises the alarm `relay_key_rolled_back` and refuses any
-  rotation until the operator confirms; README "Restoring the table"
-  says that after a restore across a relay-key rotation every member
-  connects again.
+  back too, and a new rotation from the restored key would make a
+  second successor of it: every member that followed the first would see
+  a relay fork. So:
+  - **an SSM log outside the table** records each pending key at the
+    first write (after the keystore escrow) and each key made current,
+    written durably before the flip; if that write fails, the flip waits;
+  - **at start**, after the `relaykeys` migration (which seeds the log)
+    and before any registration, the table's keys are compared with the
+    log. If the log names a newer key than the table's current one:
+    - if the keystore still holds its seed (the escrow), the service
+      **recovers it**: it stores that key again as pending (or, if the
+      log shows it made current, completes it at once), and prepares the
+      updates again from scratch. The links are the same (old key to
+      that key), so no member sees a second successor;
+    - otherwise it raises the alarm `relay_key_rolled_back`, registers
+      nothing for that key, and refuses any rotation until the operator
+      confirms; README "Restoring the table" says every member then
+      connects again;
+    - completing a restored pending key equal to the log's newest is
+      not refused;
+  - a restore that lands between a fresh mailbox's `201` and the write
+    that stored its time is treated like 0.90.11's lost run: the key is
+    marked unconfirmed, and completed only after the 241-second wait.
 - **The gate** (§3.4.1 "The gate"). A new relay key is generated only
   while every active connection advertises `relay_follow` (sticky once
-  seen). While the gate is closed, the mark waits: no key is generated,
-  and the gate is checked again at each start (and at housekeeping:
-  chosen; not in the spec).
+  seen). It is checked wherever a key would be generated: at a mark, for
+  the next key after a pending one, at the way out of the refused state,
+  and for a lost mailbox. While it is closed the mark waits, checked
+  again at each start (and at housekeeping: chosen; not in the spec).
   - **Today no member vault advertises `relay_follow`**, so an owed
     rotation waits. The application gets `relay.waiting` with the
     connections waited for, and the operator the alarm
@@ -631,59 +677,97 @@ as one task, and one lock (the peer's) covers every state change.
     the service doesn't enforce it, which is the spec's own rule today.
     **Chosen (not in the spec):** the owner may decide, per incident, to
     move those members to new invitations at once (an option on the
-    command, ending them as `stale`, with their events).
-    While it waits, the exposure the rotation answers is not closed;
-    the alarm says so.
+    command, ending them as `stale`, with their events). While it waits,
+    the exposure the rotation answers is not closed; the alarm says so.
 - **The order of a rotation** (§3.4 "The order of a relay-key
-  rotation"), with "an unlock" read as "a start" (RELEASE-29 §2):
-  1. **The first write** stores the new relay key as **pending** (sealed
-     like every key), the new standing and reconnect tokens for every
-     connection, and their `relay.address.update`s, held. RK14's anchor
-     for the current key is stored just before the first rotate attempt.
+  rotation"), with "an unlock" read as "a start" (RELEASE-29 §2). With
+  thousands of members, `Apply` splits a write into many transactions,
+  and `Peer.flush` writes its dirty records sorted by kind, so neither of
+  §3.4's two writes can be one transaction. Each is a sequence of steps,
+  each its own `Apply`, in this order, with a commit point:
+  1. **Preparing (the first write):**
+     1. the keystore escrow of the new key's seed;
+     2. the `relaykeys` record with the key as pending, state
+        **preparing**: the commit point (and the SSM log entry for it);
+     3. in batches by connection id, each connection's new standing and
+        reconnect tokens and its `relay.address.update`, held; each held
+        update names the pending key, and preparing a connection that
+        already has its update for that key is skipped, so a crash
+        resumes the batches without doubling them;
+     4. state **prepared**. Only then is the rotate made.
+
+     At load, held updates and tokens that name any key but the pending
+     one are deleted; a key still preparing resumes at step 3. No other
+     key is generated while one is preparing, pending or refused.
   2. **The rotate** (`POST /v1/mailbox/rotate`, signed by the current
-     key) with the pending key. No definite answer (a timeout, a `5xx`,
-     `429` after its `retry_after`) is retried with the same key, sooner
-     while running with full jitter (up to an hour) and at each start;
-     `retry_after` is stored with the pending key. `mailbox_unknown`
-     leads to the registration of the stored pending key, and a fresh
-     mailbox (`201`) to the 241-second wait before the second write,
-     with every held token minted again; the time of that `201` is
-     stored with the pending key in a write of its own, so a restart
-     doesn't skip the wait.
-  - **At a start while a key is pending or refused,** the service
-    registers nothing: in place of today's registration of its key, it
-    makes the rotate-then-registration attempt (one attempt; a failure
-    doesn't stop the start, the collects of the current mailbox go on
-    while it lives). Registering the current key then would, after the
-    grace, make the old mailbox again. An old key is never registered.
-  3. **The second write** makes the pending key current, the old one
-     deposit-only, re-mints held tokens that are nearly spent, takes the
-     connections again (new ones get tokens and an update; ended ones
-     lose theirs), and records per connection the service's key for it
-     (the old key, S1) and the start of S1's clock (RK13). Then the held
-     updates go out.
-  - **A definite refusal** (any `4xx` but `429`, `timestamp_stale`,
+     key), with the pending key; RK14's anchor for the current key is
+     stored in a write just before the first attempt.
+     - **No definite answer** (a timeout, a `5xx`, `429` after its
+       `retry_after`) is retried with the same key: sooner while running,
+       with full jitter up to an hour, and at each start; `retry_after`
+       is stored with the key and honored at a start.
+       `timestamp_stale` and `replay_detected` are retried at once with a
+       freshly signed request; they are not definite refusals.
+     - `mailbox_unknown` leads to the registration of the stored pending
+       key. Before each registration, a **registration attempted** mark
+       is stored. A `201` is a fresh mailbox: its time is stored with the
+       key in a write of its own, and the key is completed only after
+       the 241-second wait, with every held token minted again. A `200`
+       after an attempt that got no answer or a `5xx` may have followed
+       an unseen `201`, so it is treated as fresh too (the wait, then the
+       re-mint). The relay's own `429`, `timestamp_stale`,
+       `replay_detected` or other `4xx` (with RELAY-PROTOCOL §7.1's error
+       body) show nothing was created.
+     - **At a start while a key is pending or refused,** the service
+       registers nothing: in place of today's registration of its key,
+       it makes the rotate-then-registration attempt (one attempt,
+       honoring a stored `retry_after`; a failure doesn't stop the
+       start, and the collects of the current mailbox go on while it
+       lives). Registering the current key then would, after the grace,
+       make the old mailbox again. An old key is never registered.
+  3. **Completing (the second write):**
+     1. in batches by connection id, each connection record stores
+        explicitly the service's key for it (the old key, S1; never
+        derived from "current"), the start of S1's clock (RK13), and its
+        held tokens re-minted if nearly spent (or all of them after a
+        fresh mailbox); connections added since the first write get
+        tokens and an update, and those ended lose theirs;
+     2. the SSM log entry for the new key as current;
+     3. **the flip:** the new key current, the old one deposit-only,
+        with its anchor: the commit point. The keystore's old seed is
+        removed;
+     4. the held updates are released, in batches by connection id, each
+        marked released in its batch, so a crash resumes without
+        doubling them.
+
+     A crash before the flip leaves the key pending, and the next start
+     completes it again (step 3.1 is idempotent: a connection already
+     carrying its key for the service is skipped). A crash after it
+     resumes the releases.
+  - **A definite refusal** (any `4xx` but `429`, `timestamp_stale` and
     `replay_detected`, and `mailbox_unknown` for the rotate) puts the
     pending key in the **refused** state: kept with its tokens and
-    updates, the alarm `relay_rotation_failed`, one attempt per start,
-    and no new key generated on its own. Meanwhile the service collects
-    the old mailbox if it still lives (a refused rotate), and otherwise
-    (a refused registration) receives nothing; the alarm says which. A
-    plain run of the command while refused keeps the refused key and
-    owes a rotation, as a member vault's transfer does. **The way out
-    (chosen; not in the spec):** the command with `-discard-refused`
-    discards the refused key, its tokens and updates, and stores a new
-    pending key if the gate is open; if it is closed, it records the
-    relay-key rotation owed mark instead (keeping an earlier mark's
-    time), as `credential.rotate`'s way out does. The current key's
-    anchor, stop and `last_msg_id` survive the discard and serve the next
-    key's rotation (RK14 step 1).
-  - **Audits** (§3.4 "What is audited"): `identity.rotated` at the
-    second write; `identity.rotation_failed` at a start whose attempt
-    doesn't complete the pending key (at most once per start), and at
-    once on a definite refusal.
+    updates, the alarm `relay_rotation_failed`, and no new key generated
+    on its own. It is attempted again at each start, daily while running,
+    and when the operator runs the command (chosen; not in the spec).
+    Meanwhile the service collects the old mailbox if it still lives (a
+    refused rotate), and otherwise (a refused registration) receives
+    nothing; the alarm says which. A plain run of the command while
+    refused keeps the refused key and owes a rotation, as a member
+    vault's transfer does. **The way out (chosen; not in the spec):** the
+    command with `-discard-refused` discards the refused key, its tokens
+    and updates (and its escrow), and stores a new pending key if the
+    gate is open; if it is closed, it records the relay-key rotation owed
+    mark instead (keeping an earlier mark's time), as `credential.rotate`'s
+    way out does. The current key's anchor, stop and `last_msg_id`
+    survive the discard and serve the next key's rotation (RK14 step 1).
+  - **Audits** (§3.4 "What is audited"): `identity.rotated` at the flip;
+    `identity.rotation_failed` at a start whose attempt doesn't complete
+    the pending key (at most once per start), and at once on a definite
+    refusal.
   - **A rotation owed while a key is pending** is met by the pending
-    key's second write storing the next key, as §3.4 says.
+    key's completion storing the next key (the gate permitting), as §3.4
+    says.
 - **Collecting both mailboxes.** While a key is pending the service
   collects the old mailbox with the current key, and once the rotate has
   succeeded the new one too, in §3.4.1's order of processing:
@@ -697,57 +781,66 @@ as one task, and one lock (the peer's) covers every state change.
     the old mailbox is collected only after a rotate or registration
     attempt that got no `200` since its last collect, or while no
     attempt may be made (a `retry_after` runs, or the refused state).
-  - After the second write the service collects the old mailbox until
-    RK14 step 1 ends it: 13 days after the anchor (at once if past), or
-    at `mailbox_unknown` for it, which is final. A batch already
-    collected is processed and acked; after the stop, nothing from the
-    old mailbox is processed again.
-- **S1, the service's key for each member.** The newest of its relay
-  keys whose `relay.token.issued` from that member has arrived. It
-  deposits to the member only with that key, except on a carried token
-  (RK3: with the key the token's `sub` names, while the service still
-  holds it). While it isn't the current key, the member is sent only
-  the update (with the links from that key to the current one), its
-  `relay.token.issued`, a reconnect's messages (its `hs.init` announcing
-  the current key with `relay_links`, RK8; its `hs.fin`; an `hs.resp` to
-  the member's reconnect) and `hs.confirm`; everything else waits in the
-  outbox. An update goes only after every earlier deposit to that member
-  with the old key has had a definite answer.
+  - After the flip the service collects the old mailbox until RK14 step 1
+    ends it: 13 days after the anchor (at once if past), or at
+    `mailbox_unknown` for it, which is final. At the stop, messages from
+    it still deferred (rule T, at most two minutes) or left unacked are
+    processed first, and `last_msg_id` stays below any that are not; a
+    batch already collected is processed and acked. After the stop,
+    nothing from the old mailbox is processed again.
+- **S1, the service's key for each member** (stored on its connection
+  record): the newest of its relay keys whose `relay.token.issued` from
+  that member has arrived. It deposits to the member only with that key,
+  except on a carried token (RK3: with the key the token's `sub` names,
+  while the service still holds it). While it isn't the current key, the
+  member is sent only the update (with the links from that key to the
+  current one), its `relay.token.issued`, a reconnect's messages (its
+  `hs.init` announcing the current key with `relay_links`, RK8; its
+  `hs.fin`; an `hs.resp` to the member's reconnect) and `hs.confirm`;
+  everything else waits in the outbox. An update goes only after every
+  earlier deposit to that member with the old key has had a definite
+  answer.
+  - **The outbox bound** doesn't hold back what lets S1 end (chosen; not
+    in the spec): the update and its resends, the RK8 handshake
+    messages, `relay.token.issued` and `relay.mailbox.closed` are exempt
+    from `MaxOutboxPerConn`, as `hs.confirm` is.
   - **The update's `rotations`** are empty: the service's `ik` never
     rotates, so the update's `ik` is the member's current `ik` for the
     service and RK5's requirement holds.
   - **RK13's clock:** a member that hasn't acknowledged 30 days after
-    the second write becomes `stale`, the clock paused while the service
-    has accepted, within the last 16 days, an authenticated message from
-    it that passed dedupe and the `ts` window: a handshake message whose
+    the flip becomes `stale`, the clock paused while the service has
+    accepted, within the last 16 days, an authenticated message from it
+    that passed dedupe and the `ts` window: a handshake message whose
     signature it verified (`hs.resp`, `hs.fin`; a reconnect `hs.init`
     alone doesn't count) or a message under an epoch. It ends in any case
-    60 days after the second write.
+    60 days after the flip. So every member whose vault doesn't process
+    the update within that time is lost (section 7, question 1).
   - **S9, a sign of a fork:**
     - **a revoked standing token:** if the service gets `token_revoked`
       for a standing token a member issued to the old key while that key
       is still its key for the member, and the member's token for the
       current key hasn't come 24 hours after the service's first short
       collect after that refusal (read through RELEASE-29 §2's latch), it
-      audits `connection.fork_suspected` (`ref` = `relay_revoked`);
+      audits `connection.fork_suspected` (`ref` = `relay_revoked`) and
+      raises the alarm `fork_suspected`. The connection is not ended (the
+      spec only audits);
     - **a revoked reconnect token** starts no 24-hour wait; S9 is judged
       at S1's end instead (RK9): a member S1 ends `stale` after such a
       revocation is audited `connection.fork_suspected` as well as
-      `connection.stale`.
-
-    The connection is then `stale`, not suspended, so the application
-    gets `connection.stale` with the reason `relay_revoked` (chosen; not
-    in the spec; a new reason, section 7), one event in place of the
-    plain one. `connection.suspended` keeps its meaning (RELEASE-29 §7).
+      `connection.stale`, and the application gets `connection.stale`
+      with the reason `relay_revoked` (chosen; not in the spec; a new
+      reason, section 7), one event in place of the plain one.
   - **Resends (§3.4 (b)),** to each member that hasn't acknowledged and
-    whose standing token for the old key is still valid: the update,
-    deposited again with the old key on that token, with its links and
-    tokens made again for the member's current relay key and sent to its
-    current mailbox. At each start, and while running at most once an
-    hour per member (chosen; not in the spec: a member vault resends at
-    each unlock, and the service runs for weeks between starts). Between
-    vaults a `mailbox_unknown` holds it (RK14's hold, section 4); any
-    other definite refusal ends the resends to that member.
+    whose standing token for the old key is still valid (with several old
+    keys, the newest valid standing token whose `sub` is the service's
+    key for that member): the update, deposited again with that key on
+    that token, with its links and tokens made again for the member's
+    current relay key and sent to its current mailbox. At each start, and
+    while running at most once an hour per member (chosen; not in the
+    spec: a member vault resends at each unlock, and the service runs for
+    weeks between starts). Between vaults a `mailbox_unknown` holds it
+    (RK14's hold, section 4); any other definite refusal ends the resends
+    to that member.
 - **S2, when a member's token arrives** (one write): the service's key
   for it advances; its open reconnects that announced the old key and
   sent no `hs.fin` are abandoned and started again; deposits held by S1,
@@ -768,9 +861,10 @@ as one task, and one lock (the peer's) covers every state change.
     `relay.token.issued` (§6.3.1), which the member takes past the
     cut-off by rule T.
 
-  At the second write, the service abandons its open reconnects with a
-  member that announced the old key and sent no `hs.fin`, and starts
-  them again under this rule.
+  At the flip, the service abandons its open reconnects with a member
+  that announced the old key and sent no `hs.fin`, and starts them again
+  under this rule. Other definite refusals of its reconnect during S1
+  count as failed tries (RK10, section 4).
 - **S3:** every token the service puts in a message to a member names
   the member's key as the service has it; a held token minted for an
   earlier key of the member is minted again when deposited.
@@ -784,33 +878,37 @@ as one task, and one lock (the peer's) covers every state change.
 - **RK11, both sides rotating:** while the service has followed a
   member's new key and holds tokens from it that name a relay key of the
   service's newer than its key for that member, it doesn't judge "no
-  valid standing token" or "no reconnect token" toward it, until those
-  tokens' `exp` or RK13's cap, or the member's `relay.token.issued` for
-  the newer key.
+  valid standing token" or "no reconnect token" toward it, until the
+  earlier of those tokens' `exp` and RK13's cap, or sooner at the
+  member's `relay.token.issued` for the newer key.
 - **First contacts (S6, the relay part).** Invitations made before the
-  second write carry the current (old) key's address, those made after
-  it the new one's. Invitations, requests and first contacts begun on the
-  old address finish there with the old key while its mailbox lives; the
+  flip carry the current (old) key's address, those made after it the
+  new one's. Invitations, requests and first contacts begun on the old
+  address finish there with the old key while its mailbox lives; the
   new connection then gets the update and new tokens. Those still open
   when the old mailbox's collects end, end as expired
   (`connection.expired` to the application).
 - **RK14, the telling as the sender** (step 1 and 2):
   - **The anchor** is stored with the current key in a write just before
     the first rotate attempt (cleared only by the relay's own `400` or
-    `401` to that attempt); several old keys each keep their own.
+    `401`, with §7.1's error body, to that attempt); several old keys
+    each keep their own.
   - **`last_msg_id`** for the old mailbox is kept in the flush of each
     batch from it: the largest `msg_id` up to which every message given
-    has been processed and flushed. The stop records it in a write
-    (the second write itself when the stop is already due).
+    has been processed and flushed. The stop records it in a write (the
+    flip itself when the stop is already due).
   - **The telling:** `relay.mailbox.closed {mailbox, last_msg_id}` (null
-    when none) to each connection, under its current epoch, queued in
-    the write that records the stop (or at the second write for a stop
-    before it). It isn't on S1's list, so it waits for S2.
+    when none) to each connection, under its current epoch, queued at
+    the stop (or after the flip for a stop before it), in batches by
+    connection id with a cursor in the old key's record, so a crash
+    resumes it without doubling it. It isn't on S1's list, so for a
+    member still in S1 it waits for S2.
   - **Dedupe after the telling:** the inner `id`s processed from the old
-    mailbox above `last_msg_id` are kept per connection, 76 days after
-    that connection's telling's `201` (or its last attempt that may have
-    reached the relay), so a member's re-deposit is dropped as a
-    duplicate.
+    mailbox above `last_msg_id` are kept per connection in a record kind
+    of their own, `closeddedupe` (listed in `peer.Kinds()`; `kindInner`
+    keeps only 16 days), until 76 days after that connection's latest
+    telling's `201` (or its last attempt that may have reached the
+    relay), so a member's re-deposit is dropped as a duplicate.
 - **The old key's life** (§3.4 (a), "When the old key is deleted"):
   deposit-only, never registered again; deleted when every member has
   acknowledged or become `stale`, not before the relay's grace ends while
@@ -822,11 +920,12 @@ as one task, and one lock (the peer's) covers every state change.
   "relay_moved"`.
 - **What the application and the operator see (chosen; not in the
   spec):** the events `relay.waiting` (the gate), `relay.rotated` (the
-  second write, with the count of members to acknowledge) and
+  flip, with the count of members to acknowledge) and
   `relay.acknowledged` (all have, or the rest are `stale`); the alarms
   `relay_rotation_waiting`, `relay_rotation_failed` (pending past its
-  retries for a day, or refused), `relay_key_rolled_back` and, as
-  today, `fork_suspected` and `connection.stale`'s.
+  retries for a day, or refused), `relay_mailbox_lost`,
+  `relay_key_rolled_back` and, as today, `fork_suspected` and
+  `connection.stale`'s.
 - **Depends on the relay's grace being 14 days** (RK14: no vault rotates
   before the deployed relays' grace is exactly 14 days). Staging's and
   production's relays are at 7 days today; GC #9440 raises them. The
@@ -835,6 +934,14 @@ as one task, and one lock (the peer's) covers every state change.
   (`-relay-grace-14d`, chosen; not in the spec). The daemon also refuses
   to rotate while the relay's advertised `message_ttl_seconds` is above
   14 days, which RK14 step 2 assumes.
+- **Its own switch (chosen; not in the spec).** The P side has a second
+  one-way constant, `rotate`, off until PR 8, so that PRs 6 and 7 never
+  go live half-built: with it off the command and the daemon refuse to
+  generate a key. PR 6's `relaykeys` migration, the SSM log and the
+  keystore escrow, and the lost-mailbox handling with the gate closed
+  (re-registration and re-minted tokens), run whatever either switch
+  says. It is one-way for the same reason as the Q switch: once a
+  rotation has started, turning it off would strand the members in S1.
 
 ## 5a. Times
 
@@ -879,27 +986,33 @@ so each can be merged and deployed on its own.
    their next version, as a change of `contract` does (contract.go);
    RELEASE-29 §6 and the README say so.
 
-The P side (section 5) follows, after the Q side and behind the same
-switch, and needs the relays' grace at 14 days (GC #9440) before it is
-used:
+The P side (section 5) follows, after the Q side, behind its own
+one-way switch (on in PR 8), and needs the relays' grace at 14 days
+(GC #9440) before it is used. What PR 6 adds outside the switch (the
+`relaykeys` migration, the SSM log, the keystore escrow, a lost
+mailbox's re-registration with the gate closed) runs at once:
 
 6. **The rotation's order:** the relay keys moved into the `relaykeys`
-   record (from the keystore's seed at the first start), the SSM log and
+   record (from the keystore's seed at the first start), the keystore
+   escrow, the SSM log, the restore check with its recovery and
    `relay_key_rolled_back`; the request record, the owed mark and
-   `admin rotate-relay` (with `-discard-refused`, `-relay-grace-14d` and
-   the per-incident move to new invitations); the gate and
-   `relay.waiting`; the pending key, the rotate and registration with
-   retries and the stored fresh-mailbox time; the start that attempts in
-   place of registering; the refused state; the second write; collecting
-   both mailboxes in order; the audits; a lost mailbox's re-registration
-   with re-minted tokens.
+   `admin rotate-relay` (with `-discard-refused`, `-relay-grace-14d`,
+   `-relay-url` and the per-incident move to new invitations); the gate
+   and `relay.waiting`; preparing in its ordered steps, the rotate and
+   registration with retries, the registration-attempted mark and the
+   stored fresh-mailbox time; the start that attempts in place of
+   registering; the refused state; completing in its ordered steps;
+   collecting both mailboxes in order; the audits; a lost mailbox (a
+   rotation with the gate open, a re-registration with re-minted tokens
+   with it closed). Crash tests inside each step.
 7. **S1 and its peers:** S1 (what is held, the update's order, the
-   resends), S2, S3, S7, RK3, RK4, RK8 as the sender, RK9, RK10 while in
-   its own S1, RK11, RK13's clock, S9 (both paths), first contacts on the
-   old address.
+   resends, the outbox exemptions), S2, S3, S7, RK3, RK4, RK8 as the
+   sender, RK9, RK10 while in its own S1, RK11, RK13's clock, S9 (both
+   paths), first contacts on the old address.
 8. **The old mailbox's end:** RK14's anchor, `last_msg_id` and stop, the
-   telling and its 76-day dedupe, the old key's deletion, the
-   `relay.rotated` and `relay.acknowledged` events and the alarms.
+   telling with its cursor and its 76-day dedupe (`closeddedupe`), the
+   old key's deletion, the `relay.rotated` and `relay.acknowledged`
+   events and the alarms. Then the P switch is turned on.
 
 RK1-b's narrowing (section 4) is a separate conformance PR.
 
@@ -927,7 +1040,9 @@ too, showing today's behaviour unchanged.
    invitations after 30 days, unless the owner decides per incident; and
    today every member's gate is closed, so until member vaults advertise
    `relay_follow`, a relay-key exposure is answered by waiting or by new
-   invitations.
+   invitations. And once a rotation goes ahead, RK13 makes `stale` every
+   member whose vault doesn't process the update within 30 to 60 days
+   (a member offline that long connects again).
 2. **The application events** of sections 4 and 5 (`connection.held`,
    `connection.released`, `message.not_delivered`,
    `message.delivery_unconfirmed`, `connection.suspended` with the
@@ -963,6 +1078,21 @@ first item, a member that rotated since then must connect again.
 
 ## Changes
 
+- **0.6.0 (2026-11-14):** section 5, after the blind pair: the first and
+  second writes as ordered steps, each its own `Apply`, with commit
+  points (the `relaykeys` record, the flip), held updates naming their
+  key, each connection's key for the service stored explicitly, releases
+  and the telling resumable by cursor, crash tests in each step; a lost
+  mailbox rotates with the gate open and re-registers with it closed
+  (the lead's decision); the registration-attempted mark and a `200`
+  after an unanswered attempt treated as fresh; the pending seed
+  escrowed in the keystore, the SSM log before the flip, and a restored
+  table's key recovered from them; the keystore drops the old seed at
+  the flip; the P side's own switch; outbox exemptions during S1;
+  `last_msg_id` and deferred messages at the stop; the refused state
+  attempted daily and by command; the request deleted with the mark;
+  limits and URLs per key; RK13's cost; S9's standing-token path
+  audit-only; `closeddedupe`; what a relay-key holder can do; nits.
 - **0.5.0 (2026-11-14):** the owner's b (GC #10505): the service also
   rotates its own relay key. Section 1 becomes "both Q and P"; a new
   section 5 gives the P side (the operator command and the owed mark,
