@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -363,19 +365,28 @@ func TestServiceRekeyRespForgedChain(t *testing.T) {
 }
 
 // A stored outgoing handshake whose hs.init names another identity key
-// than this service's is dropped at start, with an alarm, instead of
-// stopping the service from starting; the drop is stored.
+// than the table's (a mixed table: its identity record names the
+// configured key) is dropped at start, with an alarm, instead of stopping
+// the service from starting; the drop is stored, and its hs.init, still
+// waiting in the outbox, is dropped with it (GC #9109).
 func TestStaleOutgoingDroppedAtStart(t *testing.T) {
 	f := newFixture(t)
 	m := f.member(10)
 	cid := f.connect(m, "")
+	f.failDeposit = func(string, string) error { return errUnavailable } // the hs.init waits
 	f.p.startRekey(f.p.conns[cid], f.clk.Now())
 	f.p.Step(context.Background(), 0) // flushed
-	if len(f.p.outgoing) != 1 {
-		t.Fatal("no rekey stored")
+	f.failDeposit = nil
+	var entry string
+	for _, og := range f.p.outgoing {
+		entry = og.InitEntry
+	}
+	if len(f.p.outgoing) != 1 || entry == "" || !slices.ContainsFunc(f.p.outbox, func(e *outboxEntry) bool { return e.ID == entry }) {
+		t.Fatalf("no rekey waiting: %d outgoing, entry %q", len(f.p.outgoing), entry)
 	}
 	ik := f.keys.IK
 	f.keys.IK = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{88}, 32))
+	setIdentityRecord(t, f.store, f.keys.IKPublic())
 	f.start() // fails the test if the load is refused; Start flushes
 	if len(f.p.outgoing) != 0 {
 		t.Fatal("the stale handshake was kept")
@@ -386,101 +397,82 @@ func TestStaleOutgoingDroppedAtStart(t *testing.T) {
 	if recs, err := f.store.Load(context.Background(), kindOutgoing); err != nil || len(recs) != 0 {
 		t.Fatalf("%d outgoing records stored, %v", len(recs), err)
 	}
-	f.keys.IK = ik // the key put right: the record, had it stayed, would load
-	f.start()
-	if len(f.p.outgoing) != 0 {
-		t.Fatal("the stale handshake is back after a restart")
+	if recs, err := f.store.Load(context.Background(), kindOutbox); err != nil || slices.ContainsFunc(recs, func(r Record) bool { return r.ID == entry }) {
+		t.Fatalf("the dropped hs.init is still in the outbox (%v)", err)
+	}
+	f.keys.IK = ik // the old key: the table's record now names the other one
+	if err := f.startErr(); !errors.Is(err, ErrIdentityMismatch) {
+		t.Fatalf("started under a key the record doesn't name: %v", err)
 	}
 }
 
-// A stored reconnect hs.init under another identity key is dropped at
-// start and its tokens revoked, but the reconnect stays open: a fresh try
-// starts at once, a second start under the same key keeps it, and once
-// the key is put right, that try is dropped in turn (a second alarm) and
-// the next one completes.
+// A start under another identity key than the table's spends no
+// reconnect try and changes nothing: identity_test.go (GC #9109).
+
+// A stored reconnect hs.init under another key than the table's (a mixed
+// table: the record names the configured key) is dropped at start, its
+// tokens revoked and its waiting hs.init dropped, but the reconnect stays
+// open and a fresh try starts under the table's key; one already on its
+// second try starts its third and last.
 func TestStaleReconnectDroppedAtStart(t *testing.T) {
-	f := newFixture(t)
-	m := f.member(10)
-	cid := f.connect(m, "")
-	b := f.backup()
-	m.StartRekey()
-	f.pump()
-	f.restore(b, true) // the reconnect's hs.init is stored, with its tokens
-	var issued []string
-	for _, og := range f.p.outgoing {
-		issued = og.Issued
-	}
-	if len(issued) == 0 || f.p.conns[cid].ReconnectTries != 1 {
-		t.Fatalf("no reconnect stored: %d tokens, tries %d", len(issued), f.p.conns[cid].ReconnectTries)
-	}
-	ik := f.keys.IK
-	f.keys.IK = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{88}, 32))
-	f.start()
-	if !strings.Contains(f.logs.String(), "alarm=outgoing_identity_changed") {
-		t.Fatalf("no alarm:\n%s", f.logs.String())
-	}
-	if strings.Contains(f.logs.String(), "alarm=reconnect_failed") {
-		t.Fatal("the reconnect was ended")
-	}
-	for _, j := range issued {
-		if tk := f.p.issued[j]; tk == nil || !tk.Denied {
-			t.Fatalf("token %s of the dropped hs.init not revoked", j)
-		}
-	}
-	c := f.p.conns[cid]
-	if !c.Reconnecting || c.State != StateActive || c.ReconnectTries != 2 || len(f.p.outgoing) != 1 {
-		t.Fatalf("reconnecting %v, state %s, tries %d, %d outgoing", c.Reconnecting, c.State, c.ReconnectTries, len(f.p.outgoing))
-	}
-	f.start() // still the wrong key: its own try loads and is kept
-	c = f.p.conns[cid]
-	if n := strings.Count(f.logs.String(), "alarm=outgoing_identity_changed"); n != 1 || !c.Reconnecting || c.ReconnectTries != 2 || len(f.p.outgoing) != 1 {
-		t.Fatalf("%d alarms, reconnecting %v, tries %d, %d outgoing", n, c.Reconnecting, c.ReconnectTries, len(f.p.outgoing))
-	}
-	f.keys.IK = ik // put right: the try made under the wrong key is dropped in turn
-	f.start()
-	c = f.p.conns[cid]
-	if n := strings.Count(f.logs.String(), "alarm=outgoing_identity_changed"); n != 2 || !c.Reconnecting || c.ReconnectTries != 3 {
-		t.Fatalf("%d alarms, reconnecting %v, tries %d", n, c.Reconnecting, c.ReconnectTries)
-	}
-	m.IgnoreRevoked = true // its answer to the first hs.init is refused
-	m.IgnoreForeign = true // the one signed under the wrong key is dropped
-	f.pump()
-	c = f.p.conns[cid]
-	if c.Reconnecting || c.kr.Current().ID() != m.KR.Current().ID() {
-		t.Fatalf("not reconnected: reconnecting %v", c.Reconnecting)
-	}
-	if !f.signIn(m, cid) {
-		t.Fatal("sign-in after the reconnect")
-	}
-}
-
-// A reconnect already on its second try when the key goes wrong spends
-// its last try under the wrong key, so once the key is put right it
-// cannot start another and ends: the member must connect again.
-func TestStaleReconnectLastTryEnds(t *testing.T) {
-	f := newFixture(t)
-	m := f.member(10)
-	cid := f.connect(m, "")
-	b := f.backup()
-	m.StartRekey()
-	f.pump()
-	f.restore(b, true)
-	f.p.conns[cid].ReconnectTries = 2 // as after a second try
-	f.p.markDirty(kindConn, cid)
-	if err := f.p.flush(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	ik := f.keys.IK
-	f.keys.IK = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{88}, 32))
-	f.start()
-	if c := f.p.conns[cid]; !c.Reconnecting || c.ReconnectTries != 3 {
-		t.Fatalf("reconnecting %v, tries %d", c.Reconnecting, c.ReconnectTries)
-	}
-	f.keys.IK = ik
-	f.start()
-	c := f.p.conns[cid]
-	if c.Reconnecting || c.State != StateStale || !strings.Contains(f.logs.String(), "alarm=reconnect_failed") {
-		t.Fatalf("reconnecting %v, state %s:\n%s", c.Reconnecting, c.State, f.logs.String())
+	for _, tc := range []struct {
+		name        string
+		tries, want int
+	}{{"first try", 1, 2}, {"second try", 2, 3}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			m := f.member(10)
+			cid := f.connect(m, "")
+			b := f.backup()
+			m.StartRekey()
+			f.pump()
+			f.failDeposit = func(string, string) error { return errUnavailable } // the hs.init waits
+			f.restore(b, true)
+			f.failDeposit = nil
+			c := f.p.conns[cid]
+			c.ReconnectTries = tc.tries
+			f.p.markDirty(kindConn, cid)
+			if err := f.p.flush(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			var issued []string
+			var entry string
+			for _, og := range f.p.outgoing {
+				issued, entry = og.Issued, og.InitEntry
+			}
+			if len(issued) == 0 || entry == "" {
+				t.Fatalf("no reconnect waiting: %d tokens, entry %q", len(issued), entry)
+			}
+			f.keys.IK = wrongKey
+			setIdentityRecord(t, f.store, f.keys.IKPublic())
+			f.start()
+			if !strings.Contains(f.logs.String(), "alarm=outgoing_identity_changed") || strings.Contains(f.logs.String(), "alarm=reconnect_failed") {
+				t.Fatalf("alarms:\n%s", f.logs.String())
+			}
+			for _, j := range issued {
+				if tk := f.p.issued[j]; tk == nil || !tk.Denied {
+					t.Fatalf("token %s of the dropped hs.init not revoked", j)
+				}
+			}
+			if slices.ContainsFunc(f.p.outbox, func(e *outboxEntry) bool { return e.ID == entry }) {
+				t.Fatal("the dropped hs.init is still waiting")
+			}
+			c = f.p.conns[cid]
+			if !c.Reconnecting || c.State != StateActive || c.ReconnectTries != tc.want || len(f.p.outgoing) != 1 {
+				t.Fatalf("reconnecting %v, state %s, tries %d, %d outgoing", c.Reconnecting, c.State, c.ReconnectTries, len(f.p.outgoing))
+			}
+			if tc.want < MaxReconnectTries {
+				return
+			}
+			// The last try, unanswered (the member pinned the other key):
+			// at its end the reconnect fails and the connection is stale.
+			f.clk.Advance(ReconnectTimeout + time.Minute)
+			f.tick()
+			c = f.p.conns[cid]
+			if c.Reconnecting || c.State != StateStale || !strings.Contains(f.logs.String(), "alarm=reconnect_failed") {
+				t.Fatalf("after the last try: reconnecting %v, state %s", c.Reconnecting, c.State)
+			}
+		})
 	}
 }
 

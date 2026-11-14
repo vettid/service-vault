@@ -197,19 +197,67 @@ destination.
   the runbook step was meant, otherwise unset it.
 - `webhook_dropped`: a webhook was given up after 24 hours, so the
   application missed an event.
+- `identity_key_mismatch`: at start, the service's identity key is not
+  the one its table's records were made under. The table says which key
+  that is in its identity record, written at the first start of a
+  release that has it. A table from before the record is judged by what
+  it stores that names the service's key: a pending epoch, a handshake
+  it started, a stored event, the approvals' audit log. If none names
+  another key, the record is written from the key the service has. If
+  the table holds none of these (only established connections), that
+  key is taken as it is: a wrong one then was already failing every
+  member's sign-in, and the record keeps it until the table is restored.
+  The service never rotates its identity key, so the keystore and the
+  records don't belong together: a wrong or partial restore, or another
+  service's table. A record the check needs that can't be opened (the
+  identity record, or in a table without it the records it reads) holds
+  too, with `from` `unreadable`: for example after a rollback to a
+  release without the record, then a record-key rotation, which leaves it
+  sealed under a retired key. One that opens but doesn't decode (a
+  connection, a stored handshake, an event or an audit entry) makes the
+  start fail instead, as loading it would. So does a start that also
+  rotates the record key (`SV_RECORD_KEY_VERSION` raised, or
+  `SV_RECORD_SEAL_MIGRATE=1`) over a record it can't open: that
+  rotation reseals every record before the identity check runs, and
+  fails on it. Start once without the rotation to see the hold.
+
+  The service stays up, held: it keeps the heartbeat and answers
+  `/health` 200, but every other request gets 503
+  `identity_key_mismatch`. It doesn't publish its TLS pin, so the
+  application keeps the right one and, while held, sees a TLS pin
+  failure if it calls the service. Nothing loads the records, signs,
+  sends or answers a member, so no reconnect try is spent and nothing is
+  deposited. (A record-key rotation or seal migration you asked for with
+  `SV_RECORD_KEY_VERSION` or `SV_RECORD_SEAL_MIGRATE` still runs first,
+  and reading records may reseal ones under an older version; their
+  contents don't change.) `admin bootstrap` refuses while the keys
+  differ; `admin reseal-blobs` refuses while the heartbeat shows the
+  service running, held or not. The alarm fires once per start, and then
+  the stack looks healthy: ECS neither replaces the task nor rolls back
+  a held deploy.
+
+  The ways out:
+  - **The keys are wrong:** put the right keystore item or table back (or
+    restore both from one backup) and restart; the service goes on from
+    the table as it was.
+  - **The record is wrong** (it was written from a wrong key, at the
+    first start of this release over an old table that held no evidence):
+    stop the service, delete the item `pk = rec#identity`, `sk = ik`,
+    and start it under the right keys, which writes the record again.
+  - **The keys are right but an old table holds a stray handshake** from
+    another table (`from` `state`, naming that handshake's key): start the
+    previous release once under the right keys, which drops it
+    (`outgoing_identity_changed`), then roll forward; or restore the
+    table from a backup without it.
 - `outgoing_identity_changed`: at start, a stored handshake this
   service started (a rekey or a reconnect) names another identity key
-  than the one it now has. The service never rotates its identity key,
-  so its keys or secrets are wrong, or the table is another service's.
-  The handshake is dropped and the tokens it carried are revoked; a
-  rekey starts again later. A reconnect stays open and a new try starts
-  at once, under the key the service now has. Further starts under that
-  same key keep that try. Once the keys are put right, the next start
-  drops that try in turn (the alarm fires again; expect it) and spends
-  another. So each key change costs a reconnect one of its 3 tries: a
-  reconnect already on its third try when the keys went wrong ends
-  (`reconnect_failed`), and that member must connect again from a new
-  invitation.
+  than the table's, although the table's identity record names the key
+  the service has (`identity_key_mismatch` covers a wrong key). So the
+  table holds records made under two keys: one was copied in from
+  another table. The handshake is dropped, the tokens it carried are
+  revoked and its `hs.init`, if still waiting, is not sent; a rekey
+  starts again later, and a reconnect stays open with a new try under
+  the table's key.
 - `reconnect_failed`: a connection's reconnect (after a table restore,
   or one the service started for want of a standing token or after its
   own new epoch went unconfirmed) could not start or complete, so that

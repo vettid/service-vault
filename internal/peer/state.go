@@ -38,7 +38,7 @@ const (
 // must touch them all (internal/sealstore).
 func Kinds() []string {
 	return []string{kindConn, kindInvite, kindAwait, kindRequest, kindOutgoing, kindToken, kindOutbox, kindAuth, kindEvent,
-		kindMsg, kindInner, kindResp, kindLease, kindUnacked, kindOnce}
+		kindMsg, kindInner, kindResp, kindLease, kindUnacked, kindOnce, kindIdentity}
 }
 
 // Retention (VAULT-MESSAGING §8.2, §6.4).
@@ -889,21 +889,25 @@ func (p *Peer) load(ctx context.Context) error {
 }
 
 // dropStale drops, once everything is loaded, the outgoing handshakes
-// whose hs.init names another identity key than this service's. The
-// service never rotates its identity key, so this means its keys or
-// secrets are wrong, or the table is another service's: an alarm, not an
-// audit. The tokens the hs.init carries are revoked, as dropOutgoing
-// does, but a reconnect is not ended: the connection stays reconnecting,
-// so resumeReconnects starts a fresh try at this start, under the current
-// key. Starts under that same key keep that try; the start after the keys
-// are put right drops it in turn and spends another. Each key change thus
-// costs one try (MaxReconnectTries).
+// whose hs.init names another identity key than this service's. A wrong
+// configured key never gets here (Start's CheckIdentity holds it first),
+// so this is a table holding records made under two keys, one copied in
+// from another table: an alarm, not an audit. The tokens the hs.init
+// carries are revoked and its outbox entry dropped, as dropOutgoing does,
+// but a reconnect is not ended: the connection stays reconnecting, so
+// resumeReconnects starts a fresh try at this start, under the table's
+// key.
 func (p *Peer) dropStale(stale []*outgoing) {
 	for _, og := range stale {
 		p.log().Error("a stored hs.init names another identity key than this service's: dropped; check the service's keys and secrets",
 			"alarm", "outgoing_identity_changed", "connection_id", og.ConnID, "purpose", string(og.Init.Purpose))
 		for _, j := range og.Issued {
 			p.denyJTI(j, p.now())
+		}
+		// Its hs.init, if still waiting, is not deposited later (as
+		// dropOutgoing; reconnect and rekey alike).
+		if og.InitEntry != "" {
+			p.dropOutbox(func(e *outboxEntry) bool { return e.ID == og.InitEntry })
 		}
 		p.markDirty(kindOutgoing, og.ID)
 	}

@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/tls"
@@ -421,8 +422,13 @@ func serve(args []string) error {
 			Type: ssmtypes.ParameterTypeString, Overwrite: aws.Bool(true)})
 		return err
 	}
-	if err := publishPin(ctx); err != nil {
-		return fmt.Errorf("publish TLS pin: %w", err)
+	// The table's identity key (GC #9109), before anything that reads the
+	// records, signs, sends, answers or publishes this keystore's TLS pin:
+	// under another key the service stays up, held (owner a, #10417).
+	if m, err := identityThenPin(ctx, records, keys.IK, publishPin); err != nil {
+		return err
+	} else if m != nil {
+		return runHeld(ctx, stop, cfg.Listen, tlsid.ServerConfig(cert), tbl, log, m)
 	}
 	// Published again every hour: a stack update that touches the
 	// parameter puts back its "unset", and the API's client would then
@@ -667,6 +673,111 @@ func serve(args []string) error {
 	return runErr
 }
 
+// identityHeld checks the table's identity key (peer.CheckIdentity, with
+// the approvals' audit log as evidence for a table from before the
+// record): a mismatch is returned for runHeld, any other failure as an
+// error.
+func identityHeld(ctx context.Context, records interface {
+	peer.Store
+	peer.Pager
+}, ik ed25519.PrivateKey) (*peer.IdentityMismatch, error) {
+	err := peer.CheckIdentity(ctx, records, ik, peer.ServiceIKIn(records, approval.KindAudit))
+	var m *peer.IdentityMismatch
+	if errors.As(err, &m) {
+		return m, nil
+	}
+	return nil, err
+}
+
+// identityThenPin is serve's first step on the table: the identity check
+// and, only when it passes, the TLS pin's first publication. A mismatch
+// is returned for runHeld with the pin untouched, so the application's
+// client keeps the right one.
+func identityThenPin(ctx context.Context, records interface {
+	peer.Store
+	peer.Pager
+}, ik ed25519.PrivateKey, publishPin func(context.Context) error) (*peer.IdentityMismatch, error) {
+	m, err := identityHeld(ctx, records, ik)
+	if err != nil || m != nil {
+		return m, err
+	}
+	if err := publishPin(ctx); err != nil {
+		return nil, fmt.Errorf("publish TLS pin: %w", err)
+	}
+	return nil, nil
+}
+
+// runHeld runs the service held by an identity-key mismatch (GC #9109;
+// owner a, #10417): the keystore and the records don't belong together,
+// so nothing reads the records, signs, sends or answers a member. It
+// raises the alarm once, keeps the heartbeat (a table restore must see the
+// service running), and serves heldHandler until it is stopped. /health
+// stays 200, so ECS doesn't replace the task in a loop: the alarm is the
+// signal. A start under the right key finds the table as it was.
+func runHeld(ctx context.Context, stop func(), listen string, tlsConfig *tls.Config, tbl *store.Table, log *slog.Logger, m *peer.IdentityMismatch) error {
+	log.Error("the service's identity key is not the one its table's records were made under: held, nothing runs until the right keys are back",
+		"alarm", "identity_key_mismatch", "from", m.From, "err", m.Error())
+	srv := &http.Server{
+		Addr:              listen,
+		Handler:           heldHandler(),
+		TLSConfig:         tlsConfig,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelWarn),
+	}
+	start, err := firstHeartbeat(ctx, tbl.Heartbeat, time.Now())
+	if err != nil {
+		return err
+	}
+	hbErr := make(chan error, 1)
+	go func() {
+		t := time.NewTicker(store.HeartbeatInterval)
+		defer t.Stop()
+		if err := heartbeat(ctx, tbl.Heartbeat, start, t.C, log); err != nil {
+			hbErr <- err
+		}
+	}()
+	srvErr := make(chan error, 1)
+	go func() { srvErr <- srv.ListenAndServeTLS("", "") }()
+	log.Info("serving held", "version", version, "listen", listen)
+	var runErr error
+	select {
+	case <-ctx.Done():
+	case err := <-srvErr:
+		runErr = fmt.Errorf("api: %w", err)
+	case runErr = <-hbErr:
+	}
+	stop()
+	sctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(sctx)
+	hctx, hcancel := context.WithTimeout(context.Background(), heartbeatWriteTimeout)
+	defer hcancel()
+	if err := tbl.ClearHeartbeat(hctx); err != nil {
+		log.Warn("clear heartbeat", "err", err.Error())
+	}
+	log.Info("stopped")
+	return runErr
+}
+
+// heldHandler is the API while held (runHeld): GET /health answers 200
+// {"status":"held"}, and every other request 503 identity_key_mismatch.
+func heldHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		if r.Method == http.MethodGet && r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"held"}` + "\n"))
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"identity_key_mismatch"}` + "\n"))
+	})
+}
+
 // The heartbeat's limits. A restore takes the service for stopped once
 // its last heartbeat is store.HeartbeatStale (2 minutes) old, so the
 // daemon must have stopped by then. It stops once heartbeatStopAfter has
@@ -864,6 +975,11 @@ func admin(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// Nothing is written into a table whose identity key isn't this
+	// keystore's (GC #9109): the daemon holds on it, and so does this.
+	if err := identityVerified(ctx, kc, cfg.KMSKeyID, tbl.Blobs(), records); err != nil {
+		return err
+	}
 	if *conn != "" {
 		return confirmBootstrap(ctx, records, *conn, *fprint, out)
 	}
@@ -954,6 +1070,29 @@ func confirmBootstrap(ctx context.Context, st peer.Store, conn, fp string, out i
 	}
 	fmt.Fprintln(out, "admin bootstrap confirmed: the running service makes the connection the first admin within seconds")
 	return nil
+}
+
+// identityVerified checks, without writing, that the keystore's identity
+// key is the table's (peer.VerifyIdentity, the audit log as evidence),
+// for a command that writes the table outside the daemon.
+func identityVerified(ctx context.Context, kc keystore.KMS, keyID string, blobs keystore.Blobs, records interface {
+	peer.Store
+	peer.Pager
+}) error {
+	secrets, err := keystore.LoadOrCreate(ctx, kc, keyID, blobs, keystore.SecretsName,
+		func() (*keystore.Secrets, error) { return nil, errNoSecrets })
+	if err != nil {
+		return fmt.Errorf("keystore: %w", err)
+	}
+	keys, err := peer.KeysFromSeeds(secrets.Peer)
+	if err != nil {
+		return err
+	}
+	err = peer.VerifyIdentity(ctx, records, keys.IK, peer.ServiceIKIn(records, approval.KindAudit))
+	if errors.Is(err, peer.ErrIdentityMismatch) {
+		return fmt.Errorf("refused: the service is held (README \"identity_key_mismatch\"): %w", err)
+	}
+	return err
 }
 
 // armBootstrap computes the email's index key under the service vault's
