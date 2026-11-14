@@ -693,8 +693,15 @@ func (p *Peer) flush(ctx context.Context) error {
 			p.versions[k]++
 		}
 	}
+	counted := false
+	for k := range p.dirty {
+		counted = counted || k.kind == kindOutbox || k.kind == kindSend
+	}
 	clear(p.dirty)
 	p.extra = p.extra[:0]
+	if counted {
+		p.viewSends()
+	}
 	return nil
 }
 
@@ -889,6 +896,13 @@ func (p *Peer) load(ctx context.Context) error {
 			ch.Entry, ch.Undelivered, ch.Unsent = e.ID, false, false
 			p.markDirty(kindAuth, ch.ID)
 		}
+		// A flush split across writes (outbox before send) may have stored a
+		// counted message without its send's new tally: the tally is made
+		// again, so the message is counted from here (what left the outbox
+		// before is lost from the counts: short, never double).
+		if e.Ref != "" && p.sends[e.Ref] == nil {
+			p.tally(e.Ref, tallyUntil(e.NotAfter, p.now()))
+		}
 	}
 	sort.Slice(p.events, func(i, j int) bool { return p.events[i].Seq < p.events[j].Seq })
 	for _, e := range p.outbox {
@@ -927,6 +941,7 @@ func (p *Peer) load(ctx context.Context) error {
 		}
 	}
 
+	p.viewSends()
 	return nil
 }
 

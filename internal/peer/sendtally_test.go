@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 )
@@ -87,5 +88,105 @@ func TestSendCounts(t *testing.T) {
 	f.start()
 	if got := counts(""); got != "[]" {
 		t.Fatalf("past the retention, after a restart: %s", got)
+	}
+}
+
+// A message whose send's tally a split flush lost (the outbox written, the
+// tally not) is counted again from the next start.
+func TestSendTallyRecreatedAtLoad(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	c := f.connect(m, "")
+	ctx := context.Background()
+	f.beginReconnectNow(c)
+	if _, err := f.p.SendMessageRef(ctx, c, "vote.proposal", json.RawMessage(`{}`), f.clk.Now().Add(time.Hour), "p1/proposal/p1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.Apply(ctx, []Change{{Kind: kindSend, ID: "p1/proposal/p1"}}); err != nil {
+		t.Fatal(err)
+	}
+	f.start()
+	if got := fmt.Sprint(f.p.SendCounts("")); got != "[{p1/proposal/p1 0 1 0}]" {
+		t.Fatalf("after the start: %s", got)
+	}
+	f.pump()
+	if got := fmt.Sprint(f.p.SendCounts("")); got != "[{p1/proposal/p1 1 0 0}]" {
+		t.Fatalf("after the confirmation: %s", got)
+	}
+}
+
+// SendCounts doesn't wait for the peer's lock, which a drain holds while
+// it calls the relay.
+func TestSendCountsWithoutLock(t *testing.T) {
+	f := newFixture(t)
+	c := f.connect(f.member(10), "")
+	if _, err := f.p.SendMessageRef(context.Background(), c, "vote.proposal", json.RawMessage(`{}`), f.clk.Now().Add(time.Hour), "p1/proposal/p1"); err != nil {
+		t.Fatal(err)
+	}
+	f.p.mu.Lock()
+	defer f.p.mu.Unlock()
+	done := make(chan string, 1)
+	go func() { done <- fmt.Sprint(f.p.SendCounts("p1/")) }()
+	select {
+	case got := <-done:
+		if got != "[{p1/proposal/p1 1 0 0}]" {
+			t.Fatal(got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("SendCounts waits for the peer's lock")
+	}
+}
+
+// A counted message the key change's re-sealing drops (tried, past the
+// dedupe window) is counted dropped.
+func TestSendCountsResealDrop(t *testing.T) {
+	f := newFixture(t)
+	cid := f.connect(f.member(10), "")
+	c := f.p.conns[cid]
+	f.failDeposit = func(string, string) error { return errUnavailable }
+	far := f.clk.Now().Add(DedupeRetention + time.Hour)
+	if _, err := f.p.SendMessageRef(context.Background(), cid, "vote.closed", json.RawMessage(`{}`), far, "p2/closed/p2"); err != nil {
+		t.Fatal(err)
+	}
+	f.p.mu.Lock()
+	for _, e := range f.p.outbox {
+		e.Tried = true
+	}
+	f.p.resealAtKeyChange(c, c.kr.Current(), f.clk.Now().Add(DedupeRetention))
+	f.p.mu.Unlock()
+	if err := f.p.flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(f.p.SendCounts("")); got != "[{p2/closed/p2 0 0 1}]" {
+		t.Fatalf("%s", got)
+	}
+}
+
+// A second message queued for a send, with the same notAfter (its tally
+// not written again), is counted as it is queued.
+func TestSendCountsQueuedSameNotAfter(t *testing.T) {
+	f := newFixture(t)
+	c := f.connect(f.member(10), "")
+	f.beginReconnectNow(c)
+	until := f.clk.Now().Add(time.Hour)
+	for i, want := range []string{"[{p1/proposal/p1 0 1 0}]", "[{p1/proposal/p1 0 2 0}]"} {
+		if _, err := f.p.SendMessageRef(context.Background(), c, "vote.proposal", json.RawMessage(`{}`), until, "p1/proposal/p1"); err != nil {
+			t.Fatal(err)
+		}
+		if got := fmt.Sprint(f.p.SendCounts("")); got != want {
+			t.Fatalf("message %d: %s", i+1, got)
+		}
+	}
+}
+
+// Tallies are stored (Kinds), and written after the outbox in a flush
+// split across writes (records go by kind): the counts fall short after a
+// crash between the two, never double.
+func TestSendKindOrder(t *testing.T) {
+	if !slices.Contains(Kinds(), kindSend) {
+		t.Fatal("kindSend is not in Kinds")
+	}
+	if kindOutbox >= kindSend {
+		t.Fatalf("%q sorts before %q", kindSend, kindOutbox)
 	}
 }
