@@ -67,6 +67,30 @@ never answers challenges and never rotates its identity.
   The member's `connection.approved` activates the connection; the
   member's vault then gets `profile.update` with the service's names and
   identity key (§10.8), and the application `connection.added`.
+- **Contract** (§10.8, 0.90.10; VAULT-SERVICE-CONTRACT §1). Every
+  `profile.update` the service sends carries `contract: "1.0"`, the
+  contract version this release implements. The service keeps the value
+  it last sent to each connection. Under a release whose value differs
+  (or that never sent one), each connection gets an update with its next
+  `version` at the first housekeeping that finds it active and able to
+  send: at the start, or later (after a reconnect, a demoted epoch, a
+  wait for a token, or while its outbox is full). That version is one more
+  than the last sent and at least the clock's Unix seconds, so one sent
+  after a rollback or a restore set the record back is still higher than
+  any the member's vault applied, unless the clock was ahead when an
+  earlier update, since lost from the record, was sent. Once queued it
+  counts as sent: if the outbox later gives it up (the window passed, the
+  connection ended or went stale), it is not sent again until the value
+  changes, as with the update at activation. That is enough while
+  `contract` is informational; a later contract version that holds
+  connections by it must revisit it.
+  From a member's `profile.update` it keeps the contract claimed
+  (a string of the §10.8 form; any other value counts as none and is
+  audited `profile_contract_malformed`, and the update is still applied).
+  The value is informational: nothing selects behavior or holds a
+  connection by it. `vote` and `approval_document` are judged from the
+  last `profile.update` applied only, never from a message's inner
+  `features`.
 - **Sessions** use the vault-to-vault policy (24 h or 10,000 messages,
   §6.5). The peer answers the member vault's rekeys and starts its own
   when its epoch reaches the limit; crossing rekeys are settled by `th1`.
