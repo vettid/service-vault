@@ -17,25 +17,32 @@ import (
 	"github.com/vettid/service-vault/internal/sealstore"
 )
 
-// While held, the alarm is raised at every tick and stops with the
-// service; the interval keeps every 5-minute alarm period raised.
+// While held, the alarm is raised again at every interval, and nothing
+// raises it once the service has stopped (the channel runHeld waits on).
 func TestHeldAlarmRepeats(t *testing.T) {
-	if heldAlarmEvery > 150*time.Second {
-		t.Fatalf("heldAlarmEvery %s leaves a 5-minute period without a line", heldAlarmEvery)
+	if heldAlarmEvery > 2*time.Minute {
+		t.Fatalf("heldAlarmEvery %s: fewer than two lines in some 5-minute alarm period", heldAlarmEvery)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	tick := make(chan time.Time)
-	raised := make(chan struct{}, 10)
-	done := make(chan struct{})
-	go func() { heldAlarm(ctx, tick, func() { raised <- struct{}{} }); close(done) }()
+	raised := make(chan struct{}, 100)
+	done := startHeldAlarm(ctx, 5*time.Millisecond, func() { raised <- struct{}{} })
 	for i := 0; i < 3; i++ {
-		tick <- time.Now()
-		<-raised
+		select {
+		case <-raised:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("raised %d times, want it again", i)
+		}
 	}
 	cancel()
-	<-done
-	if len(raised) != 0 {
-		t.Fatalf("%d extra alarms", len(raised))
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("still raising after the stop")
+	}
+	n := len(raised)
+	time.Sleep(30 * time.Millisecond)
+	if len(raised) != n {
+		t.Fatal("raised after it stopped")
 	}
 }
 

@@ -721,11 +721,7 @@ func runHeld(ctx context.Context, stop func(), listen string, tlsConfig *tls.Con
 			"alarm", "identity_key_mismatch", "from", m.From, "err", m.Error())
 	}
 	raise()
-	go func() {
-		t := time.NewTicker(heldAlarmEvery)
-		defer t.Stop()
-		heldAlarm(ctx, t.C, raise)
-	}()
+	alarmDone := startHeldAlarm(ctx, heldAlarmEvery, raise)
 	srv := &http.Server{
 		Addr:              listen,
 		Handler:           heldHandler(),
@@ -759,6 +755,7 @@ func runHeld(ctx context.Context, stop func(), listen string, tlsConfig *tls.Con
 	case runErr = <-hbErr:
 	}
 	stop()
+	<-alarmDone // nothing raises it after "stopped"
 	sctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(sctx)
@@ -771,22 +768,35 @@ func runHeld(ctx context.Context, stop func(), listen string, tlsConfig *tls.Con
 	return runErr
 }
 
-// heldAlarmEvery is how often runHeld raises its alarm again. The stack's
-// alarm sums the alarm lines over 5 minutes and treats a period without
-// one as OK, so a line every 2 minutes puts at least two in every period
-// and keeps it raised while held, ticker jitter included.
-const heldAlarmEvery = 2 * time.Minute
+// heldAlarmEvery is how often runHeld raises its alarm again (owner a,
+// #10446). The stack's alarm sums the alarm lines over 5 minutes and
+// treats a period without one as OK; a line every minute puts about five
+// in every period, so it stays raised while held, a late evaluation of a
+// period's start included. CloudWatch notifies on the change to ALARM
+// only, so this sends one notification per hold.
+const heldAlarmEvery = time.Minute
 
-// heldAlarm raises the alarm at each tick until ctx ends.
-func heldAlarm(ctx context.Context, tick <-chan time.Time, raise func()) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-tick:
-			raise()
+// startHeldAlarm raises the alarm every interval until ctx ends; the
+// channel closes once it has stopped.
+func startHeldAlarm(ctx context.Context, every time.Duration, raise func()) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if ctx.Err() != nil {
+					return
+				}
+				raise()
+			}
 		}
-	}
+	}()
+	return done
 }
 
 // heldHandler is the API while held (runHeld): GET /health answers 200
