@@ -215,7 +215,11 @@ destination.
   release without the record, then a record-key rotation, which leaves it
   sealed under a retired key. One that opens but doesn't decode (a
   connection, a stored handshake, an event or an audit entry) makes the
-  start fail instead, as loading it would.
+  start fail instead, as loading it would. So does a start that also
+  rotates the record key (`SV_RECORD_KEY_VERSION` raised, or
+  `SV_RECORD_SEAL_MIGRATE=1`) over a record it can't open: that
+  rotation reseals every record before the identity check runs, and
+  fails on it. Start once without the rotation to see the hold.
 
   The service stays up, held: it keeps the heartbeat and answers
   `/health` 200, but every other request gets 503

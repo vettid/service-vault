@@ -110,6 +110,10 @@ func TestIdentityOldTable(t *testing.T) {
 	f.p.Step(context.Background(), 0)
 	f.failDeposit = nil
 	drop()
+	var mm *IdentityMismatch
+	if err := CheckIdentity(context.Background(), f.store, wrongKey); !errors.As(err, &mm) || mm.From != "state" || !bytes.Equal(mm.Recorded, f.keys.IKPublic()) {
+		t.Fatalf("the stray hs.init's key not named: %v", err)
+	}
 	heldStart(t, f, wrongKey)
 	if got := recordedIdentity(t, f.store); got != nil {
 		t.Fatalf("written while the state names another key: %x", got)

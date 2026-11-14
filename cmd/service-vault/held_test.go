@@ -5,11 +5,13 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/vettid/service-vault/internal/approval"
+	"github.com/vettid/service-vault/internal/keystore"
 	"github.com/vettid/service-vault/internal/peer"
 	"github.com/vettid/service-vault/internal/sealstore"
 )
@@ -95,6 +97,42 @@ func TestIdentityUnreadableSealed(t *testing.T) {
 				t.Fatalf("v1 retired: %+v %v", m, err)
 			}
 		})
+	}
+}
+
+// admin bootstrap's check (identityVerified): a table without the record
+// passes and stays without it; one whose record names the keystore's key
+// passes; one that names another key is refused.
+func TestIdentityVerifiedForAdmin(t *testing.T) {
+	ctx := context.Background()
+	blobs, st := &memBlobs{m: map[string][]byte{}}, peer.NewMemStore()
+	secrets, err := keystore.LoadOrCreate(ctx, plainKMS{}, "k", blobs, keystore.SecretsName, keystore.NewSecrets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := peer.KeysFromSeeds(secrets.Peer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := func(ik ed25519.PublicKey) {
+		b, _ := json.Marshal(map[string]any{"ik": ik})
+		if err := st.Apply(ctx, []peer.Change{{Kind: "identity", ID: "ik", Data: b}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := identityVerified(ctx, plainKMS{}, "k", blobs, st); err != nil {
+		t.Fatalf("no record: %v", err)
+	}
+	if _, ok, _ := st.Get(ctx, "identity", "ik"); ok {
+		t.Fatal("the record was written by a tool")
+	}
+	record(keys.IKPublic())
+	if err := identityVerified(ctx, plainKMS{}, "k", blobs, st); err != nil {
+		t.Fatalf("the keystore's key: %v", err)
+	}
+	record(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{2}, 32)).Public().(ed25519.PublicKey))
+	if err := identityVerified(ctx, plainKMS{}, "k", blobs, st); !errors.Is(err, peer.ErrIdentityMismatch) || !strings.Contains(err.Error(), "refused") {
+		t.Fatalf("another key: %v", err)
 	}
 }
 

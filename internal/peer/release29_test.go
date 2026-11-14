@@ -461,6 +461,17 @@ func TestStaleReconnectDroppedAtStart(t *testing.T) {
 			if !c.Reconnecting || c.State != StateActive || c.ReconnectTries != tc.want || len(f.p.outgoing) != 1 {
 				t.Fatalf("reconnecting %v, state %s, tries %d, %d outgoing", c.Reconnecting, c.State, c.ReconnectTries, len(f.p.outgoing))
 			}
+			if tc.want < MaxReconnectTries {
+				return
+			}
+			// The last try, unanswered (the member pinned the other key):
+			// at its end the reconnect fails and the connection is stale.
+			f.clk.Advance(ReconnectTimeout + time.Minute)
+			f.tick()
+			c = f.p.conns[cid]
+			if c.Reconnecting || c.State != StateStale || !strings.Contains(f.logs.String(), "alarm=reconnect_failed") {
+				t.Fatalf("after the last try: reconnecting %v, state %s", c.Reconnecting, c.State)
+			}
 		})
 	}
 }

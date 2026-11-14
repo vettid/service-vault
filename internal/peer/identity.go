@@ -80,18 +80,22 @@ func keyText(k ed25519.PublicKey) string {
 // the caller's evidence finds, such as the approvals' audit log) names
 // another key, that is a mismatch and nothing is written; otherwise the
 // record is written with the configured key. A record the check needs
-// that can't be opened (ErrUnreadable) holds as From "unreadable"; one
-// that opens but doesn't decode fails the check with an error (the start
-// fails, as the load would). Nothing is written then. Nothing else is read
-// into memory or changed (a store may reseal what it reads, contents
-// unchanged).
+// that can't be opened (ErrUnreadable) holds as From "unreadable", and so
+// does an identity record that opens but doesn't decode. Any other record
+// the check reads that opens but doesn't decode fails the check with an
+// error (the start fails, as the load would). Nothing is written then.
+// Nothing else is read into memory or changed (a store may reseal what it
+// reads, contents unchanged).
 func CheckIdentity(ctx context.Context, st Store, ik ed25519.PrivateKey, evidence ...Evidence) error {
 	return checkIdentity(ctx, st, ik, true, evidence)
 }
 
 // VerifyIdentity is CheckIdentity without the write: a table without the
 // record and without evidence against the key is nil, and stays without
-// it. For tools that write the table outside the daemon.
+// it. For tools that write the table outside the daemon. In a table
+// without the record its reads may reseal records under an older record
+// key (contents unchanged), and such a reseal can fail with ErrConflict
+// when the daemon writes the same record meanwhile.
 func VerifyIdentity(ctx context.Context, st Store, ik ed25519.PrivateKey, evidence ...Evidence) error {
 	return checkIdentity(ctx, st, ik, false, evidence)
 }
