@@ -251,6 +251,46 @@ destination.
     previous release once under the right keys, which drops it
     (`outgoing_identity_changed`), then roll forward; or restore the
     table from a backup without it.
+- `relay_mailbox_lost`: the relay made the service's mailbox afresh: it
+  was deleted (the relay lost it, or someone holding the service's
+  relay key deleted it), seen at a start's registration, or while
+  running when a collect is answered `mailbox_unknown` and the service
+  registers it again at once. What
+  members deposited since the service's last collect is gone, with no
+  way to recover it here (relay-key rotation, GC #9442, is where it
+  would be). The relay now refuses every token the old mailbox issued,
+  and any minted in the next 241 seconds, so the service mints none
+  until then: a start waits that long before its reconnects and
+  housekeeping (the API refuses changes meanwhile, `ErrNotStarted`), and
+  while running, housekeeping pauses, a new invitation is refused and a
+  reconnect is held, not failed. A registration while running that got
+  no answer is made again before the next collect (each one is cut
+  short after 5 seconds), with the same pause until it is answered.
+  Then it mints every active member's standing
+  and reconnect tokens again and sends them (`relay.token.issued`), in
+  steps that each store a group of members' tokens before marking them
+  done; a member reconnecting or with a full outbox gets them at a later
+  minute, and the owed re-mint survives a restart (a start that finds
+  it owed with no member done yet raises the alarm again). A rekey or
+  token refresh with a member waits until that member's tokens are
+  re-minted, since it could only answer on a refused one. Until then members'
+  deposits to the service fail, and a member whose vault is offline gets
+  the tokens when it next collects. Not re-minted: stale and suspended
+  connections (they get fresh tokens when they reconnect), connections
+  still being made and invitations from before the loss (those members
+  connect again from a new invitation). A table from before this alarm
+  with no connections can't tell a loss from a first registration, so it
+  raises nothing, though its invitations stop working. If the relay's
+  `max_token_lifetime` is now shorter, a member may keep its refused
+  token where its exp is later than the new one's, until it refreshes.
+  The alarm also fires when nothing was lost, whenever a registration got
+  no answer or a `5xx` and the next one a `200` (a timeout, a stop, a TLS
+  failure at a start), since that attempt may have made the mailbox
+  afresh unseen. Such a false alarm costs a 241-second delay (at a start,
+  before the service runs) and two messages to each member. A deleted mailbox may also
+  mean the relay key is exposed: look at the relay's logs, and consider
+  new keys and new invitations until the service can rotate its relay
+  key.
 - `outgoing_identity_changed`: at start, a stored handshake this
   service started (a rekey or a reconnect) names another identity key
   than the table's, although the table's identity record names the key

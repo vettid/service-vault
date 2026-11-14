@@ -582,3 +582,32 @@ func TestRepinCapAfterAdminsLeave(t *testing.T) {
 		t.Fatalf("applied=%v err=%v", applied, err)
 	}
 }
+
+// An admin.repin approved while the peer's start hasn't finished (a lost
+// relay mailbox's wait): RepinGov answers ErrNotStarted, which is not a
+// moved key. The answer fails, nothing is settled, and its redelivery
+// after the start applies the repin.
+func TestRepinWhilePeerNotStarted(t *testing.T) {
+	f := newFixture(t, 1, "c1", "c2")
+	f.moved("c1", keyB)
+	c := f.create(ActionAdminRepin, "", `{"connection_id":"c1"}`)
+	f.p.notStarted = true
+	e := f.answerEvent(f.p.last("c2"), "approve")
+	if _, err := f.m.Answer(context.Background(), e); !errors.Is(err, peer.ErrNotStarted) {
+		t.Fatalf("answer before the start: %v", err)
+	}
+	if s := f.status(c.ID); s.Status != StatusPending || !bytes.Equal(f.govKey("c1"), keyA) {
+		t.Fatalf("settled before the start: %+v", s)
+	}
+	f.p.notStarted = false
+	f.deliver(e)
+	s := f.status(c.ID)
+	if s.Status != StatusApproved || s.Applied == nil || !*s.Applied || !bytes.Equal(f.govKey("c1"), keyB) {
+		t.Fatalf("%+v gov %x", s, f.govKey("c1"))
+	}
+	for _, a := range f.audit() {
+		if a.Type == AuditGovKeyRefused {
+			t.Fatalf("refused: %+v", a)
+		}
+	}
+}

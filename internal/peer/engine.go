@@ -60,6 +60,9 @@ type Config struct {
 	Log      *slog.Logger
 	// PollWait is the collect long-poll wait (default 25 s; at most 25 s).
 	PollWait time.Duration
+	// Sleep waits d, or until ctx ends (false then); the default sleeps.
+	// Start waits out a lost mailbox's FreshMailboxWait with it.
+	Sleep func(ctx context.Context, d time.Duration) bool
 	// AfterRestore is set when the store was restored from a backup: the
 	// first Start reconnects every connection (reconnect.go) and, once
 	// the reconnects are stored and sent, calls it (to clear the marker).
@@ -135,9 +138,16 @@ type Peer struct {
 	instance   string
 	seq        uint64
 	rates      map[string]*rateWindow
+	// remintAt is a lost mailbox's re-mint owed (mailbox.go), zero when
+	// none; registerOwed, a registration while running that got no answer.
+	remintAt     time.Time
+	registerOwed bool
 	// outboxFull marks the connections whose contract update waits on a
 	// full outbox, its outbox_full already logged (sendContract).
 	outboxFull map[string]bool
+	// refreshOwed marks the connections whose forced token refresh
+	// (token_expired) waited out a lost mailbox's re-mint (refreshHeld).
+	refreshOwed map[string]bool
 
 	dirty    map[key]struct{}
 	extra    []Change
@@ -162,6 +172,9 @@ func New(cfg Config) (*Peer, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
+	if cfg.Sleep == nil {
+		cfg.Sleep = sleep
+	}
 	if cfg.PollWait <= 0 || cfg.PollWait > 25*time.Second {
 		cfg.PollWait = 25 * time.Second
 	}
@@ -172,7 +185,7 @@ func New(cfg Config) (*Peer, error) {
 	return &Peer{cfg: cfg, instance: hex.EncodeToString(inst),
 		conns: map[string]*Connection{}, invites: map[string]*InviteRecord{}, awaiting: map[string]*awaiting{},
 		requests: map[string]*request{}, outgoing: map[string]*outgoing{}, issued: map[string]*IssuedToken{},
-		challenges: map[string]*challenge{}, rates: map[string]*rateWindow{}, outboxFull: map[string]bool{},
+		challenges: map[string]*challenge{}, rates: map[string]*rateWindow{}, outboxFull: map[string]bool{}, refreshOwed: map[string]bool{},
 		dirty: map[key]struct{}{}, versions: map[key]uint64{}, evWake: make(chan struct{}, 1)}, nil
 }
 
@@ -200,9 +213,9 @@ func (p *Peer) audit(event, connID string) {
 	p.log().Warn("drop", "reason", event, "connection_id", connID)
 }
 
-// Start registers the mailbox (RELAY-PROTOCOL §6.1), loads the state and
-// runs the start-up housekeeping (§7.2 "On unlock" steps 1–2) and the
-// outbox.
+// Start loads the state, registers the mailbox (RELAY-PROTOCOL §6.1;
+// mailbox.go tells a lost one) and runs the start-up housekeeping (§7.2
+// "On unlock" steps 1–2) and the outbox.
 //
 // Before anything else (the relay included) it checks the configured
 // identity key against the table's (CheckIdentity): on a mismatch it
@@ -216,21 +229,40 @@ func (p *Peer) Start(ctx context.Context) error {
 			return err
 		}
 	}
-	reg, err := p.cfg.Relay.Register(ctx)
-	if err != nil {
-		return fmt.Errorf("peer: register: %w", err)
-	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.limits = reg.Limits
 	p.drained = false // B waits for this start's first short collect (RELEASE-29 §2)
-	// An earlier process, or this one before a restart, may have left
-	// messages leased.
-	p.leasedUntil(p.now())
 	if !p.started {
 		if err := p.load(ctx); err != nil {
 			return err
 		}
+	}
+	// After the load, so that a lost mailbox is told from a first
+	// registration (mailbox.go, GC #10525).
+	if err := p.register(ctx); err != nil {
+		return err
+	}
+	p.registerOwed = false
+	// A lost mailbox: nothing that mints a token (the restore's
+	// reconnects, rekeys, answers) runs before the relay accepts tokens
+	// for it again. The lock is let go meanwhile; calls that would mint
+	// are refused (errMintWait, ErrNotStarted).
+	if p.mintWait(p.now()) {
+		d := p.remintAt.Sub(p.now())
+		p.mu.Unlock()
+		ok := p.cfg.Sleep(ctx, d)
+		p.mu.Lock()
+		if !ok {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return context.Canceled
+		}
+	}
+	// An earlier process, or this one before a restart, may have left
+	// messages leased: judged with the relay's limits, now known.
+	p.leasedUntil(p.now())
+	if !p.started {
 		if err := p.endAllOnce(ctx, p.now()); err != nil {
 			return err
 		}
@@ -254,6 +286,9 @@ func (p *Peer) Start(ctx context.Context) error {
 	p.housekeeping(p.now())
 	p.tickPendings(p.now())
 	if err := p.flush(ctx); err != nil {
+		return err
+	}
+	if err := p.remintLost(ctx, p.now()); err != nil {
 		return err
 	}
 	p.drainOutbox(ctx)
@@ -355,6 +390,12 @@ func (p *Peer) Tick(ctx context.Context) error {
 	defer p.mu.Unlock()
 	p.housekeeping(p.now())
 	p.tickPendings(p.now())
+	if err := p.flush(ctx); err != nil {
+		return err
+	}
+	if err := p.remintLost(ctx, p.now()); err != nil {
+		return err
+	}
 	return p.flushAndDrain(ctx)
 }
 
@@ -376,6 +417,18 @@ const MaxBatch = 32
 // the outbox is drained after the batch. It returns the number of
 // messages collected.
 func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
+	p.mu.Lock()
+	if p.registerOwed {
+		// A registration after a lost mailbox got no answer: it may have
+		// made the mailbox afresh, so it is made again (mailbox.go) until
+		// one is recorded, whatever the collects meanwhile say.
+		if err := p.register(ctx); err != nil {
+			p.mu.Unlock()
+			return 0, err
+		}
+		p.registerOwed = false
+	}
+	p.mu.Unlock()
 	started := p.now()
 	msgs, err := p.cfg.Relay.Collect(ctx, wait, MaxBatch)
 	p.mu.Lock()
@@ -383,6 +436,16 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 	if err != nil {
 		p.leasedUntil(p.now()) // the relay may have leased a batch we never saw
 		p.drained = false      // a failed collect clears the latch (RELEASE-29 §2)
+		var re *relayclient.Error
+		if errors.As(err, &re) && re.Code == codeMailboxUnknown {
+			// The mailbox was lost while running: register it again here,
+			// which raises relay_mailbox_lost and owes the re-mint
+			// (mailbox.go), rather than collecting from nothing.
+			if rerr := p.register(ctx); rerr != nil {
+				p.registerOwed = true
+				return 0, rerr
+			}
+		}
 		return 0, err
 	}
 	if len(msgs) > 0 {

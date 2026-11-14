@@ -1523,7 +1523,8 @@ func (m *Manager) settle(ctx context.Context, b *batch, r *record, status, reaso
 // applyAdminSet changes the admin set for an approved admin_set.*
 // action, if it still applies: an added connection must still be active
 // and not an admin; a removed one must still be an admin, and the set
-// never becomes empty this way.
+// never becomes empty this way. A peer whose start hasn't finished
+// (peer.ErrNotStarted) is an error, retried, not a moved key.
 func (m *Manager) applyAdminSet(ctx context.Context, b *batch, r *record, set []string) (bool, error) {
 	// Defence in depth: whatever settled the approval, the set is never
 	// changed on an approval signed with a changed key, or one that does
@@ -1543,7 +1544,7 @@ func (m *Manager) applyAdminSet(ctx context.Context, b *batch, r *record, set []
 		if err != nil || key == nil || !slices.Contains(set, target) || !m.active(target) {
 			return false, nil
 		}
-		if ok, err := m.Peer.RepinGov(ctx, target, key); errors.Is(err, peer.ErrNotFound) || err == nil && !ok {
+		if ok, err := m.Peer.RepinGov(ctx, target, key); !errors.Is(err, peer.ErrNotStarted) && errors.Is(err, peer.ErrNotFound) || err == nil && !ok {
 			return false, b.audit(&AuditEntry{Type: AuditGovKeyRefused, ApprovalID: r.ID, ConnectionID: target, Reason: ReasonAuthKeyMoved})
 		} else if err != nil {
 			return false, err
@@ -1564,7 +1565,7 @@ func (m *Manager) applyAdminSet(ctx context.Context, b *batch, r *record, set []
 		if len(r.AuthKey) == 0 {
 			return false, nil
 		}
-		if ok, err := m.Peer.RepinGov(ctx, target, r.AuthKey); errors.Is(err, peer.ErrNotFound) || err == nil && !ok {
+		if ok, err := m.Peer.RepinGov(ctx, target, r.AuthKey); !errors.Is(err, peer.ErrNotStarted) && errors.Is(err, peer.ErrNotFound) || err == nil && !ok {
 			return false, b.audit(&AuditEntry{Type: AuditGovKeyRefused, ApprovalID: r.ID, ConnectionID: target, Reason: ReasonAuthKeyMoved})
 		} else if err != nil {
 			return false, err

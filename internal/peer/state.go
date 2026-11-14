@@ -38,7 +38,7 @@ const (
 // must touch them all (internal/sealstore).
 func Kinds() []string {
 	return []string{kindConn, kindInvite, kindAwait, kindRequest, kindOutgoing, kindToken, kindOutbox, kindAuth, kindEvent,
-		kindMsg, kindInner, kindResp, kindLease, kindUnacked, kindOnce, kindIdentity}
+		kindMsg, kindInner, kindResp, kindLease, kindUnacked, kindOnce, kindIdentity, kindRelayReg}
 }
 
 // Retention (VAULT-MESSAGING §8.2, §6.4).
@@ -107,6 +107,9 @@ type Connection struct {
 	// version 1 at activation.
 	SentProfileVersion uint64 `json:"sent_profile_version,omitempty"`
 	SentContract       string `json:"sent_contract,omitempty"`
+	// MailboxRemint is the lost-mailbox re-mint this connection's tokens
+	// were minted again for (mailbox.go, relayReg.RemintAfter).
+	MailboxRemint time.Time `json:"mailbox_remint,omitzero"`
 
 	Standing  HeldToken `json:"standing"`
 	Reconnect HeldToken `json:"reconnect"`

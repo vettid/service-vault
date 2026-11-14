@@ -422,6 +422,9 @@ var ErrOutboxFull = errors.New("peer: outbox full")
 func (p *Peer) Remove(ctx context.Context, connID string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if !p.started {
+		return ErrNotStarted
+	}
 	c := p.conns[connID]
 	if c == nil {
 		return ErrNotFound
@@ -464,14 +467,23 @@ func (p *Peer) Connection(id string) (ConnectionInfo, bool) {
 		GovKey: append([]byte(nil), c.GovKey...), AuthKeyChangedAt: c.AuthKeyChangedAt}, true
 }
 
+// errPinNotStarted is PinGov's and RepinGov's answer before the peer has
+// started: ErrNotFound as before (their callers take it for a peer not
+// yet loaded), and ErrNotStarted.
+var errPinNotStarted = fmt.Errorf("%w (%w)", ErrNotStarted, ErrNotFound)
+
 // PinGov pins the connection's governance key: to key, or to its
 // credential key as it is now when key is empty. With onlyIfEmpty it does
 // so only when none is pinned. It reports whether it pinned, and
 // ErrNotFound for a connection it does not know (the peer may not have
-// loaded its state yet).
+// loaded its state yet). Before the peer has started it pins nothing, and
+// answers an error that is both ErrNotStarted and ErrNotFound.
 func (p *Peer) PinGov(ctx context.Context, connID string, key []byte, onlyIfEmpty bool) (bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if !p.started {
+		return false, errPinNotStarted
+	}
 	c := p.conns[connID]
 	if c == nil {
 		return false, ErrNotFound
@@ -489,10 +501,14 @@ func (p *Peer) PinGov(ctx context.Context, connID string, key []byte, onlyIfEmpt
 
 // RepinGov moves the connection's governance key to key, but only while
 // key is still its credential key; it reports whether it did, and
-// ErrNotFound for a connection it does not know.
+// ErrNotFound for a connection it does not know. Before the peer has
+// started it moves nothing, and answers as PinGov does.
 func (p *Peer) RepinGov(ctx context.Context, connID string, key []byte) (bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if !p.started {
+		return false, errPinNotStarted
+	}
 	c := p.conns[connID]
 	if c == nil {
 		return false, ErrNotFound
@@ -509,6 +525,11 @@ func (p *Peer) RepinGov(ctx context.Context, connID string, key []byte) (bool, e
 // requests and challenges past their expiry, rekeys due, tokens to
 // re-mint or refresh (§6.4, §6.5, §7.2, §7.4).
 func (p *Peer) housekeeping(now time.Time) {
+	if p.mintWait(now) {
+		// A lost mailbox's wait (mailbox.go): rekeys, reconnects and
+		// re-mints would mint tokens the relay refuses. A few minutes late.
+		return
+	}
 	for id, inv := range p.invites {
 		if !inv.Used && !inv.Withdrew && !now.Before(inv.Exp) {
 			p.withdrawInvite(inv, now)
@@ -552,6 +573,12 @@ func (p *Peer) housekeeping(now time.Time) {
 		if c.State != StateActive {
 			continue
 		}
+		if p.remintOwed(c) {
+			// A lost mailbox's re-mint not yet done for this member: what
+			// would ask it for an answer (a rekey, a refresh) waits, since
+			// it could only answer on a token the relay refuses.
+			continue
+		}
 		if c.currentDemoted() {
 			p.tickDemoted(c, now) // §3.4.1 K5: only the reconnect goes
 			continue
@@ -571,7 +598,8 @@ func (p *Peer) housekeeping(now time.Time) {
 			c.RefreshID = "" // unanswered: ask again
 			p.markDirty(kindConn, c.ID)
 		}
-		p.refreshHeld(c, now, false)
+		p.refreshHeld(c, now, p.refreshOwed[c.ID])
+		delete(p.refreshOwed, c.ID)
 	}
 	p.remintIssued(now)
 	p.pruneIssued(now)

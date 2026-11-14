@@ -62,8 +62,19 @@ type fixture struct {
 	failDeposit func(mailbox, token string) error
 	// failCollect, when set, is the error of the service's collects.
 	failCollect error
-	revokes     map[string]int
-	logs        lockedBuffer
+	// failRegister, when set, is the error of the service's registrations;
+	// regDeadline is the time left on the last registration's context
+	// (zero: none).
+	failRegister error
+	regDeadline  time.Duration
+	// slept is how long the service's starts waited (Config.Sleep);
+	// stopSleep makes the next wait end as a cancelled context does.
+	slept     time.Duration
+	stopSleep bool
+	// storeWrap, when set, is the next starts' store (wrapping f.store).
+	storeWrap Store
+	revokes   map[string]int
+	logs      lockedBuffer
 }
 
 // lockedBuffer collects the service's log lines.
@@ -98,6 +109,17 @@ func (r testRelay) Deposit(ctx context.Context, mailboxID, token string, payload
 		}
 	}
 	return r.View.Deposit(ctx, mailboxID, token, payload)
+}
+
+func (r testRelay) Register(ctx context.Context) (relayclient.Registration, error) {
+	r.f.regDeadline = 0
+	if d, ok := ctx.Deadline(); ok {
+		r.f.regDeadline = time.Until(d)
+	}
+	if r.f.failRegister != nil {
+		return relayclient.Registration{}, r.f.failRegister
+	}
+	return r.View.Register(ctx)
 }
 
 func (r testRelay) Collect(ctx context.Context, wait time.Duration, max int) ([]relayclient.Message, error) {
@@ -137,8 +159,20 @@ func (f *fixture) start() {
 // failed to start).
 func (f *fixture) startErr() error {
 	f.t.Helper()
-	p, err := New(Config{Log: slog.New(slog.NewTextHandler(&f.logs, nil)), Keys: f.keys, Relay: testRelay{f.sv, f}, RelayURL: peertest.RelayURL, Store: f.store, Events: f.ev, Now: f.clk.Now,
-		Profile: Profile{FirstName: "VettID", LastName: "Member Service"}, AfterRestore: f.afterRestore, Votes: f.votes, EndAllConnections: f.endAll})
+	var st Store = f.store
+	if f.storeWrap != nil {
+		st = f.storeWrap
+	}
+	p, err := New(Config{Log: slog.New(slog.NewTextHandler(&f.logs, nil)), Keys: f.keys, Relay: testRelay{f.sv, f}, RelayURL: peertest.RelayURL, Store: st, Events: f.ev, Now: f.clk.Now,
+		Profile: Profile{FirstName: "VettID", LastName: "Member Service"}, AfterRestore: f.afterRestore, Votes: f.votes, EndAllConnections: f.endAll,
+		Sleep: func(_ context.Context, d time.Duration) bool {
+			if f.stopSleep {
+				return false
+			}
+			f.slept += d
+			f.clk.Advance(d)
+			return true
+		}})
 	if err != nil {
 		f.t.Fatal(err)
 	}

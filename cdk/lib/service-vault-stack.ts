@@ -113,6 +113,8 @@ export const ALARMS = {
   identity_key_mismatch: 'The service\'s identity key is not the one its table\'s records were made under: the keystore and the records don\'t belong together (a wrong or partial restore, or another service\'s table). Nothing is sent, answered or changed until the right keys are back (README "identity_key_mismatch")',
   /** A stored outgoing hs.init names another identity key than the table's (internal/peer/state.go): dropped at start. */
   outgoing_identity_changed: 'A stored handshake names another identity key than the table\'s: it was dropped at start. The table holds records made under two keys (README "outgoing_identity_changed")',
+  /** The service's relay mailbox was deleted and made again empty (internal/peer/mailbox.go). */
+  relay_mailbox_lost: 'The service\'s relay mailbox was lost and made again empty: what members deposited since the last collect is gone, and every member\'s tokens are minted again (README "relay_mailbox_lost")',
   /** A reconnect after a restore could not complete (internal/peer/reconnect.go): the member must connect again. */
   reconnect_failed: 'A reconnect after a table restore failed: that member must connect again from a new invitation (README "Restoring the table")',
   /** A reconnect after a restore unanswered for a day (internal/peer/reconnect.go): the member's vault may be locked. */

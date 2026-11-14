@@ -3,6 +3,7 @@ package peer
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"github.com/vettid/service-vault/internal/peer/peertest"
 	"strings"
 	"testing"
@@ -131,10 +132,10 @@ func TestGovKeyBeforeAndAfterPeerLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := p.PinGov(ctx, cid, nil, true); ok || err != ErrNotFound {
+	if ok, err := p.PinGov(ctx, cid, nil, true); ok || !errors.Is(err, ErrNotFound) {
 		t.Fatalf("before the load: %v %v", ok, err)
 	}
-	if ok, err := p.RepinGov(ctx, cid, m.Cred.Public().(ed25519.PublicKey)); ok || err != ErrNotFound {
+	if ok, err := p.RepinGov(ctx, cid, m.Cred.Public().(ed25519.PublicKey)); ok || !errors.Is(err, ErrNotFound) {
 		t.Fatalf("re-pin before the load: %v %v", ok, err)
 	}
 	if err := p.Start(ctx); err != nil {

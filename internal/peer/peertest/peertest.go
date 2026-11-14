@@ -55,8 +55,21 @@ type World struct {
 	claims    map[string][]byte
 	denied    map[string]bool
 	usedOpen  map[string]bool
-	nextID    int
-	limits    relayclient.Limits
+	// tombs is when each deleted mailbox was deleted: a mailbox made again
+	// at that id refuses tokens issued before then plus 90 s
+	// (RELAY-PROTOCOL §6.10).
+	tombs  map[string]time.Time
+	nextID int
+	limits relayclient.Limits
+}
+
+// DeleteMailbox deletes a mailbox, as the relay losing it or its key's
+// holder deleting it would: its messages go, and it leaves a tombstone.
+func (w *World) DeleteMailbox(id string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	delete(w.mailboxes, id)
+	w.tombs[id] = w.clk.Now()
 }
 
 type mailbox struct {
@@ -75,7 +88,7 @@ func NewClock(t time.Time) *Clock { return &Clock{t: t} }
 // NewWorld returns an empty relay on clk.
 func NewWorld(clk *Clock) *World {
 	return &World{clk: clk, mailboxes: map[string]*mailbox{}, claims: map[string][]byte{}, denied: map[string]bool{},
-		usedOpen: map[string]bool{},
+		usedOpen: map[string]bool{}, tombs: map[string]time.Time{},
 		limits: relayclient.Limits{MaxTokenLifetimeSeconds: 365 * 24 * 3600, OpenTokenMaxLifetimeSeconds: 600,
 			ClaimTTLSeconds: 600}}
 }
@@ -141,16 +154,21 @@ func relayErr(status int, code string) error { return &relayclient.Error{Status:
 func (v *View) Register(context.Context) (relayclient.Registration, error) {
 	v.w.mu.Lock()
 	defer v.w.mu.Unlock()
+	created := false
 	if v.w.mailboxes[v.mb] == nil {
 		v.w.mailboxes[v.mb] = &mailbox{pk: v.c.PublicKey()}
+		created = true
 	}
-	return relayclient.Registration{MailboxID: v.mb, Limits: v.w.limits}, nil
+	return relayclient.Registration{MailboxID: v.mb, Limits: v.w.limits, Created: created}, nil
 }
 
 func (v *View) Collect(_ context.Context, _ time.Duration, max int) ([]relayclient.Message, error) {
 	v.w.mu.Lock()
 	defer v.w.mu.Unlock()
 	now := v.w.clk.Now()
+	if v.w.mailboxes[v.mb] == nil {
+		return nil, relayErr(404, "mailbox_unknown")
+	}
 	var out []relayclient.Message
 	for _, s := range v.w.mailboxes[v.mb].msgs {
 		if len(out) == max {
@@ -191,6 +209,9 @@ func (v *View) Deposit(_ context.Context, mailboxID, token string, payload []byt
 	}
 	if v.w.denied[cl.Jti] {
 		return "", relayErr(401, "token_revoked")
+	}
+	if t, ok := v.w.tombs[mailboxID]; ok && cl.Iat.Before(t.Add(90*time.Second)) {
+		return "", relayErr(401, "token_revoked") // issued before the mailbox was deleted (§5.3 step 6)
 	}
 	if !v.w.clk.Now().Before(cl.Exp) {
 		return "", relayErr(401, "token_expired")
