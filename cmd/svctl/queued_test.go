@@ -23,14 +23,14 @@ func TestRemindLineQueued(t *testing.T) {
 	}
 }
 
-// An admin whose queued challenge has gone is named once; one that left
-// the outbox undelivered (now in remind_needed) is not.
-func TestSentLine(t *testing.T) {
+// An admin whose queued challenge has left the outbox is named; one that
+// left it undelivered (now in remind_needed) is not.
+func TestUnqueuedLine(t *testing.T) {
 	st := &servicevault.Approval{ID: "a1", Status: servicevault.ApprovalStatusPending, Queued: []string{"c3"}, RemindNeeded: []string{"c2"}}
-	if got, want := sentLine([]string{"c1", "c2", "c3"}, st), "sent, no longer queued: c1\n"; got != want {
+	if got, want := unqueuedLine([]string{"c1", "c2", "c3"}, st), "no longer queued: c1\n"; got != want {
 		t.Fatalf("%q, want %q", got, want)
 	}
-	if got := sentLine(nil, st); got != "" {
+	if got := unqueuedLine(nil, st); got != "" {
 		t.Fatalf("nothing was queued: %q", got)
 	}
 }

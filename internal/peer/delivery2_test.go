@@ -176,7 +176,8 @@ func TestSplitFlushReconciledAtLoad(t *testing.T) {
 	if n := f.p.held(cid, f.clk.Now()); n != 1 {
 		t.Fatalf("%d places", n)
 	}
-	// The repair is stored at the next flush, not made again at each load.
+	// The repair is stored at the next flush (the second restart below
+	// would repair it again either way).
 	if err := f.p.flush(context.Background()); err != nil {
 		t.Fatal(err)
 	}

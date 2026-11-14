@@ -544,7 +544,7 @@ func (c *cli) approveAndFollow(ctx context.Context, req servicevault.ApprovalReq
 			return false, err
 		}
 		if st.Status == servicevault.ApprovalStatusPending {
-			c.printf("%s", sentLine(queued, st))
+			c.printf("%s", unqueuedLine(queued, st))
 			queued = st.Queued
 			if line := remindLine(st); line != told {
 				told = line
@@ -632,11 +632,13 @@ func remindLine(st *servicevault.Approval) string {
 	return out + fmt.Sprintf("remind needed: %s (%s)\n", strings.Join(st.RemindNeeded, ","), cmd) + askBudgetLines(st.AskBudget)
 }
 
-// sentLine names the admins of was (queued at the last poll) whose
-// challenge has gone since: no longer queued, and not in remind_needed
-// (where one that left the outbox undelivered goes); "" when there are
-// none.
-func sentLine(was []string, st *servicevault.Approval) string {
+// unqueuedLine names the admins of was (queued at the last poll) whose
+// challenge has left the outbox since: no longer queued, and not in
+// remind_needed (where one that left it undelivered goes); "" when there
+// are none. Not "sent": the service also shows an admin in neither list
+// when their challenge ran out in the outbox and that is not handled yet,
+// or the peer has not loaded its state.
+func unqueuedLine(was []string, st *servicevault.Approval) string {
 	var gone []string
 	for _, a := range was {
 		if !slices.Contains(st.Queued, a) && !slices.Contains(st.RemindNeeded, a) {
@@ -646,7 +648,7 @@ func sentLine(was []string, st *servicevault.Approval) string {
 	if len(gone) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("sent, no longer queued: %s\n", strings.Join(gone, ","))
+	return fmt.Sprintf("no longer queued: %s\n", strings.Join(gone, ","))
 }
 
 // askBudgetLines says which admins were left out for the ask budget and
