@@ -695,6 +695,8 @@ func TestLostMailboxRefreshBeforeMemberRemint(t *testing.T) {
 	f.p.mu.Lock()
 	f.p.sendTo(c, "connection.note", []byte(`{"x":1}`), f.clk.Now())
 	f.p.mu.Unlock()
+	// Only Tick re-mints (remintLost); Step drains the outbox, and its
+	// housekeeping skips a member whose re-mint is owed: that is the window.
 	f.step() // drains the outbox: token_expired, before any tick re-mints
 	if c.MailboxRemint.Equal(f.p.remintAt) {
 		t.Fatal("re-minted before the tick")
@@ -707,8 +709,7 @@ func TestLostMailboxRefreshBeforeMemberRemint(t *testing.T) {
 		t.Fatal("a refresh asked for before the member's re-mint")
 	}
 	f.pump()
-	f.clk.Advance(time.Minute)
-	f.tick() // the refresh
+	f.tick() // the refresh: the first housekeeping after the re-mint
 	if c.RefreshID == "" || f.p.refreshOwed[cid] {
 		t.Fatalf("refresh %q, owed %v after the re-mint", c.RefreshID, f.p.refreshOwed[cid])
 	}

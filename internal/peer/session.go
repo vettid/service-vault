@@ -599,7 +599,10 @@ func (p *Peer) housekeeping(now time.Time) {
 			p.markDirty(kindConn, c.ID)
 		}
 		force := p.refreshOwed[c.ID]
-		delete(p.refreshOwed, c.ID) // before: a refresh held again marks it anew
+		// Cleared before: a refresh held again marks it anew. (Not reached
+		// while held today: housekeeping stops while mintWait holds, and
+		// skips a member whose re-mint is owed.)
+		delete(p.refreshOwed, c.ID)
 		p.refreshHeld(c, now, force)
 	}
 	p.remintIssued(now)
