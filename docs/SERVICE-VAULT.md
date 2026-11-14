@@ -86,7 +86,9 @@ never answers challenges and never rotates its identity.
   connections by it must revisit it.
   From a member's `profile.update` it keeps the contract claimed
   (a string of the §10.8 form; any other value counts as none and is
-  audited `profile_contract_malformed`, and the update is still applied).
+  logged `profile_member_malformed` with `member=contract`, and the
+  update is still applied; a malformed `features` is logged the same
+  way with `member=features`).
   The value is informational: nothing selects behavior or holds a
   connection by it. `vote` and `approval_document` are judged from the
   last `profile.update` applied only, never from a message's inner

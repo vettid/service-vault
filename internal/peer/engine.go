@@ -135,6 +135,9 @@ type Peer struct {
 	instance   string
 	seq        uint64
 	rates      map[string]*rateWindow
+	// outboxFull marks the connections whose outbox_full is logged, until
+	// a send to them is queued again (sendEntry).
+	outboxFull map[string]bool
 
 	dirty    map[key]struct{}
 	extra    []Change
@@ -169,7 +172,7 @@ func New(cfg Config) (*Peer, error) {
 	return &Peer{cfg: cfg, instance: hex.EncodeToString(inst),
 		conns: map[string]*Connection{}, invites: map[string]*InviteRecord{}, awaiting: map[string]*awaiting{},
 		requests: map[string]*request{}, outgoing: map[string]*outgoing{}, issued: map[string]*IssuedToken{},
-		challenges: map[string]*challenge{}, rates: map[string]*rateWindow{},
+		challenges: map[string]*challenge{}, rates: map[string]*rateWindow{}, outboxFull: map[string]bool{},
 		dirty: map[key]struct{}{}, versions: map[key]uint64{}, evWake: make(chan struct{}, 1)}, nil
 }
 
