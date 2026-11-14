@@ -598,8 +598,9 @@ func (p *Peer) housekeeping(now time.Time) {
 			c.RefreshID = "" // unanswered: ask again
 			p.markDirty(kindConn, c.ID)
 		}
-		p.refreshHeld(c, now, p.refreshOwed[c.ID])
-		delete(p.refreshOwed, c.ID)
+		force := p.refreshOwed[c.ID]
+		delete(p.refreshOwed, c.ID) // before: a refresh held again marks it anew
+		p.refreshHeld(c, now, force)
 	}
 	p.remintIssued(now)
 	p.pruneIssued(now)

@@ -611,3 +611,30 @@ func TestRepinWhilePeerNotStarted(t *testing.T) {
 		}
 	}
 }
+
+// An admin_set.add approved while the peer's start hasn't finished: as
+// for a repin, RepinGov's ErrNotStarted is not a moved key. Nothing is
+// settled, and the redelivery adds the admin with the key shown.
+func TestAdminSetAddWhilePeerNotStarted(t *testing.T) {
+	f := newFixture(t, 1, "c1")
+	f.p.active["c2"] = true
+	f.p.auth = map[string][]byte{"c2": keyB}
+	c := f.create(ActionAdminSetAdd, "", `{"connection_id":"c2"}`)
+	f.p.notStarted = true
+	e := f.answerEvent(f.p.last("c1"), "approve")
+	if _, err := f.m.Answer(context.Background(), e); !errors.Is(err, peer.ErrNotStarted) {
+		t.Fatalf("answer before the start: %v", err)
+	}
+	if s := f.status(c.ID); s.Status != StatusPending || strings.Join(f.admins(), ",") != "c1" {
+		t.Fatalf("settled before the start: %+v %v", s, f.admins())
+	}
+	f.p.notStarted = false
+	f.deliver(e)
+	s := f.status(c.ID)
+	if s.Status != StatusApproved || s.Applied == nil || !*s.Applied || strings.Join(f.admins(), ",") != "c1,c2" || !bytes.Equal(f.govKey("c2"), keyB) {
+		t.Fatalf("%+v %v %x", s, f.admins(), f.govKey("c2"))
+	}
+	if au := f.auditOf(AuditGovKeyRefused); len(au) != 0 {
+		t.Fatalf("refused: %+v", au)
+	}
+}
