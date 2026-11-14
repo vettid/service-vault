@@ -363,7 +363,18 @@ best-effort notices (`connection.removed`) are not covered.
   logs these; the application is not told. A member vault tells its
   member (`message.delivery_unconfirmed`); the service has no member to
   tell, and its application learns of a failed delivery the way it does
-  today, from the missing answer.
+  today, from the missing answer. **Except** a message lost to a
+  member's relay-key rotation (RELAY-ROTATION.md section 4, once its
+  switch is on): `message.not_delivered` and
+  `message.delivery_unconfirmed` are emitted to the application then,
+  since no missing answer would show it.
+- **Held entries** (RELAY-ROTATION.md section 4, once its switch is on):
+  an entry refused `mailbox_unknown` is held, not ended (case 5 then
+  applies only past the hold's 60 days). The start rule above skips held
+  entries, and the `mailbox_unknown` attempt doesn't make an entry tried.
+  At re-address, an entry no attempt can have delivered takes a fresh
+  `ts` and case 2 doesn't apply to it; one an earlier attempt may have
+  delivered keeps its `ts`, and case 2 applies.
 - **Not delivered**, each with its own audit entry (`ref` the inner
   `id`), never silently (§8.3 cases):
   1. an entry whose `exp` passed while it waited: `drop.held_expired`;
