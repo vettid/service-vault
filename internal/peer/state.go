@@ -503,9 +503,12 @@ type challenge struct {
 	// waits there (behind an open reconnect, a stale connection, a missing
 	// token or the relay's refusals); "" once it has left the outbox, and
 	// on a record from before this field. Undelivered: it left without
-	// being deposited (ChallengeDelivery).
+	// being deposited (ChallengeDelivery); Unsent: it left never tried,
+	// so it never reached the relay and holds no place at the member
+	// vault (holds).
 	Entry       string `json:"entry,omitempty"`
 	Undelivered bool   `json:"undelivered,omitempty"`
+	Unsent      bool   `json:"unsent,omitempty"`
 }
 
 type cachedResponse struct {

@@ -148,9 +148,11 @@ func (p *Peer) authenticate(ctx context.Context, connID, ctxt, purpose, matchCod
 
 // holds reports whether the challenge may still hold a place at the member
 // vault: pending, or cancelled without a withdraw reaching the outbox
-// (ch.Gone), or just expired, until its exp plus ClockSkew.
+// (ch.Gone), or just expired, until its exp plus ClockSkew. One that left
+// the outbox never tried (ch.Unsent) never reached the relay and holds
+// none.
 func (ch *challenge) holds(now time.Time) bool {
-	return now.Before(ch.Exp.Add(ClockSkew))
+	return !ch.Unsent && now.Before(ch.Exp.Add(ClockSkew))
 }
 
 // longLived counts the challenges to connID that may still hold a
@@ -186,8 +188,11 @@ func (p *Peer) held(connID string, now time.Time) int {
 // is sent connection.authenticate.withdraw so it closes the ask
 // (VAULT-MESSAGING 0.80.0 §10.4). The withdraw is best effort: a
 // connection that is not active, or whose outbox is full, gets none, and
-// the challenge is forgotten all the same. It reports whether the
-// challenge was pending.
+// the challenge is forgotten all the same. A challenge that has not
+// reached the relay gets no withdraw: one still in the outbox and never
+// tried is dropped there unsent, and one that left it never tried
+// (Unsent) is only forgotten. It reports whether the challenge was
+// pending.
 func (p *Peer) CancelChallenge(ctx context.Context, requestID string) (bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -200,11 +205,19 @@ func (p *Peer) CancelChallenge(ctx context.Context, requestID string) (bool, err
 	}
 	withdrawn := false
 	now := p.now()
-	if e := p.outboxByID(ch.Entry); ch.Entry != "" && e != nil && !e.Tried {
-		// Still in the outbox, never tried: it has not reached the relay, so
-		// it holds no place at the member vault and needs no withdraw.
-		// Dropped unsent, it is not delivered after its cancel.
-		p.dropOutbox(func(o *outboxEntry) bool { return o == e })
+	if e := p.outboxByID(ch.Entry); ch.Unsent || ch.Entry != "" && e != nil && !e.Tried {
+		// It has not reached the relay, so it holds no place at the member
+		// vault and needs no withdraw. Still in the outbox, it is dropped
+		// there unsent, and that is stored before its record goes: a crash
+		// between the two leaves a record that over-counts until its exp,
+		// never a challenge delivered that the service no longer counts.
+		if e != nil {
+			e.Challenge = "" // its record changes below, in the next flush
+			p.dropOutbox(func(o *outboxEntry) bool { return o == e })
+			if err := p.flush(ctx); err != nil {
+				return false, err
+			}
+		}
 		delete(p.challenges, requestID)
 		p.markDirty(kindAuth, requestID)
 		if err := p.flushAndDrain(ctx); err != nil {

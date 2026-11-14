@@ -78,6 +78,46 @@ func TestChallengeDeliveryUndelivered(t *testing.T) {
 	}
 }
 
+// A queued challenge that left the outbox never tried holds no place at
+// the member vault, and its cancel sends no withdraw; one that was tried
+// may have reached the member and keeps both.
+func TestUndeliveredChallengePlaceAndCancel(t *testing.T) {
+	for _, tried := range []bool{false, true} {
+		f := newFixture(t)
+		m := f.member(10)
+		cid := f.connect(m, "")
+		f.beginReconnectNow(cid)
+		ctx := context.Background()
+		req, err := f.p.Authenticate(ctx, cid, "x", peerwire.PurposeApproval, time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.p.mu.Lock()
+		f.p.outboxByID(f.p.challenges[req].Entry).Tried = tried
+		f.p.dropUndelivered(f.p.conns[cid], "undelivered_suspended", nil)
+		f.p.mu.Unlock()
+		want := 0
+		if tried {
+			want = 1
+		}
+		if n := f.p.held(cid, f.clk.Now()); n != want {
+			t.Fatalf("tried %v: %d places held", tried, n)
+		}
+		if ok, err := f.p.CancelChallenge(ctx, req); err != nil || !ok {
+			t.Fatalf("cancel %v %v", ok, err)
+		}
+		withdraws := 0
+		for _, e := range f.p.outbox {
+			if e.ConnID == cid && !e.Handshake && !e.Confirm && e.Op == opDeposit {
+				withdraws++
+			}
+		}
+		if tried != (withdraws == 1) || !tried && f.p.challenges[req] != nil {
+			t.Fatalf("tried %v: %d withdraws queued, record %v", tried, withdraws, f.p.challenges[req])
+		}
+	}
+}
+
 // A challenge cancelled while it waits in the outbox, never tried, is
 // dropped there: neither it nor a withdraw reaches the member, and it
 // holds no place at the member vault.

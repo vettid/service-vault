@@ -100,7 +100,8 @@ func (p *Peer) dropOutbox(drop func(*outboxEntry) bool) {
 // challengeLeft notes that e left the outbox: the challenge it carries
 // was deposited, or, if not, is Undelivered (ChallengeDelivery). One that
 // may have reached the relay without an answer (Tried) and was then
-// dropped counts as undelivered too: its admin may be reminded.
+// dropped counts as undelivered too: its admin may be reminded. One never
+// tried is Unsent as well: it holds no place at the member vault.
 func (p *Peer) challengeLeft(e *outboxEntry) {
 	if e.Challenge == "" {
 		return
@@ -110,6 +111,7 @@ func (p *Peer) challengeLeft(e *outboxEntry) {
 		return
 	}
 	ch.Entry, ch.Undelivered = "", !e.deposited
+	ch.Unsent = !e.deposited && !e.Tried
 	p.markDirty(kindAuth, ch.ID)
 }
 
