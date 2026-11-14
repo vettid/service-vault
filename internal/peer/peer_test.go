@@ -128,15 +128,22 @@ func newFixture(t *testing.T) *fixture {
 // start (re)creates the peer from the store, as a restart does.
 func (f *fixture) start() {
 	f.t.Helper()
+	if err := f.startErr(); err != nil {
+		f.t.Fatalf("Start: %v", err)
+	}
+}
+
+// startErr is start, returning Start's error (f.p is then the peer that
+// failed to start).
+func (f *fixture) startErr() error {
+	f.t.Helper()
 	p, err := New(Config{Log: slog.New(slog.NewTextHandler(&f.logs, nil)), Keys: f.keys, Relay: testRelay{f.sv, f}, RelayURL: peertest.RelayURL, Store: f.store, Events: f.ev, Now: f.clk.Now,
 		Profile: Profile{FirstName: "VettID", LastName: "Member Service"}, AfterRestore: f.afterRestore, Votes: f.votes, EndAllConnections: f.endAll})
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	if err := p.Start(context.Background()); err != nil {
-		f.t.Fatalf("Start: %v", err)
-	}
 	f.p = p
+	return p.Start(context.Background())
 }
 
 func (f *fixture) member(seed byte) *peertest.Member {

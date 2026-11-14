@@ -200,7 +200,19 @@ func (p *Peer) audit(event, connID string) {
 // Start registers the mailbox (RELAY-PROTOCOL §6.1), loads the state and
 // runs the start-up housekeeping (§7.2 "On unlock" steps 1–2) and the
 // outbox.
+//
+// Before anything else (the relay included) it checks the configured
+// identity key against the table's (CheckIdentity): on a mismatch it
+// returns an error wrapping ErrIdentityMismatch, having read nothing into
+// memory, changed nothing and sent nothing, so no handshake starts or is
+// answered and nothing is deposited. A later Start under the right key
+// finds everything as it was.
 func (p *Peer) Start(ctx context.Context) error {
+	if !p.started {
+		if err := CheckIdentity(ctx, p.cfg.Store, p.cfg.Keys.IK); err != nil {
+			return err
+		}
+	}
 	reg, err := p.cfg.Relay.Register(ctx)
 	if err != nil {
 		return fmt.Errorf("peer: register: %w", err)

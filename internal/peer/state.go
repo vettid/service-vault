@@ -38,7 +38,7 @@ const (
 // must touch them all (internal/sealstore).
 func Kinds() []string {
 	return []string{kindConn, kindInvite, kindAwait, kindRequest, kindOutgoing, kindToken, kindOutbox, kindAuth, kindEvent,
-		kindMsg, kindInner, kindResp, kindLease, kindUnacked, kindOnce}
+		kindMsg, kindInner, kindResp, kindLease, kindUnacked, kindOnce, kindIdentity}
 }
 
 // Retention (VAULT-MESSAGING §8.2, §6.4).
@@ -893,6 +893,11 @@ func (p *Peer) dropStale(stale []*outgoing) {
 			"alarm", "outgoing_identity_changed", "connection_id", og.ConnID, "purpose", string(og.Init.Purpose))
 		for _, j := range og.Issued {
 			p.denyJTI(j, p.now())
+		}
+		// Its hs.init, if still waiting, is not deposited later (as
+		// dropOutgoing; reconnect and rekey alike).
+		if og.InitEntry != "" {
+			p.dropOutbox(func(e *outboxEntry) bool { return e.ID == og.InitEntry })
 		}
 		p.markDirty(kindOutgoing, og.ID)
 	}
