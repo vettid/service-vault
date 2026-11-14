@@ -58,13 +58,17 @@ func keyText(k ed25519.PublicKey) string {
 
 // CheckIdentity compares the configured identity key with the table's
 // before anything reads the table into a Peer (GC #9109). With the record:
-// equal is nil, different is an *IdentityMismatch. Without it (a table
-// from before the record, or restored from a backup taken before it), the
-// stored state decides: if a stored handshake of the service's (a pending
-// epoch's own key, an hs.init it started) names another key, that is a
-// mismatch and nothing is written; otherwise the record is written with
-// the configured key. Nothing else is read into memory or changed.
-func CheckIdentity(ctx context.Context, st Store, ik ed25519.PrivateKey) error {
+// equal is nil, different is an *IdentityMismatch, and a record that can't
+// be read is one too (From "unreadable": held, not trusted). Without it (a
+// table from before the record, or restored from a backup taken before
+// it), the stored state decides: if a record that names the service's own
+// key (a pending epoch's, an hs.init it started, a stored event's, or what
+// the caller's evidence finds, such as the approvals' audit log) names
+// another key, that is a mismatch and nothing is written; otherwise the
+// record is written with the configured key. A record of those kinds that
+// can't be read fails the check, and nothing is written. Nothing else is
+// read into memory or changed.
+func CheckIdentity(ctx context.Context, st Store, ik ed25519.PrivateKey, evidence ...Evidence) error {
 	own := ik.Public().(ed25519.PublicKey)
 	for range 2 {
 		data, ok, err := st.Get(ctx, kindIdentity, identityID)
@@ -74,7 +78,7 @@ func CheckIdentity(ctx context.Context, st Store, ik ed25519.PrivateKey) error {
 		if ok {
 			var r identityRecord
 			if err := json.Unmarshal(data, &r); err != nil || len(r.IK) != ed25519.PublicKeySize {
-				return fmt.Errorf("peer: identity record unreadable")
+				return &IdentityMismatch{Configured: own, From: "unreadable"}
 			}
 			if !bytes.Equal(r.IK, own) {
 				return &IdentityMismatch{Recorded: r.IK, Configured: own, From: "record"}
@@ -86,6 +90,15 @@ func CheckIdentity(ctx context.Context, st Store, ik ed25519.PrivateKey) error {
 				return err
 			}
 			return m
+		}
+		for _, ev := range evidence {
+			k, err := ev(ctx)
+			if err != nil {
+				return fmt.Errorf("peer: identity evidence: %w", err)
+			}
+			if len(k) > 0 && !bytes.Equal(k, own) {
+				return &IdentityMismatch{Recorded: k, Configured: own, From: "state"}
+			}
 		}
 		b, _ := json.Marshal(identityRecord{IK: own})
 		err = st.Apply(ctx, []Change{{Kind: kindIdentity, ID: identityID, Data: b, IfAbsent: true}})
@@ -100,9 +113,51 @@ func CheckIdentity(ctx context.Context, st Store, ik ed25519.PrivateKey) error {
 	return errors.New("peer: identity record: written and gone")
 }
 
-// stateIdentity looks for the service's own key in a table without the
-// record: the pending epochs of its connections and the hs.init of the
-// handshakes it started. It returns a mismatch when one names another key.
+// Evidence finds the service's own identity key in stored records the peer
+// doesn't own (nil: none found), for CheckIdentity on a table without the
+// record.
+type Evidence func(ctx context.Context) (ed25519.PublicKey, error)
+
+// Pager reads the records of a kind a page at a time, in id order.
+type Pager interface {
+	Page(ctx context.Context, kind, after string, limit int) ([]Record, error)
+}
+
+// ServiceIKIn is Evidence from the records of a kind whose JSON has a
+// "service_ik" (the approvals' audit log, kept for good): the first record
+// that has one, read a page at a time.
+func ServiceIKIn(pg Pager, kind string) Evidence {
+	return func(ctx context.Context) (ed25519.PublicKey, error) {
+		after := ""
+		for {
+			recs, err := pg.Page(ctx, kind, after, 100)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", kind, err)
+			}
+			for _, r := range recs {
+				var e struct {
+					ServiceIK []byte `json:"service_ik"`
+				}
+				if err := json.Unmarshal(r.Data, &e); err != nil {
+					return nil, fmt.Errorf("%s %s: %w", kind, r.ID, err)
+				}
+				if len(e.ServiceIK) > 0 {
+					return e.ServiceIK, nil
+				}
+			}
+			if len(recs) < 100 {
+				return nil, nil
+			}
+			after = recs[len(recs)-1].ID
+		}
+	}
+}
+
+// stateIdentity looks for the service's own key in the peer's records of
+// a table without the record: the pending epochs of its connections, the
+// hs.init of the handshakes it started, and the events it stored (a
+// sign-in's carries the challenger's key). It returns a mismatch when one
+// names another key, and an error when one of them can't be read.
 func stateIdentity(ctx context.Context, st Store, ik ed25519.PrivateKey) (*IdentityMismatch, error) {
 	own := ik.Public().(ed25519.PublicKey)
 	conns, err := st.Load(ctx, kindConn)
@@ -115,7 +170,10 @@ func stateIdentity(ctx context.Context, st Store, ik ed25519.PrivateKey) (*Ident
 				OwnIK ed25519.PublicKey `json:"own_ik"`
 			} `json:"pending"`
 		}
-		if json.Unmarshal(r.Data, &c) == nil && c.Pending != nil && len(c.Pending.OwnIK) > 0 && !bytes.Equal(c.Pending.OwnIK, own) {
+		if err := json.Unmarshal(r.Data, &c); err != nil {
+			return nil, fmt.Errorf("peer: identity: %s %s: %w", kindConn, r.ID, err)
+		}
+		if c.Pending != nil && len(c.Pending.OwnIK) > 0 && !bytes.Equal(c.Pending.OwnIK, own) {
 			return &IdentityMismatch{Recorded: c.Pending.OwnIK, Configured: own, From: "state"}, nil
 		}
 	}
@@ -125,11 +183,31 @@ func stateIdentity(ctx context.Context, st Store, ik ed25519.PrivateKey) (*Ident
 	}
 	for _, r := range outs {
 		var og outgoing
-		if json.Unmarshal(r.Data, &og) != nil {
-			continue // load reports it
+		if err := json.Unmarshal(r.Data, &og); err != nil {
+			return nil, fmt.Errorf("peer: identity: %s %s: %w", kindOutgoing, r.ID, err)
 		}
-		if _, err := handshake.RestoreInitiator(og.Init, ik); errors.Is(err, handshake.ErrIdentity) {
+		ini, err := handshake.RestoreInitiator(og.Init, ik)
+		if errors.Is(err, handshake.ErrIdentity) {
 			return &IdentityMismatch{Configured: own, From: "state"}, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("peer: identity: %s %s: %w", kindOutgoing, r.ID, err)
+		}
+		ini.Abort() // only read: its ephemeral secret goes now
+	}
+	events, err := st.Load(ctx, kindEvent)
+	if err != nil {
+		return nil, fmt.Errorf("peer: identity: load %s: %w", kindEvent, err)
+	}
+	for _, r := range events {
+		var e struct {
+			ServiceIK []byte `json:"service_ik"`
+		}
+		if err := json.Unmarshal(r.Data, &e); err != nil {
+			return nil, fmt.Errorf("peer: identity: %s %s: %w", kindEvent, r.ID, err)
+		}
+		if len(e.ServiceIK) > 0 && !bytes.Equal(e.ServiceIK, own) {
+			return &IdentityMismatch{Recorded: e.ServiceIK, Configured: own, From: "state"}, nil
 		}
 	}
 	return nil, nil

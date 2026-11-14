@@ -114,10 +114,12 @@ func TestIdentityOldTable(t *testing.T) {
 	if got := recordedIdentity(t, f.store); got != nil {
 		t.Fatalf("written while the state names another key: %x", got)
 	}
-	// Its pending epoch's own key decides as well.
-	f.start() // the right key: the record again, the rekey goes on
+	f.start() // the right key: the record written again, the rekey goes on
 	if len(f.p.outgoing) != 1 {
 		t.Fatalf("%d outgoing after the right key", len(f.p.outgoing))
+	}
+	if got := recordedIdentity(t, f.store); !bytes.Equal(got, f.keys.IKPublic()) {
+		t.Fatalf("record after the right key: %x", got)
 	}
 }
 
@@ -145,6 +147,74 @@ func TestIdentityOldTablePending(t *testing.T) {
 	f.start()
 	if c := f.p.conns[cid]; c.Pending == nil {
 		t.Fatal("the pending epoch was lost")
+	}
+}
+
+// racingStore answers the first Get of the identity record "absent" and
+// then has another task write it, with its own key, before our write.
+type racingStore struct {
+	*MemStore
+	other ed25519.PublicKey
+	raced bool
+}
+
+func (s *racingStore) Get(ctx context.Context, kind, id string) ([]byte, bool, error) {
+	if kind == kindIdentity && !s.raced {
+		s.raced = true
+		b, _ := json.Marshal(identityRecord{IK: s.other})
+		if err := s.MemStore.Apply(ctx, []Change{{Kind: kindIdentity, ID: identityID, Data: b}}); err != nil {
+			return nil, false, err
+		}
+		return nil, false, nil
+	}
+	return s.MemStore.Get(ctx, kind, id)
+}
+
+// A record written by another task between our read and our write wins:
+// the write is conditional, and the key it names is compared.
+func TestIdentityRecordRace(t *testing.T) {
+	ik := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{1}, 32))
+	st := &racingStore{MemStore: NewMemStore(), other: wrongKey.Public().(ed25519.PublicKey)}
+	var m *IdentityMismatch
+	if err := CheckIdentity(context.Background(), st, ik); !errors.As(err, &m) || m.From != "record" {
+		t.Fatalf("raced write: %v", err)
+	}
+	if got := recordedIdentity(t, st.MemStore); !bytes.Equal(got, wrongKey.Public().(ed25519.PublicKey)) {
+		t.Fatalf("the other task's record was overwritten: %x", got)
+	}
+}
+
+// A record that can't be read holds, as a mismatch, rather than being
+// trusted or failing the start.
+func TestIdentityRecordUnreadable(t *testing.T) {
+	st := NewMemStore()
+	if err := st.Apply(context.Background(), []Change{{Kind: kindIdentity, ID: identityID, Data: []byte(`{"ik":"AAAA"}`)}}); err != nil {
+		t.Fatal(err)
+	}
+	var m *IdentityMismatch
+	if err := CheckIdentity(context.Background(), st, wrongKey); !errors.As(err, &m) || m.From != "unreadable" {
+		t.Fatalf("unreadable record: %v", err)
+	}
+}
+
+// A table from before the record whose stored events name another key
+// (a sign-in's carries the challenger's) holds, with nothing written.
+func TestIdentityOldTableEvents(t *testing.T) {
+	st := NewMemStore()
+	b, _ := json.Marshal(map[string]any{"id": "e1", "type": "signin.completed", "service_ik": thirdKey.Public().(ed25519.PublicKey)})
+	if err := st.Apply(context.Background(), []Change{{Kind: kindEvent, ID: "e1", Data: b}}); err != nil {
+		t.Fatal(err)
+	}
+	var m *IdentityMismatch
+	if err := CheckIdentity(context.Background(), st, wrongKey); !errors.As(err, &m) || m.From != "state" ||
+		!bytes.Equal(m.Recorded, thirdKey.Public().(ed25519.PublicKey)) {
+		t.Fatalf("events naming another key: %v", err)
+	}
+	if got := recordedIdentity(t, st); got != nil {
+		t.Fatalf("written: %x", got)
+	}
+	if err := CheckIdentity(context.Background(), st, thirdKey); err != nil {
+		t.Fatalf("the events' own key: %v", err)
 	}
 }
 
@@ -193,7 +263,7 @@ func TestIdentityWrongAtRestoreThenRight(t *testing.T) {
 	}
 	f.pump()
 	c = f.p.conns[cid]
-	if c.Reconnecting || c.ReconnectTries != 0 && c.kr.Current().ID() != m.KR.Current().ID() {
+	if c.Reconnecting || c.kr.Current().ID() != m.KR.Current().ID() {
 		t.Fatalf("not reconnected: reconnecting %v", c.Reconnecting)
 	}
 	if !f.signIn(m, cid) {

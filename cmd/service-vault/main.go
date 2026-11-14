@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/tls"
@@ -416,6 +417,14 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
+	// The table's identity key (GC #9109), before anything that reads the
+	// records, signs, sends, answers or publishes this keystore's TLS pin:
+	// under another key the service stays up, held (owner a, #10417).
+	if m, err := identityHeld(ctx, records, keys.IK); err != nil {
+		return err
+	} else if m != nil {
+		return runHeld(ctx, stop, cfg.Listen, tlsid.ServerConfig(cert), tbl, log, m)
+	}
 	publishPin := func(ctx context.Context) error {
 		_, err := sc.PutParameter(ctx, &ssm.PutParameterInput{Name: aws.String(cfg.TLSPinParam), Value: aws.String(pin),
 			Type: ssmtypes.ParameterTypeString, Overwrite: aws.Bool(true)})
@@ -441,17 +450,6 @@ func serve(args []string) error {
 			}
 		}
 	}()
-
-	// The table's identity key (GC #9109): under another key nothing that
-	// reads the records, signs, sends or answers runs. The service stays up,
-	// held (owner a, #10417).
-	if err := peer.CheckIdentity(ctx, records, keys.IK); err != nil {
-		var m *peer.IdentityMismatch
-		if !errors.As(err, &m) {
-			return err
-		}
-		return runHeld(ctx, stop, cfg.Listen, tlsid.ServerConfig(cert), tbl, log, m)
-	}
 
 	rc := relayclient.New(cfg.RelayURL, keys.Relay)
 	if dev.relayCA != "" {
@@ -676,6 +674,22 @@ func serve(args []string) error {
 	}
 	log.Info("stopped")
 	return runErr
+}
+
+// identityHeld checks the table's identity key (peer.CheckIdentity, with
+// the approvals' audit log as evidence for a table from before the
+// record): a mismatch is returned for runHeld, any other failure as an
+// error.
+func identityHeld(ctx context.Context, records interface {
+	peer.Store
+	peer.Pager
+}, ik ed25519.PrivateKey) (*peer.IdentityMismatch, error) {
+	err := peer.CheckIdentity(ctx, records, ik, peer.ServiceIKIn(records, approval.KindAudit))
+	var m *peer.IdentityMismatch
+	if errors.As(err, &m) {
+		return m, nil
+	}
+	return nil, err
 }
 
 // runHeld runs the service held by an identity-key mismatch (GC #9109;

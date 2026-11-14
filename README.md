@@ -198,19 +198,35 @@ destination.
 - `webhook_dropped`: a webhook was given up after 24 hours, so the
   application missed an event.
 - `identity_key_mismatch`: at start, the service's identity key is not
-  the one its table's records were made under (the table's identity
-  record, or, in a table from before the record, a stored handshake of
-  the service's). The service never rotates its identity key, so the
-  keystore and the records don't belong together: a wrong or partial
-  restore, or another service's table. The service stays up, held: it
-  keeps the heartbeat and answers `/health` 200, but every other request
-  gets 503 `identity_key_mismatch`, and nothing reads the records, signs,
-  sends or answers a member, so no reconnect try is spent and nothing is
-  deposited. The alarm fires once per start, and a held deploy is not
-  rolled back by ECS: put the right table or keystore item back (or
-  restore both from one backup) and restart; the service then goes on
-  from the table as it was. A table from before the record gets it at its
-  first start, from the key it then has.
+  the one its table's records were made under. The table says which key
+  that is in its identity record, written at the first start of a
+  release that has it. A table from before the record is judged by what
+  it stores that names the service's key: a pending epoch, a handshake
+  it started, a stored event, the approvals' audit log. If none names
+  another key, the record is written from the key the service has. If
+  the table holds none of these (only established connections), that
+  key is taken as it is: a wrong one then was already failing every
+  member's sign-in, and the record keeps it until the table is restored.
+  The service never rotates its identity key, so the keystore and the
+  records don't belong together: a wrong or partial restore, or another
+  service's table. An identity record that can't be read (for example
+  after a rollback to a release without it, then a record-key rotation,
+  which leaves it sealed under a retired key) holds too.
+
+  The service stays up, held: it keeps the heartbeat and answers
+  `/health` 200, but every other request gets 503
+  `identity_key_mismatch`. It doesn't publish its TLS pin, and nothing
+  loads the records, signs, sends or answers a member, so no reconnect
+  try is spent and nothing is deposited. (A record-key rotation or seal
+  migration you asked for with `SV_RECORD_KEY_VERSION` or
+  `SV_RECORD_SEAL_MIGRATE` still runs first; it reseals the records,
+  their contents unchanged.) The alarm fires once per start, and then
+  the stack looks healthy: ECS neither replaces the task nor rolls back
+  a held deploy. Put the right table or keystore item back (or restore
+  both from one backup) and restart; the service then goes on from the
+  table as it was. If the keys are right and the table holds a stray
+  handshake from another table (the alarm's `from` is `state`), restore
+  the table from a backup without it.
 - `outgoing_identity_changed`: at start, a stored handshake this
   service started (a rekey or a reconnect) names another identity key
   than the table's, although the table's identity record names the key
