@@ -1037,7 +1037,10 @@ func (m *Manager) canAsk(ctx context.Context, connID, action string, now time.Ti
 // send or the approval's batch then fails (counting one never sent only
 // refuses more). So sends that fail before going out (an admin not
 // reachable now, the peer's limits) still fill the log, and may refuse a
-// later forced reminder to that admin. It refuses (errAskFull) when the
+// later forced reminder to that admin; so does a challenge dropped from
+// the outbox unsent (a force replacing it while it waited there): the
+// log never takes one back, so it never counts fewer than reached the
+// member's vault. It refuses (errAskFull) when the
 // log is already full, so no send is a sixth.
 func (m *Manager) logAsk(ctx context.Context, connID, action string, exp time.Time) error {
 	l, ver, err := m.asksVersion(ctx, connID)

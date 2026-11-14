@@ -142,7 +142,16 @@ func (p *Peer) authenticate(ctx context.Context, connID, ctxt, purpose, matchCod
 	if err := p.flushAndDrain(ctx); err != nil {
 		return "", err
 	}
-	p.log().Info("challenge sent", "connection_id", connID, "request_id", wc.RequestID)
+	// Sent only once deposited: one accepted may wait in the outbox, or
+	// have left it undelivered (ChallengeDelivery).
+	switch d := p.delivery(wc.RequestID); d {
+	case DeliverySent:
+		p.log().Info("challenge sent", "connection_id", connID, "request_id", wc.RequestID)
+	case DeliveryQueued:
+		p.log().Info("challenge queued", "connection_id", connID, "request_id", wc.RequestID)
+	default:
+		p.log().Info("challenge not sent", "connection_id", connID, "request_id", wc.RequestID, "delivery", string(d))
+	}
 	return wc.RequestID, nil
 }
 
