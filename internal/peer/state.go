@@ -473,8 +473,12 @@ type outboxEntry struct {
 	// Vote is a deposit SendMessage queued: only these count toward
 	// MaxSendOutbox and MaxSendOutboxBytes.
 	Vote bool `json:"vote,omitempty"`
+	// Challenge is the request id of the connection.authenticate.challenge
+	// the entry carries, or "" (challenge.Entry).
+	Challenge string `json:"challenge,omitempty"`
 
-	dropped bool // removed by dropOutbox: a drain in progress skips it
+	dropped   bool // removed by dropOutbox: a drain in progress skips it
+	deposited bool // the relay took it: it leaves the outbox delivered
 }
 
 // challenge is a connection.authenticate.challenge we sent (§10.4).
@@ -495,6 +499,16 @@ type challenge struct {
 	// vault: forgotten for every purpose but that count, until Exp plus
 	// ClockSkew.
 	Gone bool `json:"gone,omitempty"`
+	// Entry is the id of the outbox entry carrying the challenge while it
+	// waits there (behind an open reconnect, a stale connection, a missing
+	// token or the relay's refusals); "" once it has left the outbox, and
+	// on a record from before this field. Undelivered: it left without
+	// being deposited (ChallengeDelivery); Unsent: it left never tried,
+	// so it never reached the relay and holds no place at the member
+	// vault (holds).
+	Entry       string `json:"entry,omitempty"`
+	Undelivered bool   `json:"undelivered,omitempty"`
+	Unsent      bool   `json:"unsent,omitempty"`
 }
 
 type cachedResponse struct {
@@ -849,6 +863,14 @@ func (p *Peer) load(ctx context.Context) error {
 		// would have stored the mark after an accepted deposit may be lost.
 		if e.Op == opDeposit {
 			e.Tried = true
+		}
+		// A flush split across writes (auth before outbox) may have stored a
+		// challenge as having left the outbox while its entry stayed: the
+		// entry goes out, so the challenge waits with it again, and may
+		// reach the member (counted, withdrawn at a cancel).
+		if ch := p.challenges[e.Challenge]; e.Challenge != "" && ch != nil && ch.Entry != e.ID {
+			ch.Entry, ch.Undelivered, ch.Unsent = e.ID, false, false
+			p.markDirty(kindAuth, ch.ID)
 		}
 	}
 	sort.Slice(p.events, func(i, j int) bool { return p.events[i].Seq < p.events[j].Seq })

@@ -126,14 +126,18 @@ func (p *Peer) authenticate(ctx context.Context, connID, ctxt, purpose, matchCod
 	wc.Purpose = purpose
 	wc.MatchCode = matchCode
 	exp := now.Add(ttl).UTC().Truncate(time.Millisecond)
-	if p.sendInnerExp(c, peerwire.TypeConnAuthChallenge, wc.Marshal(), exp, now) == "" {
+	in := newInner(p.newID(now), peerwire.TypeConnAuthChallenge, wc.Marshal(), now)
+	in.Exp = exp
+	e := p.sendEntry(c, in, now)
+	if e == nil {
 		if c.State == StateActive && p.outboxFor(c.ID) >= MaxOutboxPerConn {
 			return "", ErrBusy
 		}
 		return "", ErrNotFound
 	}
+	e.Challenge = wc.RequestID
 	p.challenges[wc.RequestID] = &challenge{ID: wc.RequestID, ConnID: connID, Nonce: wc.Nonce, Context: ctxt, Purpose: purpose,
-		MatchCode: matchCode, Exp: exp}
+		MatchCode: matchCode, Exp: exp, Entry: e.ID}
 	p.markDirty(kindAuth, wc.RequestID)
 	if err := p.flushAndDrain(ctx); err != nil {
 		return "", err
@@ -144,9 +148,11 @@ func (p *Peer) authenticate(ctx context.Context, connID, ctxt, purpose, matchCod
 
 // holds reports whether the challenge may still hold a place at the member
 // vault: pending, or cancelled without a withdraw reaching the outbox
-// (ch.Gone), or just expired, until its exp plus ClockSkew.
+// (ch.Gone), or just expired, until its exp plus ClockSkew. One that left
+// the outbox never tried (ch.Unsent) never reached the relay and holds
+// none.
 func (ch *challenge) holds(now time.Time) bool {
-	return now.Before(ch.Exp.Add(ClockSkew))
+	return !ch.Unsent && now.Before(ch.Exp.Add(ClockSkew))
 }
 
 // longLived counts the challenges to connID that may still hold a
@@ -182,8 +188,11 @@ func (p *Peer) held(connID string, now time.Time) int {
 // is sent connection.authenticate.withdraw so it closes the ask
 // (VAULT-MESSAGING 0.80.0 §10.4). The withdraw is best effort: a
 // connection that is not active, or whose outbox is full, gets none, and
-// the challenge is forgotten all the same. It reports whether the
-// challenge was pending.
+// the challenge is forgotten all the same. A challenge that has not
+// reached the relay gets no withdraw: one still in the outbox and never
+// tried is dropped there unsent, and one that left it never tried
+// (Unsent) is only forgotten. It reports whether the challenge was
+// pending.
 func (p *Peer) CancelChallenge(ctx context.Context, requestID string) (bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -196,6 +205,27 @@ func (p *Peer) CancelChallenge(ctx context.Context, requestID string) (bool, err
 	}
 	withdrawn := false
 	now := p.now()
+	if e := p.outboxByID(ch.Entry); ch.Unsent || ch.Entry != "" && e != nil && !e.Tried {
+		// It has not reached the relay, so it holds no place at the member
+		// vault and needs no withdraw. Still in the outbox, it is dropped
+		// there unsent, and that is stored before its record goes: a crash
+		// between the two leaves a record that over-counts until its exp,
+		// never a challenge delivered that the service no longer counts.
+		if e != nil {
+			e.Challenge = "" // its record changes below, in the next flush
+			p.dropOutbox(func(o *outboxEntry) bool { return o == e })
+			if err := p.flush(ctx); err != nil {
+				return false, err
+			}
+		}
+		delete(p.challenges, requestID)
+		p.markDirty(kindAuth, requestID)
+		if err := p.flushAndDrain(ctx); err != nil {
+			return false, err
+		}
+		p.log().Info("challenge cancelled", "connection_id", ch.ConnID, "request_id", requestID, "withdrawn", false, "unsent", true)
+		return true, nil
+	}
 	if now.Before(ch.Exp) {
 		if c := p.conns[ch.ConnID]; c != nil {
 			withdrawn = p.sendInnerExp(c, peerwire.TypeConnAuthWithdraw, peerwire.ConnAuthWithdrawBody(requestID), ch.Exp, now) != ""
@@ -214,6 +244,60 @@ func (p *Peer) CancelChallenge(ctx context.Context, requestID string) (bool, err
 	}
 	p.log().Info("challenge cancelled", "connection_id", ch.ConnID, "request_id", requestID, "withdrawn", withdrawn)
 	return true, nil
+}
+
+// Delivery is where a challenge stands on its way to the member's vault
+// (ChallengeDelivery).
+type Delivery string
+
+const (
+	// DeliveryNone: no pending challenge has that id (answered, expired,
+	// cancelled, or the peer has not loaded its state yet).
+	DeliveryNone Delivery = ""
+	// DeliverySent: the relay took it. A challenge recorded before the
+	// peer noted deliveries counts as sent.
+	DeliverySent Delivery = "sent"
+	// DeliveryQueued: it waits in the outbox, behind a reconnect, for a
+	// stale connection's new epoch, for a standing token, or for the relay.
+	DeliveryQueued Delivery = "queued"
+	// DeliveryUndelivered: it left the outbox without being deposited
+	// (§8.3 "Not delivered").
+	DeliveryUndelivered Delivery = "undelivered"
+)
+
+// ChallengeDelivery reports whether the challenge with requestID has
+// reached the relay: accepted by Authenticate is not sent.
+func (p *Peer) ChallengeDelivery(requestID string) Delivery {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.delivery(requestID)
+}
+
+// ChallengeDeliveries is ChallengeDelivery for each of requestIDs, under
+// one hold of the peer's lock (which a drain holds across its deposits).
+func (p *Peer) ChallengeDeliveries(requestIDs []string) map[string]Delivery {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make(map[string]Delivery, len(requestIDs))
+	for _, id := range requestIDs {
+		out[id] = p.delivery(id)
+	}
+	return out
+}
+
+func (p *Peer) delivery(requestID string) Delivery {
+	ch := p.challenges[requestID]
+	switch {
+	case ch == nil || ch.Gone:
+		return DeliveryNone
+	case ch.Undelivered:
+		return DeliveryUndelivered
+	case ch.Entry == "":
+		return DeliverySent
+	case p.outboxByID(ch.Entry) == nil:
+		return DeliveryUndelivered // gone without its leaving noted: not known to be sent
+	}
+	return DeliveryQueued
 }
 
 func (p *Peer) sendInnerExp(c *Connection, typ string, body []byte, exp, now time.Time) string {

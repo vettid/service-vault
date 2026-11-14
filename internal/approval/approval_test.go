@@ -41,6 +41,34 @@ type fakePeer struct {
 	changedAt map[string]time.Time // connection id -> AuthKeyChangedAt
 	// notStarted: RepinGov answers as a peer whose start hasn't finished.
 	notStarted bool
+	// delivery: request id -> where it stands (absent: sent).
+	delivery map[string]peer.Delivery
+	// queue: connection id -> its challenges are queued when sent (its
+	// reconnect is open).
+	queue map[string]bool
+}
+
+func (p *fakePeer) ChallengeDeliveries(reqs []string) map[string]peer.Delivery {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := map[string]peer.Delivery{}
+	for _, req := range reqs {
+		out[req] = peer.DeliverySent
+		if d, ok := p.delivery[req]; ok {
+			out[req] = d
+		}
+	}
+	return out
+}
+
+// deliver sets where request req stands.
+func (p *fakePeer) deliver(req string, d peer.Delivery) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.delivery == nil {
+		p.delivery = map[string]peer.Delivery{}
+	}
+	p.delivery[req] = d
 }
 
 func (p *fakePeer) authKey(id string) []byte {
@@ -154,6 +182,12 @@ func (p *fakePeer) Authenticate(_ context.Context, conn, ctxt, purpose string, t
 		}
 	}
 	p.sent = append(p.sent, sent{conn, req, ctxt, now, ttl})
+	if p.queue[conn] {
+		if p.delivery == nil {
+			p.delivery = map[string]peer.Delivery{}
+		}
+		p.delivery[req] = peer.DeliveryQueued
+	}
 	return req, nil
 }
 

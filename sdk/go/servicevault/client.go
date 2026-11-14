@@ -355,6 +355,11 @@ type Approval struct {
 	// hold no live challenge (it ran out after 10 minutes, or could not
 	// be sent); RemindApproval challenges them again.
 	RemindNeeded []string `json:"remind_needed"`
+	// Queued, while pending: the admins who have not answered whose
+	// challenge waits in the service's outbox, not sent yet (their
+	// connection cannot take deposits now). It goes once it can; a
+	// reminder leaves them out.
+	Queued []string `json:"queued,omitempty"`
 	// AskBudget, while pending: those of RemindNeeded at the ask budget.
 	AskBudget []AskBudget `json:"ask_budget,omitempty"`
 	// RemindAfter, with RemindNeeded: the earliest RemindApproval is

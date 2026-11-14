@@ -354,9 +354,17 @@ type Status struct {
 	// AskBudget, while pending: those of RemindNeeded at the ask budget.
 	AskBudget []AskBudget `json:"ask_budget,omitempty"`
 	// RemindNeeded, while pending: the admins asked who have not answered
-	// and hold no live challenge (it ran out, or could not be sent), so
-	// they see nothing on the phone until a reminder.
+	// and hold no live challenge (it ran out, could not be sent, or left
+	// the outbox undelivered), so they see nothing on the phone until a
+	// reminder.
 	RemindNeeded []string `json:"remind_needed"`
+	// Queued, while pending: the admins who have not answered whose
+	// challenge waits in the outbox, not yet deposited (behind a reconnect
+	// of their connection, for example). They see nothing on the phone
+	// yet; the challenge goes once their connection can take it, and a
+	// reminder leaves them out (it would wait the same way). One that
+	// ends there undelivered moves to RemindNeeded.
+	Queued []string `json:"queued,omitempty"`
 	// RemindAfter, with RemindNeeded: the earliest a reminder is accepted
 	// (RemindInterval after the last challenges were sent).
 	RemindAfter *time.Time `json:"remind_after,omitempty"`
@@ -396,6 +404,10 @@ type Admins struct {
 type Challenge struct {
 	ConnectionID string `json:"connection_id"`
 	RequestID    string `json:"request_id"`
+	// Queued: when the entry was written, the challenge had not been
+	// deposited: it waited in the outbox (Status.Queued), or had left it
+	// undelivered.
+	Queued bool `json:"queued,omitempty"`
 }
 
 // AuditEntry is one entry of the audit log. Entries are written once and

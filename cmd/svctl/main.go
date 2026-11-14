@@ -607,16 +607,24 @@ func (c *cli) requireApproved(ctx context.Context, id string) error {
 var now = time.Now
 
 // remindLine is the line that tells the operator which admins hold no
-// live challenge and have not answered; "" when there are none.
+// live challenge and have not answered, after one for the admins whose
+// challenge is queued, not sent yet; "" when there are none.
 func remindLine(st *servicevault.Approval) string {
-	if st.Status != servicevault.ApprovalStatusPending || len(st.RemindNeeded) == 0 {
+	if st.Status != servicevault.ApprovalStatusPending {
 		return ""
+	}
+	out := ""
+	if len(st.Queued) > 0 {
+		out = fmt.Sprintf("queued, not sent yet: %s\n", strings.Join(st.Queued, ","))
+	}
+	if len(st.RemindNeeded) == 0 {
+		return out
 	}
 	cmd := "svctl remind " + st.ID
 	if st.RemindAfter != nil && now().Before(*st.RemindAfter) {
 		cmd += " after " + st.RemindAfter.UTC().Format("15:04:05Z")
 	}
-	return fmt.Sprintf("remind needed: %s (%s)\n", strings.Join(st.RemindNeeded, ","), cmd) + askBudgetLines(st.AskBudget)
+	return out + fmt.Sprintf("remind needed: %s (%s)\n", strings.Join(st.RemindNeeded, ","), cmd) + askBudgetLines(st.AskBudget)
 }
 
 // askBudgetLines says which admins were left out for the ask budget and

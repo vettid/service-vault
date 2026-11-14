@@ -166,6 +166,10 @@ type Peer interface {
 	Connection(id string) (peer.ConnectionInfo, bool)
 	Authenticate(ctx context.Context, connID, ctxt, purpose string, ttl time.Duration) (string, error)
 	CancelChallenge(ctx context.Context, requestID string) (bool, error)
+	// ChallengeDeliveries reports, for each request id, whether the
+	// challenge Authenticate accepted has been deposited, waits in the
+	// outbox, or left it undelivered.
+	ChallengeDeliveries(requestIDs []string) map[string]peer.Delivery
 	// PinGov pins a connection's governance key to key, or to its
 	// credential key as it is now when key is empty (with onlyIfEmpty only
 	// if none is pinned). RepinGov moves it to key if that is still the
@@ -919,7 +923,7 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 		return nil, err
 	}
 	m.log().Info("approval requested", "approval_id", id, "action", r.Action, "threshold", th, "admins", len(set),
-		"challenged", len(sent))
+		"challenged", len(sent), "queued", queued(sent))
 	return &Created{ID: id, ActionHash: hash, Status: StatusPending, ExpiresAt: r.Exp, AskBudget: skipped}, nil
 }
 
@@ -963,9 +967,49 @@ func (m *Manager) challenge(ctx context.Context, b *batch, r *record, conns []st
 		r.Pending[c] = reqID
 		b.changes = append(b.changes, peer.Change{Kind: kindReq, ID: reqID, Data: []byte(r.ID),
 			Expires: r.Exp.Add(reqRetention)})
-		sent = append(sent, Challenge{ConnectionID: c, RequestID: reqID})
+		d := m.Peer.ChallengeDeliveries([]string{reqID})[reqID]
+		sent = append(sent, Challenge{ConnectionID: c, RequestID: reqID, Queued: d == peer.DeliveryQueued || d == peer.DeliveryUndelivered})
 	}
 	return sent, skipped, full
+}
+
+// queued counts the challenges of chs not deposited yet.
+func queued(chs []Challenge) int {
+	n := 0
+	for _, c := range chs {
+		if c.Queued {
+			n++
+		}
+	}
+	return n
+}
+
+// deliveries is where each admin's live challenge for r stands, by
+// admin, asked of the peer at once; an admin who holds none is absent
+// (peer.DeliveryNone).
+func (m *Manager) deliveries(r *record) map[string]peer.Delivery {
+	reqs := make([]string, 0, len(r.Pending))
+	for _, req := range r.Pending {
+		if req != "" {
+			reqs = append(reqs, req)
+		}
+	}
+	ds := m.Peer.ChallengeDeliveries(reqs)
+	out := make(map[string]peer.Delivery, len(r.Pending))
+	for a, req := range r.Pending {
+		if req == "" {
+			continue
+		}
+		d := ds[req]
+		if d == peer.DeliveryNone {
+			// Recorded, but the peer has no such challenge pending: it ended
+			// and its signin.expired has not been handled yet, or the peer has
+			// not loaded its state. As before the peer noted deliveries: live.
+			d = peer.DeliverySent
+		}
+		out[a] = d
+	}
+	return out
 }
 
 // errAskFull is an admin whose askLog is full (askBudget).
@@ -1083,9 +1127,16 @@ func (m *Manager) Status(ctx context.Context, id string) (*Status, error) {
 		if err != nil {
 			return nil, err
 		}
+		ds := m.deliveries(r)
 		for _, a := range r.Admins {
-			if slices.Contains(set, a) && r.Pending[a] == "" && !r.answered(a) {
+			if !slices.Contains(set, a) || r.answered(a) {
+				continue
+			}
+			switch ds[a] {
+			case peer.DeliveryNone, peer.DeliveryUndelivered:
 				st.RemindNeeded = append(st.RemindNeeded, a)
+			case peer.DeliveryQueued:
+				st.Queued = append(st.Queued, a)
 			}
 		}
 		for _, a := range st.RemindNeeded {
@@ -1116,6 +1167,10 @@ var ErrNotFound = errors.New("approval: not found")
 // remind_needed ones), each lasting as long as the approval, and
 // CodeNothingToRemind when there are none (checked before the interval).
 // Otherwise to every admin who has not answered, replacing their challenge.
+// Either way, an admin whose challenge still waits in the outbox
+// (Status.Queued) is left out: it goes once their connection can take it.
+// CodeNothingToRemind answers when that leaves nobody (checked before the
+// interval). A challenge that left the outbox undelivered is replaced.
 // An admin at the approval's ask limit (askLimit: 4 approval challenges
 // that still count, or 5 for a repair action) is left out, with
 // their challenge not withdrawn; CodeAskBudget when that leaves nobody
@@ -1172,7 +1227,13 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 		conns = append(conns, a)
 	}
 	var skipped []AskBudget
-	cands, limited := 0, 0 // admins to remind; of those left out for a full or unreadable ask log
+	// Admins to remind; of those, left out for a full or unreadable ask
+	// log; admins left out because their challenge waits in the outbox.
+	cands, limited, waiting := 0, 0, 0
+	var ds map[string]peer.Delivery
+	if len(force) == 0 {
+		ds = m.deliveries(r)
+	}
 	for _, a := range r.Admins {
 		if len(force) > 0 {
 			break // only the named admins
@@ -1180,14 +1241,21 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 		if !slices.Contains(set, a) || r.answered(a) {
 			continue
 		}
-		if m.LongChallenges {
+		d := ds[a]
+		if d == peer.DeliveryQueued {
+			// Its challenge waits in the outbox (behind a reconnect, say) and
+			// goes once the connection can take it; another would wait the
+			// same way, and use one of the member's asks.
+			waiting++
+			continue
+		}
+		if m.LongChallenges && d == peer.DeliverySent {
 			// An admin who still holds a live challenge is not challenged
 			// again: it outlives RemindInterval, and each challenge that
 			// reaches a member's vault uses its approval bucket
-			// (VAULT-MESSAGING §10.4.1).
-			if r.Pending[a] != "" {
-				continue
-			}
+			// (VAULT-MESSAGING §10.4.1). One that left the outbox
+			// undelivered is replaced.
+			continue
 		}
 		cands++
 		// Before anything is withdrawn: an admin at the budget keeps the
@@ -1203,13 +1271,13 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 			}
 			continue
 		}
-		if old := r.Pending[a]; old != "" && !m.LongChallenges {
+		if old := r.Pending[a]; old != "" && (!m.LongChallenges || d == peer.DeliveryUndelivered) {
 			to = append(to, Challenge{ConnectionID: a, RequestID: old})
 			delete(r.Pending, a)
 		}
 		conns = append(conns, a)
 	}
-	if len(force) == 0 && m.LongChallenges && cands == 0 {
+	if len(force) == 0 && cands == 0 && (m.LongChallenges || waiting > 0) {
 		return nil, errCode(CodeNothingToRemind)
 	}
 	if len(force) == 0 && len(conns) == 0 && limited > 0 {
@@ -1245,7 +1313,7 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 	for _, c := range sent {
 		out.Reminded = append(out.Reminded, c.ConnectionID)
 	}
-	m.log().Info("approval reminded", "approval_id", r.ID, "challenged", len(sent), "forced", len(force) > 0)
+	m.log().Info("approval reminded", "approval_id", r.ID, "challenged", len(sent), "queued", queued(sent), "forced", len(force) > 0)
 	return out, nil
 }
 
