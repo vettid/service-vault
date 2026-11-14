@@ -178,8 +178,9 @@ func TestSendCountsResealDrop(t *testing.T) {
 		e.Tried = true
 	}
 	f.p.resealAtKeyChange(c, c.kr.Current(), f.clk.Now().Add(DedupeRetention))
+	err := f.p.flush(context.Background())
 	f.p.mu.Unlock()
-	if err := f.p.flush(context.Background()); err != nil {
+	if err != nil {
 		t.Fatal(err)
 	}
 	if got := fmt.Sprint(f.p.SendCounts("")); got != "[{p2/closed/p2 0 0 1}]" {
@@ -205,13 +206,129 @@ func TestSendCountsQueuedSameNotAfter(t *testing.T) {
 }
 
 // Tallies are stored (Kinds), and written after the outbox in a flush
-// split across writes (records go by kind): the counts fall short after a
-// crash between the two, never double.
+// (records go by kind, so a store that splits a flush writes the outbox's
+// first): the counts fall short after a crash between the two, never
+// double.
 func TestSendKindOrder(t *testing.T) {
 	if !slices.Contains(Kinds(), kindSend) {
 		t.Fatal("kindSend is not in Kinds")
 	}
-	if kindOutbox >= kindSend {
-		t.Fatalf("%q sorts before %q", kindSend, kindOutbox)
+	f := newFixture(t)
+	c := f.connect(f.member(10), "")
+	rec := &kindOrder{MemStore: f.store}
+	f.p.cfg.Store = rec
+	if _, err := f.p.SendMessageRef(context.Background(), c, "vote.proposal", json.RawMessage(`{}`), f.clk.Now().Add(time.Hour), "p1/proposal/p1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(f.p.SendCounts("")); got != "[{p1/proposal/p1 1 0 0}]" {
+		t.Fatalf("%s", got)
+	}
+	both := 0
+	for _, kinds := range rec.applies {
+		lastOutbox, firstSend := -1, len(kinds)
+		for i, k := range kinds {
+			if k == kindOutbox {
+				lastOutbox = i
+			}
+			if k == kindSend && i < firstSend {
+				firstSend = i
+			}
+		}
+		if lastOutbox >= 0 && firstSend < len(kinds) {
+			both++
+			if lastOutbox > firstSend {
+				t.Fatalf("a tally is written before an outbox record: %v", kinds)
+			}
+		}
+	}
+	if both == 0 {
+		t.Fatalf("no flush wrote both: %v", rec.applies)
+	}
+}
+
+// kindOrder records the kinds of each write, in order.
+type kindOrder struct {
+	*MemStore
+	applies [][]string
+}
+
+func (s *kindOrder) Apply(ctx context.Context, cs []Change) error {
+	var kinds []string
+	for _, c := range cs {
+		kinds = append(kinds, c.Kind)
+	}
+	s.applies = append(s.applies, kinds)
+	return s.MemStore.Apply(ctx, cs)
+}
+
+// A tally made again at load is kept until the latest notAfter of its
+// messages, whichever comes first in the outbox; a stored tally whose
+// longer Until was lost is extended too.
+func TestSendTallyUntilAtLoad(t *testing.T) {
+	f := newFixture(t)
+	c := f.connect(f.member(10), "")
+	ctx := context.Background()
+	f.beginReconnectNow(c)
+	late, early := f.clk.Now().Add(2*time.Hour), f.clk.Now().Add(time.Hour)
+	for _, at := range []time.Time{late, early} {
+		if _, err := f.p.SendMessageRef(ctx, c, "vote.proposal", json.RawMessage(`{}`), at, "p1/proposal/p1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	until := func() time.Time {
+		f.p.mu.Lock()
+		defer f.p.mu.Unlock()
+		return f.p.sends["p1/proposal/p1"].Until
+	}
+	want := late.UTC().Truncate(time.Millisecond)
+	if got := until(); !got.Equal(want) {
+		t.Fatalf("sent: %v", got)
+	}
+	// The tally lost: made again from both messages.
+	if err := f.store.Apply(ctx, []Change{{Kind: kindSend, ID: "p1/proposal/p1"}}); err != nil {
+		t.Fatal(err)
+	}
+	f.start()
+	if got := until(); !got.Equal(want) {
+		t.Fatalf("made again: %v", got)
+	}
+	// Its longer Until lost: extended again.
+	data, _ := json.Marshal(&sendTally{Ref: "p1/proposal/p1", Until: early.UTC().Truncate(time.Millisecond)})
+	rec, _, _ := f.store.GetRecord(ctx, kindSend, "p1/proposal/p1")
+	if err := f.store.Apply(ctx, []Change{{Kind: kindSend, ID: "p1/proposal/p1", Data: data, IfVersion: rec.Version}}); err != nil {
+		t.Fatal(err)
+	}
+	f.start()
+	if got := until(); !got.Equal(want) {
+		t.Fatalf("extended: %v", got)
+	}
+}
+
+// SendCounts read while sends flush: for -race.
+func TestSendCountsConcurrent(t *testing.T) {
+	f := newFixture(t)
+	c := f.connect(f.member(10), "")
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_ = f.p.SendCounts("")
+			}
+		}
+	}()
+	for i := range 20 {
+		if _, err := f.p.SendMessageRef(context.Background(), c, "vote.proposal", json.RawMessage(`{}`), f.clk.Now().Add(time.Hour), fmt.Sprintf("p%d/proposal", i%3)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	close(stop)
+	<-done
+	if got := fmt.Sprint(f.p.SendCounts("")); got != "[{p0/proposal 7 0 0} {p1/proposal 7 0 0} {p2/proposal 6 0 0}]" {
+		t.Fatalf("%s", got)
 	}
 }

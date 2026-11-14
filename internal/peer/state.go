@@ -899,10 +899,13 @@ func (p *Peer) load(ctx context.Context) error {
 			p.markDirty(kindAuth, ch.ID)
 		}
 		// A flush split across writes (outbox before send) may have stored a
-		// counted message without its send's new tally: the tally is made
-		// again, so the message is counted from here (what left the outbox
-		// before is lost from the counts: short, never double).
-		if e.Ref != "" && p.sends[e.Ref] == nil {
+		// counted message without its send's tally, or without the tally's
+		// longer Until: the tally is made again (counted from here; what
+		// left the outbox before is lost from the counts: short, never
+		// double) and kept until the latest notAfter of its messages. A
+		// message with no notAfter recreates, at each start, a tally pruned
+		// SendTallyRetention after its send (ballot sends always give one).
+		if e.Ref != "" {
 			p.tally(e.Ref, tallyUntil(e.NotAfter, p.now()))
 		}
 	}
