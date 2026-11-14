@@ -197,19 +197,29 @@ destination.
   the runbook step was meant, otherwise unset it.
 - `webhook_dropped`: a webhook was given up after 24 hours, so the
   application missed an event.
+- `identity_key_mismatch`: at start, the service's identity key is not
+  the one its table's records were made under (the table's identity
+  record, or, in a table from before the record, a stored handshake of
+  the service's). The service never rotates its identity key, so the
+  keystore and the records don't belong together: a wrong or partial
+  restore, or another service's table. The service stays up, held: it
+  keeps the heartbeat and answers `/health` 200, but every other request
+  gets 503 `identity_key_mismatch`, and nothing reads the records, signs,
+  sends or answers a member, so no reconnect try is spent and nothing is
+  deposited. The alarm fires once per start, and a held deploy is not
+  rolled back by ECS: put the right table or keystore item back (or
+  restore both from one backup) and restart; the service then goes on
+  from the table as it was. A table from before the record gets it at its
+  first start, from the key it then has.
 - `outgoing_identity_changed`: at start, a stored handshake this
   service started (a rekey or a reconnect) names another identity key
-  than the one it now has. The service never rotates its identity key,
-  so its keys or secrets are wrong, or the table is another service's.
-  The handshake is dropped and the tokens it carried are revoked; a
-  rekey starts again later. A reconnect stays open and a new try starts
-  at once, under the key the service now has. Further starts under that
-  same key keep that try. Once the keys are put right, the next start
-  drops that try in turn (the alarm fires again; expect it) and spends
-  another. So each key change costs a reconnect one of its 3 tries: a
-  reconnect already on its third try when the keys went wrong ends
-  (`reconnect_failed`), and that member must connect again from a new
-  invitation.
+  than the table's, although the table's identity record names the key
+  the service has (`identity_key_mismatch` covers a wrong key). So the
+  table holds records made under two keys: one was copied in from
+  another table. The handshake is dropped, the tokens it carried are
+  revoked and its `hs.init`, if still waiting, is not sent; a rekey
+  starts again later, and a reconnect stays open with a new try under
+  the table's key.
 - `reconnect_failed`: a connection's reconnect (after a table restore,
   or one the service started for want of a standing token or after its
   own new epoch went unconfirmed) could not start or complete, so that

@@ -442,6 +442,17 @@ func serve(args []string) error {
 		}
 	}()
 
+	// The table's identity key (GC #9109): under another key nothing that
+	// reads the records, signs, sends or answers runs. The service stays up,
+	// held (owner a, #10417).
+	if err := peer.CheckIdentity(ctx, records, keys.IK); err != nil {
+		var m *peer.IdentityMismatch
+		if !errors.As(err, &m) {
+			return err
+		}
+		return runHeld(ctx, stop, cfg.Listen, tlsid.ServerConfig(cert), tbl, log, m)
+	}
+
 	rc := relayclient.New(cfg.RelayURL, keys.Relay)
 	if dev.relayCA != "" {
 		hc, err := clientTrusting(dev.relayCA)
@@ -665,6 +676,77 @@ func serve(args []string) error {
 	}
 	log.Info("stopped")
 	return runErr
+}
+
+// runHeld runs the service held by an identity-key mismatch (GC #9109;
+// owner a, #10417): the keystore and the records don't belong together,
+// so nothing reads the records, signs, sends or answers a member. It
+// raises the alarm once, keeps the heartbeat (a table restore must see the
+// service running), and serves heldHandler until it is stopped. /health
+// stays 200, so ECS doesn't replace the task in a loop: the alarm is the
+// signal. A start under the right key finds the table as it was.
+func runHeld(ctx context.Context, stop func(), listen string, tlsConfig *tls.Config, tbl *store.Table, log *slog.Logger, m *peer.IdentityMismatch) error {
+	log.Error("the service's identity key is not the one its table's records were made under: held, nothing runs until the right keys are back",
+		"alarm", "identity_key_mismatch", "from", m.From, "err", m.Error())
+	srv := &http.Server{
+		Addr:              listen,
+		Handler:           heldHandler(),
+		TLSConfig:         tlsConfig,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelWarn),
+	}
+	start, err := firstHeartbeat(ctx, tbl.Heartbeat, time.Now())
+	if err != nil {
+		return err
+	}
+	hbErr := make(chan error, 1)
+	go func() {
+		t := time.NewTicker(store.HeartbeatInterval)
+		defer t.Stop()
+		if err := heartbeat(ctx, tbl.Heartbeat, start, t.C, log); err != nil {
+			hbErr <- err
+		}
+	}()
+	srvErr := make(chan error, 1)
+	go func() { srvErr <- srv.ListenAndServeTLS("", "") }()
+	log.Info("serving held", "version", version, "listen", listen)
+	var runErr error
+	select {
+	case <-ctx.Done():
+	case err := <-srvErr:
+		runErr = fmt.Errorf("api: %w", err)
+	case runErr = <-hbErr:
+	}
+	stop()
+	sctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(sctx)
+	hctx, hcancel := context.WithTimeout(context.Background(), heartbeatWriteTimeout)
+	defer hcancel()
+	if err := tbl.ClearHeartbeat(hctx); err != nil {
+		log.Warn("clear heartbeat", "err", err.Error())
+	}
+	log.Info("stopped")
+	return runErr
+}
+
+// heldHandler is the API while held (runHeld): GET /health answers 200
+// {"status":"held"}, and every other request 503 identity_key_mismatch.
+func heldHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		if r.Method == http.MethodGet && r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"held"}` + "\n"))
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"identity_key_mismatch"}` + "\n"))
+	})
 }
 
 // The heartbeat's limits. A restore takes the service for stopped once

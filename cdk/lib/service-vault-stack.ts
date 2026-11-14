@@ -109,8 +109,10 @@ export const ALARMS = {
   end_all_reused: 'SV_END_ALL_CONNECTIONS names a date that already ran, so nothing was ended at this start: if the runbook step was meant, deploy again with a date not used before; otherwise unset it (README "Rolling back across release 29")',
   /** A webhook was given up after the outbox's MaxAge (internal/webhook/outbox.go): the application missed an event. */
   webhook_dropped: 'A webhook was dropped as undeliverable after 24 h: the application missed an event',
-  /** A stored outgoing hs.init names another identity key than the service's (internal/peer/state.go): dropped at start. */
-  outgoing_identity_changed: 'A stored handshake names another identity key than this service\'s: it was dropped at start. The service never rotates its key, so its keys or secrets are wrong, or the table is another service\'s (README "outgoing_identity_changed")',
+  /** The configured identity key is not the table's (internal/peer/identity.go): nothing runs until it is. */
+  identity_key_mismatch: 'The service\'s identity key is not the one its table\'s records were made under: the keystore and the records don\'t belong together (a wrong or partial restore, or another service\'s table). Nothing is sent, answered or changed until the right keys are back (README "identity_key_mismatch")',
+  /** A stored outgoing hs.init names another identity key than the table's (internal/peer/state.go): dropped at start. */
+  outgoing_identity_changed: 'A stored handshake names another identity key than the table\'s: it was dropped at start. The table holds records made under two keys (README "outgoing_identity_changed")',
   /** A reconnect after a restore could not complete (internal/peer/reconnect.go): the member must connect again. */
   reconnect_failed: 'A reconnect after a table restore failed: that member must connect again from a new invitation (README "Restoring the table")',
   /** A reconnect after a restore unanswered for a day (internal/peer/reconnect.go): the member's vault may be locked. */
