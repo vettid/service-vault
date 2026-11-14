@@ -16,6 +16,9 @@ func (p *Peer) CreateInvite(ctx context.Context, tag string) (*InviteRecord, err
 		return nil, ErrNotStarted
 	}
 	now := p.now()
+	if p.mintWait(now) {
+		return nil, ErrMailboxRenewing // its open token would be refused (mailbox.go)
+	}
 	iv := &Inviter{Keys: p.cfg.Keys, Relay: p.cfg.Relay, RelayURL: p.cfg.RelayURL, HintName: p.cfg.Profile.Name(),
 		Now: func() time.Time { return now }}
 	inv, err := iv.Create(ctx)

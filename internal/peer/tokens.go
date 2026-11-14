@@ -37,6 +37,9 @@ func (p *Peer) mint(connID string, np *peerInfo, kind string, ttl time.Duration,
 // mintJTI is mint, also returning the token's jti (to revoke it if the
 // handshake it was minted for fails).
 func (p *Peer) mintJTI(connID string, np *peerInfo, kind string, ttl time.Duration, quota *relayauth.Quota, now time.Time) (string, string, error) {
+	if p.mintWait(now) {
+		return "", "", errMintWait // the relay would refuse it (mailbox.go)
+	}
 	jti := p.newID(now)
 	tok, err := p.cfg.Relay.MintToken(relayauth.EncodeKey(np.Relay.PK), p.cfg.RelayURL,
 		relayclient.TokenOptions{TTL: ttl, JTI: jti, Quota: quota})

@@ -509,6 +509,11 @@ func (p *Peer) RepinGov(ctx context.Context, connID string, key []byte) (bool, e
 // requests and challenges past their expiry, rekeys due, tokens to
 // re-mint or refresh (§6.4, §6.5, §7.2, §7.4).
 func (p *Peer) housekeeping(now time.Time) {
+	if p.mintWait(now) {
+		// A lost mailbox's wait (mailbox.go): rekeys, reconnects and
+		// re-mints would mint tokens the relay refuses. A few minutes late.
+		return
+	}
 	for id, inv := range p.invites {
 		if !inv.Used && !inv.Withdrew && !now.Before(inv.Exp) {
 			p.withdrawInvite(inv, now)
@@ -573,7 +578,6 @@ func (p *Peer) housekeeping(now time.Time) {
 		}
 		p.refreshHeld(c, now, false)
 	}
-	p.remintLost(now) // a lost mailbox's tokens first (mailbox.go)
 	p.remintIssued(now)
 	p.pruneIssued(now)
 	for id, w := range p.rates {

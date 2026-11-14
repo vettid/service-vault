@@ -251,6 +251,9 @@ func (p *Peer) activeAgain(c *Connection) {
 // (tickPending), and the reconnect of a connection that has a waiting
 // entry and no valid standing token (RELEASE-29 §3 items 2 and 5).
 func (p *Peer) tickPendings(now time.Time) {
+	if p.mintWait(now) {
+		return // its reconnects mint tokens the relay would refuse (mailbox.go)
+	}
 	for id := range p.discardCheck {
 		if c := p.conns[id]; c != nil && c.State == StateActive {
 			p.afterCarriedDiscard(c, now)

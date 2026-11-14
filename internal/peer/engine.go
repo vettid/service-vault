@@ -60,6 +60,9 @@ type Config struct {
 	Log      *slog.Logger
 	// PollWait is the collect long-poll wait (default 25 s; at most 25 s).
 	PollWait time.Duration
+	// Sleep waits d, or until ctx ends (false then); the default sleeps.
+	// Start waits out a lost mailbox's FreshMailboxWait with it.
+	Sleep func(ctx context.Context, d time.Duration) bool
 	// AfterRestore is set when the store was restored from a backup: the
 	// first Start reconnects every connection (reconnect.go) and, once
 	// the reconnects are stored and sent, calls it (to clear the marker).
@@ -136,8 +139,9 @@ type Peer struct {
 	seq        uint64
 	rates      map[string]*rateWindow
 	// remintAt is a lost mailbox's re-mint owed (mailbox.go), zero when
-	// none.
-	remintAt time.Time
+	// none; registerOwed, a registration while running that got no answer.
+	remintAt     time.Time
+	registerOwed bool
 	// outboxFull marks the connections whose contract update waits on a
 	// full outbox, its outbox_full already logged (sendContract).
 	outboxFull map[string]bool
@@ -164,6 +168,9 @@ func New(cfg Config) (*Peer, error) {
 	cfg.RelayURL = strings.TrimRight(cfg.RelayURL, "/")
 	if cfg.Now == nil {
 		cfg.Now = time.Now
+	}
+	if cfg.Sleep == nil {
+		cfg.Sleep = sleep
 	}
 	if cfg.PollWait <= 0 || cfg.PollWait > 25*time.Second {
 		cfg.PollWait = 25 * time.Second
@@ -203,9 +210,9 @@ func (p *Peer) audit(event, connID string) {
 	p.log().Warn("drop", "reason", event, "connection_id", connID)
 }
 
-// Start registers the mailbox (RELAY-PROTOCOL §6.1), loads the state and
-// runs the start-up housekeeping (§7.2 "On unlock" steps 1–2) and the
-// outbox.
+// Start loads the state, registers the mailbox (RELAY-PROTOCOL §6.1;
+// mailbox.go tells a lost one) and runs the start-up housekeeping (§7.2
+// "On unlock" steps 1–2) and the outbox.
 //
 // Before anything else (the relay included) it checks the configured
 // identity key against the table's (CheckIdentity): on a mismatch it
@@ -231,6 +238,22 @@ func (p *Peer) Start(ctx context.Context) error {
 	// registration (mailbox.go, GC #10525).
 	if err := p.register(ctx); err != nil {
 		return err
+	}
+	// A lost mailbox: nothing that mints a token (the restore's
+	// reconnects, rekeys, answers) runs before the relay accepts tokens
+	// for it again. The lock is let go meanwhile; calls that would mint
+	// are refused (errMintWait, ErrNotStarted).
+	if p.mintWait(p.now()) {
+		d := p.remintAt.Sub(p.now())
+		p.mu.Unlock()
+		ok := p.cfg.Sleep(ctx, d)
+		p.mu.Lock()
+		if !ok {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return context.Canceled
+		}
 	}
 	// An earlier process, or this one before a restart, may have left
 	// messages leased: judged with the relay's limits, now known.
@@ -259,6 +282,9 @@ func (p *Peer) Start(ctx context.Context) error {
 	p.housekeeping(p.now())
 	p.tickPendings(p.now())
 	if err := p.flush(ctx); err != nil {
+		return err
+	}
+	if err := p.remintLost(ctx, p.now()); err != nil {
 		return err
 	}
 	p.drainOutbox(ctx)
@@ -360,6 +386,12 @@ func (p *Peer) Tick(ctx context.Context) error {
 	defer p.mu.Unlock()
 	p.housekeeping(p.now())
 	p.tickPendings(p.now())
+	if err := p.flush(ctx); err != nil {
+		return err
+	}
+	if err := p.remintLost(ctx, p.now()); err != nil {
+		return err
+	}
 	return p.flushAndDrain(ctx)
 }
 
@@ -381,6 +413,18 @@ const MaxBatch = 32
 // the outbox is drained after the batch. It returns the number of
 // messages collected.
 func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
+	p.mu.Lock()
+	if p.registerOwed {
+		// A registration after a lost mailbox got no answer: it may have
+		// made the mailbox afresh, so it is made again (mailbox.go) until
+		// one is recorded, whatever the collects meanwhile say.
+		if err := p.register(ctx); err != nil {
+			p.mu.Unlock()
+			return 0, err
+		}
+		p.registerOwed = false
+	}
+	p.mu.Unlock()
 	started := p.now()
 	msgs, err := p.cfg.Relay.Collect(ctx, wait, MaxBatch)
 	p.mu.Lock()
@@ -394,6 +438,7 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 			// which raises relay_mailbox_lost and owes the re-mint
 			// (mailbox.go), rather than collecting from nothing.
 			if rerr := p.register(ctx); rerr != nil {
+				p.registerOwed = true
 				return 0, rerr
 			}
 		}

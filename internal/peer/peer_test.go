@@ -64,8 +64,14 @@ type fixture struct {
 	failCollect error
 	// failRegister, when set, is the error of the service's registrations.
 	failRegister error
-	revokes      map[string]int
-	logs         lockedBuffer
+	// slept is how long the service's starts waited (Config.Sleep);
+	// stopSleep makes the next wait end as a cancelled context does.
+	slept     time.Duration
+	stopSleep bool
+	// storeWrap, when set, is the next starts' store (wrapping f.store).
+	storeWrap Store
+	revokes   map[string]int
+	logs      lockedBuffer
 }
 
 // lockedBuffer collects the service's log lines.
@@ -146,8 +152,20 @@ func (f *fixture) start() {
 // failed to start).
 func (f *fixture) startErr() error {
 	f.t.Helper()
-	p, err := New(Config{Log: slog.New(slog.NewTextHandler(&f.logs, nil)), Keys: f.keys, Relay: testRelay{f.sv, f}, RelayURL: peertest.RelayURL, Store: f.store, Events: f.ev, Now: f.clk.Now,
-		Profile: Profile{FirstName: "VettID", LastName: "Member Service"}, AfterRestore: f.afterRestore, Votes: f.votes, EndAllConnections: f.endAll})
+	var st Store = f.store
+	if f.storeWrap != nil {
+		st = f.storeWrap
+	}
+	p, err := New(Config{Log: slog.New(slog.NewTextHandler(&f.logs, nil)), Keys: f.keys, Relay: testRelay{f.sv, f}, RelayURL: peertest.RelayURL, Store: st, Events: f.ev, Now: f.clk.Now,
+		Profile: Profile{FirstName: "VettID", LastName: "Member Service"}, AfterRestore: f.afterRestore, Votes: f.votes, EndAllConnections: f.endAll,
+		Sleep: func(_ context.Context, d time.Duration) bool {
+			if f.stopSleep {
+				return false
+			}
+			f.slept += d
+			f.clk.Advance(d)
+			return true
+		}})
 	if err != nil {
 		f.t.Fatal(err)
 	}

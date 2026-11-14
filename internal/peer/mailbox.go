@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sort"
 	"time"
 
 	"github.com/vettid/vettid-relay/relayclient"
@@ -90,17 +91,35 @@ func (p *Peer) register(ctx context.Context) error {
 	}
 	p.limits = reg.Limits
 	before := r.Registered || len(p.conns) > 0
-	if before && (reg.Created || prev) {
+	lost := before && (reg.Created || prev)
+	if lost {
 		r.RemintAfter = p.now().Add(FreshMailboxWait)
-		p.log().Error("the service's relay mailbox was lost and made again empty: messages members deposited since the last collect are gone, and every member's tokens for it are minted again",
-			"alarm", "relay_mailbox_lost", "created", reg.Created, "connections", len(p.conns))
 	}
 	r.Registered, r.Attempted = true, false
 	if err := p.writeRelayReg(ctx, r); err != nil {
 		return fmt.Errorf("peer: register: %w", err)
 	}
 	p.remintAt = r.RemintAfter
+	if lost {
+		// After the write, so that a crash before it raises the alarm again
+		// at the next start rather than never.
+		p.log().Error("the service's relay mailbox was lost and made again empty: messages members deposited since the last collect are gone, and every member's tokens for it are minted again",
+			"alarm", "relay_mailbox_lost", "created", reg.Created, "connections", len(p.conns))
+	}
 	return nil
+}
+
+// errMintWait is a token mint refused during a lost mailbox's wait: the
+// relay would refuse a token issued then (RELAY-PROTOCOL §6.10).
+var errMintWait = errors.New("peer: the relay mailbox was made again: tokens can be minted again in a few minutes")
+
+// ErrMailboxRenewing is what CreateInvite answers during that wait.
+var ErrMailboxRenewing = errMintWait
+
+// mintWait reports whether no token may be minted now: a lost mailbox's
+// FreshMailboxWait has not passed.
+func (p *Peer) mintWait(now time.Time) bool {
+	return !p.remintAt.IsZero() && now.Before(p.remintAt)
 }
 
 // registerMadeNothing reports whether a failed registration certainly
@@ -121,30 +140,74 @@ func registerMadeNothing(err error) bool {
 	return errors.As(err, &op) && op.Op == "dial"
 }
 
+// remintChunk is how many connections one re-mint step covers: each
+// gives about five changes (two tokens, two outbox entries, its record),
+// so a step's write stays one transaction of the store (at most 100).
+const remintChunk = 15
+
 // remintLost re-mints, once FreshMailboxWait has passed, every active
 // connection's standing and reconnect tokens after a lost mailbox, and
-// sends them (relay.token.issued). A connection reconnecting, or whose
-// outbox is full, is done at a later housekeeping; the mark clears once
-// every active connection is done.
-func (p *Peer) remintLost(now time.Time) {
-	if p.remintAt.IsZero() || now.Before(p.remintAt) {
-		return
+// sends them (relay.token.issued). It goes by chunks of remintChunk
+// connections, each in two writes, as endInTwoWrites does: first the
+// tokens, the outbox entries and the records they move, then each done
+// connection's mark (Connection.MailboxRemint). A write that fails leaves
+// the marks unset, so those connections are minted again later (a second
+// token is harmless: the later exp wins). A connection reconnecting, or
+// whose outbox is full, is left for a later call. Once every active
+// connection is done, the owed mark is cleared in a write of its own,
+// only if the stored one is still the one done.
+func (p *Peer) remintLost(ctx context.Context, now time.Time) error {
+	if p.remintAt.IsZero() || p.mintWait(now) {
+		return nil
 	}
-	done := true
+	if err := p.flush(ctx); err != nil { // nothing else rides on the steps' writes
+		return err
+	}
+	var todo []*Connection
 	for _, c := range p.conns {
-		if c.State != StateActive || c.MailboxRemint.Equal(p.remintAt) {
-			continue
+		if c.State == StateActive && !c.MailboxRemint.Equal(p.remintAt) {
+			todo = append(todo, c)
 		}
-		if !p.issue(c, tokStanding, false, now) || !p.issue(c, tokReconnect, false, now) {
-			done = false
-			continue
+	}
+	sort.Slice(todo, func(i, j int) bool { return todo[i].ID < todo[j].ID })
+	left := false
+	for len(todo) > 0 {
+		n := min(remintChunk, len(todo))
+		var done []*Connection
+		for _, c := range todo[:n] {
+			if p.issue(c, tokStanding, false, now) && p.issue(c, tokReconnect, false, now) {
+				done = append(done, c)
+			} else {
+				left = true
+			}
 		}
-		c.MailboxRemint = p.remintAt
-		p.markDirty(kindConn, c.ID)
+		todo = todo[n:]
+		if err := p.flush(ctx); err != nil {
+			return err
+		}
+		for _, c := range done {
+			c.MailboxRemint = p.remintAt
+			p.markDirty(kindConn, c.ID)
+		}
+		if err := p.flush(ctx); err != nil {
+			return err
+		}
 	}
-	if done {
-		p.remintAt = time.Time{}
-		b, _ := json.Marshal(relayReg{Registered: true})
-		p.extra = append(p.extra, Change{Kind: kindRelayReg, ID: relayRegID, Data: b})
+	if left {
+		return nil
 	}
+	r, err := p.readRelayReg(ctx)
+	if err != nil {
+		return err
+	}
+	if !r.RemintAfter.Equal(p.remintAt) {
+		p.remintAt = r.RemintAfter // a newer loss: its own re-mint goes on
+		return nil
+	}
+	r.RemintAfter = time.Time{}
+	if err := p.writeRelayReg(ctx, r); err != nil {
+		return err
+	}
+	p.remintAt = time.Time{}
+	return nil
 }
