@@ -232,9 +232,10 @@ destination.
   and reading records may reseal ones under an older version; their
   contents don't change.) `admin bootstrap` refuses while the keys
   differ; `admin reseal-blobs` refuses while the heartbeat shows the
-  service running, held or not. The alarm fires once per start, and then
-  the stack looks healthy: ECS neither replaces the task nor rolls back
-  a held deploy.
+  service running, held or not. The alarm line is logged at once and
+  again every 2 minutes while held, so the alarm stays raised for as long
+  as the service is held: `/health` is 200, so ECS neither replaces the
+  task nor rolls back a held deploy, and the alarm is the only signal.
 
   The ways out:
   - **The keys are wrong:** put the right keystore item or table back (or

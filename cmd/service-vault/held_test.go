@@ -9,12 +9,35 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vettid/service-vault/internal/approval"
 	"github.com/vettid/service-vault/internal/keystore"
 	"github.com/vettid/service-vault/internal/peer"
 	"github.com/vettid/service-vault/internal/sealstore"
 )
+
+// While held, the alarm is raised at every tick and stops with the
+// service; the interval keeps every 5-minute alarm period raised.
+func TestHeldAlarmRepeats(t *testing.T) {
+	if heldAlarmEvery > 150*time.Second {
+		t.Fatalf("heldAlarmEvery %s leaves a 5-minute period without a line", heldAlarmEvery)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	tick := make(chan time.Time)
+	raised := make(chan struct{}, 10)
+	done := make(chan struct{})
+	go func() { heldAlarm(ctx, tick, func() { raised <- struct{}{} }); close(done) }()
+	for i := 0; i < 3; i++ {
+		tick <- time.Now()
+		<-raised
+	}
+	cancel()
+	<-done
+	if len(raised) != 0 {
+		t.Fatalf("%d extra alarms", len(raised))
+	}
+}
 
 // While held (GC #9109), /health answers 200 and every other request,
 // /v1 routes and a POST to /health included, 503 identity_key_mismatch.

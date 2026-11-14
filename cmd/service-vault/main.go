@@ -710,13 +710,22 @@ func identityThenPin(ctx context.Context, records interface {
 // runHeld runs the service held by an identity-key mismatch (GC #9109;
 // owner a, #10417): the keystore and the records don't belong together,
 // so nothing reads the records, signs, sends or answers a member. It
-// raises the alarm once, keeps the heartbeat (a table restore must see the
-// service running), and serves heldHandler until it is stopped. /health
-// stays 200, so ECS doesn't replace the task in a loop: the alarm is the
-// signal. A start under the right key finds the table as it was.
+// raises the alarm at once and again every heldAlarmEvery for as long as
+// it is held (owner a, #10446), keeps the heartbeat (a table restore must
+// see the service running), and serves heldHandler until it is stopped.
+// /health stays 200, so ECS doesn't replace the task in a loop: the alarm
+// is the signal. A start under the right key finds the table as it was.
 func runHeld(ctx context.Context, stop func(), listen string, tlsConfig *tls.Config, tbl *store.Table, log *slog.Logger, m *peer.IdentityMismatch) error {
-	log.Error("the service's identity key is not the one its table's records were made under: held, nothing runs until the right keys are back",
-		"alarm", "identity_key_mismatch", "from", m.From, "err", m.Error())
+	raise := func() {
+		log.Error("the service's identity key is not the one its table's records were made under: held, nothing runs until the right keys are back",
+			"alarm", "identity_key_mismatch", "from", m.From, "err", m.Error())
+	}
+	raise()
+	go func() {
+		t := time.NewTicker(heldAlarmEvery)
+		defer t.Stop()
+		heldAlarm(ctx, t.C, raise)
+	}()
 	srv := &http.Server{
 		Addr:              listen,
 		Handler:           heldHandler(),
@@ -760,6 +769,24 @@ func runHeld(ctx context.Context, stop func(), listen string, tlsConfig *tls.Con
 	}
 	log.Info("stopped")
 	return runErr
+}
+
+// heldAlarmEvery is how often runHeld raises its alarm again. The stack's
+// alarm sums the alarm lines over 5 minutes and treats a period without
+// one as OK, so a line every 2 minutes puts at least two in every period
+// and keeps it raised while held, ticker jitter included.
+const heldAlarmEvery = 2 * time.Minute
+
+// heldAlarm raises the alarm at each tick until ctx ends.
+func heldAlarm(ctx context.Context, tick <-chan time.Time, raise func()) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick:
+			raise()
+		}
+	}
 }
 
 // heldHandler is the API while held (runHeld): GET /health answers 200
