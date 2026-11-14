@@ -54,14 +54,25 @@ func (p *Peer) sendProfile(c *Connection, version uint64, now time.Time) bool {
 // with its next version when the contract last sent to it differs from
 // this release's, a value never sent included (§10.8 "Sending"): at the
 // first start under such a release, and again at each housekeeping until
-// it is queued; once queued it is retried with the connection's other
-// messages (the outbox). A record from before contract was sent version 1
-// at activation.
+// it is queued (sendEntry audits why it was not); once queued it is
+// retried with the connection's other messages (the outbox).
 func (p *Peer) sendContract(c *Connection, now time.Time) {
 	if c.SentContract == Contract {
 		return
 	}
-	if !p.sendProfile(c, max(c.SentProfileVersion, 1)+1, now) {
-		p.audit("contract_update_unsent", c.ID)
-	}
+	p.sendProfile(c, nextProfileVersion(c, now), now)
+}
+
+// nextProfileVersion is the version of the service's next profile.update
+// to c after the one at activation: one more than the last sent (a record
+// from before contract was sent version 1 at activation), and at least
+// now in Unix seconds. The member's vault keeps an update only when its
+// version is higher than the last it applied (§10.8 "Receiving" step 1),
+// and the count kept here can go back: a rollback to a release without it
+// rewrites the record without it, and a restore brings back an older one.
+// Counting from the clock keeps a later update above what an earlier
+// record sent (chosen; §10.8 asks only for a higher version, at most
+// 2^53−1).
+func nextProfileVersion(c *Connection, now time.Time) uint64 {
+	return max(max(c.SentProfileVersion, 1)+1, uint64(max(now.Unix(), 0)))
 }

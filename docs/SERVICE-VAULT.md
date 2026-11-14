@@ -73,7 +73,12 @@ never answers challenges and never rotates its identity.
   it last sent to each connection; at a start under a release whose value
   differs (or that never sent one), each active connection gets an update
   with its next `version`, retried at the next housekeeping until it is
-  queued. From a member's `profile.update` it keeps the contract claimed
+  queued. That version is at least the clock's Unix seconds, so one sent
+  after a rollback or a restore set the record back is still higher than
+  any the member's vault applied. Once queued it counts as sent: if the
+  outbox later gives it up (the window passed, the connection ended or
+  went stale), it is not sent again, as with the update at activation.
+  From a member's `profile.update` it keeps the contract claimed
   (a string of the §10.8 form; any other value counts as none and is
   audited `profile_contract_malformed`, and the update is still applied).
   The value is informational: nothing selects behavior or holds a

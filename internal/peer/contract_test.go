@@ -78,16 +78,20 @@ func TestContractSentAtActivation(t *testing.T) {
 
 // At a start under a release whose contract differs from the one last
 // sent (a value never sent included), each active connection gets an
-// update with its next version, once (§10.8 "Sending").
+// update with its next version, once (§10.8 "Sending"). The version is at
+// least the clock's Unix seconds, so a record a rollback or a restore set
+// back cannot send one the member's vault already holds.
 func TestContractSentAtStartWhenDiffers(t *testing.T) {
+	clock := uint64(time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC).Unix()) // the fixture's clock
 	for _, tc := range []struct {
 		name        string
 		lastVersion uint64
 		lastSent    string
 		want        uint64
 	}{
-		{"a record from before contract", 0, "", 2},
-		{"another contract sent", 4, "0.9", 5},
+		{"a record from before contract", 0, "", clock},
+		{"another contract sent", 4, "0.9", clock},
+		{"a version past the clock", clock + 10, "0.9", clock + 11},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t)
@@ -175,15 +179,53 @@ func TestPeerContract(t *testing.T) {
 			t.Fatalf("v%d %s: audited %v", tc.version, tc.raw, got)
 		}
 	}
-	f.start()
-	if c := f.p.conns[cid]; c.PeerContract != "" {
-		t.Fatalf("after a restart: %q", c.PeerContract)
-	}
 	m.Send(peerwire.TypeProfileUpdate, withMember(t, peerwire.ProfileUpdateBody(15, "Nora", "Kept", ik, nil), "contract", `"1.0"`))
 	f.pump()
 	f.start()
 	if c := f.p.conns[cid]; c.PeerContract != "1.0" {
 		t.Fatalf("not kept across a restart: %q", c.PeerContract)
+	}
+	// A dropped update changes nothing: a malformed core, another ik.
+	other := ed25519.NewKeyFromSeed(make([]byte, 32)).Public().(ed25519.PublicKey)
+	for _, body := range [][]byte{
+		peerwire.ProfileUpdateBody(16, "", "Empty", ik, nil),
+		peerwire.ProfileUpdateBody(17, "Nora", "Other", other, nil),
+	} {
+		m.Send(peerwire.TypeProfileUpdate, withMember(t, body, "contract", `"2.0"`))
+		f.pump()
+		if c := f.p.conns[cid]; c.PeerContract != "1.0" || c.ProfileVersion != 15 {
+			t.Fatalf("a dropped update changed: %q v%d", c.PeerContract, c.ProfileVersion)
+		}
+	}
+}
+
+// An update that cannot be queued (the outbox full) is not counted as
+// sent, and goes at a later housekeeping.
+func TestContractRetriedUntilQueued(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	p := f.p
+	c := p.conns[cid]
+	p.mu.Lock()
+	c.SentContract = ""
+	for p.outboxFor(cid) < MaxOutboxPerConn {
+		p.queueDeposit(&outboxEntry{ConnID: cid, Mailbox: c.Peer.Relay.Mailbox, Payload: []byte("x"), NotBefore: f.clk.Now().Add(1000 * time.Hour)},
+			f.clk.Now())
+	}
+	p.mu.Unlock()
+	f.tick()
+	f.pump()
+	if c.SentContract != "" || len(profilesTo(t, m)) != 1 {
+		t.Fatalf("counted as sent with the outbox full: %q", c.SentContract)
+	}
+	p.mu.Lock()
+	p.outbox = slices.DeleteFunc(p.outbox, func(e *outboxEntry) bool { return string(e.Payload) == "x" })
+	p.mu.Unlock()
+	f.tick()
+	f.pump()
+	if got := profilesTo(t, m); len(got) != 2 || string(got[1].Contract) != `"1.0"` || c.SentContract != Contract {
+		t.Fatalf("not sent once the outbox had room: %+v", got)
 	}
 }
 
