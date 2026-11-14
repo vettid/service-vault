@@ -3,6 +3,7 @@ package peer
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -39,6 +40,9 @@ func TestChallengeQueuedThenSentOneProcess(t *testing.T) {
 	}
 	if d := f.p.ChallengeDelivery(req); d != DeliverySent || len(m.Received(peerwire.TypeConnAuthChallenge)) != 1 {
 		t.Fatalf("%q", d)
+	}
+	if !strings.Contains(f.logs.String(), "challenge queued") {
+		t.Fatal("not logged as queued")
 	}
 	if got := f.p.ChallengeDeliveries([]string{req, "nope"}); got[req] != DeliverySent || got["nope"] != DeliveryNone {
 		t.Fatalf("%v", got)
@@ -171,6 +175,19 @@ func TestSplitFlushReconciledAtLoad(t *testing.T) {
 	}
 	if n := f.p.held(cid, f.clk.Now()); n != 1 {
 		t.Fatalf("%d places", n)
+	}
+	// The repair is stored at the next flush, not made again at each load.
+	if err := f.p.flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	raw, ok, err := f.store.Get(context.Background(), kindAuth, req)
+	var stored challenge
+	if err != nil || !ok || json.Unmarshal(raw, &stored) != nil || stored.Entry == "" || stored.Unsent || stored.Undelivered {
+		t.Fatalf("stored %+v %v %v", stored, ok, err)
+	}
+	f.start()
+	if d := f.p.ChallengeDelivery(req); d != DeliveryQueued {
+		t.Fatalf("after a second restart: %q", d)
 	}
 	f.pump()
 	if d := f.p.ChallengeDelivery(req); d != DeliverySent || len(m.Received(peerwire.TypeConnAuthChallenge)) != 1 {

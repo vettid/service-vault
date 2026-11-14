@@ -2,6 +2,7 @@ package peer
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -148,5 +149,10 @@ func TestCancelQueuedChallengeUnsent(t *testing.T) {
 	}
 	if n := len(m.Received(peerwire.TypeConnAuthChallenge)) + len(m.Received(peerwire.TypeConnAuthWithdraw)); n != 0 {
 		t.Fatalf("%d challenges or withdraws reached the member", n)
+	}
+	logs := f.logs.String()
+	if !strings.Contains(logs, "challenge queued") || strings.Contains(logs, "challenge sent") ||
+		!strings.Contains(logs, "withdrawn=false unsent=true") {
+		t.Fatalf("log: %s", logs)
 	}
 }
