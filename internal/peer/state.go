@@ -32,13 +32,14 @@ const (
 	kindLease    = "lease"    // the latest collect that leased messages, by process (Caught)
 	kindUnacked  = "unacked"  // a message left unacked, by msg_id: its times only (Caught)
 	kindOnce     = "once"     // a one-shot operator action that ran (EndAllConnections)
+	// kindSend (sendtally.go): a send's tally of its messages.
 )
 
 // Kinds lists every record kind the peer stores, for a migration that
 // must touch them all (internal/sealstore).
 func Kinds() []string {
 	return []string{kindConn, kindInvite, kindAwait, kindRequest, kindOutgoing, kindToken, kindOutbox, kindAuth, kindEvent,
-		kindMsg, kindInner, kindResp, kindLease, kindUnacked, kindOnce, kindIdentity, kindRelayReg}
+		kindMsg, kindInner, kindResp, kindLease, kindUnacked, kindOnce, kindIdentity, kindRelayReg, kindSend}
 }
 
 // Retention (VAULT-MESSAGING §8.2, §6.4).
@@ -476,6 +477,8 @@ type outboxEntry struct {
 	// Challenge is the request id of the connection.authenticate.challenge
 	// the entry carries, or "" (challenge.Entry).
 	Challenge string `json:"challenge,omitempty"`
+	// Ref is the send a SendMessageRef message is counted under, or "".
+	Ref string `json:"ref,omitempty"`
 
 	dropped   bool // removed by dropOutbox: a drain in progress skips it
 	deposited bool // the relay took it: it leaves the outbox delivered
@@ -618,6 +621,12 @@ func (p *Peer) recordData(k key) ([]byte, time.Time, error) {
 			return nil, exp, nil
 		}
 		v = e
+	case kindSend:
+		t := p.sends[k.id]
+		if t == nil {
+			return nil, exp, nil
+		}
+		v, exp = t, t.Until.Add(SendTallyRetention+storeMargin)
 	default:
 		return nil, exp, fmt.Errorf("peer: unknown record kind %q", k.kind)
 	}
@@ -826,6 +835,14 @@ func (p *Peer) load(ctx context.Context) error {
 			}
 			p.outbox = append(p.outbox, e)
 			return e.ID, nil
+		}},
+		{kindSend, func(b []byte) (string, error) {
+			t := &sendTally{}
+			if err := json.Unmarshal(b, t); err != nil {
+				return "", err
+			}
+			p.sends[t.Ref] = t
+			return t.Ref, nil
 		}},
 		{kindAuth, func(b []byte) (string, error) {
 			c := &challenge{}

@@ -1,0 +1,109 @@
+package peer
+
+import (
+	"context"
+	"encoding/json"
+	"sort"
+	"strings"
+	"time"
+)
+
+// Send tallies: what became of the messages an application send put in
+// the outbox (SendMessageRef). Accepted is not sent: a message to a
+// connection mid-reconnect, or stale, waits in the outbox, and may be
+// deposited days later or end there undelivered (§8.3).
+
+// kindSend is a send's tally, by its ref.
+const kindSend = "send"
+
+// SendTallyRetention keeps a send's tally this long after the latest
+// notAfter of its messages, the last time one could still be deposited
+// (chosen; not in the spec).
+const SendTallyRetention = 14 * 24 * time.Hour
+
+// sendTally counts a send's messages that left the outbox. The ones still
+// in it are counted from the outbox itself (SendCounts).
+type sendTally struct {
+	Ref       string    `json:"ref"`
+	Deposited int       `json:"deposited"`
+	Dropped   int       `json:"dropped"`
+	Until     time.Time `json:"until"` // the latest notAfter of its messages
+}
+
+// SendCounts is where one send's messages stand: deposited with the
+// relay (Sent), waiting in the outbox (Queued), or ended there
+// undelivered (Dropped).
+type SendCounts struct {
+	Ref     string
+	Sent    int
+	Queued  int
+	Dropped int
+}
+
+// SendMessageRef is SendMessage, with the message counted under ref
+// (SendCounts). A message with no notAfter is counted for
+// SendTallyRetention from now.
+func (p *Peer) SendMessageRef(ctx context.Context, connID, typ string, body json.RawMessage, notAfter time.Time, ref string) (string, error) {
+	return p.sendMessage(ctx, connID, typ, body, notAfter, ref)
+}
+
+// tally returns ref's tally, made if new, kept at least until until.
+func (p *Peer) tally(ref string, until time.Time) *sendTally {
+	t := p.sends[ref]
+	if t == nil {
+		t = &sendTally{Ref: ref}
+		p.sends[ref] = t
+	}
+	if until.After(t.Until) {
+		t.Until = until.UTC().Truncate(time.Millisecond)
+		p.markDirty(kindSend, ref)
+	}
+	return t
+}
+
+// sendLeft counts e, a message of a send, as it leaves the outbox.
+func (p *Peer) sendLeft(e *outboxEntry) {
+	if e.Ref == "" {
+		return
+	}
+	t := p.sends[e.Ref]
+	if t == nil {
+		return // its tally is past its retention
+	}
+	if e.deposited {
+		t.Deposited++
+	} else {
+		t.Dropped++
+	}
+	p.markDirty(kindSend, e.Ref)
+}
+
+// SendCounts reports the sends whose ref starts with prefix, by ref.
+func (p *Peer) SendCounts(prefix string) []SendCounts {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	queued := map[string]int{}
+	for _, e := range p.outbox {
+		if e.Ref != "" && strings.HasPrefix(e.Ref, prefix) {
+			queued[e.Ref]++
+		}
+	}
+	var out []SendCounts
+	for ref, t := range p.sends {
+		if strings.HasPrefix(ref, prefix) {
+			out = append(out, SendCounts{Ref: ref, Sent: t.Deposited, Queued: queued[ref], Dropped: t.Dropped})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Ref < out[j].Ref })
+	return out
+}
+
+// pruneSends (housekeeping) forgets the tallies past their retention.
+func (p *Peer) pruneSends(now time.Time) {
+	for ref, t := range p.sends {
+		if now.After(t.Until.Add(SendTallyRetention)) {
+			delete(p.sends, ref)
+			p.markDirty(kindSend, ref)
+		}
+	}
+}

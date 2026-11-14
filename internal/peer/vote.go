@@ -124,6 +124,10 @@ func (p *Peer) activeIf(keep func(*Connection) bool) []string {
 // notAfter, when set, is when the message stops being worth delivering:
 // a deposit not made by then is dropped from the outbox.
 func (p *Peer) SendMessage(ctx context.Context, connID, typ string, body json.RawMessage, notAfter time.Time) (string, error) {
+	return p.sendMessage(ctx, connID, typ, body, notAfter, "")
+}
+
+func (p *Peer) sendMessage(ctx context.Context, connID, typ string, body json.RawMessage, notAfter time.Time, ref string) (string, error) {
 	if !envelope.ValidType(typ) {
 		return "", errors.New("peer: invalid message type")
 	}
@@ -155,6 +159,15 @@ func (p *Peer) SendMessage(ctx context.Context, connID, typ string, body json.Ra
 	}
 	if e := p.outbox[len(p.outbox)-1]; e.ConnID == c.ID && e.Op == opDeposit {
 		e.Vote, e.NotAfter = true, notAfter
+		if ref != "" {
+			// Counted from here: the drain below may deposit it already.
+			until := notAfter
+			if until.IsZero() {
+				until = now
+			}
+			p.tally(ref, until)
+			e.Ref = ref
+		}
 	}
 	if err := p.flushAndDrain(ctx); err != nil {
 		return "", err

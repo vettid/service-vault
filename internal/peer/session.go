@@ -542,6 +542,7 @@ func (p *Peer) housekeeping(now time.Time) {
 	}
 	p.expireRequests(now)
 	p.expireChallenges(now)
+	p.pruneSends(now)
 	for id, og := range p.outgoing {
 		c := p.conns[og.ConnID]
 		reconnect := og.ini != nil && og.ini.Purpose() == handshake.PurposeReconnect
