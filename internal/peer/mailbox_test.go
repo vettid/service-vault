@@ -670,3 +670,47 @@ func TestLostMailboxRefreshAfterRemint(t *testing.T) {
 		t.Fatalf("the member got it %d times", n)
 	}
 }
+
+// After the wait, before a member's re-mint (no tick has run since): a
+// deposit refused token_expired asks for no refresh yet, since the member
+// still holds only refused tokens. The refresh goes at the first
+// housekeeping after its re-mint.
+func TestLostMailboxRefreshBeforeMemberRemint(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "")
+	f.w.DeleteMailbox(f.keys.Mailbox())
+	if _, err := f.p.Step(context.Background(), 0); err == nil {
+		t.Fatal("no loss seen")
+	}
+	f.clk.Advance(FreshMailboxWait)
+	c := f.p.conns[cid]
+	expired := c.Standing.Token
+	f.failDeposit = func(_, token string) error {
+		if token == expired {
+			return &relayclient.Error{Status: 401, Code: codeTokenExpired}
+		}
+		return nil
+	}
+	f.p.mu.Lock()
+	f.p.sendTo(c, "connection.note", []byte(`{"x":1}`), f.clk.Now())
+	f.p.mu.Unlock()
+	// Only Tick re-mints (remintLost); Step drains the outbox, and its
+	// housekeeping skips a member whose re-mint is owed: that is the window.
+	f.step() // drains the outbox: token_expired, before any tick re-mints
+	if c.MailboxRemint.Equal(f.p.remintAt) {
+		t.Fatal("re-minted before the tick")
+	}
+	if c.RefreshID != "" || !f.p.refreshOwed[cid] {
+		t.Fatalf("refresh %q, owed %v", c.RefreshID, f.p.refreshOwed[cid])
+	}
+	f.tick() // the re-mint
+	if c.RefreshID != "" {
+		t.Fatal("a refresh asked for before the member's re-mint")
+	}
+	f.pump()
+	f.tick() // the refresh: the first housekeeping after the re-mint
+	if c.RefreshID == "" || f.p.refreshOwed[cid] {
+		t.Fatalf("refresh %q, owed %v after the re-mint", c.RefreshID, f.p.refreshOwed[cid])
+	}
+}
