@@ -251,9 +251,11 @@ destination.
     previous release once under the right keys, which drops it
     (`outgoing_identity_changed`), then roll forward; or restore the
     table from a backup without it.
-- `relay_mailbox_lost`: at start, the relay made the service's mailbox
-  afresh: it was deleted while the service was down (the relay lost
-  it, or someone holding the service's relay key deleted it). What
+- `relay_mailbox_lost`: the relay made the service's mailbox afresh: it
+  was deleted (the relay lost it, or someone holding the service's
+  relay key deleted it), seen at a start's registration, or while
+  running when a collect is answered `mailbox_unknown` and the service
+  registers it again at once. What
   members deposited since the service's last collect is gone, with no
   way to recover it here (relay-key rotation, GC #9442, is where it
   would be). The relay now refuses every token the old mailbox issued,
@@ -261,9 +263,12 @@ destination.
   standing and reconnect tokens again and sends them
   (`relay.token.issued`); until then members' deposits to the service
   fail, and a member whose vault is offline gets them when it next
-  collects. A start whose registration got no answer before is treated
-  the same at its next `200`, since that attempt may have made the
-  mailbox afresh unseen. A deleted mailbox may also mean the relay key
+  collects. Connections still being made and invitations from before
+  the loss can't complete: those members connect again from a new
+  invitation. A registration that got no answer (or a `5xx`) is treated
+  the same at the next `200`, since it may have made the mailbox afresh
+  unseen; so the alarm can rarely fire when nothing was lost (the
+  re-mint is harmless then). A deleted mailbox may also mean the relay key
   is exposed: look at the relay's logs, and consider new keys and new
   invitations until the service can rotate its relay key.
 - `outgoing_identity_changed`: at start, a stored handshake this

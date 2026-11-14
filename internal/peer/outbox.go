@@ -22,9 +22,11 @@ const (
 	codeTimestampStale = "timestamp_stale"
 )
 
-// OneDepositAttempt wraps a relay client so that each deposit is one
-// attempt, its other calls keeping the client's retries (§8.3, a deposit
-// is one client attempt; RELEASE-29 §13).
+// OneDepositAttempt wraps a relay client so that each deposit and each
+// registration is one attempt, its other calls keeping the client's
+// retries (§8.3, a deposit is one client attempt; RELEASE-29 §13). A
+// registration retried inside the client could hide a 201 behind the
+// next attempt's 200 (mailbox.go).
 func OneDepositAttempt(c *relayclient.Client) Relay {
 	d := *c
 	d.MaxAttempts = 1
@@ -38,6 +40,10 @@ type oneDeposit struct {
 
 func (o oneDeposit) Deposit(ctx context.Context, mailboxID, token string, payload []byte) (string, error) {
 	return o.dep.Deposit(ctx, mailboxID, token, payload)
+}
+
+func (o oneDeposit) Register(ctx context.Context) (relayclient.Registration, error) {
+	return o.dep.Register(ctx)
 }
 
 // outboxMaxBackoff caps the outbox retry backoff (§8.6: 0.25 s × 2ⁿ,

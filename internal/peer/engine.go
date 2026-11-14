@@ -222,9 +222,6 @@ func (p *Peer) Start(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.drained = false // B waits for this start's first short collect (RELEASE-29 §2)
-	// An earlier process, or this one before a restart, may have left
-	// messages leased.
-	p.leasedUntil(p.now())
 	if !p.started {
 		if err := p.load(ctx); err != nil {
 			return err
@@ -235,6 +232,9 @@ func (p *Peer) Start(ctx context.Context) error {
 	if err := p.register(ctx); err != nil {
 		return err
 	}
+	// An earlier process, or this one before a restart, may have left
+	// messages leased: judged with the relay's limits, now known.
+	p.leasedUntil(p.now())
 	if !p.started {
 		if err := p.endAllOnce(ctx, p.now()); err != nil {
 			return err
@@ -388,6 +388,15 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 	if err != nil {
 		p.leasedUntil(p.now()) // the relay may have leased a batch we never saw
 		p.drained = false      // a failed collect clears the latch (RELEASE-29 §2)
+		var re *relayclient.Error
+		if errors.As(err, &re) && re.Code == codeMailboxUnknown {
+			// The mailbox was lost while running: register it again here,
+			// which raises relay_mailbox_lost and owes the re-mint
+			// (mailbox.go), rather than collecting from nothing.
+			if rerr := p.register(ctx); rerr != nil {
+				return 0, rerr
+			}
+		}
 		return 0, err
 	}
 	if len(msgs) > 0 {

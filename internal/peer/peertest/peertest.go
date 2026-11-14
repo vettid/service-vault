@@ -166,6 +166,9 @@ func (v *View) Collect(_ context.Context, _ time.Duration, max int) ([]relayclie
 	v.w.mu.Lock()
 	defer v.w.mu.Unlock()
 	now := v.w.clk.Now()
+	if v.w.mailboxes[v.mb] == nil {
+		return nil, relayErr(404, "mailbox_unknown")
+	}
 	var out []relayclient.Message
 	for _, s := range v.w.mailboxes[v.mb].msgs {
 		if len(out) == max {
@@ -208,7 +211,7 @@ func (v *View) Deposit(_ context.Context, mailboxID, token string, payload []byt
 		return "", relayErr(401, "token_revoked")
 	}
 	if t, ok := v.w.tombs[mailboxID]; ok && cl.Iat.Before(t.Add(90*time.Second)) {
-		return "", relayErr(401, "token_invalid") // issued before the mailbox was deleted
+		return "", relayErr(401, "token_revoked") // issued before the mailbox was deleted (§5.3 step 6)
 	}
 	if !v.w.clk.Now().Before(cl.Exp) {
 		return "", relayErr(401, "token_expired")

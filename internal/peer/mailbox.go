@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/vettid/vettid-relay/relayclient"
@@ -79,10 +80,10 @@ func (p *Peer) register(ctx context.Context) error {
 	}
 	reg, err := p.cfg.Relay.Register(ctx)
 	if err != nil {
-		var re *relayclient.Error
-		if errors.As(err, &re) && re.Status >= 400 && re.Status < 500 {
-			// The relay's own refusal (429 included): nothing was made.
-			r.Attempted = false
+		if registerMadeNothing(err) {
+			// This attempt made nothing: the mark goes back to what an
+			// earlier attempt left (which may have made the mailbox).
+			r.Attempted = prev
 			_ = p.writeRelayReg(ctx, r)
 		}
 		return fmt.Errorf("peer: register: %w", err)
@@ -100,6 +101,24 @@ func (p *Peer) register(ctx context.Context) error {
 	}
 	p.remintAt = r.RemintAfter
 	return nil
+}
+
+// registerMadeNothing reports whether a failed registration certainly
+// made nothing at the relay: the relay's own refusal (a 4xx, 429
+// included, but not replay_detected, which shows an earlier copy of the
+// request did reach it), or a request that never left (a dial or DNS
+// failure). Anything else (no answer, a 5xx) may hide a fresh mailbox.
+func registerMadeNothing(err error) bool {
+	var re *relayclient.Error
+	if errors.As(err, &re) {
+		return re.Status >= 400 && re.Status < 500 && re.Code != codeReplayDetected
+	}
+	var dns *net.DNSError
+	if errors.As(err, &dns) {
+		return true
+	}
+	var op *net.OpError
+	return errors.As(err, &op) && op.Op == "dial"
 }
 
 // remintLost re-mints, once FreshMailboxWait has passed, every active
