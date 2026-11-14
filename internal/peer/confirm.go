@@ -393,6 +393,7 @@ func (p *Peer) resealAtKeyChange(c *Connection, next *handshake.Epoch, now time.
 		e.dropped = true
 		p.markDirty(kindOutbox, e.ID)
 		p.challengeLeft(e)
+		p.sendLeft(e)
 	}
 	p.outbox = keep
 }

@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/vettid/service-vault/internal/peer"
 	"github.com/vettid/service-vault/vote"
 	"log/slog"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -35,6 +37,27 @@ type Roster interface {
 // Sender sends a message to a member's vault over its connection.
 type Sender interface {
 	SendMessage(ctx context.Context, connID, typ string, body json.RawMessage, notAfter time.Time) (string, error)
+}
+
+// SendCounter is a Sender that counts each send's messages by where they
+// stand (*peer.Peer): accepted is not sent, since a message to a member
+// whose connection is mid-reconnect waits in the outbox, and may end there
+// undelivered. Without it, sends are counted as accepted only.
+type SendCounter interface {
+	SendMessageRef(ctx context.Context, connID, typ string, body json.RawMessage, notAfter time.Time, ref string) (string, error)
+	SendCounts(prefix string) []peer.SendCounts
+}
+
+// SendStatus is where one send's messages stand: deposited with the relay
+// (Sent), waiting in the outbox (Queued), or ended there undelivered
+// (Dropped). They count messages, not members: a send run again (a
+// /publish) counts again. A dropped message is not sent again; its member
+// learns of the vote as BALLOT-PROTOCOL §4.2, §8.3 and §10 say.
+type SendStatus struct {
+	Send    string `json:"send"` // proposal, extended/<n> or closed
+	Sent    int    `json:"sent"`
+	Queued  int    `json:"queued"`
+	Dropped int    `json:"dropped"`
 }
 
 // Publisher anchors a proposal and publishes it on votes.vettid.org
@@ -456,6 +479,10 @@ type ProposalStatus struct {
 	OpensAt      int64  `json:"opens_at"`
 	ClosesAt     int64  `json:"closes_at"` // as extended
 	Published    bool   `json:"published"`
+	// Sends: what became of the messages sent to members about it, while
+	// the peer keeps their counts (peer.SendTallyRetention past the last
+	// one's notAfter).
+	Sends []SendStatus `json:"sends,omitempty"`
 }
 
 // Status reports a proposal, or nil for an unknown id.
@@ -469,8 +496,31 @@ func (m *Manager) Status(ctx context.Context, id string) (*ProposalStatus, error
 		return nil, err
 	}
 	return &ProposalStatus{ProposalID: id, Proposal: string(o.Doc), ProposalHash: sum(o.Doc), Eligible: p.Eligible,
-		OpensAt: p.OpensAt, ClosesAt: o.ClosesAt, Published: o.Bundle != nil}, nil
+		OpensAt: p.OpensAt, ClosesAt: o.ClosesAt, Published: o.Bundle != nil, Sends: m.sendStatus(id)}, nil
 }
+
+// sendStatus is where the messages of proposal id's sends stand, or nil
+// when the Sender doesn't count them.
+func (m *Manager) sendStatus(id string) []SendStatus {
+	sc, ok := m.Sender.(SendCounter)
+	if !ok {
+		return nil
+	}
+	var out []SendStatus
+	for _, c := range sc.SendCounts(sendRef(id, "")) {
+		// A ref is <proposal id>/<key>, the key <type>/<proposal id>[/<n>].
+		typ, rest, _ := strings.Cut(strings.TrimPrefix(c.Ref, sendRef(id, "")), "/")
+		send := typ
+		if n, ok := strings.CutPrefix(rest, id+"/"); ok {
+			send += "/" + n
+		}
+		out = append(out, SendStatus{Send: send, Sent: c.Sent, Queued: c.Queued, Dropped: c.Dropped})
+	}
+	return out
+}
+
+// sendRef is the ref a send's messages are counted under at the peer.
+func sendRef(proposalID, key string) string { return proposalID + "/" + key }
 
 // countIn counts the ids of some that are in all.
 func countIn(all, some []string) int {

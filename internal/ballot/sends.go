@@ -68,6 +68,7 @@ func memberOnly(err error) bool {
 // sendJob is one message to send to a proposal's members.
 type sendJob struct {
 	key, typ string
+	ref      string // its messages' count at the peer (sendRef)
 	conns    []string
 	notAfter time.Time
 	body     func(conn string) (json.RawMessage, error)
@@ -115,7 +116,7 @@ func (m *Manager) sendInBackground(proposalID, key, typ string, conns []string, 
 	}
 	m.sends.keys[key] = true
 	q, running := m.sends.queues[proposalID]
-	m.sends.queues[proposalID] = append(q, &sendJob{key: key, typ: typ, conns: conns, notAfter: notAfter, body: body})
+	m.sends.queues[proposalID] = append(q, &sendJob{key: key, typ: typ, ref: sendRef(proposalID, key), conns: conns, notAfter: notAfter, body: body})
 	if !running {
 		m.sends.wg.Add(1)
 		go m.runSends(proposalID)
@@ -149,8 +150,9 @@ func (m *Manager) runJob(job *sendJob) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	sent, failed, bodyErrs, inARow := 0, 0, 0, 0
+	accepted, failed, bodyErrs, inARow := 0, 0, 0, 0
 	gaveUp := false
+	sc, counted := m.Sender.(SendCounter)
 	for _, c := range job.conns {
 		// Checked before each send: the peer queues a message before it
 		// looks at the context.
@@ -166,7 +168,11 @@ func (m *Manager) runJob(job *sendJob) {
 			continue
 		}
 		sctx, cancel := context.WithTimeout(ctx, SendTimeout)
-		_, err = m.Sender.SendMessage(sctx, c, job.typ, b, job.notAfter)
+		if counted {
+			_, err = sc.SendMessageRef(sctx, c, job.typ, b, job.notAfter, job.ref)
+		} else {
+			_, err = m.Sender.SendMessage(sctx, c, job.typ, b, job.notAfter)
+		}
 		cancel()
 		if err != nil {
 			// A send that timed out may still be in the peer's outbox, and go
@@ -187,10 +193,27 @@ func (m *Manager) runJob(job *sendJob) {
 			continue
 		}
 		inARow = 0
-		sent++
+		accepted++
 	}
-	m.log().Info(job.typ+" sent", "send", job.key, "sent", sent, "failed", failed, "body_errors", bodyErrs,
-		"of", len(job.conns), "stopped", ctx.Err() != nil, "gave_up", gaveUp)
+	// Accepted is not sent: the split says how many messages were deposited
+	// with the relay so far (sent), how many wait in the outbox (queued:
+	// their connection is mid-reconnect, say) and how many ended there not
+	// confirmed deposited (dropped). They count this send's messages so
+	// far, earlier runs of the same send included, and a timed-out send
+	// that still went, so they can exceed accepted (or fall short after a
+	// crash: peer.sendLeft); the proposal's status follows them later.
+	args := []any{"send", job.key, "accepted", accepted, "failed", failed, "body_errors", bodyErrs,
+		"of", len(job.conns), "stopped", ctx.Err() != nil, "gave_up", gaveUp}
+	if counted {
+		var n peer.SendCounts
+		for _, c := range sc.SendCounts(job.ref) {
+			if c.Ref == job.ref { // not extended/<id>/10 for extended/<id>/1
+				n = c
+			}
+		}
+		args = append(args, "sent", n.Sent, "queued", n.Queued, "dropped", n.Dropped)
+	}
+	m.log().Info(job.typ+" send ended", args...)
 }
 
 // Wait waits for every background send to end (tests, and the daemon's

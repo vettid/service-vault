@@ -118,6 +118,7 @@ type Peer struct {
 	issued     map[string]*IssuedToken
 	outbox     []*outboxEntry
 	challenges map[string]*challenge
+	sends      map[string]*sendTally // by ref (sendtally.go)
 	events     []*Event
 	// What Caught reads. lastMsgMS is the relay time of the latest message
 	// handled (lastMsgAt the start of its collect) and emptyAt the start
@@ -185,7 +186,7 @@ func New(cfg Config) (*Peer, error) {
 	return &Peer{cfg: cfg, instance: hex.EncodeToString(inst),
 		conns: map[string]*Connection{}, invites: map[string]*InviteRecord{}, awaiting: map[string]*awaiting{},
 		requests: map[string]*request{}, outgoing: map[string]*outgoing{}, issued: map[string]*IssuedToken{},
-		challenges: map[string]*challenge{}, rates: map[string]*rateWindow{}, outboxFull: map[string]bool{}, refreshOwed: map[string]bool{},
+		challenges: map[string]*challenge{}, sends: map[string]*sendTally{}, rates: map[string]*rateWindow{}, outboxFull: map[string]bool{}, refreshOwed: map[string]bool{},
 		dirty: map[key]struct{}{}, versions: map[key]uint64{}, evWake: make(chan struct{}, 1)}, nil
 }
 
