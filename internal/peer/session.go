@@ -18,6 +18,9 @@ import (
 // dispatch handles a decrypted session-mode message from an active
 // connection (§8.2, §8.3, §8.4, §7.3).
 func (p *Peer) dispatch(ctx context.Context, c *Connection, in *envelope.Inner, ep *handshake.Epoch, raw []byte, sender ed25519.PublicKey, msgID string, now time.Time) (disposition, error) {
+	// First, before any store read: it makes every later store error in
+	// this message a discard that drops something (Step's dropped guard
+	// relies on it), so the peer stops rather than carry on.
 	p.markDirty(kindConn, c.ID)                      // the epoch's receive count moved
 	if !suite.EqualPublic(sender, c.Peer.Relay.PK) { // §6.3
 		p.audit("sender_mismatch", c.ID)

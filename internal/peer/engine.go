@@ -91,6 +91,10 @@ type Peer struct {
 	// reconfirm marks the connections the current batch owes an
 	// hs.confirm (§6.3.1 Responder; noteFromMember).
 	reconfirm map[string]bool
+	// stopped: a step's writes were discarded (errDiscarded), so memory
+	// no longer matches the store; flush refuses from then on, and the
+	// task restarts from the store.
+	stopped bool
 	// removing is the connection removeConnectionFor is ending: its
 	// dropped withdraws aren't owed again (withdrawLeft).
 	removing string
@@ -336,6 +340,12 @@ func (p *Peer) Run(ctx context.Context) error {
 	}
 	var wg sync.WaitGroup
 	defer wg.Wait()
+	// The loops end with Run, not only with the caller's ctx: on a stop
+	// (ErrConflict, errDiscarded) Run must return at once, so the task
+	// exits and restarts, rather than wait while the tick loop goes on.
+	// (cancel runs before wg.Wait: defers run last-in first-out.)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	wg.Add(2)
 	go func() { defer wg.Done(); p.eventLoop(ctx) }()
 	go func() { defer wg.Done(); p.tickLoop(ctx) }()
@@ -343,6 +353,22 @@ func (p *Peer) Run(ctx context.Context) error {
 	fails := 0
 	for ctx.Err() == nil {
 		if _, err := p.Step(ctx, p.cfg.PollWait); err != nil {
+			if errors.Is(err, errDiscarded) && ctx.Err() != nil &&
+				(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+				// A shutdown cancelled the step's write: a routine stop, not
+				// a failing store. The next start reads the stored state.
+				p.log().Warn("peer: a shutdown cancelled a step's write; the next start reads the stored state")
+				return ctx.Err()
+			}
+			if errors.Is(err, errDiscarded) {
+				// Memory no longer matches the store: carrying on could act on
+				// changes that were never written (and do them again when the
+				// batch is redelivered). The task restarts from the store.
+				// Logged even during a shutdown, for a real store error.
+				p.log().Error("peer: a store error discarded a step; stopping so the task restarts from the stored state",
+					"alarm", "peer_discarded", "err", errCode(err), "store_err", storeCode(err))
+				return err
+			}
 			if ctx.Err() != nil {
 				break
 			}
@@ -371,6 +397,16 @@ func errCode(err error) string {
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return "canceled"
+	}
+	return "error"
+}
+
+// storeCode is the store error's code for a log (an AWS API error's,
+// such as ProvisionedThroughputExceededException), or "error".
+func storeCode(err error) string {
+	var ae interface{ ErrorCode() string }
+	if errors.As(err, &ae) {
+		return ae.ErrorCode()
 	}
 	return "error"
 }
@@ -528,8 +564,17 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 	for _, m := range msgs {
 		d, err := p.handleMessage(ctx, m, now)
 		if err != nil {
+			// Memory and store part only if discard drops something: every
+			// change meant to be written (outbox entries included) is
+			// marked dirty. Then nothing is written from now on (flush
+			// refuses) and Run stops; otherwise a plain error, retried.
+			dropped := len(p.dirty) > 0 || len(p.extra) > 0
 			p.discard()
-			return failed(err)
+			if !dropped {
+				return failed(err)
+			}
+			p.stopped = true
+			return failed(fmt.Errorf("%w: %w", errDiscarded, err))
 		}
 		if d == ackAfterFlush {
 			p.mark(kindMsg, m.MsgID, []byte{1}, now.Add(DedupeRetention))
@@ -538,7 +583,16 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 			p.handledUnacked(m.MsgID)
 		}
 		if err := p.flush(ctx); err != nil {
-			return failed(err)
+			// The message was handled in memory (its response queued, its
+			// dedupe mark in extra) but nothing of it was written: a
+			// redelivery would handle it again, and the queued response
+			// would go twice. Stop, as for a discard. A conflict (another
+			// task writing) stops as ErrConflict, without this alarm.
+			p.stopped = true
+			if errors.Is(err, ErrConflict) {
+				return failed(err)
+			}
+			return failed(fmt.Errorf("%w: %w", errDiscarded, err))
 		}
 		if d == noAck {
 			p.leaveUnacked(m, now) // it comes back after its lease
@@ -685,8 +739,10 @@ func (p *Peer) visibility() time.Duration {
 	return 60 * time.Second
 }
 
-// discard forgets unflushed changes after a store error; the process
-// restarts from the stored state.
+// discard forgets unflushed changes after a store error. It doesn't undo
+// the in-memory changes they recorded: when it drops any, Step sets
+// stopped (flush refuses, events aren't delivered) and returns
+// errDiscarded, and Run stops so the task restarts from the stored state.
 func (p *Peer) discard() {
 	p.reconfirm = nil
 	clear(p.dirty)

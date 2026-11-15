@@ -91,6 +91,9 @@ func TestVoteRouted(t *testing.T) {
 // (BALLOT-PROTOCOL §7). Nor does anything right after a start.
 func TestCaughtWaitsOutLeases(t *testing.T) {
 	f := newFixture(t)
+	fm := &failMsgGet{MemStore: f.store}
+	f.storeWrap = fm
+	f.start()
 	rv := &recordVotes{}
 	f.votes = rv
 	f.p.cfg.Votes = rv
@@ -106,12 +109,12 @@ func TestCaughtWaitsOutLeases(t *testing.T) {
 		t.Fatal("not caught up with nothing leased")
 	}
 
-	rv.fail = errors.New("store down")
+	fm.fail = true // the message is left unacked, the peer goes on
 	m.Send("vote.cast", []byte(`{}`))
 	m.Step()
 	closeAt := f.clk.Now().Add(time.Millisecond)
-	if _, err := f.p.Step(ctx, 0); err == nil {
-		t.Fatal("the failed cast didn't fail the step")
+	if _, err := f.p.Step(ctx, 0); err == nil || errors.Is(err, errDiscarded) {
+		t.Fatalf("the failed cast: %v, want a plain error (the peer goes on)", err)
 	}
 	f.clk.Advance(time.Second)
 	m.Send("vote.status", []byte(`{}`)) // a later message, handled
@@ -163,6 +166,9 @@ func (f *fixture) caught(t time.Time) bool {
 // Another process's leases hold it false until they are over.
 func TestCaughtUnackedAndOtherProcess(t *testing.T) {
 	f := newFixture(t)
+	fm := &failMsgGet{MemStore: f.store}
+	f.storeWrap = fm
+	f.start()
 	rv := &recordVotes{}
 	f.votes = rv
 	f.p.cfg.Votes = rv
@@ -176,11 +182,11 @@ func TestCaughtUnackedAndOtherProcess(t *testing.T) {
 	closeAt := f.clk.Now()
 	f.clk.Advance(time.Second)
 	// After the close, a message left unacked again and again.
-	rv.fail = errors.New("store down")
+	fm.fail = true // the message is left unacked, the peer goes on
 	m.Send("vote.status", []byte(`{}`))
 	m.Step()
-	if _, err := f.p.Step(context.Background(), 0); err == nil {
-		t.Fatal("the failed message didn't fail the step")
+	if _, err := f.p.Step(context.Background(), 0); err == nil || errors.Is(err, errDiscarded) {
+		t.Fatalf("the failed message: %v, want a plain error (the peer goes on)", err)
 	}
 	f.clk.Advance(time.Second) // it is still leased
 	m.Send("vote.status", []byte(`{}`))

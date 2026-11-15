@@ -251,6 +251,18 @@ destination.
     previous release once under the right keys, which drops it
     (`outgoing_identity_changed`), then roll forward; or restore the
     table from a backup without it.
+- `peer_discarded`: a store error while the peer handled a message
+  discarded that step's unwritten changes, so its memory no longer
+  matches the store. The peer writes nothing more, stops, and the task
+  restarts from the stored state (the batch is redelivered and handled
+  again), so nothing that was never written is sent. One is harmless;
+  repeats mean the store is failing: check DynamoDB's errors and
+  throttling (the line's `store_err` names the code). A failed write
+  right after a message is handled, and a votes-store error after the
+  step changed state, stop the peer the same way. Each such stop also
+  shows as a stopped ECS task. A store conflict (another task writing
+  the table) stops the peer without this alarm; a shutdown that
+  cancels a write logs a warning instead.
 - `relay_tombstone_ahead`: the relay's registration answer reports a
   `tokens_not_before` more than 5 minutes ahead of the service's clock
   (see `relay_mailbox_lost`): no token is minted until it passes. Check

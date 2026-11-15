@@ -117,6 +117,8 @@ export const ALARMS = {
   relay_mailbox_lost: 'The service\'s relay mailbox was lost and made again empty: what members deposited since the last collect is gone, and every member\'s tokens are minted again (README "relay_mailbox_lost")',
   /** The relay's tokens_not_before is far ahead of the service's clock (internal/peer/mailbox.go): no token is minted until it passes. */
   relay_tombstone_ahead: 'The relay reports a tokens_not_before far ahead of the service\'s clock (its clock or report is wrong, or the service\'s clock is behind): no token is minted until that time passes, so members get no new tokens or invitations (README "relay_mailbox_lost")',
+  /** A store error discarded a peer step (internal/peer/engine.go): the task stopped and restarted from the stored state. */
+  peer_discarded: 'A store error discarded a peer step; the task restarted from the stored state. Repeats mean the store is failing (README "peer_discarded")',
   /** A reconnect after a restore could not complete (internal/peer/reconnect.go): the member must connect again. */
   reconnect_failed: 'A reconnect after a table restore failed: that member must connect again from a new invitation (README "Restoring the table")',
   /** A reconnect after a restore unanswered for a day (internal/peer/reconnect.go): the member's vault may be locked. */
