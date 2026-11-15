@@ -158,8 +158,8 @@ func (p *Peer) authenticate(ctx context.Context, connID, ctxt, purpose, matchCod
 
 // holds reports whether the challenge may still hold a place at the member
 // vault: pending, or cancelled without a withdraw reaching the outbox
-// (ch.Gone; also once a withdraw owed was queued late), or just expired,
-// until its exp plus ClockSkew. One that left
+// (ch.Gone, or made again when a queued withdraw was dropped or refused),
+// or just expired, until its exp plus ClockSkew. One that left
 // the outbox never tried (ch.Unsent) never reached the relay and holds
 // none.
 func (ch *challenge) holds(now time.Time) bool {
@@ -418,10 +418,11 @@ func (p *Peer) connAuthRotated(c *Connection, body []byte) {
 // withdrawOwed queues the withdraw a cancel couldn't, once the connection
 // can take it; past the challenge's exp it is no longer owed. Once queued,
 // the record goes (deleted with the entry's write, in the same flush, which
-// Step makes before a batch can be discarded). Not queued twice: one
-// already in the outbox (a store that split the flush, and a crash between
-// its writes) is left to go. A crash that loses the queued entry instead
-// fails safe: the member's vault closes the ask at exp. An outbox already
+// Step makes before a batch can be discarded). A store that splits the
+// flush writes "auth" before "outbox", so a crash between its writes loses
+// the withdraw rather than doubling it, which fails safe: the member's
+// vault closes the ask at exp. The check for one already in the outbox is
+// defence in depth. An outbox already
 // full for the connection is not tried (sendEntry would log outbox_full on
 // each housekeeping, about once a minute). It runs from expireChallenges,
 // in each housekeeping.
@@ -471,17 +472,24 @@ func (p *Peer) queueWithdraw(c *Connection, ch *challenge, now time.Time) bool {
 // expired) is owed again until the challenge's exp, on the challenge's
 // record, even one already tried (it may not have arrived: at least once;
 // a second withdraw is harmless). One the relay refused for good is not
-// (e.refused): it would be refused again; one cancelled with its withdraw queued at once had its record
-// deleted, so it is made again, Gone, holding its place as before. Not for
-// a connection that is gone: its vault can't answer.
+// owed again (it would be refused again), but its record is kept too. A
+// record a cancel deleted when it queued the withdraw is made again, Gone,
+// with its purpose, holding its place until exp. Not for a connection that
+// is gone or being removed: its vault can't answer.
 func (p *Peer) withdrawLeft(e *outboxEntry, now time.Time) {
-	if e.Withdraw == "" || e.deposited || e.refused || !now.Before(e.WithdrawExp) || p.conns[e.ConnID] == nil || e.ConnID == p.removing {
+	if e.Withdraw == "" || e.deposited || !now.Before(e.WithdrawExp) || p.conns[e.ConnID] == nil || e.ConnID == p.removing {
 		return
 	}
 	ch := p.challenges[e.Withdraw]
 	if ch == nil {
 		ch = &challenge{ID: e.Withdraw, ConnID: e.ConnID, Exp: e.WithdrawExp, Purpose: e.WithdrawPurpose, Gone: true}
 		p.challenges[e.Withdraw] = ch
+		p.markDirty(kindAuth, ch.ID)
+	}
+	if e.refused {
+		// Not owed again (it would be refused again), but the record holds
+		// the challenge's place until exp: the vault may still hold it.
+		return
 	}
 	if !ch.WithdrawOwed {
 		ch.WithdrawOwed = true

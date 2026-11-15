@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-relay/relayclient"
+	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/peerwire"
 )
 
@@ -492,6 +493,130 @@ func TestWithdrawRefusedForGoodNotOwed(t *testing.T) {
 	}
 	if *n != 1 || f.owed(id) {
 		t.Fatalf("%d deposits tried, owed %v", *n, f.owed(id))
+	}
+}
+
+// A sign-in withdraw refused for good keeps the record (not owed): the
+// sign-in still counts as pending until its exp, and isn't re-sent.
+func TestWithdrawRefusedKeepsPlace(t *testing.T) {
+	f := newFixture(t)
+	cid := f.connect(f.member(10), "tag")
+	id, n := withdrawCancelHeld(t, f, cid, peerwire.PurposeSignIn, &relayclient.Error{Status: 400, Code: "bad_request"})
+	f.pump()
+	if !f.p.HasPendingSignIn(cid) || f.owed(id) {
+		t.Fatalf("after the refusal: pending %v, owed %v", f.p.HasPendingSignIn(cid), f.owed(id))
+	}
+	f.clk.Advance(5 * time.Minute)
+	f.tick()
+	f.pump()
+	if !f.p.HasPendingSignIn(cid) || *n != 1 {
+		t.Fatalf("before exp: pending %v, %d deposits", f.p.HasPendingSignIn(cid), *n)
+	}
+	f.clk.Advance(6*time.Minute + ClockSkew)
+	f.tick()
+	if f.p.HasPendingSignIn(cid) {
+		t.Fatal("still pending past exp plus the skew")
+	}
+}
+
+// A withdraw already in the outbox isn't queued a second time.
+func TestWithdrawOwedNotQueuedTwice(t *testing.T) {
+	f := newFixture(t)
+	cid := f.connect(f.member(10), "tag")
+	id, _ := withdrawCancelHeld(t, f, cid, peerwire.PurposeApproval, errUnavailable)
+	f.p.mu.Lock()
+	defer f.p.mu.Unlock()
+	f.p.challenges[id] = &challenge{ID: id, ConnID: cid, Exp: f.clk.Now().Add(9 * time.Minute), Gone: true, WithdrawOwed: true}
+	f.p.expireChallenges(f.clk.Now())
+	n := 0
+	for _, e := range f.p.outbox {
+		if e.Withdraw == id {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d entries for the withdraw, want 1", n)
+	}
+}
+
+// A withdraw dropped while being sealed again at a key change
+// (held_unsealable) is owed again.
+func TestWithdrawDroppedAtResealOwedAgain(t *testing.T) {
+	f := newFixture(t)
+	cid := f.connect(f.member(10), "tag")
+	id, _ := withdrawCancelHeld(t, f, cid, peerwire.PurposeApproval, errUnavailable)
+	f.p.mu.Lock()
+	f.p.resealAtKeyChange(f.p.conns[cid], &handshake.Epoch{}, f.clk.Now())
+	n := 0
+	for _, e := range f.p.outbox {
+		if e.Withdraw == id {
+			n++
+		}
+	}
+	f.p.mu.Unlock()
+	if n != 0 || !f.owed(id) {
+		t.Fatalf("after the reseal: %d entries, owed %v", n, f.owed(id))
+	}
+}
+
+// failApplyOnce fails one Apply when armed, after letting skip through.
+type failApplyOnce struct {
+	*MemStore
+	fail bool
+	skip int
+}
+
+func (s *failApplyOnce) Apply(ctx context.Context, cs []Change) error {
+	if s.fail {
+		if s.skip > 0 {
+			s.skip--
+		} else {
+			s.fail = false
+			return errors.New("store down")
+		}
+	}
+	return s.MemStore.Apply(ctx, cs)
+}
+
+// The flush after housekeeping failing leaves the batch unacked, the start
+// latch clear, and the changes dirty for the next flush.
+func TestStepHousekeepingFlushFailure(t *testing.T) {
+	f := newFixture(t)
+	st := &failApplyOnce{MemStore: f.store}
+	f.storeWrap = st
+	f.start()
+	m := f.member(10)
+	cid := f.connect(m, "tag")
+	f.pump()
+	m.Send(peerwire.TypeConnAuthResponse, []byte(`{}`))
+	f.p.mu.Lock()
+	f.p.markDirty(kindConn, cid) // something for that flush to write
+	f.p.drained = true           // as after a short collect, so the step must clear it
+	f.p.mu.Unlock()
+	st.fail, st.skip = true, 1 // markLeased's write goes through; the flush after housekeeping fails
+	if _, err := f.p.Step(context.Background(), 0); err == nil {
+		t.Fatal("the step didn't fail")
+	}
+	if st.fail {
+		t.Fatal("the failure wasn't reached")
+	}
+	f.p.mu.Lock()
+	drained, dirty, unacked := f.p.drained, len(f.p.dirty), len(f.p.unacked)
+	f.p.mu.Unlock()
+	if drained || dirty == 0 || unacked != 1 {
+		t.Fatalf("drained %v, dirty %d, unacked %d", drained, dirty, unacked)
+	}
+	msgs, _ := f.sv.Collect(context.Background(), 0, 32)
+	if len(msgs) != 0 {
+		t.Fatalf("%d messages collectable at once: the batch was acked", len(msgs))
+	}
+	f.clk.Advance(61 * time.Second)
+	f.pump()
+	f.p.mu.Lock()
+	dirty = len(f.p.dirty)
+	f.p.mu.Unlock()
+	if dirty != 0 {
+		t.Fatal("the dirty changes weren't written by a later flush")
 	}
 }
 
