@@ -148,7 +148,7 @@ export const ALARMS = {
   /** An admin's governance key can't be pinned yet: the peer doesn't know the admin's connection (internal/approval/approval.go, a WARN, at most hourly per admin). Until it can, that admin's governance approvals don't count. */
   gov_migration_waiting: 'An admin\'s governance key is not pinned yet because the service doesn\'t know that admin\'s connection: their governance approvals (admin set, re-pin, proposals, extensions, contract templates) don\'t count until it does (README "gov_migration_waiting")',
   /** A removed connection left fewer admins than the threshold (internal/approval/approval.go): no approval can pass. */
-  admins_short: 'An admin connection was removed and fewer admins than the threshold remain: no approval can pass until the operator recovers the set (README "Recovering admins")',
+  admins_short: 'Fewer admins than the threshold: no approval can pass. Logged every minute while the set is short (at start too), so it stays raised until the operator recovers the set (README "Recovering admins")',
 } as const;
 
 /**

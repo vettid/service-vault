@@ -244,9 +244,13 @@ type Manager struct {
 	mu        sync.Mutex
 	govWarned map[string]time.Time // admin -> when the migration last warned it waits for them
 	govDone   bool                 // migrateGov has seen every admin
-	lastID    string
-	kick      chan struct{}
-	once      sync.Once
+	// short: the admin set was below the threshold when last checked;
+	// shortLogged: when admins_short was last logged (checkShort).
+	short       bool
+	shortLogged time.Time
+	lastID      string
+	kick        chan struct{}
+	once        sync.Once
 }
 
 // record is a stored approval.
@@ -2035,8 +2039,7 @@ func (m *Manager) ConnectionRemoved(ctx context.Context, connID string) error {
 		// No approval can pass until the operator mends it: a lower m,
 		// or a bootstrap once the set is empty (README "Recovering
 		// admins").
-		m.log().Error("admin set below the threshold: approvals cannot pass", "alarm", "admins_short",
-			"admins", len(next), "threshold", th)
+		m.logShort(len(next), th)
 	}
 	m.wake()
 	return m.reevaluate(ctx)
@@ -2074,12 +2077,43 @@ func (m *Manager) Start(ctx context.Context) error {
 	case m.BootstrapKey != "" && st != nil && st.State == bootDone:
 		m.log().Info("admin bootstrap setting ignored: the bootstrap has happened", "admins", len(set))
 	}
+	m.noteShort(len(set))
 	return nil
 }
 
+// ShortAlarmEvery is how often admins_short is logged while the admin set
+// is below the threshold. The alarm counts the line over 5-minute
+// periods and clears on a period without it, so it is logged well
+// within one: the alarm stays raised for as long as the set is short.
+const ShortAlarmEvery = time.Minute
+
+// logShort logs admins_short and notes when.
+func (m *Manager) logShort(admins, th int) {
+	m.log().Error("admin set below the threshold: approvals cannot pass", "alarm", "admins_short",
+		"admins", admins, "threshold", th)
+	m.short, m.shortLogged = true, m.now()
+}
+
+// noteShort logs admins_short while the set is below the threshold, at
+// most every ShortAlarmEvery, and one line when it is back at it. Caller
+// holds m.mu.
+func (m *Manager) noteShort(admins int) {
+	th := m.threshold()
+	switch {
+	case admins < th:
+		if !m.short || m.now().Sub(m.shortLogged) >= ShortAlarmEvery {
+			m.logShort(admins, th)
+		}
+	case m.short:
+		m.log().Info("admin set back at the threshold: approvals can pass", "admins", admins, "threshold", th)
+		m.short, m.shortLogged = false, time.Time{}
+	}
+}
+
 // Tick does the periodic work: bootstrap from an already bound, active
-// connection while the set is empty and a bootstrap applies; expire or settle the open
-// approvals. The webhooks are delivered by Hooks.Run.
+// connection while the set is empty and a bootstrap applies; log
+// admins_short while the set is below the threshold (noteShort); expire
+// or settle the open approvals. The webhooks are delivered by Hooks.Run.
 func (m *Manager) Tick(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -2090,11 +2124,11 @@ func (m *Manager) Tick(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	set, err := m.admins(ctx)
+	if err != nil {
+		return err
+	}
 	if key != "" && m.BoundConnection != nil {
-		set, err := m.admins(ctx)
-		if err != nil {
-			return err
-		}
 		if len(set) == 0 {
 			c, ok, err := m.BoundConnection(ctx, key)
 			if err != nil {
@@ -2104,9 +2138,13 @@ func (m *Manager) Tick(ctx context.Context) error {
 				if err := m.bootstrap(ctx, c); err != nil {
 					return err
 				}
+				if set, err = m.admins(ctx); err != nil {
+					return err
+				}
 			}
 		}
 	}
+	m.noteShort(len(set))
 	return m.reevaluate(ctx)
 }
 
