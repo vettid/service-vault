@@ -260,3 +260,50 @@ func TestAdminsShortReadFailureDoesNotStopTick(t *testing.T) {
 		t.Fatalf("short, the read failed once: %d lines, %v", count(), err)
 	}
 }
+
+// failFilledRead fails, once, the first read of the admin set that would
+// find it filled: the read right after a bootstrap.
+type failFilledRead struct {
+	peer.Store
+	failed bool
+}
+
+func (s *failFilledRead) Get(ctx context.Context, kind, id string) ([]byte, bool, error) {
+	data, ok, err := s.Store.Get(ctx, kind, id)
+	if err == nil && kind == kindAdmins && !s.failed && strings.Contains(string(data), "c1") {
+		s.failed = true
+		return nil, false, errors.New("store fault")
+	}
+	return data, ok, err
+}
+
+// The bootstrapping tick's read of the set it filled failing ends nothing:
+// the tick goes on and succeeds, and the next tick logs the set back.
+func TestBootstrapReReadFailureDoesNotEndTick(t *testing.T) {
+	f := newFixture(t, 1)
+	ctx := context.Background()
+	f.m.BootstrapKey = "boot-key"
+	f.m.BoundConnection = func(context.Context, string) (string, bool, error) { return "c1", true, nil }
+	f.p.active["c1"] = true
+	if err := f.m.Tick(ctx); err != nil { // waits for the confirmation
+		t.Fatal(err)
+	}
+	if err := f.confirm("c1"); err != nil {
+		t.Fatal(err)
+	}
+	st := &failFilledRead{Store: f.st}
+	f.m.Store = st
+	if err := f.m.Tick(ctx); err != nil {
+		t.Fatalf("the bootstrapping tick: %v", err)
+	}
+	if !st.failed {
+		t.Fatal("the read after the bootstrap didn't fail")
+	}
+	if a := f.admins(); len(a) != 1 || a[0] != "c1" {
+		t.Fatalf("admins %v", a)
+	}
+	f.clk.Advance(ShortAlarmEvery)
+	if err := f.m.Tick(ctx); err != nil || !strings.Contains(f.logs.String(), "admin set back at the threshold") {
+		t.Fatalf("next tick: %v", err)
+	}
+}

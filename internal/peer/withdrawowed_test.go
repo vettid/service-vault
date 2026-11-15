@@ -108,6 +108,17 @@ func TestWithdrawOwedAcrossRestart(t *testing.T) {
 	if n := len(m.Received(peerwire.TypeConnAuthWithdraw)); n != 1 || f.owed(id) {
 		t.Fatalf("%d withdraws after the restart", n)
 	}
+	// Another restart after the late send: the cleared flag was stored, so
+	// it isn't sent again.
+	f.start()
+	if f.owed(id) {
+		t.Fatal("owed again after a restart that followed the late send")
+	}
+	f.tick()
+	f.pump()
+	if n := len(m.Received(peerwire.TypeConnAuthWithdraw)); n != 1 {
+		t.Fatalf("%d withdraws after the second restart", n)
+	}
 }
 
 // Past the challenge's exp the withdraw is no longer owed: never sent, and
@@ -194,8 +205,8 @@ func TestWithdrawNotOwedWhenQueued(t *testing.T) {
 	}
 }
 
-// A connection whose outbox stays full isn't tried each step (sendEntry
-// would log outbox_full every time): the debt waits quietly, and is paid
+// A connection whose outbox stays full isn't tried on each housekeeping
+// (sendEntry would log outbox_full every time): the debt waits quietly, and is paid
 // once there is room.
 func TestWithdrawOwedWaitsForOutboxRoom(t *testing.T) {
 	f := newFixture(t)
@@ -233,5 +244,26 @@ func TestWithdrawOwedWaitsForOutboxRoom(t *testing.T) {
 	f.pump()
 	if n := len(m.Received(peerwire.TypeConnAuthWithdraw)); n != 1 || f.owed(id) {
 		t.Fatalf("%d withdraws once there was room", n)
+	}
+}
+
+// A live challenge, never cancelled, gets no withdraw however many
+// housekeepings run.
+func TestNoWithdrawForLiveChallenge(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "tag")
+	id, err := f.p.Authenticate(context.Background(), cid, "x", peerwire.PurposeApproval, 10*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.pump()
+	for i := 0; i < 5; i++ {
+		f.clk.Advance(time.Minute)
+		f.tick()
+		f.pump()
+	}
+	if n := len(m.Received(peerwire.TypeConnAuthWithdraw)); n != 0 || f.owed(id) {
+		t.Fatalf("%d withdraws for a live challenge", n)
 	}
 }

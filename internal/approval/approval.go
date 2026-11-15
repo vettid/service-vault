@@ -280,9 +280,10 @@ type record struct {
 	// or a store error in the peer's flush. Never counted (Answer counts
 	// Pending only); reevaluate withdraws them again until CancelChallenge
 	// succeeds, and the record stays in the open index until then, settled
-	// or not. CancelChallenge succeeds without sending the member's vault a
-	// withdraw when the connection isn't active or its outbox is full
-	// (peer.CancelChallenge): such a challenge is not kept here.
+	// or not. CancelChallenge also succeeds when it couldn't queue the
+	// member's withdraw (the connection not active, or its outbox full):
+	// the peer then owes it until the challenge's exp (WithdrawOwed), so
+	// such a challenge is not kept here.
 	Withdrawing []Challenge `json:"withdrawing,omitempty"`
 	Applied     *bool       `json:"applied,omitempty"`
 	Settled     time.Time   `json:"settled,omitzero"`

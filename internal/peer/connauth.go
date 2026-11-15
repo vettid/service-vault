@@ -422,13 +422,17 @@ func (p *Peer) connAuthRotated(c *Connection, body []byte) {
 
 // withdrawOwed queues the withdraw a cancel couldn't, once the connection
 // can take it; past the challenge's exp it is no longer owed. The flag is
-// cleared only with the withdraw queued, both in the same flush, so it is
-// never queued twice. A store that splits a large flush into several
+// cleared only with the withdraw queued, both in the same flush, so a
+// crash can't queue it twice (one exception, older than this: a flush that
+// fails and is discarded, then a restart before exp, can). A store that
+// splits a large flush into several
 // writes may store the cleared flag without the outbox entry (auth sorts
 // first); a crash between them loses the withdraw, which fails safe: the
 // record keeps its place counted until exp plus ClockSkew, and the
 // member's vault closes the ask at exp. An outbox already full for the
-// connection is not tried (sendEntry would log outbox_full each step).
+// connection is not tried (sendEntry would log outbox_full on each
+// housekeeping, about once a minute). It runs from expireChallenges, in
+// each housekeeping.
 func (p *Peer) withdrawOwed(id string, ch *challenge, now time.Time) {
 	if !now.Before(ch.Exp) {
 		ch.WithdrawOwed = false
