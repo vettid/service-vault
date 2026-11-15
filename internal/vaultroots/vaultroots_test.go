@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"testing/fstest"
@@ -56,12 +57,8 @@ func TestCheckRealStagingBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	n := 0
-	for _, s := range sets {
-		n += len(s.Releases)
-	}
-	if n < 5 || len(sets) != 1 {
-		t.Fatalf("%d sets over %d releases (want the identical roots of 25-29 as one set)", len(sets), n)
+	if len(sets) != 1 || fmt.Sprint(sets[0].Releases) != "[25 26 27 30]" {
+		t.Fatalf("%+v (want the identical roots of releases 25, 26, 27 and 30 as one set)", sets)
 	}
 }
 
