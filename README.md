@@ -389,9 +389,17 @@ destination.
   What this check does not cover:
   - **One verifier for every release.** The service runs the `votewire`
     of the vettid-vault version in `go.mod` against each release's
-    roots, not each release's own `votewire`. Today they are the same
-    code for staging 25–29, but nothing here checks that they stay so:
-    a release whose verifier changes may refuse what this accepts.
+    roots, not each release's own `votewire`. The daily `vault-roots`
+    check (`rootscheck`) compares each supported release's verifier code
+    with that version, byte for byte: `votewire`'s `bundle.go`,
+    `trust.go`, `merkle.go` and `verify.go`, and the `strictjson` and
+    `suite` packages they use. A difference fails it, naming the
+    release, unless `internal/vaultroots/testdata/verifier_differences.json`
+    lists it with the reason it is safe. Today it lists staging 25 and 26,
+    whose `strictjson` is more lenient than the service's (the service
+    refuses first), and staging 30, whose `suite.go` only adds a
+    constant. It compares code, not verdicts: a difference it lets
+    through is one a person has judged.
   - **The signed service list.** The anchor key is not looked up in the
     signed service list. A key missing from it passes here, and member
     vaults then refuse the bundle (`service_list`). That fails closed at

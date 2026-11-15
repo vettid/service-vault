@@ -17,12 +17,27 @@ package vaultroots
 // the service to roots no supported vault pins. A channel whose manifest
 // is not published (HTTP 404) has every tagged release counted as
 // supported, so nothing is missed while it is absent.
+//
+// It also requires, for each of those releases, the vault's bundle
+// verifier at its tag to be the one the service runs (checkVerifier):
+// votewire's bundle.go, trust.go, merkle.go and verify.go, and every
+// non-test Go file of the vettid-vault packages they import (strictjson,
+// suite), equal byte for byte to the vettid-vault version go.mod pins.
+// strictjson's move from internal/ to vms/ (vettid-vault #237) is undone
+// before comparing. A difference fails, naming the release and the file,
+// unless testdata/verifier_differences.json lists it (release, path and
+// the tag file's sha256, with the reason it is safe); an entry nothing
+// matches fails too. The service checks a bundle with this code before
+// it sends anything (BALLOT-PROTOCOL §3.3): a release whose own verifier
+// refuses what the service passes would never take a proposal.
 
 import (
 	"bytes"
 	"crypto/ecdsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,9 +68,184 @@ func TestCopiesMatchReleases(t *testing.T) {
 	if repo == "" {
 		t.Fatal("VAULTROOTS_VAULT_REPO is not set (a vettid-vault clone with its release tags)")
 	}
+	v := &verifierCheck{pkgs: pinnedVerifier(t), known: readKnownDifferences(t), used: map[knownDifference]bool{}}
 	for _, channel := range Instances {
-		t.Run(channel, func(t *testing.T) { checkChannel(t, repo, channel) })
+		t.Run(channel, func(t *testing.T) { checkChannel(t, repo, channel, v) })
 	}
+	for _, k := range v.known {
+		if !v.used[k] {
+			t.Errorf("testdata/verifier_differences.json: release %s, %s, sha256 %s matches no difference any more: remove it", k.Release, k.Path, k.SHA256)
+		}
+	}
+}
+
+// votewirePkg is the vault's bundle verifier package; votewireFiles are
+// its files that verify a bundle and the roots (the rest are message
+// bodies and documents).
+const votewirePkg = "github.com/vettid/vettid-vault/vms/votewire"
+
+var votewireFiles = []string{"bundle.go", "trust.go", "merkle.go", "verify.go"}
+
+// strictjsonMove is vettid-vault #237: strictjson was internal/ before.
+var strictjsonMove = [2]string{"internal/strictjson", "vms/strictjson"}
+
+// verifierPkg is the pinned vettid-vault module's copy of part of the
+// verifier: a package's module-relative directory and the compared files.
+type verifierPkg struct {
+	rel   string
+	files map[string][]byte
+}
+
+// knownDifference is a reviewed difference between a release's verifier
+// and the pinned one: path as in the pinned module, sha256 of the file at
+// the tag (as committed, before any normalizing).
+type knownDifference struct {
+	Release string `json:"release"` // <channel>/<n>
+	Path    string `json:"path"`
+	SHA256  string `json:"sha256"`
+	Reason  string `json:"reason"`
+}
+
+type verifierCheck struct {
+	pkgs  []verifierPkg
+	known []knownDifference
+	used  map[knownDifference]bool
+}
+
+func readKnownDifferences(t *testing.T) []knownDifference {
+	t.Helper()
+	b, err := os.ReadFile("testdata/verifier_differences.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []knownDifference
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&out); err != nil {
+		t.Fatalf("testdata/verifier_differences.json: %v", err)
+	}
+	for _, k := range out {
+		if k.Release == "" || k.Path == "" || len(k.SHA256) != 64 || strings.TrimSpace(k.Reason) == "" {
+			t.Fatalf("testdata/verifier_differences.json: incomplete entry %+v", k)
+		}
+	}
+	return out
+}
+
+// pinnedVerifier reads the compared files from the vettid-vault version
+// go.mod pins: votewireFiles, and every non-test Go file of the
+// vettid-vault packages votewire imports (go list -deps).
+func pinnedVerifier(t *testing.T) []verifierPkg {
+	t.Helper()
+	modDir := strings.TrimSpace(string(goCmd(t, "list", "-m", "-f", "{{.Dir}}", "github.com/vettid/vettid-vault")))
+	var out []verifierPkg
+	for _, line := range strings.Split(strings.TrimSpace(string(goCmd(t, "list", "-deps", "-f", "{{.ImportPath}}\t{{.Dir}}", votewirePkg))), "\n") {
+		ip, dir, ok := strings.Cut(line, "\t")
+		if !ok || !strings.HasPrefix(ip, "github.com/vettid/vettid-vault/") {
+			continue
+		}
+		rel, ok := strings.CutPrefix(dir, modDir+"/")
+		if !ok {
+			t.Fatalf("package %s is not under the module directory %s", ip, modDir)
+		}
+		p := verifierPkg{rel: rel, files: map[string][]byte{}}
+		ents, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range ents {
+			if !goSource(e.Name()) || ip == votewirePkg && !slices.Contains(votewireFiles, e.Name()) {
+				continue
+			}
+			b, err := os.ReadFile(path.Join(dir, e.Name()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			p.files[e.Name()] = b
+		}
+		out = append(out, p)
+	}
+	for _, f := range votewireFiles {
+		if !slices.ContainsFunc(out, func(p verifierPkg) bool { return p.rel == "vms/votewire" && p.files[f] != nil }) {
+			t.Fatalf("vms/votewire/%s is not in the pinned vettid-vault", f)
+		}
+	}
+	return out
+}
+
+func goSource(name string) bool {
+	return strings.HasSuffix(name, ".go") && !strings.HasSuffix(name, "_test.go")
+}
+
+// checkVerifier compares release n's verifier with the pinned one.
+func (v *verifierCheck) check(t *testing.T, repo, channel string, n uint64) {
+	t.Helper()
+	tag := fmt.Sprintf("release/%s/%d", channel, n)
+	rel := fmt.Sprintf("%s/%d", channel, n)
+	differ := func(p, why string, atTag []byte) {
+		sum := sha256.Sum256(atTag)
+		h := hex.EncodeToString(sum[:])
+		for _, k := range v.known {
+			if k.Release == rel && k.Path == p && k.SHA256 == h {
+				v.used[k] = true
+				t.Logf("release %s: %s %s: a known difference (%s)", rel, p, why, k.Reason)
+				return
+			}
+		}
+		t.Errorf("release %s: %s %s: the release's bundle verifier differs from the service's (tag file sha256 %s; if it is safe, list it in testdata/verifier_differences.json with the reason)", rel, p, why, h)
+	}
+	for _, p := range v.pkgs {
+		dir := p.rel
+		if dir == strictjsonMove[1] && !treeHas(t, repo, tag, dir) {
+			dir = strictjsonMove[0]
+		}
+		var atTag []string
+		for _, name := range strings.Fields(string(git(t, repo, "ls-tree", "--name-only", tag, dir+"/"))) {
+			name = path.Base(name)
+			if goSource(name) && (p.rel != "vms/votewire" || slices.Contains(votewireFiles, name)) {
+				atTag = append(atTag, name)
+			}
+		}
+		for _, name := range atTag {
+			pinned := p.rel + "/" + name
+			raw := git(t, repo, "show", tag+":"+dir+"/"+name)
+			want, ok := p.files[name]
+			switch {
+			case !ok:
+				differ(pinned, "is at the tag but not in the pinned vettid-vault", raw)
+			case !bytes.Equal(undoMove(raw), want):
+				differ(pinned, "differs", raw)
+			}
+		}
+		for name := range p.files {
+			if !slices.Contains(atTag, name) {
+				differ(p.rel+"/"+name, "is in the pinned vettid-vault but not at the tag", nil)
+			}
+		}
+	}
+}
+
+// undoMove rewrites a tag file's import of strictjson's old place to its
+// new one.
+func undoMove(b []byte) []byte {
+	return bytes.ReplaceAll(b, []byte(`"github.com/vettid/vettid-vault/`+strictjsonMove[0]+`"`), []byte(`"github.com/vettid/vettid-vault/`+strictjsonMove[1]+`"`))
+}
+
+func treeHas(t *testing.T, repo, tag, dir string) bool {
+	t.Helper()
+	return len(bytes.TrimSpace(git(t, repo, "ls-tree", tag, dir))) > 0
+}
+
+func goCmd(t *testing.T, args ...string) []byte {
+	t.Helper()
+	cmd := exec.Command("go", args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go %s: %v: %s", strings.Join(args, " "), err, stderr.String())
+	}
+	return out
 }
 
 // releaseCfg is what the check reads of enclave/releasecfg/<channel>.json.
@@ -67,7 +257,7 @@ type releaseCfg struct {
 	VoteTrustRoots json.RawMessage `json:"vote_trust_roots"`
 }
 
-func checkChannel(t *testing.T, repo, channel string) {
+func checkChannel(t *testing.T, repo, channel string, v *verifierCheck) {
 	url, ok := manifestURLs[channel]
 	if !ok {
 		t.Fatalf("no manifest URL for channel %s", channel)
@@ -123,6 +313,9 @@ func checkChannel(t *testing.T, repo, channel string) {
 		if !bytes.Equal(exp.Bytes(), copyBytes) {
 			t.Errorf("%s/release-%d.json differs from vote_trust_roots at tag release/%s/%d", dir, n, channel, n)
 		}
+	}
+	for _, n := range sortedKeys(want) {
+		v.check(t, repo, channel, n)
 	}
 	for n := range have {
 		if !want[n] {

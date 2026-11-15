@@ -1,0 +1,20 @@
+[
+  {
+    "release": "staging/25",
+    "path": "vms/strictjson/strictjson.go",
+    "sha256": "52085e536add91d02982a8901d9ec1bdf0fcd08ac8e28b6961778ce47256ae92",
+    "reason": "before vettid-vault f6bfca1 (refuse an unpaired surrogate escape): this release's parser is more lenient than the service's, so the service refuses first (fail-safe); reviewed in GC #10243"
+  },
+  {
+    "release": "staging/26",
+    "path": "vms/strictjson/strictjson.go",
+    "sha256": "52085e536add91d02982a8901d9ec1bdf0fcd08ac8e28b6961778ce47256ae92",
+    "reason": "before vettid-vault f6bfca1 (refuse an unpaired surrogate escape): this release's parser is more lenient than the service's, so the service refuses first (fail-safe); reviewed in GC #10243"
+  },
+  {
+    "release": "staging/30",
+    "path": "vms/suite/suite.go",
+    "sha256": "72d7ca44fe495acf356903cf1ac4b7ef7c7bacab9dece5505e04be17d98ce4c8",
+    "reason": "adds the constant LabelRelayRotate only; suite.Verify, the one function the verifier uses, is unchanged; reviewed in GC #10243"
+  }
+]
