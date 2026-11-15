@@ -530,24 +530,38 @@ func TestTombReportOtherTJudged(t *testing.T) {
 // re-registration that made the mailbox but whose answer was lost, then a
 // 200 with no T, is a data loss (alarm), not a possible one.
 func TestTombReportRunningUnanswered(t *testing.T) {
-	f := newFixture(t)
-	f.connect(f.member(10), "")
-	jti, n := cancelledInvite(t, f)
-	f.reportTomb = true
-	f.w.DeleteMailbox(f.keys.Mailbox())
-	f.loseRegAnswer = true
-	if _, err := f.p.Step(context.Background(), 0); err == nil {
-		t.Fatal("a collect from a deleted mailbox succeeded")
-	}
-	if lostAlarms(f) != 0 {
-		t.Fatalf("%d alarms before an answer", lostAlarms(f))
-	}
-	if _, err := f.p.Step(context.Background(), 0); err != nil { // the owed registration: a 200
-		t.Fatal(err)
-	}
-	f.pump()
-	if lostAlarms(f) != 1 || !strings.Contains(f.logs.String(), "tokens_kept=true") || f.revokes[jti] <= n {
-		t.Fatalf("%d alarms, revocations %d -> %d", lostAlarms(f), n, f.revokes[jti])
+	for _, restart := range []bool{false, true} {
+		f := newFixture(t)
+		f.connect(f.member(10), "")
+		jti, n := cancelledInvite(t, f)
+		waiting, err := f.p.CreateInvite(context.Background(), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.reportTomb = true
+		f.w.DeleteMailbox(f.keys.Mailbox())
+		f.loseRegAnswer = true
+		if _, err := f.p.Step(context.Background(), 0); err == nil {
+			t.Fatal("a collect from a deleted mailbox succeeded")
+		}
+		if lostAlarms(f) != 0 {
+			t.Fatalf("%d alarms before an answer", lostAlarms(f))
+		}
+		if restart { // the proof survives it: the next registration is a start's
+			f.start()
+		} else if _, err := f.p.Step(context.Background(), 0); err != nil { // the owed registration: a 200
+			t.Fatal(err)
+		}
+		f.pump()
+		if lostAlarms(f) != 1 || !strings.Contains(f.logs.String(), "tokens_kept=true") || f.revokes[jti] <= n {
+			t.Fatalf("restart %v: %d alarms, revocations %d -> %d", restart, lostAlarms(f), n, f.revokes[jti])
+		}
+		if got, _ := f.p.Invite(waiting.ID); !got.Withdrew || f.revokes[waiting.OpenJTI] == 0 {
+			t.Fatalf("restart %v: a waiting invitation not withdrawn after a proven loss: %+v", restart, got)
+		}
+		if r, _ := f.p.readRelayReg(context.Background()); r.LossProven || r.Attempted {
+			t.Fatalf("restart %v: record %+v", restart, r)
+		}
 	}
 }
 

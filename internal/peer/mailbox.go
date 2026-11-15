@@ -62,6 +62,11 @@ type relayReg struct {
 	// token is revoked too, and waiting invitations withdrawn. Without it
 	// (a loss only possible) just the revocations in force are sent again.
 	DenyOpen bool `json:"deny_open,omitempty"`
+	// LossProven: the registration attempted follows a collect's
+	// mailbox_unknown (Peer.lossProven), so a lost answer hides a proven
+	// loss, across a restart too. Written with Attempted, cleared once an
+	// answer is recorded.
+	LossProven bool `json:"loss_proven,omitempty"`
 }
 
 // tombstoneAhead is how far ahead of the service's clock a relay's
@@ -133,7 +138,11 @@ func (p *Peer) register(ctx context.Context) error {
 		return err
 	}
 	prev := r.Attempted
+	proven := p.lossProven || r.LossProven
 	r.Attempted = true
+	if p.lossProven {
+		r.LossProven = true
+	}
 	if err := p.writeRelayReg(ctx, r); err != nil {
 		return fmt.Errorf("peer: register: %w", err)
 	}
@@ -189,7 +198,7 @@ func (p *Peer) register(ctx context.Context) error {
 	}
 	if reported && before {
 		switch {
-		case reg.Created, prev && p.lossProven:
+		case reg.Created, prev && proven:
 			// A 201; or, after a collect's mailbox_unknown, an attempt whose
 			// answer was lost: that answer was the 201.
 			dataLost = true
@@ -203,7 +212,7 @@ func (p *Peer) register(ctx context.Context) error {
 			r.DenyOwed = true
 		}
 	}
-	r.Registered, r.Attempted = true, false
+	r.Registered, r.Attempted, r.LossProven = true, false, false
 	if err := p.writeRelayReg(ctx, r); err != nil {
 		return fmt.Errorf("peer: register: %w", err)
 	}
