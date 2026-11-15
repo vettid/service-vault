@@ -248,6 +248,7 @@ type Manager struct {
 	// shortLogged: when admins_short was last logged (checkShort).
 	short       bool
 	shortLogged time.Time
+	shortAdmins int // the set's size when last found short
 	lastID      string
 	kick        chan struct{}
 	once        sync.Once
@@ -2089,14 +2090,16 @@ const ShortAlarmEvery = time.Minute
 
 // logShort logs admins_short and notes when.
 func (m *Manager) logShort(admins, th int) {
-	m.log().Error("admin set below the threshold: approvals cannot pass", "alarm", "admins_short",
+	m.log().Error("admin set below the threshold: new approvals cannot pass", "alarm", "admins_short",
 		"admins", admins, "threshold", th)
-	m.short, m.shortLogged = true, m.now()
+	m.short, m.shortLogged, m.shortAdmins = true, m.now(), admins
 }
 
 // noteShort logs admins_short while the set is below the threshold, at
-// most every ShortAlarmEvery, and one line when it is back at it. Caller
-// holds m.mu.
+// most every ShortAlarmEvery, and one line when it is back at it (only
+// after this process saw it short: a restart with a lower threshold logs
+// none). "New approvals": an open one keeps the larger of its own
+// threshold and the current one. Caller holds m.mu.
 func (m *Manager) noteShort(admins int) {
 	th := m.threshold()
 	switch {
@@ -2105,7 +2108,7 @@ func (m *Manager) noteShort(admins int) {
 			m.logShort(admins, th)
 		}
 	case m.short:
-		m.log().Info("admin set back at the threshold: approvals can pass", "admins", admins, "threshold", th)
+		m.log().Info("admin set back at the threshold: new approvals can pass", "admins", admins, "threshold", th)
 		m.short, m.shortLogged = false, time.Time{}
 	}
 }
@@ -2114,17 +2117,26 @@ func (m *Manager) noteShort(admins int) {
 // connection while the set is empty and a bootstrap applies; log
 // admins_short while the set is below the threshold (noteShort); expire
 // or settle the open approvals. The webhooks are delivered by Hooks.Run.
-func (m *Manager) Tick(ctx context.Context) error {
+func (m *Manager) Tick(ctx context.Context) (err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// A tick that fails keeps a short set's alarm raised: the set is not
+	// known to be mended (fail secure).
+	defer func() {
+		if err != nil && m.short && m.now().Sub(m.shortLogged) >= ShortAlarmEvery {
+			m.logShort(m.shortAdmins, m.threshold())
+		}
+	}()
+	// The set first, before the steps that can fail.
+	set, err := m.admins(ctx)
+	if err != nil {
+		return err
+	}
+	m.noteShort(len(set))
 	if err := m.migrateGov(ctx); err != nil {
 		return err
 	}
 	key, err := m.bootstrapKey(ctx)
-	if err != nil {
-		return err
-	}
-	set, err := m.admins(ctx)
 	if err != nil {
 		return err
 	}
@@ -2141,10 +2153,10 @@ func (m *Manager) Tick(ctx context.Context) error {
 				if set, err = m.admins(ctx); err != nil {
 					return err
 				}
+				m.noteShort(len(set))
 			}
 		}
 	}
-	m.noteShort(len(set))
 	return m.reevaluate(ctx)
 }
 
