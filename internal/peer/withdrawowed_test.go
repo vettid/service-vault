@@ -512,7 +512,12 @@ func TestWithdrawRefusedKeepsPlace(t *testing.T) {
 	if !f.p.HasPendingSignIn(cid) || *n != 1 {
 		t.Fatalf("before exp: pending %v, %d deposits", f.p.HasPendingSignIn(cid), *n)
 	}
-	f.clk.Advance(6*time.Minute + ClockSkew)
+	f.clk.Advance(5*time.Minute + time.Second) // past exp, within the skew
+	f.tick()
+	if !f.p.HasPendingSignIn(cid) {
+		t.Fatal("not pending between exp and exp plus the skew")
+	}
+	f.clk.Advance(time.Minute + ClockSkew)
 	f.tick()
 	if f.p.HasPendingSignIn(cid) {
 		t.Fatal("still pending past exp plus the skew")
@@ -526,7 +531,7 @@ func TestWithdrawOwedNotQueuedTwice(t *testing.T) {
 	id, _ := withdrawCancelHeld(t, f, cid, peerwire.PurposeApproval, errUnavailable)
 	f.p.mu.Lock()
 	defer f.p.mu.Unlock()
-	f.p.challenges[id] = &challenge{ID: id, ConnID: cid, Exp: f.clk.Now().Add(9 * time.Minute), Gone: true, WithdrawOwed: true}
+	f.p.challenges[id] = &challenge{ID: id, ConnID: cid, Exp: f.clk.Now().Add(9 * time.Minute), Purpose: peerwire.PurposeApproval, Gone: true, WithdrawOwed: true}
 	f.p.expireChallenges(f.clk.Now())
 	n := 0
 	for _, e := range f.p.outbox {
@@ -546,6 +551,16 @@ func TestWithdrawDroppedAtResealOwedAgain(t *testing.T) {
 	cid := f.connect(f.member(10), "tag")
 	id, _ := withdrawCancelHeld(t, f, cid, peerwire.PurposeApproval, errUnavailable)
 	f.p.mu.Lock()
+	queued := 0
+	for _, e := range f.p.outbox {
+		if e.Withdraw == id {
+			queued++
+		}
+	}
+	if queued != 1 {
+		f.p.mu.Unlock()
+		t.Fatalf("%d withdraw entries before the reseal, want 1", queued)
+	}
 	f.p.resealAtKeyChange(f.p.conns[cid], &handshake.Epoch{}, f.clk.Now())
 	n := 0
 	for _, e := range f.p.outbox {
