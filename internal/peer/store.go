@@ -63,6 +63,12 @@ type Change struct {
 // ErrConflict is a conditional change that did not hold.
 var ErrConflict = errors.New("peer: store conflict")
 
+// errDiscarded is a step whose batch hit a store error after it had
+// changed state in memory: its writes were discarded (discard), and its
+// in-memory changes no longer match the store. Run stops on it, so the
+// task restarts from the stored state (alarm peer_discarded).
+var errDiscarded = errors.New("peer: a store error discarded a step")
+
 // MemStore is an in-memory Store, for tests and local runs.
 type MemStore struct {
 	mu  sync.Mutex

@@ -346,6 +346,14 @@ func (p *Peer) Run(ctx context.Context) error {
 			if errors.Is(err, ErrConflict) {
 				return err // another writer: stop rather than overwrite
 			}
+			if errors.Is(err, errDiscarded) {
+				// Memory no longer matches the store: carrying on could act on
+				// changes that were never written (and do them again when the
+				// batch is redelivered). The task restarts from the store.
+				p.log().Error("peer: a store error discarded a step; stopping so the task restarts from the stored state",
+					"alarm", "peer_discarded", "err", err.Error())
+				return err
+			}
 			fails++
 			p.log().Warn("collect", "err", errCode(err), "fails", fails)
 			if !sleep(ctx, min(time.Second<<min(fails, 4), 15*time.Second)) {
@@ -513,7 +521,7 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 		d, err := p.handleMessage(ctx, m, now)
 		if err != nil {
 			p.discard()
-			return failed(err)
+			return failed(fmt.Errorf("%w: %w", errDiscarded, err))
 		}
 		if d == ackAfterFlush {
 			p.mark(kindMsg, m.MsgID, []byte{1}, now.Add(DedupeRetention))
