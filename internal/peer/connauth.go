@@ -421,7 +421,8 @@ func (p *Peer) connAuthRotated(c *Connection, body []byte) {
 // Step makes before a batch can be discarded). A store that splits the
 // flush writes "auth" before "outbox", so a crash between its writes loses
 // the withdraw rather than doubling it, which fails safe: the member's
-// vault closes the ask at exp. The check for one already in the outbox is
+// vault closes the ask at exp (the record's delete is stored too, so its
+// place goes uncounted until then). The check for one already in the outbox is
 // defence in depth. An outbox already
 // full for the connection is not tried (sendEntry would log outbox_full on
 // each housekeeping, about once a minute). It runs from expireChallenges,

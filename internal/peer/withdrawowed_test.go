@@ -506,6 +506,15 @@ func TestWithdrawRefusedKeepsPlace(t *testing.T) {
 	if !f.p.HasPendingSignIn(cid) || f.owed(id) {
 		t.Fatalf("after the refusal: pending %v, owed %v", f.p.HasPendingSignIn(cid), f.owed(id))
 	}
+	// The record was stored: a restart keeps the place.
+	f.failDeposit = nil
+	f.start()
+	f.p.mu.Lock()
+	ch := f.p.challenges[id]
+	f.p.mu.Unlock()
+	if ch == nil || !ch.Gone || ch.WithdrawOwed || !f.p.HasPendingSignIn(cid) {
+		t.Fatalf("after a restart: %+v, pending %v", ch, f.p.HasPendingSignIn(cid))
+	}
 	f.clk.Advance(5 * time.Minute)
 	f.tick()
 	f.pump()
