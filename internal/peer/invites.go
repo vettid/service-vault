@@ -29,7 +29,7 @@ func (p *Peer) CreateInvite(ctx context.Context, tag string) (*InviteRecord, err
 		Status: InviteWaiting}
 	p.invites[rec.ID] = rec
 	p.markDirty(kindInvite, rec.ID)
-	p.issued[inv.OpenJTI] = &IssuedToken{JTI: inv.OpenJTI, Kind: tokOpen, Sub: "*", Exp: inv.Exp}
+	p.issued[inv.OpenJTI] = &IssuedToken{JTI: inv.OpenJTI, Kind: tokOpen, Sub: "*", Exp: inv.Exp, Iat: inv.Exp.Add(-InviteTTL)}
 	p.markDirty(kindToken, inv.OpenJTI)
 	if err := p.flush(ctx); err != nil {
 		return nil, err

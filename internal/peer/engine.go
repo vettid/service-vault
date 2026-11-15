@@ -143,7 +143,17 @@ type Peer struct {
 	rates      map[string]*rateWindow
 	// remintAt is a lost mailbox's re-mint owed (mailbox.go), zero when
 	// none; registerOwed, a registration while running that got no answer.
-	remintAt     time.Time
+	remintAt time.Time
+	// mintFloor is the tokens-not-before a relay that reports tombstones
+	// gave at the last registration (mailbox.go), zero when none: no
+	// token is minted before it plus TombstoneSkew.
+	mintFloor time.Time
+	// lossProven: the registration running now follows a collect's
+	// mailbox_unknown (mailbox.go): a lost answer then hides a proven loss.
+	lossProven bool
+	// recheckAt, when set, is when to register again after a relay's
+	// tokens_not_before far ahead (mailbox.go), to judge it once it isn't.
+	recheckAt    time.Time
 	registerOwed bool
 	// outboxFull marks the connections whose contract update waits on a
 	// full outbox, its outbox_full already logged (sendContract).
@@ -251,7 +261,9 @@ func (p *Peer) Start(ctx context.Context) error {
 	// for it again. The lock is let go meanwhile; calls that would mint
 	// are refused (errMintWait, ErrNotStarted).
 	if p.mintWait(p.now()) {
-		d := p.remintAt.Sub(p.now())
+		// A longer wait (a relay's tokens_not_before far ahead) is left to
+		// mintWait, which refuses mints while the service runs.
+		d := min(p.mintWaitUntil().Sub(p.now()), maxStartWait)
 		p.mu.Unlock()
 		ok := p.cfg.Sleep(ctx, d)
 		p.mu.Lock()
@@ -425,11 +437,20 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 		// A registration after a lost mailbox got no answer: it may have
 		// made the mailbox afresh, so it is made again (mailbox.go) until
 		// one is recorded, whatever the collects meanwhile say.
-		if err := p.register(ctx); err != nil {
+		p.lossProven = true
+		err := p.register(ctx)
+		p.lossProven = false
+		if err != nil {
 			p.mu.Unlock()
 			return 0, err
 		}
 		p.registerOwed = false
+	} else if !p.recheckAt.IsZero() && !p.now().Before(p.recheckAt) {
+		// A relay's tokens_not_before was far ahead: ask again (mailbox.go).
+		if err := p.register(ctx); err != nil {
+			p.mu.Unlock()
+			return 0, err
+		}
 	}
 	p.mu.Unlock()
 	started := p.now()
@@ -444,7 +465,10 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 			// The mailbox was lost while running: register it again here,
 			// which raises relay_mailbox_lost and owes the re-mint
 			// (mailbox.go), rather than collecting from nothing.
-			if rerr := p.register(ctx); rerr != nil {
+			p.lossProven = true
+			rerr := p.register(ctx)
+			p.lossProven = false
+			if rerr != nil {
 				p.registerOwed = true
 				return 0, rerr
 			}

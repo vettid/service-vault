@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"log/slog"
 	"sync"
 	"testing"
@@ -75,6 +76,14 @@ type fixture struct {
 	storeWrap Store
 	revokes   map[string]int
 	logs      lockedBuffer
+	// reportTomb makes the relay's registration answers report tombstones
+	// (RELAY-PROTOCOL 0.12.0 §6.1), with tombNB as tokens_not_before
+	// (zero: none held).
+	reportTomb bool
+	tombNB     time.Time
+	// loseRegAnswer makes the next registration reach the relay (and make
+	// the mailbox) but its answer be lost (a 503).
+	loseRegAnswer bool
 }
 
 // lockedBuffer collects the service's log lines.
@@ -119,7 +128,18 @@ func (r testRelay) Register(ctx context.Context) (relayclient.Registration, erro
 	if r.f.failRegister != nil {
 		return relayclient.Registration{}, r.f.failRegister
 	}
-	return r.View.Register(ctx)
+	reg, err := r.View.Register(ctx)
+	if err == nil && r.f.loseRegAnswer {
+		r.f.loseRegAnswer = false
+		return relayclient.Registration{}, &relayclient.Error{Status: 503, Code: "unavailable"}
+	}
+	if err == nil && r.f.reportTomb {
+		reg.Limits.ReportsTombstones = json.RawMessage(`true`)
+		if !r.f.tombNB.IsZero() {
+			reg.TokensNotBefore = json.RawMessage(`"` + r.f.tombNB.UTC().Format(time.RFC3339) + `"`)
+		}
+	}
+	return reg, err
 }
 
 func (r testRelay) Collect(ctx context.Context, wait time.Duration, max int) ([]relayclient.Message, error) {
