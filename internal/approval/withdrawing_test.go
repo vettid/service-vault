@@ -177,9 +177,18 @@ func TestWithdrawingOutlivesExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.clk.Advance(DefaultTTL)
-	f.tick()
+	f.m.once.Do(func() { f.m.kick = make(chan struct{}, 1) })
+	f.tick() // the pass that settles it wakes Run, once
 	if s := f.status(c.ID); s.Status != StatusExpired || f.openCount() != 1 {
 		t.Fatalf("status %s, open %d", s.Status, f.openCount())
+	}
+	if len(f.m.kick) != 1 {
+		t.Fatal("the expiring pass didn't wake Run")
+	}
+	<-f.m.kick
+	f.tick() // still owed, already settled: no wake
+	if len(f.m.kick) != 0 {
+		t.Fatal("a later pass woke Run")
 	}
 	f.p.mu.Lock()
 	f.p.cancelFail = nil
