@@ -391,15 +391,20 @@ destination.
     of the vettid-vault version in `go.mod` against each release's
     roots, not each release's own `votewire`. The daily `vault-roots`
     check (`rootscheck`) compares each supported release's verifier code
-    with that version, byte for byte: `votewire`'s `bundle.go`,
-    `trust.go`, `merkle.go` and `verify.go`, and the `strictjson` and
-    `suite` packages they use. A difference fails it, naming the
+    with that version, byte for byte: `votewire` (all but its message
+    bodies, documents and JCS: `body.go`, `documents.go`, `jcs.go`), and
+    the `strictjson` and `suite` packages it uses, and fails on an import
+    the pinned code doesn't have. A difference fails it, naming the
     release, unless `internal/vaultroots/testdata/verifier_differences.json`
-    lists it with the reason it is safe. Today it lists staging 25 and 26,
-    whose `strictjson` is more lenient than the service's (the service
-    refuses first), and staging 30, whose `suite.go` only adds a
-    constant. It compares code, not verdicts: a difference it lets
-    through is one a person has judged.
+    lists it, keyed by the sha256 of both files, with the reason it is
+    safe: a change on either side asks for a new review. Today it lists
+    staging 25 and 26, whose `strictjson` is more lenient than the
+    service's (the service refuses first) and whose `votewire.go` lacks
+    two things no check uses, and staging 30, whose `suite.go` only adds
+    a constant. It compares code, not verdicts, and not the vault's call
+    site (how a release passes the keys and the time to the verifier): a
+    difference it lets through is one a person has judged. Comparing
+    verdicts on shared bundle vectors is a possible later step.
   - **The signed service list.** The anchor key is not looked up in the
     signed service list. A key missing from it passes here, and member
     vaults then refuse the bundle (`service_list`). That fails closed at
