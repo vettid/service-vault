@@ -81,6 +81,9 @@ type fixture struct {
 	// (zero: none held).
 	reportTomb bool
 	tombNB     time.Time
+	// loseRegAnswer makes the next registration reach the relay (and make
+	// the mailbox) but its answer be lost (a 503).
+	loseRegAnswer bool
 }
 
 // lockedBuffer collects the service's log lines.
@@ -126,6 +129,10 @@ func (r testRelay) Register(ctx context.Context) (relayclient.Registration, erro
 		return relayclient.Registration{}, r.f.failRegister
 	}
 	reg, err := r.View.Register(ctx)
+	if err == nil && r.f.loseRegAnswer {
+		r.f.loseRegAnswer = false
+		return relayclient.Registration{}, &relayclient.Error{Status: 503, Code: "unavailable"}
+	}
 	if err == nil && r.f.reportTomb {
 		reg.Limits.ReportsTombstones = json.RawMessage(`true`)
 		if !r.f.tombNB.IsZero() {

@@ -47,6 +47,10 @@ func TestTombReportNoneAfterUnanswered(t *testing.T) {
 	f := newFixture(t)
 	f.connect(f.member(10), "")
 	jti, n := cancelledInvite(t, f)
+	waiting, err := f.p.CreateInvite(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	setRelayReg(t, f, relayReg{Registered: true, Attempted: true})
 	f.reportTomb = true
 	f.start()
@@ -55,9 +59,13 @@ func TestTombReportNoneAfterUnanswered(t *testing.T) {
 		t.Fatalf("%d alarms, waited %s", lostAlarms(f), f.slept)
 	}
 	// The unanswered attempt may have been a 201 (a data loss): the
-	// revocations are sent again, without an alarm.
-	if f.revokes[jti] <= n {
+	// revocations in force are sent again, with a warning, not an alarm;
+	// a waiting invitation is left alone (nothing is known to be lost).
+	if f.revokes[jti] <= n || !strings.Contains(f.logs.String(), "warning=relay_mailbox_maybe_lost") {
 		t.Fatalf("revocations %d -> %d", n, f.revokes[jti])
+	}
+	if got, _ := f.p.Invite(waiting.ID); got.Withdrew || f.revokes[waiting.OpenJTI] != 0 {
+		t.Fatalf("a waiting invitation withdrawn on a possible loss: %+v", got)
 	}
 	if r, _ := f.p.readRelayReg(context.Background()); r.Attempted || !r.RemintAfter.IsZero() || !r.Registered {
 		t.Fatalf("record %+v", r)
@@ -477,8 +485,8 @@ func TestTombReportWhileRunning(t *testing.T) {
 	}
 }
 
-// More revocations than one store write holds (each is two changes) are
-// all sent again.
+// Many revocations are all sent again. (MemStore takes any number of
+// changes at once: a store's 100-change split isn't exercised here.)
 func TestTombReportManyRevocations(t *testing.T) {
 	f := newFixture(t)
 	f.connect(f.member(10), "")
@@ -515,5 +523,58 @@ func TestTombReportOtherTJudged(t *testing.T) {
 	f.start()
 	if lostAlarms(f) != 1 {
 		t.Fatalf("%d alarms: an earlier T was not judged", lostAlarms(f))
+	}
+}
+
+// While running, a collect's mailbox_unknown proves the loss: a
+// re-registration that made the mailbox but whose answer was lost, then a
+// 200 with no T, is a data loss (alarm), not a possible one.
+func TestTombReportRunningUnanswered(t *testing.T) {
+	f := newFixture(t)
+	f.connect(f.member(10), "")
+	jti, n := cancelledInvite(t, f)
+	f.reportTomb = true
+	f.w.DeleteMailbox(f.keys.Mailbox())
+	f.loseRegAnswer = true
+	if _, err := f.p.Step(context.Background(), 0); err == nil {
+		t.Fatal("a collect from a deleted mailbox succeeded")
+	}
+	if lostAlarms(f) != 0 {
+		t.Fatalf("%d alarms before an answer", lostAlarms(f))
+	}
+	if _, err := f.p.Step(context.Background(), 0); err != nil { // the owed registration: a 200
+		t.Fatal(err)
+	}
+	f.pump()
+	if lostAlarms(f) != 1 || !strings.Contains(f.logs.String(), "tokens_kept=true") || f.revokes[jti] <= n {
+		t.Fatalf("%d alarms, revocations %d -> %d", lostAlarms(f), n, f.revokes[jti])
+	}
+}
+
+// A real loss with a T far ahead is labelled: whether tokens are refused
+// is unknown. A registration once the recheck is due takes the relay's
+// sane T: judged, and the far floor lifted.
+func TestTombReportFarWithLossThenSane(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	f.connect(m, "")
+	f.w.DeleteMailbox(f.keys.Mailbox())
+	f.reportTomb, f.tombNB = true, wholeUp(f.clk.Now().Add(24*time.Hour))
+	f.start()
+	if !strings.Contains(f.logs.String(), "tokens_kept=unknown") {
+		t.Fatal("a loss with a far T not labelled unknown")
+	}
+	alarms := lostAlarms(f)
+	f.tombNB = wholeUp(f.clk.Now().Add(-time.Minute)) // the relay is sane again; tokens are older
+	f.clk.Advance(tombstoneAhead)
+	if _, err := f.p.Step(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if lostAlarms(f) != alarms+1 {
+		t.Fatalf("%d alarms: the sane T was not judged", lostAlarms(f)-alarms)
+	}
+	f.clk.Advance(TombstoneSkew)
+	if _, err := f.p.CreateInvite(context.Background(), ""); err != nil {
+		t.Fatalf("the far floor not lifted: %v", err)
 	}
 }

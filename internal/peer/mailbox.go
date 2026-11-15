@@ -57,6 +57,11 @@ type relayReg struct {
 	// write, cleared once the revocations are stored in the outbox, so a
 	// stop in between sends them at the next registration.
 	DenyOwed bool `json:"deny_owed,omitempty"`
+	// DenyOpen, with DenyOwed, after a loss that is known (a 201, or a
+	// lost answer after a collect's mailbox_unknown): every unexpired open
+	// token is revoked too, and waiting invitations withdrawn. Without it
+	// (a loss only possible) just the revocations in force are sent again.
+	DenyOpen bool `json:"deny_open,omitempty"`
 }
 
 // tombstoneAhead is how far ahead of the service's clock a relay's
@@ -151,9 +156,18 @@ func (p *Peer) register(ctx context.Context) error {
 	p.limits = reg.Limits
 	now := p.now()
 	before := r.Registered || len(p.conns) > 0
-	lost, dataLost, unknownIat, newT, resend := false, false, false, false, false
+	lost, dataLost, unknownIat, newT, maybe := false, false, false, false, false
 	nb, reported := reg.Tombstone()
 	ahead := !nb.IsZero() && nb.After(now.Add(tombstoneAhead))
+	p.recheckAt = time.Time{}
+	if ahead {
+		p.recheckAt = now.Add(tombstoneAhead) // judged once it isn't ahead
+	}
+	if reported && !ahead && p.mintFloor.After(now.Add(tombstoneAhead)) {
+		// A reporting relay's sane answer replaces a far-ahead floor it
+		// gave before (an answer without the flag doesn't).
+		p.mintFloor = time.Time{}
+	}
 	// The floor: the latest T not yet passed, of this answer, the one
 	// judged and stored, and the one already known (an answer without it,
 	// from a relay instance not yet reporting or after a restart, doesn't
@@ -175,14 +189,17 @@ func (p *Peer) register(ctx context.Context) error {
 	}
 	if reported && before {
 		switch {
-		case reg.Created:
+		case reg.Created, prev && p.lossProven:
+			// A 201; or, after a collect's mailbox_unknown, an attempt whose
+			// answer was lost: that answer was the 201.
 			dataLost = true
-			r.DenyOwed = true
+			r.DenyOwed, r.DenyOpen = true, true
 		case prev:
-			// An attempt whose answer was lost may have been that 201: the
-			// revocations are sent again all the same (cheap; no alarm,
-			// which an unanswered registration alone would make false).
-			resend = true
+			// At a start, an attempt whose answer was lost may have been a
+			// 201: the revocations in force are sent again (cheap), with a
+			// warning, not an alarm (an unanswered registration alone would
+			// make it false).
+			maybe = true
 			r.DenyOwed = true
 		}
 	}
@@ -209,18 +226,22 @@ func (p *Peer) register(ctx context.Context) error {
 			msg = "the relay refuses tokens issued before tokens_not_before, and some the service relies on are older or of unknown age (recorded before this version kept iat): every member's tokens for it are minted again; messages members deposited since the last collect may be gone"
 		}
 		p.log().Error(msg, attrs...)
+	} else if dataLost && ahead {
+		p.log().Error("the relay made the service's mailbox again, and its tokens_not_before is unusable (far ahead): messages members deposited since the last collect are gone, whether members' tokens are refused is unknown until the relay reports a sane time, and revocations are sent again",
+			"alarm", "relay_mailbox_lost", "created", reg.Created, "tokens_kept", "unknown", "tokens_not_before", nb, "connections", len(p.conns))
 	} else if dataLost && newT {
 		p.log().Error("the relay deleted the service's mailbox and made it again: messages members deposited since the last collect are gone; no token the service relies on is refused, and revocations are sent again",
-			"alarm", "relay_mailbox_lost", "created", true, "tokens_kept", true, "tokens_not_before", nb, "connections", len(p.conns))
+			"alarm", "relay_mailbox_lost", "created", reg.Created, "tokens_kept", true, "tokens_not_before", nb, "connections", len(p.conns))
 	} else if dataLost {
 		p.log().Error("the relay holds no record of the service's mailbox (its data was lost, or it was rebuilt): messages members deposited since the last collect are gone; the members' tokens still work, and revocations are sent again",
-			"alarm", "relay_mailbox_lost", "created", true, "tokens_kept", true, "connections", len(p.conns))
+			"alarm", "relay_mailbox_lost", "created", reg.Created, "tokens_kept", true, "connections", len(p.conns))
 	} else if newT && before {
 		p.log().Warn("the relay reports a deletion of the service's mailbox after which no token it relies on is refused: messages deposited before it may be gone",
 			"tokens_not_before", nb)
 	}
-	if resend {
-		p.log().Info("a registration whose answer was lost may have made the mailbox afresh: revocations are sent again")
+	if maybe {
+		p.log().Warn("a registration whose answer was lost may have made the service's mailbox afresh (its data lost): the revocations in force are sent again",
+			"warning", "relay_mailbox_maybe_lost")
 	}
 	if ahead {
 		p.log().Error("the relay's tokens_not_before is far ahead of this clock (the relay's clock or report is wrong, or this clock is behind): it is not taken as a deletion, and no token is minted until it has passed",
@@ -248,15 +269,15 @@ func (p *Peer) denyOwed(ctx context.Context, now time.Time) error {
 	if err != nil || !r.DenyOwed {
 		return err
 	}
-	n := p.denyAgain(now)
+	n, withdrawn := p.denyAgain(now, r.DenyOpen)
 	if err := p.flush(ctx); err != nil {
 		return fmt.Errorf("peer: revocations owed: %w", err)
 	}
-	r.DenyOwed = false
+	r.DenyOwed, r.DenyOpen = false, false
 	if err := p.writeRelayReg(ctx, r); err != nil {
 		return fmt.Errorf("peer: revocations owed: %w", err)
 	}
-	p.log().Info("revocations sent again", "count", n)
+	p.log().Warn("revocations sent again", "revocations", n, "invitations_withdrawn", withdrawn)
 	return nil
 }
 
@@ -279,34 +300,37 @@ func (p *Peer) reliesBefore(nb, now time.Time) (before, unknown bool) {
 
 // denyAgain sends again every revocation still in force, after a relay
 // lost its denylist and its record of used one-shot tokens (RELAY-PROTOCOL
-// §6.1): every unexpired token revoked, and every unexpired open token. An
-// open token the relay consumed but whose deposit the service refused
-// before marking the invitation used (handshake.go: an invalid invite, a
-// malformed profile, the request limit) isn't known to be used, so all are
-// revoked, as §6.1 allows when use isn't fully tracked; their waiting
-// invitations are withdrawn (make new ones). It returns how many it queued.
-func (p *Peer) denyAgain(now time.Time) int {
+// §6.1): every unexpired token revoked (an invitation's open token is
+// revoked once it is used: handshake.go). With open, after a loss that is
+// known, every unexpired open token too: one the relay consumed but whose
+// deposit the service refused before marking the invitation used (an
+// invalid invite, a malformed profile, the request limit) isn't known to
+// be used, so all are revoked, as §6.1 allows when use isn't fully
+// tracked, and their waiting invitations withdrawn (make new ones). It
+// returns how many it queued, and how many invitations it withdrew.
+func (p *Peer) denyAgain(now time.Time, open bool) (n, withdrawn int) {
 	jtis := make([]string, 0, len(p.issued))
 	for jti, t := range p.issued {
-		if now.Before(t.Exp) && (t.Denied || t.Kind == tokOpen) {
+		if now.Before(t.Exp) && (t.Denied || open && t.Kind == tokOpen) {
 			jtis = append(jtis, jti)
 		}
 	}
 	sort.Strings(jtis)
-	open := map[string]*InviteRecord{}
+	waiting := map[string]*InviteRecord{}
 	for _, inv := range p.invites {
 		if inv.OpenJTI != "" && !inv.Withdrew {
-			open[inv.OpenJTI] = inv
+			waiting[inv.OpenJTI] = inv
 		}
 	}
 	for _, jti := range jtis {
-		if inv := open[jti]; inv != nil {
+		if inv := waiting[jti]; inv != nil {
 			p.withdrawInvite(inv, now) // revokes the token too
+			withdrawn++
 			continue
 		}
 		p.denyJTI(jti, now)
 	}
-	return len(jtis)
+	return len(jtis), withdrawn
 }
 
 func maxTime(a, b time.Time) time.Time {

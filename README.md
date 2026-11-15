@@ -313,6 +313,17 @@ destination.
     judged or stored, so it can't hide a real T after it; no token is
     minted until it passes, and a start waits at most about 9 minutes
     for it before it runs (collecting and answering, minting nothing).
+    The service registers again every 5 minutes while it lasts: once the
+    relay reports a sane T (or none), that is judged and the wait lifts.
+    A relay without the flag doesn't lift it. After fixing the clocks,
+    nothing else is needed (a restart makes it sooner). A loss reported
+    with such a T says `tokens_kept=unknown`.
+  - **A registration whose answer was lost, then one with no `201`:**
+    at a start that may have been a lost `201`: the revocations in force
+    are sent again, with a warning (`relay_mailbox_maybe_lost`), no
+    alarm, and invitations are left alone. While running, after a
+    collect's `mailbox_unknown`, the loss is proven: it is a data loss
+    as below (alarm, invitations withdrawn).
   - **No T:** no token is refused because of a deletion, whatever the
     last registration's fate: no alarm, no wait.
   - **A `201` for a mailbox registered before** (with a T already
@@ -325,9 +336,7 @@ destination.
     is revoked (a one-shot token's use isn't always known): invitations
     still waiting are withdrawn, so make new ones. That is recorded with
     the registration, so a stop before the revocations are stored sends
-    them at the next one. A registration whose answer was lost may have
-    been such a `201`, so after one the revocations are sent again too,
-    without an alarm.
+    them at the next one.
   - A new T that refuses no token relied on is logged (`warn`): messages
     deposited before it may be gone. A T more than a few minutes ahead of
     the service's clock is waited for all the same, and logged.
