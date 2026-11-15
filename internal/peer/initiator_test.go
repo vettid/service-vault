@@ -844,13 +844,14 @@ func TestLatchRules(t *testing.T) {
 	fail, ok := true, 1 // the lease mark is written; the batch's write fails
 	f.p.cfg.Store = failingStore{f.store, &fail, &ok}
 	m.Send("connection.note", []byte(`{}`))
-	if _, err := f.p.Step(context.Background(), 0); err == nil {
-		t.Fatal("no store error")
+	if _, err := f.p.Step(context.Background(), 0); !errors.Is(err, errDiscarded) {
+		t.Fatalf("a failed batch write: %v, want errDiscarded (the peer stops)", err)
 	}
 	if f.p.drained {
 		t.Fatal("a failed batch left it set")
 	}
 	fail = false
+	f.start() // the task restarts from the store
 	f.clk.Advance(time.Hour)
 	f.step()
 	for i := 0; i < MaxBatch; i++ {

@@ -458,6 +458,10 @@ func (p *Peer) DeliverEvents(ctx context.Context) {
 	}
 	for ctx.Err() == nil {
 		p.mu.Lock()
+		if p.stopped {
+			p.mu.Unlock()
+			return // from a memory that left the store: the restart emits what was stored
+		}
 		var e *Event
 		if len(p.events) > 0 {
 			c := *p.events[0]

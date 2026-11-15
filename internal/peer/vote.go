@@ -43,7 +43,9 @@ type VoteAnswer struct {
 }
 
 // Votes answers vote.* requests. An error is a storage failure: the
-// batch is not acknowledged, and the relay delivers it again. An error
+// batch is not acknowledged, and the relay delivers it again; if the
+// step had changes the error discards, the peer stops and the task
+// restarts first (errDiscarded). An error
 // that wraps ErrNoAnswer acknowledges the request without answering it.
 type Votes interface {
 	Vote(ctx context.Context, r *VoteRequest) (VoteAnswer, error)
