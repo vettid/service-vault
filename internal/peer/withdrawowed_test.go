@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vettid/vettid-relay/relayclient"
 	"github.com/vettid/vettid-vault/vms/peerwire"
 )
 
@@ -451,5 +452,112 @@ func TestWithdrawQueuedThenConnectionRemoved(t *testing.T) {
 	f.p.mu.Unlock()
 	if kept || strings.Contains(f.logs.String(), "owed again") {
 		t.Fatalf("kept %v, logs %s", kept, f.logs.String())
+	}
+}
+
+// withdrawCancelHeld cancels a fresh challenge while deposits are refused
+// by refuse, and returns its id and the count of deposits tried.
+func withdrawCancelHeld(t *testing.T, f *fixture, cid, purpose string, refuse error) (string, *int) {
+	t.Helper()
+	ctx := context.Background()
+	var id string
+	var err error
+	if purpose == peerwire.PurposeSignIn {
+		id, err = f.p.AuthenticateSignIn(ctx, cid, "Sign in", "42", 10*time.Minute)
+	} else {
+		id, err = f.p.Authenticate(ctx, cid, "x", purpose, 10*time.Minute)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.pump()
+	n := 0
+	f.failDeposit = func(string, string) error { n++; return refuse }
+	if ok, err := f.p.CancelChallenge(ctx, id); !ok || err != nil {
+		t.Fatalf("cancel: %v %v", ok, err)
+	}
+	return id, &n
+}
+
+// A withdraw the relay refuses for good is tried once and not owed again
+// (it would be refused again until its exp).
+func TestWithdrawRefusedForGoodNotOwed(t *testing.T) {
+	f := newFixture(t)
+	cid := f.connect(f.member(10), "tag")
+	id, n := withdrawCancelHeld(t, f, cid, peerwire.PurposeApproval, &relayclient.Error{Status: 400, Code: "bad_request"})
+	for i := 0; i < 5; i++ {
+		f.clk.Advance(time.Minute)
+		f.tick()
+		f.pump()
+	}
+	if *n != 1 || f.owed(id) {
+		t.Fatalf("%d deposits tried, owed %v", *n, f.owed(id))
+	}
+}
+
+// A real mailbox_unknown (the connection goes stale) owes the withdraw
+// again; the record is made again, Gone, and kept across a restart.
+func TestWithdrawMailboxUnknownOwedAgain(t *testing.T) {
+	f := newFixture(t)
+	cid := f.connect(f.member(10), "tag")
+	id, _ := withdrawCancelHeld(t, f, cid, peerwire.PurposeApproval, &relayclient.Error{Status: 404, Code: "mailbox_unknown"})
+	f.pump()
+	f.p.mu.Lock()
+	ch := f.p.challenges[id]
+	gone := ch != nil && ch.Gone
+	f.p.mu.Unlock()
+	if !f.owed(id) || !gone {
+		t.Fatalf("after mailbox_unknown: owed %v, gone %v", f.owed(id), gone)
+	}
+	f.failDeposit = nil
+	f.pump() // written
+	f.start()
+	if !f.owed(id) {
+		t.Fatal("the re-created debt didn't survive a restart")
+	}
+}
+
+// A drop after the challenge's exp owes nothing: the vault closes the ask.
+func TestWithdrawDroppedAfterExpNotOwed(t *testing.T) {
+	f := newFixture(t)
+	cid := f.connect(f.member(10), "tag")
+	id, _ := withdrawCancelHeld(t, f, cid, peerwire.PurposeApproval, errUnavailable)
+	f.clk.Advance(11 * time.Minute)
+	f.p.mu.Lock()
+	f.p.dropOutbox(func(e *outboxEntry) bool { return e.Withdraw == id })
+	_, kept := f.p.challenges[id]
+	f.p.mu.Unlock()
+	if kept {
+		t.Fatal("a record made again past the challenge's exp")
+	}
+}
+
+// After a late send the record goes: a cancelled sign-in no longer holds
+// a replacement back.
+func TestLateSendDeletesRecord(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "tag")
+	ctx := context.Background()
+	id, err := f.p.AuthenticateSignIn(ctx, cid, "Sign in", "42", 10*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.pump()
+	f.setState(cid, StateSuspended)
+	if ok, err := f.p.CancelChallenge(ctx, id); !ok || err != nil {
+		t.Fatalf("cancel: %v %v", ok, err)
+	}
+	if !f.p.HasPendingSignIn(cid) {
+		t.Fatal("before the late send, the cancelled sign-in should still hold its place")
+	}
+	f.setState(cid, StateActive)
+	f.tick()
+	f.pump()
+	f.p.mu.Lock()
+	_, kept := f.p.challenges[id]
+	f.p.mu.Unlock()
+	if kept || f.p.HasPendingSignIn(cid) || len(m.Received(peerwire.TypeConnAuthWithdraw)) != 1 {
+		t.Fatalf("after the late send: kept %v, pending %v", kept, f.p.HasPendingSignIn(cid))
 	}
 }

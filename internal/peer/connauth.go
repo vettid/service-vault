@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/vettid/vettid-vault/vms/credwire"
@@ -415,18 +416,15 @@ func (p *Peer) connAuthRotated(c *Connection, body []byte) {
 }
 
 // withdrawOwed queues the withdraw a cancel couldn't, once the connection
-// can take it; past the challenge's exp it is no longer owed. The flag is
-// cleared only with the withdraw queued, both in the same flush, so a
-// crash can't queue it twice (one exception, older than this: a flush that
-// fails and is discarded, then a restart before exp, can). A store that
-// splits a large flush into several
-// writes may store the cleared flag without the outbox entry (auth sorts
-// first); a crash between them loses the withdraw, which fails safe: the
-// record keeps its place counted until exp plus ClockSkew, and the
-// member's vault closes the ask at exp. An outbox already full for the
-// connection is not tried (sendEntry would log outbox_full on each
-// housekeeping, about once a minute). It runs from expireChallenges, in
-// each housekeeping.
+// can take it; past the challenge's exp it is no longer owed. Once queued,
+// the record goes (deleted with the entry's write, in the same flush, which
+// Step makes before a batch can be discarded). Not queued twice: one
+// already in the outbox (a store that split the flush, and a crash between
+// its writes) is left to go. A crash that loses the queued entry instead
+// fails safe: the member's vault closes the ask at exp. An outbox already
+// full for the connection is not tried (sendEntry would log outbox_full on
+// each housekeeping, about once a minute). It runs from expireChallenges,
+// in each housekeeping.
 func (p *Peer) withdrawOwed(id string, ch *challenge, now time.Time) {
 	if !now.Before(ch.Exp) {
 		ch.WithdrawOwed = false
@@ -436,13 +434,20 @@ func (p *Peer) withdrawOwed(id string, ch *challenge, now time.Time) {
 	}
 	c := p.conns[ch.ConnID]
 	if c == nil || c.State != StateActive || c.kr == nil || c.kr.Current() == nil || // cheap, before the outbox scan
-		p.outboxFor(c.ID) >= MaxOutboxPerConn || !p.queueWithdraw(c, ch, now) {
+		p.outboxFor(c.ID) >= MaxOutboxPerConn {
 		return
 	}
-	// The record stays, Gone, until exp plus the skew (a cancel that queued
-	// its withdraw at once deletes it): its place is still counted, and a
-	// withdraw dropped before the relay takes it is owed again on it.
-	ch.WithdrawOwed = false
+	// Already queued (a crash between the queueing and the flag's write,
+	// in a store that splits a flush): not queued twice.
+	queued := slices.ContainsFunc(p.outbox, func(e *outboxEntry) bool { return e.Withdraw == id && !e.dropped })
+	if !queued && !p.queueWithdraw(c, ch, now) {
+		return
+	}
+	// Queued: the record goes, as a cancel that queues its withdraw at once
+	// deletes it (its place is no longer held for a sign-in or approval
+	// waiting on it). A withdraw dropped before the relay takes it is owed
+	// again on a record made again (withdrawLeft).
+	delete(p.challenges, id)
 	p.markDirty(kindAuth, id)
 	p.log().Info("challenge withdraw sent late", "connection_id", ch.ConnID, "request_id", id)
 }
@@ -464,11 +469,13 @@ func (p *Peer) queueWithdraw(c *Connection, ch *challenge, now time.Time) bool {
 // withdrawLeft notes that e left the outbox: a withdraw the relay didn't
 // take (dropped: the mailbox lost, the connection stale, the entry
 // expired) is owed again until the challenge's exp, on the challenge's
-// record; one cancelled with its withdraw queued at once had its record
+// record, even one already tried (it may not have arrived: at least once;
+// a second withdraw is harmless). One the relay refused for good is not
+// (e.refused): it would be refused again; one cancelled with its withdraw queued at once had its record
 // deleted, so it is made again, Gone, holding its place as before. Not for
 // a connection that is gone: its vault can't answer.
-func (p *Peer) withdrawLeft(e *outboxEntry) {
-	if e.Withdraw == "" || e.deposited || !p.now().Before(e.WithdrawExp) || p.conns[e.ConnID] == nil || e.ConnID == p.removing {
+func (p *Peer) withdrawLeft(e *outboxEntry, now time.Time) {
+	if e.Withdraw == "" || e.deposited || e.refused || !now.Before(e.WithdrawExp) || p.conns[e.ConnID] == nil || e.ConnID == p.removing {
 		return
 	}
 	ch := p.challenges[e.Withdraw]

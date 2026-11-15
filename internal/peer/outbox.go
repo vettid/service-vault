@@ -90,7 +90,7 @@ func (p *Peer) dropOutbox(drop func(*outboxEntry) bool) {
 			e.dropped = true
 			p.markDirty(kindOutbox, e.ID)
 			p.challengeLeft(e)
-			p.withdrawLeft(e)
+			p.withdrawLeft(e, p.now())
 			p.sendLeft(e)
 			continue
 		}
@@ -200,6 +200,10 @@ func (p *Peer) drainOutbox(ctx context.Context) {
 		case opDeposit:
 			finished, err = p.deposit(ctx, e, now)
 			e.deposited = err == nil && !finished
+			// A refusal for good is about the message, not the connection's
+			// state: owed again, it would be refused again until its exp.
+			// mailbox_unknown is the connection's state (it goes stale).
+			e.refused = finished && err != nil && !relayclient.IsCode(err, codeMailboxUnknown)
 		case opRevoke:
 			err = p.cfg.Relay.Revoke(ctx, relayclient.Revocation{Kind: "jti", Value: e.Value})
 		case opDeleteClaim:

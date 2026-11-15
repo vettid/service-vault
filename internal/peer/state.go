@@ -495,6 +495,7 @@ type outboxEntry struct {
 	WithdrawPurpose string `json:"withdraw_purpose,omitempty"`
 
 	dropped   bool // removed by dropOutbox: a drain in progress skips it
+	refused   bool // the relay refused it for good (not for a mailbox it lost): a withdraw isn't owed again
 	deposited bool // the relay took it: it leaves the outbox delivered
 }
 
