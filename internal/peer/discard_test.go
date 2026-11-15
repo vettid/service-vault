@@ -99,15 +99,17 @@ type failWrites struct {
 	skip    int
 	err     error              // returned instead of errThrottled, if set
 	onlyMsg bool               // fail only a write carrying a message's dedupe mark
+	onlyOf  string             // fail only a write carrying a record of this kind, if set
 	cancel  context.CancelFunc // called as the write fails, if set
 }
 
 func (s *failWrites) Apply(ctx context.Context, cs []Change) error {
-	msg := false
+	msg, of := false, s.onlyOf == ""
 	for _, c := range cs {
 		msg = msg || c.Kind == kindMsg
+		of = of || c.Kind == s.onlyOf
 	}
-	if s.on && (msg || !s.onlyMsg) {
+	if s.on && (msg || !s.onlyMsg) && of {
 		if s.skip > 0 {
 			s.skip--
 		} else {
