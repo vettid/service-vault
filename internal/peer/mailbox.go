@@ -51,7 +51,20 @@ type relayReg struct {
 	// the same time again (a relay keeps it for as long as it keeps the
 	// tombstone, some for good) is nothing new.
 	Tombstone time.Time `json:"tombstone,omitzero"`
+	// DenyOwed: a relay that reports tombstones answered 201 for a mailbox
+	// registered before, so it may have lost its denylist: every revocation
+	// still in force is sent again (denyAgain). Set in the registration's
+	// write, cleared once the revocations are stored in the outbox, so a
+	// stop in between sends them at the next registration.
+	DenyOwed bool `json:"deny_owed,omitempty"`
 }
+
+// tombstoneAhead is how far ahead of the service's clock a relay's
+// tokens-not-before can honestly be: a deletion now, plus 90 s, rounded up
+// to the second, on a relay clock up to 90 s ahead (§4.1, §6.10), with a
+// margin. A later one is waited for all the same (a token minted before it
+// would be refused), but logged.
+const tombstoneAhead = 5 * time.Minute
 
 func (p *Peer) readRelayReg(ctx context.Context) (relayReg, error) {
 	var r relayReg
@@ -92,9 +105,13 @@ func (p *Peer) writeRelayReg(ctx context.Context, r relayReg) error {
 //     from the answer. Either way nothing is minted before T +
 //     TombstoneSkew.
 //   - no T: no token is refused because of a deletion, whatever the
-//     attempted mark says. A 201 for a mailbox registered before means
-//     the relay lost what it held: the messages since the last collect,
-//     and its denylist, so revocations are sent again (dataLost).
+//     attempted mark says.
+//
+// On such a relay a 201 for a mailbox registered before (with or without
+// T) means the relay lost what it held: the messages since the last
+// collect, and its denylist. Every revocation still in force is sent
+// again (DenyOwed, durably), and without a loss of tokens the alarm says
+// tokens_kept.
 //
 // While running (after a collect's mailbox_unknown), the relay call gets
 // registerRunningTimeout: it runs under p.mu, and the loss is proven, so
@@ -128,24 +145,29 @@ func (p *Peer) register(ctx context.Context) error {
 	p.limits = reg.Limits
 	now := p.now()
 	before := r.Registered || len(p.conns) > 0
-	lost, dataLost := false, false
+	lost, dataLost, unknownIat, newT := false, false, false, false
 	nb, reported := reg.Tombstone()
-	p.mintFloor = nb
+	// The floor is kept until it has passed: an answer without it (a relay
+	// instance not yet reporting) doesn't lift a wait already known.
+	if nb.After(p.mintFloor) || !now.Before(p.mintFloor.Add(TombstoneSkew)) {
+		p.mintFloor = nb
+	}
 	switch {
 	case !reported: // a relay before 0.12.0: the answer says nothing of tombstones
 		lost = before && (reg.Created || prev)
 		if lost {
 			r.RemintAfter = now.Add(FreshMailboxWait)
 		}
-	case !nb.IsZero():
-		if nb.After(r.Tombstone) {
-			if lost = p.reliesBefore(nb, now); lost {
-				r.RemintAfter = maxTime(now, nb.Add(TombstoneSkew))
-			}
-			r.Tombstone = nb
+	case !nb.IsZero() && nb.After(r.Tombstone):
+		newT = true
+		if lost, unknownIat = p.reliesBefore(nb, now); lost {
+			r.RemintAfter = maxTime(now, nb.Add(TombstoneSkew))
 		}
-	default:
-		dataLost = before && reg.Created
+		r.Tombstone = nb
+	}
+	if reported && before && reg.Created {
+		dataLost = true
+		r.DenyOwed = true
 	}
 	r.Registered, r.Attempted = true, false
 	if err := p.writeRelayReg(ctx, r); err != nil {
@@ -162,29 +184,60 @@ func (p *Peer) register(ctx context.Context) error {
 		if !nb.IsZero() {
 			attrs = append(attrs, "tokens_not_before", nb)
 		}
+		if unknownIat {
+			// Tokens recorded before their iat was kept (the first start of
+			// this version): counted as older, so this may be no loss.
+			attrs = append(attrs, "tokens_of_unknown_age", true)
+		}
 		p.log().Error("the service's relay mailbox was lost and made again empty: messages members deposited since the last collect are gone, and every member's tokens for it are minted again", attrs...)
-	}
-	if dataLost {
-		n := p.denyAgain(now)
+	} else if dataLost {
 		p.log().Error("the relay holds no record of the service's mailbox (its data was lost, or it was rebuilt): messages members deposited since the last collect are gone; the members' tokens still work, and revocations are sent again",
-			"alarm", "relay_mailbox_lost", "created", true, "tokens_kept", true, "revocations", n, "connections", len(p.conns))
+			"alarm", "relay_mailbox_lost", "created", true, "tokens_kept", true, "connections", len(p.conns))
+	} else if newT && before {
+		p.log().Warn("the relay reports a deletion of the service's mailbox after which no token it relies on is refused: messages deposited before it may be gone",
+			"tokens_not_before", nb)
 	}
+	if !nb.IsZero() && nb.After(now.Add(tombstoneAhead)) {
+		p.log().Warn("the relay's tokens_not_before is far ahead of this clock (the relay's clock or report is wrong, or this clock is behind): no token is minted until it has passed",
+			"tokens_not_before", nb, "now", now)
+	}
+	return p.denyOwed(ctx, now)
+}
+
+// denyOwed sends again, if owed (relayReg.DenyOwed), every revocation
+// still in force: queued and stored in the outbox, then the mark cleared.
+func (p *Peer) denyOwed(ctx context.Context, now time.Time) error {
+	r, err := p.readRelayReg(ctx)
+	if err != nil || !r.DenyOwed {
+		return err
+	}
+	n := p.denyAgain(now)
+	if err := p.flush(ctx); err != nil {
+		return fmt.Errorf("peer: revocations owed: %w", err)
+	}
+	r.DenyOwed = false
+	if err := p.writeRelayReg(ctx, r); err != nil {
+		return fmt.Errorf("peer: revocations owed: %w", err)
+	}
+	p.log().Info("revocations sent again", "count", n)
 	return nil
 }
 
 // reliesBefore reports whether a token the service issued and still
 // relies on (not revoked, not expired) has an iat before nb, or an
 // unknown one (a record from before Iat was kept): the relay refuses it.
-func (p *Peer) reliesBefore(nb, now time.Time) bool {
+// unknown reports whether an unknown iat was among them.
+func (p *Peer) reliesBefore(nb, now time.Time) (before, unknown bool) {
 	for _, t := range p.issued {
 		if t.Denied || !now.Before(t.Exp) {
 			continue
 		}
 		if t.Iat.Before(nb) { // a zero (unknown) iat is before any nb
-			return true
+			before = true
+			unknown = unknown || t.Iat.IsZero()
 		}
 	}
-	return false
+	return before, unknown
 }
 
 // denyAgain sends again every revocation still in force, after a relay

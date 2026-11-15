@@ -303,14 +303,20 @@ destination.
     already judged is not judged again. Either way no token is minted
     before T + 90 s.
   - **No T:** no token is refused because of a deletion, whatever the
-    last registration's fate: no alarm, no wait. Except a `201` for a
-    mailbox registered before: the relay holds no record of it (its
-    data was lost, or it was rebuilt). The members' tokens still work,
-    so nothing is re-minted and nothing waits, but the messages since
-    the last collect and the relay's denylist are gone: the alarm is
-    raised (`tokens_kept=true`), and every revocation still in force,
-    and the open token of every invitation no longer waiting, is sent
-    again.
+    last registration's fate: no alarm, no wait.
+  - **A `201` for a mailbox registered before** (with a T already
+    judged, a T that refuses no token, or none): the relay holds no
+    record of the mailbox (its data was lost, or it was rebuilt). The
+    members' tokens still work, so nothing is re-minted for that, but
+    the messages since the last collect and the relay's denylist are
+    gone: the alarm is raised (`tokens_kept=true`) and every revocation
+    still in force is sent again (an invitation's open token is revoked
+    as soon as it is used, so used ones are among them). That is
+    recorded with the registration, so a stop before the revocations are
+    stored sends them at the next one.
+  - A new T that refuses no token relied on is logged (`warn`): messages
+    deposited before it may be gone. A T more than a few minutes ahead of
+    the service's clock is waited for all the same, and logged.
 
   A deleted mailbox may also
   mean the relay key is exposed: look at the relay's logs, and consider

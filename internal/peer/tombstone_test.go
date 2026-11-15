@@ -161,6 +161,9 @@ func TestTombReportOlderTokens(t *testing.T) {
 		if lostAlarms(f) != 1 || f.slept != 0 || issuedTo(m)-before != 2 {
 			t.Fatalf("unknown iat %v: %d alarms, waited %s, %d tokens", unknown, lostAlarms(f), f.slept, issuedTo(m)-before)
 		}
+		if got := strings.Contains(f.logs.String(), "tokens_of_unknown_age=true"); got != unknown {
+			t.Fatalf("unknown iat %v: tokens_of_unknown_age logged %v", unknown, got)
+		}
 	}
 }
 
@@ -228,5 +231,113 @@ func TestTombReportDataLoss(t *testing.T) {
 	// forgot its use).
 	if usedOpen == "" || f.revokes[usedOpen] <= usedRevoked {
 		t.Fatalf("a used invitation's token %q was not revoked again", usedOpen)
+	}
+}
+
+// cancelledInvite makes an invitation and cancels it (its open token is
+// revoked), and returns its token's jti and how often it was revoked.
+func cancelledInvite(t *testing.T, f *fixture) (string, int) {
+	t.Helper()
+	ctx := context.Background()
+	inv, err := f.p.CreateInvite(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.p.CancelInvite(ctx, inv.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.pump()
+	if f.revokes[inv.OpenJTI] == 0 {
+		t.Fatal("the cancelled invitation's token was never revoked")
+	}
+	return inv.OpenJTI, f.revokes[inv.OpenJTI]
+}
+
+// A 201 with a T already judged (a relay that lost the mailbox's record
+// but kept its tombstone) still means the relay lost its denylist:
+// revocations are sent again, with the alarm.
+func TestTombReport201SameT(t *testing.T) {
+	f := newFixture(t)
+	f.connect(f.member(10), "")
+	jti, n := cancelledInvite(t, f)
+	nb := wholeUp(f.clk.Now().Add(-48 * time.Hour))
+	setRelayReg(t, f, relayReg{Registered: true, Tombstone: nb})
+	f.w.DeleteMailbox(f.keys.Mailbox())
+	f.reportTomb, f.tombNB = true, nb
+	f.start()
+	f.pump()
+	if lostAlarms(f) != 1 || !strings.Contains(f.logs.String(), "tokens_kept=true") || f.revokes[jti] <= n {
+		t.Fatalf("%d alarms, revocations %d -> %d", lostAlarms(f), n, f.revokes[jti])
+	}
+	if r, _ := f.p.readRelayReg(context.Background()); r.DenyOwed {
+		t.Fatalf("record %+v", r)
+	}
+}
+
+// Revocations owed by a data loss survive a stop before they were stored:
+// the next registration, a plain 200, sends them.
+func TestTombReportDenyOwedSurvives(t *testing.T) {
+	f := newFixture(t)
+	f.connect(f.member(10), "")
+	jti, n := cancelledInvite(t, f)
+	setRelayReg(t, f, relayReg{Registered: true, DenyOwed: true})
+	f.reportTomb = true
+	f.start()
+	f.pump()
+	if f.revokes[jti] <= n {
+		t.Fatalf("revocations %d -> %d", n, f.revokes[jti])
+	}
+	if r, _ := f.p.readRelayReg(context.Background()); r.DenyOwed {
+		t.Fatalf("record %+v", r)
+	}
+}
+
+// A T far ahead of the clock is waited for (a token minted before it would
+// be refused), and logged; a new T that refuses no token relied on is
+// logged as a possible loss of messages.
+func TestTombReportLogs(t *testing.T) {
+	f := newFixture(t)
+	f.reportTomb, f.tombNB = true, wholeUp(f.clk.Now().Add(24*time.Hour))
+	f.start()
+	if !strings.Contains(f.logs.String(), "far ahead") || f.slept < 24*time.Hour {
+		t.Fatalf("waited %s", f.slept)
+	}
+	g := newFixture(t)
+	g.clk.Advance(-time.Hour)
+	nb := wholeUp(g.clk.Now())
+	g.clk.Advance(time.Hour)
+	g.connect(g.member(10), "")
+	g.reportTomb, g.tombNB = true, nb
+	g.start()
+	if lostAlarms(g) != 0 || !strings.Contains(g.logs.String(), "messages deposited before it may be gone") {
+		t.Fatalf("%d alarms", lostAlarms(g))
+	}
+}
+
+// A floor not yet passed is kept when a later answer doesn't report one
+// (a relay instance without the flag).
+func TestTombReportFloorKept(t *testing.T) {
+	f := newFixture(t)
+	f.start()
+	ctx := context.Background()
+	f.reportTomb, f.tombNB = true, wholeUp(f.clk.Now().Add(30*time.Second))
+	f.p.mu.Lock()
+	defer f.p.mu.Unlock()
+	if err := f.p.register(ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.reportTomb = false
+	if err := f.p.register(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !f.p.mintWait(f.clk.Now()) {
+		t.Fatal("an answer without the flag lifted the floor")
+	}
+	f.clk.Advance(30*time.Second + TombstoneSkew)
+	if err := f.p.register(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if f.p.mintWait(f.clk.Now()) {
+		t.Fatal("the floor outlived itself")
 	}
 }
