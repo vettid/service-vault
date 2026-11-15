@@ -4,7 +4,9 @@ name: vault-roots
 # (internal/vaultroots, BALLOT-PROTOCOL §3.3):
 # - rootscheck: each copy equals the vote_trust_roots of the vault release
 #   it copies, and every supported release that registers vote has one
-#   (the signed manifest decides which are supported);
+#   (the signed manifest decides which are supported); and each of those
+#   releases' bundle verifier code equals the one the service pins, but
+#   for the reviewed differences in internal/vaultroots/testdata;
 # - sigstore: Sigstore's current trusted root (through TUF) still matches
 #   the pinned copies.
 # Daily, and on a pull request that changes them. A scheduled failure
@@ -96,7 +98,7 @@ jobs:
             fi
           }
           if [ "$ROOTSCHECK" = failure ]; then
-            report "a pinned vault root copy is missing, differs or is left over" "A copy under internal/vaultroots/roots differs from its vault release, is missing for a supported release that registers vote, or is left over from one no longer supported (README \"proposal_bundle_unverified\")."
+            report "a pinned vault root copy, or a release's bundle verifier, differs" "A copy under internal/vaultroots/roots differs from its vault release, is missing for a supported release that registers vote, or is left over from one no longer supported; or a supported release's bundle verifier code differs from the one the service pins, and internal/vaultroots/testdata/verifier_differences.json doesn't list it (or lists one that no longer matches). The run's log names the release and the file (README \"proposal_bundle_unverified\")."
           fi
           if [ "$SIGSTORE" = failure ]; then
             if [ "$SIGSTORE_CODE" = 1 ]; then
