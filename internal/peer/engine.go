@@ -350,11 +350,18 @@ func (p *Peer) Run(ctx context.Context) error {
 	fails := 0
 	for ctx.Err() == nil {
 		if _, err := p.Step(ctx, p.cfg.PollWait); err != nil {
+			if errors.Is(err, errDiscarded) && ctx.Err() != nil &&
+				(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+				// A shutdown cancelled the step's write: a routine stop, not
+				// a failing store. The next start reads the stored state.
+				p.log().Warn("peer: a shutdown cancelled a step's write; the next start reads the stored state")
+				return ctx.Err()
+			}
 			if errors.Is(err, errDiscarded) {
 				// Memory no longer matches the store: carrying on could act on
 				// changes that were never written (and do them again when the
 				// batch is redelivered). The task restarts from the store.
-				// Logged even during a shutdown.
+				// Logged even during a shutdown, for a real store error.
 				p.log().Error("peer: a store error discarded a step; stopping so the task restarts from the stored state",
 					"alarm", "peer_discarded", "err", errCode(err), "store_err", storeCode(err))
 				return err
@@ -563,8 +570,12 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 			// The message was handled in memory (its response queued, its
 			// dedupe mark in extra) but nothing of it was written: a
 			// redelivery would handle it again, and the queued response
-			// would go twice. Stop, as for a discard.
+			// would go twice. Stop, as for a discard. A conflict (another
+			// task writing) stops as ErrConflict, without this alarm.
 			p.stopped = true
+			if errors.Is(err, ErrConflict) {
+				return failed(err)
+			}
 			return failed(fmt.Errorf("%w: %w", errDiscarded, err))
 		}
 		if d == noAck {

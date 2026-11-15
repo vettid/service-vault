@@ -64,7 +64,8 @@ type Change struct {
 var ErrConflict = errors.New("peer: store conflict")
 
 // errDiscarded is a step whose batch hit a store error after it had
-// changed state in memory: its writes were discarded (discard), and its
+// changed state in memory: its writes were discarded (discard), or the
+// write right after a message was handled failed. Either way its
 // in-memory changes no longer match the store. Run stops on it, so the
 // task restarts from the stored state (alarm peer_discarded).
 var errDiscarded = errors.New("peer: a store error discarded a step")

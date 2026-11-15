@@ -93,20 +93,41 @@ func TestCollectErrorDoesNotStopRun(t *testing.T) {
 // failWrites fails Apply while on, after letting skip through.
 type failWrites struct {
 	*MemStore
-	on   bool
-	skip int
+	on      bool
+	skip    int
+	err     error              // returned instead of errThrottled, if set
+	onlyMsg bool               // fail only a write carrying a message's dedupe mark
+	cancel  context.CancelFunc // called as the write fails, if set
 }
 
 func (s *failWrites) Apply(ctx context.Context, cs []Change) error {
-	if s.on {
+	msg := false
+	for _, c := range cs {
+		msg = msg || c.Kind == kindMsg
+	}
+	if s.on && (msg || !s.onlyMsg) {
 		if s.skip > 0 {
 			s.skip--
 		} else {
-			return errors.New("store down")
+			if s.cancel != nil {
+				s.cancel() // a shutdown arrives as the write fails
+			}
+			if s.err != nil {
+				return s.err
+			}
+			return errThrottled
 		}
 	}
 	return s.MemStore.Apply(ctx, cs)
 }
+
+// throttled is a store error with an AWS error code.
+type throttled struct{}
+
+func (throttled) Error() string     { return "throttled" }
+func (throttled) ErrorCode() string { return "ProvisionedThroughputExceededException" }
+
+var errThrottled error = throttled{}
 
 // Writes fail while reads work: the message is handled in memory, its
 // response queued, and its write fails. The peer stops (one Votes call,
@@ -128,17 +149,29 @@ func TestFailedMessageWriteStops(t *testing.T) {
 	f.pump()
 	m.Send("vote.status", []byte(`{}`))
 	m.Step()
+	chs := len(m.Challenges)
 	st.on, st.skip = true, 1 // the lease mark is written, the message's write fails
 	if _, err := f.p.Step(context.Background(), 0); !errors.Is(err, errDiscarded) {
 		t.Fatalf("step: %v, want errDiscarded", err)
 	}
-	st.on = false
+	st.on = false // the store is back: the stopped peer still writes nothing
+	ctx := context.Background()
+	if err := f.p.Tick(ctx); !errors.Is(err, errDiscarded) {
+		t.Fatalf("tick after the stop: %v", err)
+	}
+	if _, err := f.p.Step(ctx, 0); !errors.Is(err, errDiscarded) {
+		t.Fatalf("step after the stop: %v", err)
+	}
+	if _, err := f.p.Authenticate(ctx, cid, "y", "", 5*time.Minute); !errors.Is(err, errDiscarded) {
+		t.Fatalf("authenticate after the stop: %v", err)
+	}
+	f.p.DeliverEvents(ctx)
 	m.Step()
 	rv.mu.Lock()
 	calls := len(rv.reqs)
 	rv.mu.Unlock()
-	if calls != 1 || len(m.Received("vote.status")) != 0 {
-		t.Fatalf("before the restart: %d votes calls, %d responses", calls, len(m.Received("vote.status")))
+	if calls != 1 || len(m.Received("vote.status")) != 0 || len(m.Challenges) != chs {
+		t.Fatalf("before the restart: %d votes calls, %d responses, %d challenges (was %d)", calls, len(m.Received("vote.status")), len(m.Challenges), chs)
 	}
 	f.clk.Advance(61 * time.Second)
 	f.start()
@@ -183,5 +216,90 @@ func TestDiscardedEventsNotDelivered(t *testing.T) {
 	ex := f.ev.of(EventSignInExpired)
 	if len(ex)-before != 1 || ex[len(ex)-1].RequestID != id {
 		t.Fatalf("after the restart: %d signin.expired", len(ex)-before)
+	}
+}
+
+// The store error is wrapped and named: errors.Is finds it, and the alarm
+// line carries its code.
+func TestDiscardWrapsStoreError(t *testing.T) {
+	f, _, _, rv := discardSetup(t)
+	rv.mu.Lock()
+	rv.fail = errThrottled
+	rv.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	err := f.p.Run(ctx)
+	if !errors.Is(err, errDiscarded) || !errors.Is(err, errThrottled) {
+		t.Fatalf("run: %v, want errDiscarded wrapping the store error", err)
+	}
+	if !strings.Contains(f.logs.String(), "store_err=ProvisionedThroughputExceededException") {
+		t.Fatal("the alarm line doesn't name the store's error code")
+	}
+}
+
+// A shutdown that cancels the message's write is a routine stop: no
+// alarm. A real store error during a shutdown still raises it.
+func TestShutdownMidMessage(t *testing.T) {
+	for _, real := range []bool{false, true} {
+		f := newFixture(t)
+		st := &failWrites{MemStore: f.store}
+		f.storeWrap = st
+		f.start()
+		rv := &recordVotes{}
+		f.votes = rv
+		f.p.cfg.Votes = rv
+		m := f.member(10)
+		cid := f.connect(m, "t")
+		if !f.signIn(m, cid) {
+			t.Fatal("sign-in failed")
+		}
+		f.clk.Advance(2 * time.Minute)
+		f.pump()
+		m.Send("vote.status", []byte(`{}`))
+		m.Step()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		st.on, st.onlyMsg, st.cancel = true, true, cancel
+		if !real {
+			st.err = context.Canceled
+		}
+		err := f.p.Run(ctx)
+		alarm := strings.Contains(f.logs.String(), "alarm=peer_discarded")
+		if real && (!alarm || !errors.Is(err, errDiscarded)) {
+			t.Fatalf("a store error during a shutdown: alarm %v, %v", alarm, err)
+		}
+		if !real && (alarm || errors.Is(err, errDiscarded)) {
+			t.Fatalf("a cancelled write at shutdown: alarm %v, %v", alarm, err)
+		}
+	}
+}
+
+// A conflict on the message's write stops as ErrConflict, without the
+// peer_discarded alarm.
+func TestMessageWriteConflictStopsWithoutAlarm(t *testing.T) {
+	f := newFixture(t)
+	st := &failWrites{MemStore: f.store}
+	f.storeWrap = st
+	f.start()
+	rv := &recordVotes{}
+	f.votes = rv
+	f.p.cfg.Votes = rv
+	m := f.member(10)
+	cid := f.connect(m, "t")
+	if !f.signIn(m, cid) {
+		t.Fatal("sign-in failed")
+	}
+	f.clk.Advance(2 * time.Minute)
+	f.pump()
+	m.Send("vote.status", []byte(`{}`))
+	m.Step()
+	st.on, st.onlyMsg, st.err = true, true, ErrConflict
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := f.p.Run(ctx); !errors.Is(err, ErrConflict) || errors.Is(err, errDiscarded) {
+		t.Fatalf("run: %v, want ErrConflict", err)
+	}
+	if strings.Contains(f.logs.String(), "peer_discarded") {
+		t.Fatal("a conflict raised peer_discarded")
 	}
 }

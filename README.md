@@ -260,7 +260,9 @@ destination.
   throttling (the line's `store_err` names the code). A failed write
   right after a message is handled, and a votes-store error after the
   step changed state, stop the peer the same way. Each such stop also
-  shows as a stopped ECS task.
+  shows as a stopped ECS task. A store conflict (another task writing
+  the table) stops the peer without this alarm; a shutdown that
+  cancels a write logs a warning instead.
 - `relay_tombstone_ahead`: the relay's registration answer reports a
   `tokens_not_before` more than 5 minutes ahead of the service's clock
   (see `relay_mailbox_lost`): no token is minted until it passes. Check
