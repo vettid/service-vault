@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"maps"
 	"slices"
 	"strings"
@@ -703,5 +704,37 @@ func TestReconnectRefusedEnds(t *testing.T) {
 	f.start() // a restart spends no try on it
 	if c := f.p.conns[cid]; c.Reconnecting || c.ReconnectTries != 0 {
 		t.Fatalf("after a restart: reconnecting %v, tries %d", c.Reconnecting, c.ReconnectTries)
+	}
+}
+
+// A restore whose reconnects can't be written sends none of them: the
+// start fails before the outbox is drained, and the restore isn't
+// marked done, so the next start reconnects again.
+func TestReconnectAfterRestoreWriteFails(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	f.connect(m, "")
+	b := f.backup()
+	m.StartRekey()
+	f.pump()
+
+	cleared := 0
+	f.store = b
+	f.storeWrap = &failWrites{MemStore: b, on: true, onlyOf: kindOutgoing}
+	f.afterRestore = func(context.Context) error { cleared++; return nil }
+	if err := f.startErr(); !errors.Is(err, errThrottled) {
+		t.Fatalf("the start after its reconnects weren't written: %v", err)
+	}
+	m.Step()
+	if m.Reconnects != 0 || cleared != 0 {
+		t.Fatalf("after the failed write: %d reconnects answered, marker cleared %d times", m.Reconnects, cleared)
+	}
+
+	f.storeWrap = nil
+	f.start()
+	f.afterRestore = nil
+	f.pump()
+	if m.Reconnects != 1 || cleared != 1 {
+		t.Fatalf("after the next start: %d reconnects answered, marker cleared %d times", m.Reconnects, cleared)
 	}
 }
