@@ -94,7 +94,15 @@ func TestCopiesMatchReleases(t *testing.T) {
 // documents, JCS): every other file is compared, a new one included.
 const votewirePkg = "github.com/vettid/vettid-vault/vms/votewire"
 
+// (They aren't scanned for imports either: one could reach the verifier
+// only through an init or a package-level variable, which none has.)
 var votewireNotVerifier = []string{"body.go", "documents.go", "jcs.go"}
+
+// notCompared are vettid-vault packages a compared file may import that are
+// not compared themselves, each with why.
+var notCompared = map[string]string{
+	"internal/hpkederand": "imported only by suite/rand_vectors.go, under the vmsvectors build tag: test vectors, not in a member's build",
+}
 
 const vvPrefix = "github.com/vettid/vettid-vault/"
 
@@ -243,16 +251,14 @@ func (v *verifierCheck) check(t *testing.T, repo, channel string, n uint64) {
 		}
 		return bytes.ReplaceAll(b, []byte(`"`+vvPrefix+strictjsonMove[0]+`"`), []byte(`"`+vvPrefix+strictjsonMove[1]+`"`))
 	}
-	// The vettid-vault imports the pinned files have (a build-tagged
-	// file's included): one the tag adds is outside what is compared.
+	// The vettid-vault packages compared, and those named in notCompared:
+	// an import of any other at the tag is outside what is compared.
 	known := map[string]bool{}
 	for _, p := range v.pkgs {
 		known[p.rel] = true
-		for _, b := range p.files {
-			for _, m := range vvImport.FindAllSubmatch(b, -1) {
-				known[string(m[1])] = true
-			}
-		}
+	}
+	for pkg := range notCompared {
+		known[pkg] = true
 	}
 	for _, p := range v.pkgs {
 		dir := p.rel
