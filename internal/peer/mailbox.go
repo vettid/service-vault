@@ -62,9 +62,15 @@ type relayReg struct {
 // tombstoneAhead is how far ahead of the service's clock a relay's
 // tokens-not-before can honestly be: a deletion now, plus 90 s, rounded up
 // to the second, on a relay clock up to 90 s ahead (§4.1, §6.10), with a
-// margin. A later one is waited for all the same (a token minted before it
-// would be refused), but logged.
+// margin. A later one is not judged or stored (it would hide a real T
+// after it); it is waited for all the same (a token minted before it would
+// be refused), and raises relay_tombstone_ahead.
 const tombstoneAhead = 5 * time.Minute
+
+// maxStartWait bounds a start's wait before it runs (Start): a longer one
+// (only a T far ahead) is left to mintWait, which refuses mints while the
+// service collects and answers.
+const maxStartWait = FreshMailboxWait + tombstoneAhead
 
 func (p *Peer) readRelayReg(ctx context.Context) (relayReg, error) {
 	var r relayReg
@@ -145,29 +151,40 @@ func (p *Peer) register(ctx context.Context) error {
 	p.limits = reg.Limits
 	now := p.now()
 	before := r.Registered || len(p.conns) > 0
-	lost, dataLost, unknownIat, newT := false, false, false, false
+	lost, dataLost, unknownIat, newT, resend := false, false, false, false, false
 	nb, reported := reg.Tombstone()
-	// The floor is kept until it has passed: an answer without it (a relay
-	// instance not yet reporting) doesn't lift a wait already known.
-	if nb.After(p.mintFloor) || !now.Before(p.mintFloor.Add(TombstoneSkew)) {
-		p.mintFloor = nb
-	}
+	ahead := !nb.IsZero() && nb.After(now.Add(tombstoneAhead))
+	// The floor: the latest T not yet passed, of this answer, the one
+	// judged and stored, and the one already known (an answer without it,
+	// from a relay instance not yet reporting or after a restart, doesn't
+	// lift a wait).
+	p.mintFloor = latestFloor(now, nb, r.Tombstone, p.mintFloor)
 	switch {
 	case !reported: // a relay before 0.12.0: the answer says nothing of tombstones
 		lost = before && (reg.Created || prev)
 		if lost {
 			r.RemintAfter = now.Add(FreshMailboxWait)
 		}
-	case !nb.IsZero() && nb.After(r.Tombstone):
+	case ahead: // not judged, nor stored: see tombstoneAhead
+	case !nb.IsZero() && !nb.Equal(r.Tombstone):
 		newT = true
 		if lost, unknownIat = p.reliesBefore(nb, now); lost {
 			r.RemintAfter = maxTime(now, nb.Add(TombstoneSkew))
 		}
 		r.Tombstone = nb
 	}
-	if reported && before && reg.Created {
-		dataLost = true
-		r.DenyOwed = true
+	if reported && before {
+		switch {
+		case reg.Created:
+			dataLost = true
+			r.DenyOwed = true
+		case prev:
+			// An attempt whose answer was lost may have been that 201: the
+			// revocations are sent again all the same (cheap; no alarm,
+			// which an unanswered registration alone would make false).
+			resend = true
+			r.DenyOwed = true
+		}
 	}
 	r.Registered, r.Attempted = true, false
 	if err := p.writeRelayReg(ctx, r); err != nil {
@@ -184,12 +201,17 @@ func (p *Peer) register(ctx context.Context) error {
 		if !nb.IsZero() {
 			attrs = append(attrs, "tokens_not_before", nb)
 		}
+		msg := "the service's relay mailbox was lost and made again empty: messages members deposited since the last collect are gone, and every member's tokens for it are minted again"
 		if unknownIat {
 			// Tokens recorded before their iat was kept (the first start of
 			// this version): counted as older, so this may be no loss.
 			attrs = append(attrs, "tokens_of_unknown_age", true)
+			msg = "the relay refuses tokens issued before tokens_not_before, and some the service relies on are older or of unknown age (recorded before this version kept iat): every member's tokens for it are minted again; messages members deposited since the last collect may be gone"
 		}
-		p.log().Error("the service's relay mailbox was lost and made again empty: messages members deposited since the last collect are gone, and every member's tokens for it are minted again", attrs...)
+		p.log().Error(msg, attrs...)
+	} else if dataLost && newT {
+		p.log().Error("the relay deleted the service's mailbox and made it again: messages members deposited since the last collect are gone; no token the service relies on is refused, and revocations are sent again",
+			"alarm", "relay_mailbox_lost", "created", true, "tokens_kept", true, "tokens_not_before", nb, "connections", len(p.conns))
 	} else if dataLost {
 		p.log().Error("the relay holds no record of the service's mailbox (its data was lost, or it was rebuilt): messages members deposited since the last collect are gone; the members' tokens still work, and revocations are sent again",
 			"alarm", "relay_mailbox_lost", "created", true, "tokens_kept", true, "connections", len(p.conns))
@@ -197,11 +219,26 @@ func (p *Peer) register(ctx context.Context) error {
 		p.log().Warn("the relay reports a deletion of the service's mailbox after which no token it relies on is refused: messages deposited before it may be gone",
 			"tokens_not_before", nb)
 	}
-	if !nb.IsZero() && nb.After(now.Add(tombstoneAhead)) {
-		p.log().Warn("the relay's tokens_not_before is far ahead of this clock (the relay's clock or report is wrong, or this clock is behind): no token is minted until it has passed",
-			"tokens_not_before", nb, "now", now)
+	if resend {
+		p.log().Info("a registration whose answer was lost may have made the mailbox afresh: revocations are sent again")
+	}
+	if ahead {
+		p.log().Error("the relay's tokens_not_before is far ahead of this clock (the relay's clock or report is wrong, or this clock is behind): it is not taken as a deletion, and no token is minted until it has passed",
+			"alarm", "relay_tombstone_ahead", "tokens_not_before", nb, "now", now)
 	}
 	return p.denyOwed(ctx, now)
+}
+
+// latestFloor is the latest of the given tokens-not-before times whose
+// TombstoneSkew has not passed at now, or zero.
+func latestFloor(now time.Time, ts ...time.Time) time.Time {
+	var out time.Time
+	for _, t := range ts {
+		if !t.IsZero() && now.Before(t.Add(TombstoneSkew)) && t.After(out) {
+			out = t
+		}
+	}
+	return out
 }
 
 // denyOwed sends again, if owed (relayReg.DenyOwed), every revocation
@@ -242,18 +279,31 @@ func (p *Peer) reliesBefore(nb, now time.Time) (before, unknown bool) {
 
 // denyAgain sends again every revocation still in force, after a relay
 // lost its denylist and its record of used one-shot tokens (RELAY-PROTOCOL
-// §6.1): every unexpired token revoked. That covers the used ones: an
-// invitation is withdrawn, its open token revoked, in the handling that
-// marks it used (handshake.go). It returns how many it queued.
+// §6.1): every unexpired token revoked, and every unexpired open token. An
+// open token the relay consumed but whose deposit the service refused
+// before marking the invitation used (handshake.go: an invalid invite, a
+// malformed profile, the request limit) isn't known to be used, so all are
+// revoked, as §6.1 allows when use isn't fully tracked; their waiting
+// invitations are withdrawn (make new ones). It returns how many it queued.
 func (p *Peer) denyAgain(now time.Time) int {
 	jtis := make([]string, 0, len(p.issued))
 	for jti, t := range p.issued {
-		if t.Denied && now.Before(t.Exp) {
+		if now.Before(t.Exp) && (t.Denied || t.Kind == tokOpen) {
 			jtis = append(jtis, jti)
 		}
 	}
 	sort.Strings(jtis)
+	open := map[string]*InviteRecord{}
+	for _, inv := range p.invites {
+		if inv.OpenJTI != "" && !inv.Withdrew {
+			open[inv.OpenJTI] = inv
+		}
+	}
 	for _, jti := range jtis {
+		if inv := open[jti]; inv != nil {
+			p.withdrawInvite(inv, now) // revokes the token too
+			continue
+		}
 		p.denyJTI(jti, now)
 	}
 	return len(jtis)

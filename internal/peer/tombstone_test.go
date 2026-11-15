@@ -2,6 +2,8 @@ package peer
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -44,11 +46,18 @@ func mintedSince(f *fixture, was map[string]bool) (iats []time.Time) {
 func TestTombReportNoneAfterUnanswered(t *testing.T) {
 	f := newFixture(t)
 	f.connect(f.member(10), "")
+	jti, n := cancelledInvite(t, f)
 	setRelayReg(t, f, relayReg{Registered: true, Attempted: true})
 	f.reportTomb = true
 	f.start()
+	f.pump()
 	if lostAlarms(f) != 0 || f.slept != 0 {
 		t.Fatalf("%d alarms, waited %s", lostAlarms(f), f.slept)
+	}
+	// The unanswered attempt may have been a 201 (a data loss): the
+	// revocations are sent again, without an alarm.
+	if f.revokes[jti] <= n {
+		t.Fatalf("revocations %d -> %d", n, f.revokes[jti])
 	}
 	if r, _ := f.p.readRelayReg(context.Background()); r.Attempted || !r.RemintAfter.IsZero() || !r.Registered {
 		t.Fatalf("record %+v", r)
@@ -292,15 +301,23 @@ func TestTombReportDenyOwedSurvives(t *testing.T) {
 	}
 }
 
-// A T far ahead of the clock is waited for (a token minted before it would
-// be refused), and logged; a new T that refuses no token relied on is
-// logged as a possible loss of messages.
+// A T far ahead of the clock raises relay_tombstone_ahead; the start waits
+// at most maxStartWait and then runs, with mints still refused until it
+// passes; it is not stored as judged. A new T that refuses no token relied
+// on is logged as a possible loss of messages.
 func TestTombReportLogs(t *testing.T) {
 	f := newFixture(t)
-	f.reportTomb, f.tombNB = true, wholeUp(f.clk.Now().Add(24*time.Hour))
+	far := wholeUp(f.clk.Now().Add(24 * time.Hour))
+	f.reportTomb, f.tombNB = true, far
 	f.start()
-	if !strings.Contains(f.logs.String(), "far ahead") || f.slept < 24*time.Hour {
+	if !strings.Contains(f.logs.String(), "alarm=relay_tombstone_ahead") || f.slept != maxStartWait {
 		t.Fatalf("waited %s", f.slept)
+	}
+	if _, err := f.p.CreateInvite(context.Background(), ""); !errors.Is(err, ErrMailboxRenewing) {
+		t.Fatalf("an invitation before a far T: %v", err)
+	}
+	if r, _ := f.p.readRelayReg(context.Background()); !r.Tombstone.IsZero() {
+		t.Fatalf("a far T stored as judged: %+v", r)
 	}
 	g := newFixture(t)
 	g.clk.Advance(-time.Hour)
@@ -339,5 +356,164 @@ func TestTombReportFloorKept(t *testing.T) {
 	}
 	if f.p.mintWait(f.clk.Now()) {
 		t.Fatal("the floor outlived itself")
+	}
+}
+
+// A far T doesn't hide a real one after it: the real one is judged.
+func TestTombReportFarThenReal(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	f.connect(m, "")
+	f.reportTomb, f.tombNB = true, wholeUp(f.clk.Now().Add(24*time.Hour))
+	f.start()
+	f.clk.Advance(5 * time.Second)
+	f.w.DeleteMailbox(f.keys.Mailbox())
+	f.tombNB = wholeUp(f.clk.Now().Add(90 * time.Second))
+	f.start()
+	if lostAlarms(f) != 1 {
+		t.Fatalf("%d alarms: the real T was not judged", lostAlarms(f))
+	}
+}
+
+// The floor comes back from the stored T after a restart: an answer
+// without T then mints nothing before it.
+func TestTombReportFloorStored(t *testing.T) {
+	f := newFixture(t)
+	f.connect(f.member(10), "")
+	nb := wholeUp(f.clk.Now().Add(-60 * time.Second)) // judged: the tokens aren't older
+	setRelayReg(t, f, relayReg{Registered: true, Tombstone: nb})
+	f.reportTomb = true // and no T
+	start := f.clk.Now()
+	f.start()
+	if want := nb.Add(TombstoneSkew).Sub(start); want <= 0 || f.slept != want {
+		t.Fatalf("waited %s, want %s", f.slept, want)
+	}
+}
+
+// After a data loss every unexpired open token is revoked, and a waiting
+// invitation withdrawn: its one-shot token's use may not be known.
+func TestTombReportDataLossOpenTokens(t *testing.T) {
+	f := newFixture(t)
+	f.connect(f.member(10), "")
+	inv, err := f.p.CreateInvite(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.w.DeleteMailbox(f.keys.Mailbox())
+	f.reportTomb = true
+	f.start()
+	f.pump()
+	got, _ := f.p.Invite(inv.ID)
+	if f.revokes[inv.OpenJTI] == 0 || !got.Withdrew {
+		t.Fatalf("the waiting invitation: revoked %d, %+v", f.revokes[inv.OpenJTI], got)
+	}
+}
+
+// failOutboxStore fails every write that stores an outbox entry.
+type failOutboxStore struct {
+	*MemStore
+	fail bool
+}
+
+func (s *failOutboxStore) Apply(ctx context.Context, cs []Change) error {
+	if s.fail {
+		for _, c := range cs {
+			if c.Kind == kindOutbox {
+				return errors.New("store down")
+			}
+		}
+	}
+	return s.MemStore.Apply(ctx, cs)
+}
+
+// Revocations owed survive a write of them that fails: the mark stays
+// until they are stored.
+func TestTombReportDenyOwedFlushFails(t *testing.T) {
+	f := newFixture(t)
+	f.connect(f.member(10), "")
+	jti, n := cancelledInvite(t, f)
+	setRelayReg(t, f, relayReg{Registered: true, DenyOwed: true})
+	f.reportTomb = true
+	st := &failOutboxStore{MemStore: f.store, fail: true}
+	f.storeWrap = st
+	if err := f.startErr(); err == nil {
+		t.Fatal("the failing write didn't fail the start")
+	}
+	if r, _ := f.p.readRelayReg(context.Background()); !r.DenyOwed {
+		t.Fatalf("the mark cleared before the revocations were stored: %+v", r)
+	}
+	st.fail = false
+	f.start()
+	f.pump()
+	if f.revokes[jti] <= n {
+		t.Fatalf("revocations %d -> %d", n, f.revokes[jti])
+	}
+}
+
+// While running, a collect answered mailbox_unknown registers again: on a
+// relay that reports tombstones, a 201 with no T is a data loss (alarm,
+// revocations sent again, no wait), not a lost mailbox's re-mint.
+func TestTombReportWhileRunning(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	f.connect(m, "")
+	jti, n := cancelledInvite(t, f)
+	before := issuedTo(m)
+	f.reportTomb = true
+	f.w.DeleteMailbox(f.keys.Mailbox())
+	if _, err := f.p.Step(context.Background(), 0); err == nil {
+		t.Fatal("a collect from a deleted mailbox succeeded")
+	}
+	if lostAlarms(f) != 1 || !strings.Contains(f.logs.String(), "tokens_kept=true") {
+		t.Fatalf("%d alarms", lostAlarms(f))
+	}
+	if _, err := f.p.CreateInvite(context.Background(), ""); err != nil {
+		t.Fatalf("an invitation after a data loss: %v", err)
+	}
+	f.tick()
+	f.pump()
+	if f.revokes[jti] <= n || issuedTo(m) != before {
+		t.Fatalf("revocations %d -> %d, %d tokens re-minted", n, f.revokes[jti], issuedTo(m)-before)
+	}
+}
+
+// More revocations than one store write holds (each is two changes) are
+// all sent again.
+func TestTombReportManyRevocations(t *testing.T) {
+	f := newFixture(t)
+	f.connect(f.member(10), "")
+	var jtis []string
+	counts := map[string]int{}
+	for range 70 {
+		jti, n := cancelledInvite(t, f)
+		jtis, counts[jti] = append(jtis, jti), n
+	}
+	f.w.DeleteMailbox(f.keys.Mailbox())
+	f.reportTomb = true
+	f.start()
+	f.pump()
+	missed := 0
+	for _, j := range jtis {
+		if f.revokes[j] <= counts[j] {
+			missed++
+		}
+	}
+	if missed != 0 {
+		t.Fatal(fmt.Sprint(missed, " of ", len(jtis), " revocations not sent again"))
+	}
+}
+
+// Any T other than the one last judged is judged, an earlier one too (a
+// relay instance whose tombstone differs): a token older than it is a loss.
+func TestTombReportOtherTJudged(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	f.connect(m, "")
+	f.clk.Advance(2 * time.Hour)
+	setRelayReg(t, f, relayReg{Registered: true, Tombstone: wholeUp(f.clk.Now().Add(-10 * time.Minute))})
+	f.reportTomb, f.tombNB = true, wholeUp(f.clk.Now().Add(-time.Hour))
+	f.start()
+	if lostAlarms(f) != 1 {
+		t.Fatalf("%d alarms: an earlier T was not judged", lostAlarms(f))
 	}
 }

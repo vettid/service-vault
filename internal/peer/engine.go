@@ -255,7 +255,9 @@ func (p *Peer) Start(ctx context.Context) error {
 	// for it again. The lock is let go meanwhile; calls that would mint
 	// are refused (errMintWait, ErrNotStarted).
 	if p.mintWait(p.now()) {
-		d := p.mintWaitUntil().Sub(p.now())
+		// A longer wait (a relay's tokens_not_before far ahead) is left to
+		// mintWait, which refuses mints while the service runs.
+		d := min(p.mintWaitUntil().Sub(p.now()), maxStartWait)
 		p.mu.Unlock()
 		ok := p.cfg.Sleep(ctx, d)
 		p.mu.Lock()

@@ -251,6 +251,10 @@ destination.
     previous release once under the right keys, which drops it
     (`outgoing_identity_changed`), then roll forward; or restore the
     table from a backup without it.
+- `relay_tombstone_ahead`: the relay's registration answer reports a
+  `tokens_not_before` more than 5 minutes ahead of the service's clock
+  (see `relay_mailbox_lost`): no token is minted until it passes. Check
+  the service's and the relay's clocks.
 - `relay_mailbox_lost`: the relay made the service's mailbox afresh: it
   was deleted (the relay lost it, or someone holding the service's
   relay key deleted it), seen at a start's registration, or while
@@ -299,9 +303,16 @@ destination.
     allows), not 241 s from the answer: after a deletion while the
     service was down, usually none.
   - **T, and every token relied on is at or after it:** nothing; the
-    relay may report the same T for good (DynamoDB relays do), and a T
-    already judged is not judged again. Either way no token is minted
-    before T + 90 s.
+    relay may report the same T for good (DynamoDB relays do), and the T
+    last judged is not judged again (any other is). Either way no token
+    is minted before T + 90 s, which a restart keeps (the T judged is
+    stored).
+  - **T more than 5 minutes ahead of the service's clock** (no honest
+    relay reports one: the relay's clock or report is wrong, or the
+    service's clock is behind): alarm `relay_tombstone_ahead`. It is not
+    judged or stored, so it can't hide a real T after it; no token is
+    minted until it passes, and a start waits at most about 9 minutes
+    for it before it runs (collecting and answering, minting nothing).
   - **No T:** no token is refused because of a deletion, whatever the
     last registration's fate: no alarm, no wait.
   - **A `201` for a mailbox registered before** (with a T already
@@ -310,10 +321,13 @@ destination.
     members' tokens still work, so nothing is re-minted for that, but
     the messages since the last collect and the relay's denylist are
     gone: the alarm is raised (`tokens_kept=true`) and every revocation
-    still in force is sent again (an invitation's open token is revoked
-    as soon as it is used, so used ones are among them). That is
-    recorded with the registration, so a stop before the revocations are
-    stored sends them at the next one.
+    still in force is sent again, and every unexpired invitation token
+    is revoked (a one-shot token's use isn't always known): invitations
+    still waiting are withdrawn, so make new ones. That is recorded with
+    the registration, so a stop before the revocations are stored sends
+    them at the next one. A registration whose answer was lost may have
+    been such a `201`, so after one the revocations are sent again too,
+    without an alarm.
   - A new T that refuses no token relied on is logged (`warn`): messages
     deposited before it may be gone. A T more than a few minutes ahead of
     the service's clock is waited for all the same, and logged.
