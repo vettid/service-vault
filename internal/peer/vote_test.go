@@ -113,8 +113,8 @@ func TestCaughtWaitsOutLeases(t *testing.T) {
 	m.Send("vote.cast", []byte(`{}`))
 	m.Step()
 	closeAt := f.clk.Now().Add(time.Millisecond)
-	if _, err := f.p.Step(ctx, 0); err == nil {
-		t.Fatal("the failed cast didn't fail the step")
+	if _, err := f.p.Step(ctx, 0); err == nil || errors.Is(err, errDiscarded) {
+		t.Fatalf("the failed cast: %v, want a plain error (the peer goes on)", err)
 	}
 	f.clk.Advance(time.Second)
 	m.Send("vote.status", []byte(`{}`)) // a later message, handled
@@ -185,8 +185,8 @@ func TestCaughtUnackedAndOtherProcess(t *testing.T) {
 	fm.fail = true // the message is left unacked, the peer goes on
 	m.Send("vote.status", []byte(`{}`))
 	m.Step()
-	if _, err := f.p.Step(context.Background(), 0); err == nil {
-		t.Fatal("the failed message didn't fail the step")
+	if _, err := f.p.Step(context.Background(), 0); err == nil || errors.Is(err, errDiscarded) {
+		t.Fatalf("the failed message: %v, want a plain error (the peer goes on)", err)
 	}
 	f.clk.Advance(time.Second) // it is still leased
 	m.Send("vote.status", []byte(`{}`))
