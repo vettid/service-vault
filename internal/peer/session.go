@@ -390,6 +390,9 @@ func (p *Peer) removeConnectionFor(c *Connection, dir, reason string, now time.T
 	}
 	for id, ch := range p.challenges {
 		if ch.ConnID == c.ID {
+			if ch.WithdrawOwed {
+				p.log().Info("challenge withdraw dropped: connection removed", "connection_id", c.ID, "request_id", id)
+			}
 			delete(p.challenges, id)
 			p.markDirty(kindAuth, id)
 		}

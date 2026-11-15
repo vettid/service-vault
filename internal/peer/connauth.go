@@ -195,9 +195,11 @@ func (p *Peer) held(connID string, now time.Time) int {
 // later answer matches no pending request and is ignored (§8.1), and no
 // event is emitted for it; and, unless it has expired, the member's vault
 // is sent connection.authenticate.withdraw so it closes the ask
-// (VAULT-MESSAGING 0.80.0 §10.4). The withdraw is best effort: a
-// connection that is not active, or whose outbox is full, gets none, and
-// the challenge is forgotten all the same. A challenge that has not
+// (VAULT-MESSAGING 0.80.0 §10.4). The challenge is forgotten at once;
+// the withdraw is owed until its exp: a connection that is not active, or
+// whose outbox is full, gets it once it can take it (WithdrawOwed,
+// expireChallenges), and none if the connection is removed first. A
+// challenge that has not
 // reached the relay gets no withdraw: one still in the outbox and never
 // tried is dropped there unsent, and one that left it never tried
 // (Unsent) is only forgotten. It reports whether the challenge was
@@ -242,8 +244,9 @@ func (p *Peer) CancelChallenge(ctx context.Context, requestID string) (bool, err
 	}
 	if !withdrawn && now.Before(ch.Exp) {
 		// The member vault may still hold it: keep its place counted until
-		// its exp (and the skew), but answer to nothing.
-		ch.Gone = true
+		// its exp (and the skew), but answer to nothing; and owe the
+		// withdraw until then.
+		ch.Gone, ch.WithdrawOwed = true, true
 	} else {
 		delete(p.challenges, requestID)
 	}
@@ -416,11 +419,34 @@ func (p *Peer) connAuthRotated(c *Connection, body []byte) {
 	p.markDirty(kindConn, c.ID)
 }
 
+// withdrawOwed queues the withdraw a cancel couldn't, once the connection
+// can take it; past the challenge's exp it is no longer owed. The flag is
+// cleared only with the withdraw queued, and both are written in the same
+// flush, so a crash between them sends it at most once.
+func (p *Peer) withdrawOwed(id string, ch *challenge, now time.Time) {
+	if !now.Before(ch.Exp) {
+		ch.WithdrawOwed = false
+		p.markDirty(kindAuth, id)
+		p.log().Info("challenge withdraw dropped: expired", "connection_id", ch.ConnID, "request_id", id)
+		return
+	}
+	c := p.conns[ch.ConnID]
+	if c == nil || p.sendInnerExp(c, peerwire.TypeConnAuthWithdraw, peerwire.ConnAuthWithdrawBody(id), ch.Exp, now) == "" {
+		return
+	}
+	ch.WithdrawOwed = false
+	p.markDirty(kindAuth, id)
+	p.log().Info("challenge withdraw sent late", "connection_id", ch.ConnID, "request_id", id)
+}
+
 // expireChallenges ends the challenges past their exp: signin.expired. A
 // record stays, marked Gone, until its exp plus ClockSkew, so that its
 // place at the member vault is still counted.
 func (p *Peer) expireChallenges(now time.Time) {
 	for id, ch := range p.challenges {
+		if ch.WithdrawOwed {
+			p.withdrawOwed(id, ch, now)
+		}
 		if now.Before(ch.Exp) {
 			continue
 		}

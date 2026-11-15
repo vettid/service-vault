@@ -506,6 +506,12 @@ type challenge struct {
 	// vault: forgotten for every purpose but that count, until Exp plus
 	// ClockSkew.
 	Gone bool `json:"gone,omitempty"`
+	// WithdrawOwed: cancelled before its exp, but no withdraw could be
+	// queued (the connection not active, or its outbox full). The step
+	// queues it once it can, until Exp (expireChallenges); after that the
+	// member's vault closes the ask itself. Removing the connection drops
+	// it with the record.
+	WithdrawOwed bool `json:"withdraw_owed,omitempty"`
 	// Entry is the id of the outbox entry carrying the challenge while it
 	// waits there (behind an open reconnect, a stale connection, a missing
 	// token or the relay's refusals); "" once it has left the outbox, and
