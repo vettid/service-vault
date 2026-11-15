@@ -252,10 +252,10 @@ destination.
     (`outgoing_identity_changed`), then roll forward; or restore the
     table from a backup without it.
 - `peer_discarded`: a store error while the peer handled a message
-  discarded that step's writes after it had changed state in memory. The
-  peer stops and the task restarts from the stored state (the batch is
-  redelivered and handled again), so nothing that was never written is
-  sent. One is harmless; repeats mean the store is failing: check
+  discarded that step's unwritten changes, so its memory no longer
+  matches the store. The peer writes nothing more, stops, and the task
+  restarts from the stored state (the batch is redelivered and handled
+  again), so nothing that was never written is sent. One is harmless; repeats mean the store is failing: check
   DynamoDB's errors and throttling.
 - `relay_tombstone_ahead`: the relay's registration answer reports a
   `tokens_not_before` more than 5 minutes ahead of the service's clock

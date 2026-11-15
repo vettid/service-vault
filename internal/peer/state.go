@@ -663,6 +663,9 @@ const tokenRetention = 30 * 24 * time.Hour
 // written on the version it was read at, so that a second writer on the
 // same table is detected rather than overwritten.
 func (p *Peer) flush(ctx context.Context) error {
+	if p.stopped {
+		return errDiscarded // nothing more from a memory that left the store
+	}
 	if len(p.dirty) == 0 && len(p.extra) == 0 {
 		return nil
 	}

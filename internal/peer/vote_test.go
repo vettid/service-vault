@@ -110,9 +110,10 @@ func TestCaughtWaitsOutLeases(t *testing.T) {
 	m.Send("vote.cast", []byte(`{}`))
 	m.Step()
 	closeAt := f.clk.Now().Add(time.Millisecond)
-	if _, err := f.p.Step(ctx, 0); err == nil {
-		t.Fatal("the failed cast didn't fail the step")
+	if _, err := f.p.Step(ctx, 0); !errors.Is(err, errDiscarded) {
+		t.Fatalf("the failed cast: %v, want errDiscarded", err)
 	}
+	f.start() // the step's changes were discarded: the task restarts from the store
 	f.clk.Advance(time.Second)
 	m.Send("vote.status", []byte(`{}`)) // a later message, handled
 	f.pump()
@@ -179,9 +180,12 @@ func TestCaughtUnackedAndOtherProcess(t *testing.T) {
 	rv.fail = errors.New("store down")
 	m.Send("vote.status", []byte(`{}`))
 	m.Step()
-	if _, err := f.p.Step(context.Background(), 0); err == nil {
-		t.Fatal("the failed message didn't fail the step")
+	if _, err := f.p.Step(context.Background(), 0); !errors.Is(err, errDiscarded) {
+		t.Fatalf("the failed message: %v, want errDiscarded", err)
 	}
+	f.start()                      // the step's changes were discarded: the task restarts from the store
+	f.clk.Advance(2 * time.Minute) // past the start's leases, as above
+	f.pump()
 	f.clk.Advance(time.Second) // it is still leased
 	m.Send("vote.status", []byte(`{}`))
 	f.pump()

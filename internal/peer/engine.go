@@ -91,6 +91,10 @@ type Peer struct {
 	// reconfirm marks the connections the current batch owes an
 	// hs.confirm (§6.3.1 Responder; noteFromMember).
 	reconfirm map[string]bool
+	// stopped: a step's writes were discarded (errDiscarded), so memory
+	// no longer matches the store; flush refuses from then on, and the
+	// task restarts from the store.
+	stopped bool
 	// msgJTI is the collect jti of the message being handled ("" when
 	// none): the token it was deposited under.
 	msgJTI string
@@ -333,6 +337,12 @@ func (p *Peer) Run(ctx context.Context) error {
 	}
 	var wg sync.WaitGroup
 	defer wg.Wait()
+	// The loops end with Run, not only with the caller's ctx: on a stop
+	// (ErrConflict, errDiscarded) Run must return at once, so the task
+	// exits and restarts, rather than wait while the tick loop goes on.
+	// (cancel runs before wg.Wait: defers run last-in first-out.)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	wg.Add(2)
 	go func() { defer wg.Done(); p.eventLoop(ctx) }()
 	go func() { defer wg.Done(); p.tickLoop(ctx) }()
@@ -351,7 +361,7 @@ func (p *Peer) Run(ctx context.Context) error {
 				// changes that were never written (and do them again when the
 				// batch is redelivered). The task restarts from the store.
 				p.log().Error("peer: a store error discarded a step; stopping so the task restarts from the stored state",
-					"alarm", "peer_discarded", "err", err.Error())
+					"alarm", "peer_discarded", "err", errCode(err))
 				return err
 			}
 			fails++
@@ -520,7 +530,16 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 	for _, m := range msgs {
 		d, err := p.handleMessage(ctx, m, now)
 		if err != nil {
+			// Memory and store part only if discard drops something: every
+			// change meant to be written (outbox entries included) is
+			// marked dirty. Then nothing is written from now on (flush
+			// refuses) and Run stops; otherwise a plain error, retried.
+			dropped := len(p.dirty) > 0 || len(p.extra) > 0
 			p.discard()
+			if !dropped {
+				return failed(err)
+			}
+			p.stopped = true
 			return failed(fmt.Errorf("%w: %w", errDiscarded, err))
 		}
 		if d == ackAfterFlush {
