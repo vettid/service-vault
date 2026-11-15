@@ -90,6 +90,7 @@ func (p *Peer) dropOutbox(drop func(*outboxEntry) bool) {
 			e.dropped = true
 			p.markDirty(kindOutbox, e.ID)
 			p.challengeLeft(e)
+			p.withdrawLeft(e)
 			p.sendLeft(e)
 			continue
 		}

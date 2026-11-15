@@ -500,6 +500,19 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 	}
 	now := p.now()
 	p.housekeeping(now)
+	// Housekeeping's changes are written before the batch: a store error
+	// while a message is handled discards the batch's dirty marks
+	// (discard), and would leave housekeeping's in-memory changes unstored
+	// while a later drain acts on them (a late withdraw sent while the
+	// store still owes it, sent again after a restart). On a failed write
+	// they stay dirty for the next flush, before any drain.
+	if err := p.flush(ctx); err != nil {
+		for _, m := range msgs {
+			p.leaveUnacked(m, now)
+		}
+		p.drained = false
+		return 0, err
+	}
 	var acks []string
 	// On a store error none of the batch is acked: all of it comes back.
 	failed := func(err error) (int, error) {

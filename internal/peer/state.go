@@ -483,6 +483,12 @@ type outboxEntry struct {
 	Challenge string `json:"challenge,omitempty"`
 	// Ref is the send a SendMessageRef message is counted under, or "".
 	Ref string `json:"ref,omitempty"`
+	// Withdraw is the request id of the challenge whose
+	// connection.authenticate.withdraw the entry carries, or "", and
+	// WithdrawExp that challenge's exp: dropped before the relay took it,
+	// the withdraw is owed again until then (withdrawLeft).
+	Withdraw    string    `json:"withdraw,omitempty"`
+	WithdrawExp time.Time `json:"withdraw_exp,omitzero"`
 
 	dropped   bool // removed by dropOutbox: a drain in progress skips it
 	deposited bool // the relay took it: it leaves the outbox delivered

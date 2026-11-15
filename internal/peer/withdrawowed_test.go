@@ -3,6 +3,7 @@ package peer
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -265,5 +266,140 @@ func TestNoWithdrawForLiveChallenge(t *testing.T) {
 	}
 	if n := len(m.Received(peerwire.TypeConnAuthWithdraw)); n != 0 || f.owed(id) {
 		t.Fatalf("%d withdraws for a live challenge", n)
+	}
+}
+
+// A queued withdraw dropped before the relay took it is owed again, and
+// sent once the connection can take it: for one queued at the cancel
+// (whose record was deleted) and one sent late.
+func TestWithdrawDroppedOwedAgain(t *testing.T) {
+	for _, late := range []bool{false, true} {
+		f := newFixture(t)
+		m := f.member(10)
+		cid := f.connect(m, "tag")
+		ctx := context.Background()
+		id, err := f.p.Authenticate(ctx, cid, "x", peerwire.PurposeApproval, 10*time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.pump()
+		if late {
+			f.setState(cid, StateSuspended)
+		}
+		f.failDeposit = func(string, string) error { return errUnavailable } // the withdraw waits in the outbox
+		if ok, err := f.p.CancelChallenge(ctx, id); !ok || err != nil {
+			t.Fatalf("cancel: %v %v", ok, err)
+		}
+		if late {
+			f.setState(cid, StateActive)
+			f.p.mu.Lock()
+			f.p.expireChallenges(f.clk.Now()) // queues the late withdraw
+			f.p.mu.Unlock()
+		}
+		// Dropped before the relay took it.
+		f.p.mu.Lock()
+		n := 0
+		f.p.dropOutbox(func(e *outboxEntry) bool {
+			if e.Withdraw == id {
+				n++
+				return true
+			}
+			return false
+		})
+		f.p.mu.Unlock()
+		if n != 1 || !f.owed(id) {
+			t.Fatalf("late %v: %d entries dropped, owed %v", late, n, f.owed(id))
+		}
+		f.failDeposit = nil
+		f.tick()
+		f.pump()
+		if got := len(m.Received(peerwire.TypeConnAuthWithdraw)); got != 1 || f.owed(id) {
+			t.Fatalf("late %v: %d withdraws after the drop", late, got)
+		}
+	}
+}
+
+// A withdraw the relay took isn't owed again when its entry leaves.
+func TestWithdrawDepositedNotOwedAgain(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "tag")
+	ctx := context.Background()
+	id, err := f.p.Authenticate(ctx, cid, "x", peerwire.PurposeApproval, 10*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.pump()
+	if ok, err := f.p.CancelChallenge(ctx, id); !ok || err != nil {
+		t.Fatalf("cancel: %v %v", ok, err)
+	}
+	f.pump()
+	for i := 0; i < 3; i++ {
+		f.tick()
+		f.pump()
+	}
+	if got := len(m.Received(peerwire.TypeConnAuthWithdraw)); got != 1 || f.owed(id) {
+		t.Fatalf("%d withdraws, owed %v", got, f.owed(id))
+	}
+}
+
+// failMsgGet fails the next Get of a message's dedupe record: a store
+// error while a batch is handled, after housekeeping ran.
+type failMsgGet struct {
+	*MemStore
+	fail bool
+}
+
+func (s *failMsgGet) Get(ctx context.Context, kind, id string) ([]byte, bool, error) {
+	if s.fail && kind == kindMsg {
+		s.fail = false
+		return nil, false, errors.New("store down")
+	}
+	return s.MemStore.Get(ctx, kind, id)
+}
+
+// A store error later in the batch that housekeeping queued a late
+// withdraw in doesn't leave the withdraw sent while the stored record still
+// owes it, which a restart would send a second time (Fable's 1 -> 2).
+func TestLateWithdrawNotSentTwiceAfterDiscard(t *testing.T) {
+	f := newFixture(t)
+	st := &failMsgGet{MemStore: f.store}
+	f.storeWrap = st
+	f.start()
+	m := f.member(10)
+	cid := f.connect(m, "tag")
+	ctx := context.Background()
+	id, err := f.p.Authenticate(ctx, cid, "x", peerwire.PurposeApproval, 10*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.pump()
+	f.setState(cid, StateSuspended)
+	if ok, err := f.p.CancelChallenge(ctx, id); !ok || err != nil {
+		t.Fatalf("cancel: %v %v", ok, err)
+	}
+	f.setState(cid, StateActive)
+	f.pump()
+	// A message arrives; its step's housekeeping queues the late withdraw,
+	// then handling the message hits a store error.
+	m.Send(peerwire.TypeConnAuthResponse, []byte(`{}`))
+	st.fail = true
+	if _, err := f.p.Step(ctx, 0); err == nil {
+		t.Fatal("the step didn't fail")
+	}
+	f.pump() // later steps succeed and drain
+	sent := len(m.Received(peerwire.TypeConnAuthWithdraw))
+	recs, err := f.store.Load(ctx, kindAuth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storedOwed := false
+	for _, r := range recs {
+		if r.ID == id {
+			storedOwed = strings.Contains(string(r.Data), `"withdraw_owed":true`)
+		}
+	}
+	if sent != 0 && storedOwed {
+		t.Fatalf("the withdraw was sent (%d) while the store still owes it: a restart sends it again", sent)
 	}
 }

@@ -240,7 +240,7 @@ func (p *Peer) CancelChallenge(ctx context.Context, requestID string) (bool, err
 	}
 	if now.Before(ch.Exp) {
 		if c := p.conns[ch.ConnID]; c != nil {
-			withdrawn = p.sendInnerExp(c, peerwire.TypeConnAuthWithdraw, peerwire.ConnAuthWithdrawBody(requestID), ch.Exp, now) != ""
+			withdrawn = p.queueWithdraw(c, requestID, ch.Exp, now)
 		}
 	}
 	if !withdrawn && now.Before(ch.Exp) {
@@ -311,12 +311,6 @@ func (p *Peer) delivery(requestID string) Delivery {
 		return DeliveryUndelivered // gone without its leaving noted: not known to be sent
 	}
 	return DeliveryQueued
-}
-
-func (p *Peer) sendInnerExp(c *Connection, typ string, body []byte, exp, now time.Time) string {
-	in := newInner(p.newID(now), typ, body, now)
-	in.Exp = exp
-	return p.sendInner(c, in, now)
 }
 
 // wire is the challenge as sent.
@@ -441,13 +435,52 @@ func (p *Peer) withdrawOwed(id string, ch *challenge, now time.Time) {
 		return
 	}
 	c := p.conns[ch.ConnID]
-	if c == nil || p.outboxFor(c.ID) >= MaxOutboxPerConn ||
-		p.sendInnerExp(c, peerwire.TypeConnAuthWithdraw, peerwire.ConnAuthWithdrawBody(id), ch.Exp, now) == "" {
+	if c == nil || c.State != StateActive || c.kr == nil || c.kr.Current() == nil || // cheap, before the outbox scan
+		p.outboxFor(c.ID) >= MaxOutboxPerConn || !p.queueWithdraw(c, id, ch.Exp, now) {
 		return
 	}
+	// The record stays, Gone, until exp plus the skew (a cancel that queued
+	// its withdraw at once deletes it): its place is still counted, and a
+	// withdraw dropped before the relay takes it is owed again on it.
 	ch.WithdrawOwed = false
 	p.markDirty(kindAuth, id)
 	p.log().Info("challenge withdraw sent late", "connection_id", ch.ConnID, "request_id", id)
+}
+
+// queueWithdraw queues the member's withdraw of challenge id, noting it on
+// the outbox entry so that a drop before the relay takes it owes it again
+// (withdrawLeft). It reports whether it was queued.
+func (p *Peer) queueWithdraw(c *Connection, id string, exp, now time.Time) bool {
+	in := newInner(p.newID(now), peerwire.TypeConnAuthWithdraw, peerwire.ConnAuthWithdrawBody(id), now)
+	in.Exp = exp
+	e := p.sendEntry(c, in, now)
+	if e == nil {
+		return false
+	}
+	e.Withdraw, e.WithdrawExp = id, exp
+	return true
+}
+
+// withdrawLeft notes that e left the outbox: a withdraw the relay didn't
+// take (dropped: the mailbox lost, the connection stale, the entry
+// expired) is owed again until the challenge's exp, on the challenge's
+// record; one cancelled with its withdraw queued at once had its record
+// deleted, so it is made again, Gone, holding its place as before. Not for
+// a connection that is gone: its vault can't answer.
+func (p *Peer) withdrawLeft(e *outboxEntry) {
+	if e.Withdraw == "" || e.deposited || !p.now().Before(e.WithdrawExp) || p.conns[e.ConnID] == nil {
+		return
+	}
+	ch := p.challenges[e.Withdraw]
+	if ch == nil {
+		ch = &challenge{ID: e.Withdraw, ConnID: e.ConnID, Exp: e.WithdrawExp, Gone: true}
+		p.challenges[e.Withdraw] = ch
+	}
+	if !ch.WithdrawOwed {
+		ch.WithdrawOwed = true
+		p.markDirty(kindAuth, ch.ID)
+		p.log().Info("challenge withdraw owed again: dropped before the relay took it", "connection_id", ch.ConnID, "request_id", ch.ID)
+	}
 }
 
 // expireChallenges ends the challenges past their exp: signin.expired. A
