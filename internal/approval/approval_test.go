@@ -734,9 +734,21 @@ func TestBootstrapAtStart(t *testing.T) {
 	if err := f.confirm("c1"); err != nil {
 		t.Fatal(err)
 	}
+	// The tick that makes the admin reads the set again: the "back" line
+	// comes in that tick, and no admins_short after it.
+	f.clk.Advance(ShortAlarmEvery)
 	f.tick()
 	if a := f.admins(); len(a) != 1 || a[0] != "c1" {
 		t.Fatalf("admins %v", a)
+	}
+	if !strings.Contains(f.logs.String(), "admin set back at the threshold") {
+		t.Fatalf("no back line in the bootstrapping tick\n%s", f.logs)
+	}
+	short := strings.Count(f.logs.String(), "alarm=admins_short")
+	f.clk.Advance(ShortAlarmEvery)
+	f.tick()
+	if n := strings.Count(f.logs.String(), "alarm=admins_short"); n != short {
+		t.Fatalf("admins_short %d -> %d after the bootstrap tick\n%s", short, n, f.logs)
 	}
 }
 

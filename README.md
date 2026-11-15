@@ -533,9 +533,16 @@ destination.
   `vote.extend`, `contract_template.change`) are recorded but don't count.
   Check that the connection is active and reachable (a reconnect after a
   restore, a suspended connection); if it is gone, repair the admin set.
-- `admins_short`: an admin's connection was removed (severed, or
-  replaced by a new connection) and fewer admins than m remain, so no
-  approval can pass (see "Recovering admins" under "Admin approvals").
+- `admins_short`: fewer admins than m, so no approval can pass (see
+  "Recovering admins" under "Admin approvals"); for example an admin's
+  connection was removed (severed, or replaced by a new connection), or
+  the service started with the set already short. It is logged every
+  minute while the set is short (also while the service can't read its
+  state), so the alarm stays raised until the set is mended; "admin set
+  back at the threshold" is logged once it is, unless the mend was a
+  restart with a lower m. A new deployment has no admin until its first
+  bootstrap is confirmed, so it raises this alarm until then: expected,
+  not an incident.
 - `key_change`: the keystore KMS key was changed (a grant, its
   policy, an alias, tags, rotation, disabled, or scheduled for
   deletion). CloudTrail's KMS management events reach EventBridge from
