@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/vettid/vettid-vault/vms/credwire"
@@ -157,8 +158,8 @@ func (p *Peer) authenticate(ctx context.Context, connID, ctxt, purpose, matchCod
 
 // holds reports whether the challenge may still hold a place at the member
 // vault: pending, or cancelled without a withdraw reaching the outbox
-// (ch.Gone; also once a withdraw owed was queued late), or just expired,
-// until its exp plus ClockSkew. One that left
+// (ch.Gone, or made again when a queued withdraw was dropped or refused),
+// or just expired, until its exp plus ClockSkew. One that left
 // the outbox never tried (ch.Unsent) never reached the relay and holds
 // none.
 func (ch *challenge) holds(now time.Time) bool {
@@ -240,7 +241,7 @@ func (p *Peer) CancelChallenge(ctx context.Context, requestID string) (bool, err
 	}
 	if now.Before(ch.Exp) {
 		if c := p.conns[ch.ConnID]; c != nil {
-			withdrawn = p.sendInnerExp(c, peerwire.TypeConnAuthWithdraw, peerwire.ConnAuthWithdrawBody(requestID), ch.Exp, now) != ""
+			withdrawn = p.queueWithdraw(c, ch, now)
 		}
 	}
 	if !withdrawn && now.Before(ch.Exp) {
@@ -311,12 +312,6 @@ func (p *Peer) delivery(requestID string) Delivery {
 		return DeliveryUndelivered // gone without its leaving noted: not known to be sent
 	}
 	return DeliveryQueued
-}
-
-func (p *Peer) sendInnerExp(c *Connection, typ string, body []byte, exp, now time.Time) string {
-	in := newInner(p.newID(now), typ, body, now)
-	in.Exp = exp
-	return p.sendInner(c, in, now)
 }
 
 // wire is the challenge as sent.
@@ -421,18 +416,17 @@ func (p *Peer) connAuthRotated(c *Connection, body []byte) {
 }
 
 // withdrawOwed queues the withdraw a cancel couldn't, once the connection
-// can take it; past the challenge's exp it is no longer owed. The flag is
-// cleared only with the withdraw queued, both in the same flush, so a
-// crash can't queue it twice (one exception, older than this: a flush that
-// fails and is discarded, then a restart before exp, can). A store that
-// splits a large flush into several
-// writes may store the cleared flag without the outbox entry (auth sorts
-// first); a crash between them loses the withdraw, which fails safe: the
-// record keeps its place counted until exp plus ClockSkew, and the
-// member's vault closes the ask at exp. An outbox already full for the
-// connection is not tried (sendEntry would log outbox_full on each
-// housekeeping, about once a minute). It runs from expireChallenges, in
-// each housekeeping.
+// can take it; past the challenge's exp it is no longer owed. Once queued,
+// the record goes (deleted with the entry's write, in the same flush, which
+// Step makes before a batch can be discarded). A store that splits the
+// flush writes "auth" before "outbox", so a crash between its writes loses
+// the withdraw rather than doubling it, which fails safe: the member's
+// vault closes the ask at exp (the record's delete is stored too, so its
+// place goes uncounted until then). The check for one already in the outbox is
+// defence in depth. An outbox already
+// full for the connection is not tried (sendEntry would log outbox_full on
+// each housekeeping, about once a minute). It runs from expireChallenges,
+// in each housekeeping.
 func (p *Peer) withdrawOwed(id string, ch *challenge, now time.Time) {
 	if !now.Before(ch.Exp) {
 		ch.WithdrawOwed = false
@@ -441,13 +435,68 @@ func (p *Peer) withdrawOwed(id string, ch *challenge, now time.Time) {
 		return
 	}
 	c := p.conns[ch.ConnID]
-	if c == nil || p.outboxFor(c.ID) >= MaxOutboxPerConn ||
-		p.sendInnerExp(c, peerwire.TypeConnAuthWithdraw, peerwire.ConnAuthWithdrawBody(id), ch.Exp, now) == "" {
+	if c == nil || c.State != StateActive || c.kr == nil || c.kr.Current() == nil || // cheap, before the outbox scan
+		p.outboxFor(c.ID) >= MaxOutboxPerConn {
 		return
 	}
-	ch.WithdrawOwed = false
+	// Already queued (a crash between the queueing and the flag's write,
+	// in a store that splits a flush): not queued twice.
+	queued := slices.ContainsFunc(p.outbox, func(e *outboxEntry) bool { return e.Withdraw == id && !e.dropped })
+	if !queued && !p.queueWithdraw(c, ch, now) {
+		return
+	}
+	// Queued: the record goes, as a cancel that queues its withdraw at once
+	// deletes it (its place is no longer held for a sign-in or approval
+	// waiting on it). A withdraw dropped before the relay takes it is owed
+	// again on a record made again (withdrawLeft).
+	delete(p.challenges, id)
 	p.markDirty(kindAuth, id)
 	p.log().Info("challenge withdraw sent late", "connection_id", ch.ConnID, "request_id", id)
+}
+
+// queueWithdraw queues the member's withdraw of challenge id, noting it on
+// the outbox entry so that a drop before the relay takes it owes it again
+// (withdrawLeft). It reports whether it was queued.
+func (p *Peer) queueWithdraw(c *Connection, ch *challenge, now time.Time) bool {
+	in := newInner(p.newID(now), peerwire.TypeConnAuthWithdraw, peerwire.ConnAuthWithdrawBody(ch.ID), now)
+	in.Exp = ch.Exp
+	e := p.sendEntry(c, in, now)
+	if e == nil {
+		return false
+	}
+	e.Withdraw, e.WithdrawExp, e.WithdrawPurpose = ch.ID, ch.Exp, ch.Purpose
+	return true
+}
+
+// withdrawLeft notes that e left the outbox: a withdraw the relay didn't
+// take (dropped: the mailbox lost, the connection stale, the entry
+// expired) is owed again until the challenge's exp, on the challenge's
+// record, even one already tried (it may not have arrived: at least once;
+// a second withdraw is harmless). One the relay refused for good is not
+// owed again (it would be refused again), but its record is kept too. A
+// record a cancel deleted when it queued the withdraw is made again, Gone,
+// with its purpose, holding its place until exp. Not for a connection that
+// is gone or being removed: its vault can't answer.
+func (p *Peer) withdrawLeft(e *outboxEntry, now time.Time) {
+	if e.Withdraw == "" || e.deposited || !now.Before(e.WithdrawExp) || p.conns[e.ConnID] == nil || e.ConnID == p.removing {
+		return
+	}
+	ch := p.challenges[e.Withdraw]
+	if ch == nil {
+		ch = &challenge{ID: e.Withdraw, ConnID: e.ConnID, Exp: e.WithdrawExp, Purpose: e.WithdrawPurpose, Gone: true}
+		p.challenges[e.Withdraw] = ch
+		p.markDirty(kindAuth, ch.ID)
+	}
+	if e.refused {
+		// Not owed again (it would be refused again), but the record holds
+		// the challenge's place until exp: the vault may still hold it.
+		return
+	}
+	if !ch.WithdrawOwed {
+		ch.WithdrawOwed = true
+		p.markDirty(kindAuth, ch.ID)
+		p.log().Info("challenge withdraw owed again: dropped before the relay took it", "connection_id", ch.ConnID, "request_id", ch.ID)
+	}
 }
 
 // expireChallenges ends the challenges past their exp: signin.expired. A
