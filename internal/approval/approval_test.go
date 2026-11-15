@@ -43,6 +43,8 @@ type fakePeer struct {
 	notStarted bool
 	// delivery: request id -> where it stands (absent: sent).
 	delivery map[string]peer.Delivery
+	// cancelFail: CancelChallenge fails for these request ids.
+	cancelFail map[string]error
 	// queue: connection id -> its challenges are queued when sent (its
 	// reconnect is open).
 	queue map[string]bool
@@ -194,6 +196,9 @@ func (p *fakePeer) Authenticate(_ context.Context, conn, ctxt, purpose string, t
 func (p *fakePeer) CancelChallenge(_ context.Context, req string) (bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if err := p.cancelFail[req]; err != nil {
+		return false, err
+	}
 	p.cancelled = append(p.cancelled, req)
 	return true, nil
 }

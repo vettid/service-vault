@@ -109,9 +109,14 @@ const (
 	AuditRequested = "approval.requested"
 	AuditResponse  = "approval.response"
 	AuditReminded  = "approval.reminded"
-	AuditApproved  = "approval.approved"
-	AuditDenied    = "approval.denied"
-	AuditExpired   = "approval.expired"
+	// AuditReplaced: a reminder replaced these challenges and is about to
+	// withdraw them. It is written before the withdraw, so it doesn't say
+	// the withdraw happened: the record names them in Withdrawing until it
+	// has, and an answer to one never counts either way.
+	AuditReplaced = "approval.replaced"
+	AuditApproved = "approval.approved"
+	AuditDenied   = "approval.denied"
+	AuditExpired  = "approval.expired"
 	// AuditConsumed: an approved proposal.create or vote.extend was used,
 	// once, for the proposal or extension it approved.
 	AuditConsumed        = "approval.consumed"
