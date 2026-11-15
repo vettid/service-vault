@@ -2,7 +2,9 @@ package peer
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 	"strings"
 	"testing"
 	"time"
@@ -183,39 +185,40 @@ func TestFailedMessageWriteStops(t *testing.T) {
 	}
 }
 
-// Events raised in memory a step then discarded aren't delivered; the
-// restart raises what the store holds, once.
+// Events a message raises in memory that a stop then leaves unwritten
+// aren't delivered; the restart handles the message again and raises it
+// once. (Housekeeping's events are written before the batch: #181.)
 func TestDiscardedEventsNotDelivered(t *testing.T) {
 	f := newFixture(t)
-	fm := &failMsgGet{MemStore: f.store}
-	f.storeWrap = fm
+	st := &failWrites{MemStore: f.store}
+	f.storeWrap = st
 	f.start()
 	m := f.member(10)
 	cid := f.connect(m, "t")
 	ctx := context.Background()
-	id, err := f.p.Authenticate(ctx, cid, "x", "", time.Minute)
+	id, err := f.p.Authenticate(ctx, cid, "x", "", 5*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
 	f.pump()
 	f.p.DeliverEvents(ctx)
-	before := len(f.ev.of(EventSignInExpired))
-	f.clk.Advance(2 * time.Minute) // housekeeping in the next step expires it
-	m.Send("connection.note", []byte(`{}`))
-	fm.fail = true
+	r, _ := peerwire.SignConnAuth(m.Cred, f.keys.IKPublic(), m.IK.Public().(ed25519.PublicKey), m.Challenges[len(m.Challenges)-1], f.clk.Now(), nil)
+	m.Send(peerwire.TypeConnAuthResponse, r.Marshal())
+	st.on, st.onlyMsg = true, true // the answer's write fails
 	if _, err := f.p.Step(ctx, 0); !errors.Is(err, errDiscarded) {
 		t.Fatalf("step: %v, want errDiscarded", err)
 	}
+	st.on = false
 	f.p.DeliverEvents(ctx)
-	if n := len(f.ev.of(EventSignInExpired)) - before; n != 0 {
-		t.Fatalf("%d events delivered from discarded memory", n)
+	if n := len(f.ev.of(EventSignInApproved)); n != 0 {
+		t.Fatalf("%d approvals delivered from unwritten memory", n)
 	}
+	f.clk.Advance(61 * time.Second)
 	f.start()
-	f.tick()
+	f.pump()
 	f.p.DeliverEvents(ctx)
-	ex := f.ev.of(EventSignInExpired)
-	if len(ex)-before != 1 || ex[len(ex)-1].RequestID != id {
-		t.Fatalf("after the restart: %d signin.expired", len(ex)-before)
+	if ap := f.ev.of(EventSignInApproved); len(ap) != 1 || ap[0].RequestID != id {
+		t.Fatalf("after the restart: %+v", ap)
 	}
 }
 

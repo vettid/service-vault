@@ -1172,20 +1172,3 @@ func TestSendMessageBoundOverDaysOfTicks(t *testing.T) {
 		t.Fatalf("the healthy member got %d of 30", got)
 	}
 }
-
-// failMsgGet fails the next Get of a message's dedupe record: a store
-// error before the message changed anything, so the step's discard drops
-// nothing and the error is plain (the peer goes on, the message is left
-// unacked).
-type failMsgGet struct {
-	*MemStore
-	fail bool
-}
-
-func (s *failMsgGet) Get(ctx context.Context, kind, id string) ([]byte, bool, error) {
-	if s.fail && kind == kindMsg {
-		s.fail = false
-		return nil, false, errors.New("store down")
-	}
-	return s.MemStore.Get(ctx, kind, id)
-}
