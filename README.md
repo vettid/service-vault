@@ -255,8 +255,9 @@ destination.
   discarded that step's unwritten changes, so its memory no longer
   matches the store. The peer writes nothing more, stops, and the task
   restarts from the stored state (the batch is redelivered and handled
-  again), so nothing that was never written is sent. One is harmless; repeats mean the store is failing: check
-  DynamoDB's errors and throttling.
+  again), so nothing that was never written is sent. One is harmless;
+  repeats mean the store is failing: check DynamoDB's errors and
+  throttling.
 - `relay_tombstone_ahead`: the relay's registration answer reports a
   `tokens_not_before` more than 5 minutes ahead of the service's clock
   (see `relay_mailbox_lost`): no token is minted until it passes. Check
