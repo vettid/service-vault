@@ -2095,6 +2095,15 @@ func (m *Manager) logShort(admins, th int) {
 	m.short, m.shortLogged, m.shortAdmins = true, m.now(), admins
 }
 
+// holdShort logs admins_short again, at most every ShortAlarmEvery, when
+// the set was last seen short and its state can't be read now: it is not
+// known to be mended (fail secure). Caller holds m.mu.
+func (m *Manager) holdShort() {
+	if m.short && m.now().Sub(m.shortLogged) >= ShortAlarmEvery {
+		m.logShort(m.shortAdmins, m.threshold())
+	}
+}
+
 // noteShort logs admins_short while the set is below the threshold, at
 // most every ShortAlarmEvery, and one line when it is back at it (only
 // after this process saw it short: a restart with a lower threshold logs
@@ -2117,22 +2126,18 @@ func (m *Manager) noteShort(admins int) {
 // connection while the set is empty and a bootstrap applies; log
 // admins_short while the set is below the threshold (noteShort); expire
 // or settle the open approvals. The webhooks are delivered by Hooks.Run.
-func (m *Manager) Tick(ctx context.Context) (err error) {
+func (m *Manager) Tick(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	// A tick that fails keeps a short set's alarm raised: the set is not
-	// known to be mended (fail secure).
-	defer func() {
-		if err != nil && m.short && m.now().Sub(m.shortLogged) >= ShortAlarmEvery {
-			m.logShort(m.shortAdmins, m.threshold())
-		}
-	}()
-	// The set first, before the steps that can fail.
-	set, err := m.admins(ctx)
-	if err != nil {
-		return err
+	// The set first, before the steps that can fail, so none of them can
+	// skip it. A failed read holds the alarm (the set is not known to be
+	// mended: fail secure) and ends nothing else: the rest of the tick
+	// runs as it would without this check.
+	if set, err := m.admins(ctx); err != nil {
+		m.holdShort()
+	} else {
+		m.noteShort(len(set))
 	}
-	m.noteShort(len(set))
 	if err := m.migrateGov(ctx); err != nil {
 		return err
 	}
@@ -2141,6 +2146,10 @@ func (m *Manager) Tick(ctx context.Context) (err error) {
 		return err
 	}
 	if key != "" && m.BoundConnection != nil {
+		set, err := m.admins(ctx)
+		if err != nil {
+			return err
+		}
 		if len(set) == 0 {
 			c, ok, err := m.BoundConnection(ctx, key)
 			if err != nil {

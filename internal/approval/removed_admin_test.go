@@ -172,14 +172,20 @@ func TestAdminsShortHeldWhenTickFails(t *testing.T) {
 	}
 }
 
-// failGet fails every Get while fail is set: a store fault.
+// failGet fails every Get while fail is set, and the next once Gets of
+// the admin set: a store fault.
 type failGet struct {
 	peer.Store
 	fail bool
+	once int
 }
 
 func (s *failGet) Get(ctx context.Context, kind, id string) ([]byte, bool, error) {
 	if s.fail {
+		return nil, false, errors.New("store fault")
+	}
+	if kind == kindAdmins && s.once > 0 {
+		s.once--
 		return nil, false, errors.New("store fault")
 	}
 	return s.Store.Get(ctx, kind, id)
@@ -217,5 +223,40 @@ func TestAdminsShortHeldWhenStateUnreadable(t *testing.T) {
 	g.clk.Advance(ShortAlarmEvery)
 	if err := g.m.Tick(ctx); err == nil || strings.Contains(g.logs.String(), "admins_short") {
 		t.Fatalf("not short: %v\n%s", err, g.logs)
+	}
+}
+
+// The alarm's own read of the admin set failing ends nothing else in the
+// tick: an approval past its expiry is still settled in that tick.
+func TestAdminsShortReadFailureDoesNotStopTick(t *testing.T) {
+	f := newFixture(t, 1, "c1")
+	ctx := context.Background()
+	c := f.create(ActionContractTemplateChange, "Open", `{}`)
+	st := &failGet{Store: f.st}
+	f.m.Store = st
+	f.clk.Advance(DefaultTTL + time.Minute)
+	st.once = 1 // the alarm's read, the first of the tick
+	if err := f.m.Tick(ctx); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if st.once != 0 {
+		t.Fatal("the alarm's read didn't fail")
+	}
+	if s := f.status(c.ID); s.Status != StatusExpired {
+		t.Fatalf("status %s: the tick stopped at the alarm's read", s.Status)
+	}
+	// While the set is short, that failed read still holds the alarm, in
+	// a tick that otherwise succeeds.
+	g := newFixture(t, 1)
+	gst := &failGet{Store: g.st}
+	g.m.Store = gst
+	count := func() int { return strings.Count(g.logs.String(), "alarm=admins_short") }
+	if err := g.m.Start(ctx); err != nil || count() != 1 {
+		t.Fatalf("start: %d lines, %v", count(), err)
+	}
+	g.clk.Advance(ShortAlarmEvery)
+	gst.once = 1
+	if err := g.m.Tick(ctx); err != nil || gst.once != 0 || count() != 2 {
+		t.Fatalf("short, the read failed once: %d lines, %v", count(), err)
 	}
 }
