@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"maps"
 	"slices"
 	"strings"
@@ -721,8 +722,8 @@ func TestReconnectAfterRestoreWriteFails(t *testing.T) {
 	f.store = b
 	f.storeWrap = &failWrites{MemStore: b, on: true, onlyOf: kindOutgoing}
 	f.afterRestore = func(context.Context) error { cleared++; return nil }
-	if err := f.startErr(); err == nil {
-		t.Fatal("the start went on after its reconnects weren't written")
+	if err := f.startErr(); !errors.Is(err, errThrottled) {
+		t.Fatalf("the start after its reconnects weren't written: %v", err)
 	}
 	m.Step()
 	if m.Reconnects != 0 || cleared != 0 {

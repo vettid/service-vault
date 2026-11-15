@@ -99,7 +99,7 @@ type failWrites struct {
 	skip    int
 	err     error              // returned instead of errThrottled, if set
 	onlyMsg bool               // fail only a write carrying a message's dedupe mark
-	onlyOf  string             // fail only a write carrying a record of this kind, if set
+	onlyOf  string             // fail only a write carrying a record of this kind, if set (skip then counts only those)
 	cancel  context.CancelFunc // called as the write fails, if set
 }
 
