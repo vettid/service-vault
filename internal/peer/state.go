@@ -489,6 +489,10 @@ type outboxEntry struct {
 	// the withdraw is owed again until then (withdrawLeft).
 	Withdraw    string    `json:"withdraw,omitempty"`
 	WithdrawExp time.Time `json:"withdraw_exp,omitzero"`
+	// WithdrawPurpose is that challenge's purpose, so a record made again
+	// counts as it did (a sign-in in HasPendingSignIn, an approval in
+	// longLived).
+	WithdrawPurpose string `json:"withdraw_purpose,omitempty"`
 
 	dropped   bool // removed by dropOutbox: a drain in progress skips it
 	deposited bool // the relay took it: it leaves the outbox delivered

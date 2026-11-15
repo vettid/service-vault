@@ -91,6 +91,9 @@ type Peer struct {
 	// reconfirm marks the connections the current batch owes an
 	// hs.confirm (§6.3.1 Responder; noteFromMember).
 	reconfirm map[string]bool
+	// removing is the connection removeConnectionFor is ending: its
+	// dropped withdraws aren't owed again (withdrawLeft).
+	removing string
 	// msgJTI is the collect jti of the message being handled ("" when
 	// none): the token it was deposited under.
 	msgJTI string

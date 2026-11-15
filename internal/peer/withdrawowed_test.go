@@ -399,7 +399,57 @@ func TestLateWithdrawNotSentTwiceAfterDiscard(t *testing.T) {
 			storedOwed = strings.Contains(string(r.Data), `"withdraw_owed":true`)
 		}
 	}
-	if sent != 0 && storedOwed {
-		t.Fatalf("the withdraw was sent (%d) while the store still owes it: a restart sends it again", sent)
+	if sent != 1 || storedOwed {
+		t.Fatalf("withdraws sent %d (want 1), store still owes it %v: a restart would send it again", sent, storedOwed)
+	}
+}
+
+// A recreated record keeps the challenge's purpose: a sign-in whose
+// withdraw was dropped still counts as pending.
+func TestWithdrawDroppedKeepsPurpose(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "tag")
+	ctx := context.Background()
+	id, err := f.p.AuthenticateSignIn(ctx, cid, "Sign in", "42", 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.pump()
+	f.failDeposit = func(string, string) error { return errUnavailable }
+	if ok, err := f.p.CancelChallenge(ctx, id); !ok || err != nil {
+		t.Fatalf("cancel: %v %v", ok, err)
+	}
+	f.p.mu.Lock()
+	f.p.dropOutbox(func(e *outboxEntry) bool { return e.Withdraw == id })
+	ch := f.p.challenges[id]
+	f.p.mu.Unlock()
+	if ch == nil || ch.Purpose != peerwire.PurposeSignIn || !f.p.HasPendingSignIn(cid) {
+		t.Fatalf("recreated %+v: not a pending sign-in", ch)
+	}
+}
+
+// Removing a connection with a withdraw still queued owes nothing and
+// doesn't log one as owed again.
+func TestWithdrawQueuedThenConnectionRemoved(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "tag")
+	ctx := context.Background()
+	id, err := f.p.Authenticate(ctx, cid, "x", peerwire.PurposeApproval, 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.pump()
+	f.failDeposit = func(string, string) error { return errUnavailable }
+	if ok, err := f.p.CancelChallenge(ctx, id); !ok || err != nil {
+		t.Fatalf("cancel: %v %v", ok, err)
+	}
+	f.p.mu.Lock()
+	f.p.removeConnection(f.p.conns[cid], "in", f.clk.Now())
+	_, kept := f.p.challenges[id]
+	f.p.mu.Unlock()
+	if kept || strings.Contains(f.logs.String(), "owed again") {
+		t.Fatalf("kept %v, logs %s", kept, f.logs.String())
 	}
 }

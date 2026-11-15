@@ -240,7 +240,7 @@ func (p *Peer) CancelChallenge(ctx context.Context, requestID string) (bool, err
 	}
 	if now.Before(ch.Exp) {
 		if c := p.conns[ch.ConnID]; c != nil {
-			withdrawn = p.queueWithdraw(c, requestID, ch.Exp, now)
+			withdrawn = p.queueWithdraw(c, ch, now)
 		}
 	}
 	if !withdrawn && now.Before(ch.Exp) {
@@ -436,7 +436,7 @@ func (p *Peer) withdrawOwed(id string, ch *challenge, now time.Time) {
 	}
 	c := p.conns[ch.ConnID]
 	if c == nil || c.State != StateActive || c.kr == nil || c.kr.Current() == nil || // cheap, before the outbox scan
-		p.outboxFor(c.ID) >= MaxOutboxPerConn || !p.queueWithdraw(c, id, ch.Exp, now) {
+		p.outboxFor(c.ID) >= MaxOutboxPerConn || !p.queueWithdraw(c, ch, now) {
 		return
 	}
 	// The record stays, Gone, until exp plus the skew (a cancel that queued
@@ -450,14 +450,14 @@ func (p *Peer) withdrawOwed(id string, ch *challenge, now time.Time) {
 // queueWithdraw queues the member's withdraw of challenge id, noting it on
 // the outbox entry so that a drop before the relay takes it owes it again
 // (withdrawLeft). It reports whether it was queued.
-func (p *Peer) queueWithdraw(c *Connection, id string, exp, now time.Time) bool {
-	in := newInner(p.newID(now), peerwire.TypeConnAuthWithdraw, peerwire.ConnAuthWithdrawBody(id), now)
-	in.Exp = exp
+func (p *Peer) queueWithdraw(c *Connection, ch *challenge, now time.Time) bool {
+	in := newInner(p.newID(now), peerwire.TypeConnAuthWithdraw, peerwire.ConnAuthWithdrawBody(ch.ID), now)
+	in.Exp = ch.Exp
 	e := p.sendEntry(c, in, now)
 	if e == nil {
 		return false
 	}
-	e.Withdraw, e.WithdrawExp = id, exp
+	e.Withdraw, e.WithdrawExp, e.WithdrawPurpose = ch.ID, ch.Exp, ch.Purpose
 	return true
 }
 
@@ -468,12 +468,12 @@ func (p *Peer) queueWithdraw(c *Connection, id string, exp, now time.Time) bool 
 // deleted, so it is made again, Gone, holding its place as before. Not for
 // a connection that is gone: its vault can't answer.
 func (p *Peer) withdrawLeft(e *outboxEntry) {
-	if e.Withdraw == "" || e.deposited || !p.now().Before(e.WithdrawExp) || p.conns[e.ConnID] == nil {
+	if e.Withdraw == "" || e.deposited || !p.now().Before(e.WithdrawExp) || p.conns[e.ConnID] == nil || e.ConnID == p.removing {
 		return
 	}
 	ch := p.challenges[e.Withdraw]
 	if ch == nil {
-		ch = &challenge{ID: e.Withdraw, ConnID: e.ConnID, Exp: e.WithdrawExp, Gone: true}
+		ch = &challenge{ID: e.Withdraw, ConnID: e.ConnID, Exp: e.WithdrawExp, Purpose: e.WithdrawPurpose, Gone: true}
 		p.challenges[e.Withdraw] = ch
 	}
 	if !ch.WithdrawOwed {
