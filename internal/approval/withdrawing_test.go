@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/vettid/service-vault/internal/peer"
@@ -54,7 +55,7 @@ func TestRemindRecordsWithdrawing(t *testing.T) {
 	if w := f.record(c.ID).Withdrawing; len(w) != 0 {
 		t.Fatalf("withdrawing %v after a withdraw that worked", w)
 	}
-	a := f.auditOf(AuditWithdrawn)
+	a := f.auditOf(AuditReplaced)
 	if len(a) != 1 || a[0].ApprovalID != c.ID || len(a[0].Challenges) != 1 || a[0].Challenges[0].RequestID != old.req || a[0].Challenges[0].ConnectionID != "c1" {
 		t.Fatalf("audit %+v", a)
 	}
@@ -186,5 +187,56 @@ func TestWithdrawingOutlivesExpiry(t *testing.T) {
 	f.tick()
 	if !slices.Contains(f.p.cancelled, old.req) || f.openCount() != 0 {
 		t.Fatalf("cancelled %v, open %d", f.p.cancelled, f.openCount())
+	}
+}
+
+// A settled record kept open for its Withdrawing list doesn't wake Run on
+// each pass (which would tick again at once, in a loop, while the
+// withdraw keeps failing), nor log "approval settled" again.
+func TestWithdrawingSettledDoesNotWake(t *testing.T) {
+	f := newFixture(t, 2, "c1", "c2")
+	c, old := remindReplacing(t, f)
+	f.p.mu.Lock()
+	f.p.cancelFail = map[string]error{old.req: errors.New("not started")}
+	f.p.mu.Unlock()
+	if _, err := f.m.Remind(context.Background(), c.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.answer("c2", "deny")
+	f.m.once.Do(func() { f.m.kick = make(chan struct{}, 1) })
+	for i := 0; i < 3; i++ {
+		select { // drain
+		case <-f.m.kick:
+		default:
+		}
+		f.tick()
+		if len(f.m.kick) != 0 {
+			t.Fatalf("pass %d woke Run", i)
+		}
+	}
+	if n := strings.Count(f.logs.String(), "approval settled"); n > 1 {
+		t.Fatalf("settled logged %d times", n)
+	}
+	if f.openCount() != 1 {
+		t.Fatalf("open %d", f.openCount())
+	}
+}
+
+// Several replaced at once, one failing: only the failing one stays.
+func TestWithdrawingKeepsOnlyFailures(t *testing.T) {
+	f := newFixture(t, 3, "c1", "c2", "c3")
+	f.m.LongChallenges = true
+	c := f.create(ActionContractTemplateChange, "Open", `{}`)
+	o1, o2 := f.p.last("c1"), f.p.last("c2")
+	f.p.mu.Lock()
+	f.p.delivery = map[string]peer.Delivery{o1.req: peer.DeliveryUndelivered, o2.req: peer.DeliveryUndelivered}
+	f.p.cancelFail = map[string]error{o2.req: errors.New("outbox full")}
+	f.p.mu.Unlock()
+	f.clk.Advance(RemindInterval)
+	if _, err := f.m.Remind(context.Background(), c.ID); err != nil {
+		t.Fatal(err)
+	}
+	if w := withdrawingIDs(f.record(c.ID)); !slices.Equal(w, []string{o2.req}) {
+		t.Fatalf("withdrawing %v, want only %s", w, o2.req)
 	}
 }

@@ -1335,7 +1335,7 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 		// vault, where an approval of it would show but never count.
 		r.Withdrawing = append(r.Withdrawing, to...)
 		pre := m.batch(now)
-		if err := errors.Join(pre.save(r), pre.audit(&AuditEntry{Type: AuditWithdrawn, ApprovalID: r.ID, Challenges: to})); err != nil {
+		if err := errors.Join(pre.save(r), pre.audit(&AuditEntry{Type: AuditReplaced, ApprovalID: r.ID, Challenges: to})); err != nil {
 			return nil, err
 		}
 		if err := pre.apply(ctx); err != nil {
@@ -1343,9 +1343,14 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 		}
 	}
 	left := m.cancelLeft(ctx, to)
-	r.Withdrawing = slices.DeleteFunc(r.Withdrawing, func(c Challenge) bool {
-		return slices.Contains(to, c) && !slices.Contains(left, c)
-	})
+	done := map[string]bool{}
+	for _, c := range to {
+		done[c.RequestID] = true
+	}
+	for _, c := range left {
+		delete(done, c.RequestID)
+	}
+	r.Withdrawing = slices.DeleteFunc(r.Withdrawing, func(c Challenge) bool { return done[c.RequestID] })
 	if len(r.Withdrawing) == 0 {
 		r.Withdrawing = nil
 	}
@@ -1743,6 +1748,7 @@ func (m *Manager) reevaluate(ctx context.Context) error {
 		now := m.now()
 		b := m.batch(now)
 		var settled []Challenge
+		wasPending := r != nil && r.Status == StatusPending
 		if r != nil {
 			m.withdrawAgain(ctx, r)
 		}
@@ -1779,7 +1785,9 @@ func (m *Manager) reevaluate(ctx context.Context) error {
 		if err := b.apply(ctx); err != nil {
 			return err
 		}
-		if r != nil && r.Status != StatusPending {
+		// Only the pass that settled it: a settled record kept open for its
+		// Withdrawing list comes round again, and must not wake Run each time.
+		if wasPending && r.Status != StatusPending {
 			m.log().Info("approval settled", "approval_id", r.ID, "status", r.Status, "reason", r.Reason)
 			m.cancel(ctx, settled)
 			m.wake()
