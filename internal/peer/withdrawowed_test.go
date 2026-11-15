@@ -193,3 +193,45 @@ func TestWithdrawNotOwedWhenQueued(t *testing.T) {
 		t.Fatalf("%d withdraws", n)
 	}
 }
+
+// A connection whose outbox stays full isn't tried each step (sendEntry
+// would log outbox_full every time): the debt waits quietly, and is paid
+// once there is room.
+func TestWithdrawOwedWaitsForOutboxRoom(t *testing.T) {
+	f := newFixture(t)
+	m := f.member(10)
+	cid := f.connect(m, "tag")
+	ctx := context.Background()
+	id, err := f.p.Authenticate(ctx, cid, "x", peerwire.PurposeApproval, 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.pump()
+	f.setState(cid, StateSuspended)
+	if ok, err := f.p.CancelChallenge(ctx, id); !ok || err != nil {
+		t.Fatalf("cancel: %v %v", ok, err)
+	}
+	f.setState(cid, StateActive)
+	// The connection's outbox is full: entries waiting for its mailbox.
+	f.p.mu.Lock()
+	saved := f.p.outbox
+	for i := 0; i < MaxOutboxPerConn; i++ {
+		f.p.outbox = append(f.p.outbox, &outboxEntry{ID: "full", ConnID: cid, Op: opDeposit})
+	}
+	before := strings.Count(f.logs.String(), "outbox_full")
+	for i := 0; i < 5; i++ {
+		f.p.expireChallenges(f.clk.Now())
+	}
+	after := strings.Count(f.logs.String(), "outbox_full")
+	owed := f.p.challenges[id].WithdrawOwed
+	f.p.outbox = saved
+	f.p.mu.Unlock()
+	if after != before || !owed {
+		t.Fatalf("outbox_full lines %d -> %d, owed %v", before, after, owed)
+	}
+	f.tick()
+	f.pump()
+	if n := len(m.Received(peerwire.TypeConnAuthWithdraw)); n != 1 || f.owed(id) {
+		t.Fatalf("%d withdraws once there was room", n)
+	}
+}

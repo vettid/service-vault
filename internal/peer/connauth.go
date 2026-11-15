@@ -157,7 +157,8 @@ func (p *Peer) authenticate(ctx context.Context, connID, ctxt, purpose, matchCod
 
 // holds reports whether the challenge may still hold a place at the member
 // vault: pending, or cancelled without a withdraw reaching the outbox
-// (ch.Gone), or just expired, until its exp plus ClockSkew. One that left
+// (ch.Gone; also once a withdraw owed was queued late), or just expired,
+// until its exp plus ClockSkew. One that left
 // the outbox never tried (ch.Unsent) never reached the relay and holds
 // none.
 func (ch *challenge) holds(now time.Time) bool {
@@ -421,8 +422,13 @@ func (p *Peer) connAuthRotated(c *Connection, body []byte) {
 
 // withdrawOwed queues the withdraw a cancel couldn't, once the connection
 // can take it; past the challenge's exp it is no longer owed. The flag is
-// cleared only with the withdraw queued, and both are written in the same
-// flush, so a crash between them sends it at most once.
+// cleared only with the withdraw queued, both in the same flush, so it is
+// never queued twice. A store that splits a large flush into several
+// writes may store the cleared flag without the outbox entry (auth sorts
+// first); a crash between them loses the withdraw, which fails safe: the
+// record keeps its place counted until exp plus ClockSkew, and the
+// member's vault closes the ask at exp. An outbox already full for the
+// connection is not tried (sendEntry would log outbox_full each step).
 func (p *Peer) withdrawOwed(id string, ch *challenge, now time.Time) {
 	if !now.Before(ch.Exp) {
 		ch.WithdrawOwed = false
@@ -431,7 +437,8 @@ func (p *Peer) withdrawOwed(id string, ch *challenge, now time.Time) {
 		return
 	}
 	c := p.conns[ch.ConnID]
-	if c == nil || p.sendInnerExp(c, peerwire.TypeConnAuthWithdraw, peerwire.ConnAuthWithdrawBody(id), ch.Exp, now) == "" {
+	if c == nil || p.outboxFor(c.ID) >= MaxOutboxPerConn ||
+		p.sendInnerExp(c, peerwire.TypeConnAuthWithdraw, peerwire.ConnAuthWithdrawBody(id), ch.Exp, now) == "" {
 		return
 	}
 	ch.WithdrawOwed = false
