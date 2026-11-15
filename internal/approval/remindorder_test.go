@@ -36,6 +36,12 @@ func (s *failAfterStore) Apply(ctx context.Context, changes []peer.Change) error
 // live and named.
 func TestRemindSaveFailsAfterWithdraw(t *testing.T) {
 	for _, force := range []bool{true, false} {
+		t.Run(map[bool]string{true: "forced", false: "unforced"}[force], func(t *testing.T) { remindSaveFailsAfterWithdraw(t, force) })
+	}
+}
+
+func remindSaveFailsAfterWithdraw(t *testing.T, force bool) {
+	{
 		f := newFixture(t, 2, "c1", "c2")
 		f.m.LongChallenges = true
 		c := f.create(ActionContractTemplateChange, "Open", `{}`)

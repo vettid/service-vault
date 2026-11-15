@@ -270,8 +270,14 @@ type record struct {
 	Approvals []Approver        `json:"approvals,omitempty"`
 	Denials   []Denier          `json:"denials,omitempty"`
 	Pending   map[string]string `json:"pending,omitempty"` // admin connection id -> its outstanding challenge
-	Applied   *bool             `json:"applied,omitempty"`
-	Settled   time.Time         `json:"settled,omitzero"`
+	// Withdrawing: challenges replaced by a reminder whose withdraw has
+	// not been confirmed (a crash after the early save, or a failed
+	// CancelChallenge). Never counted (Answer counts Pending only);
+	// reevaluate withdraws them again until it succeeds, and the record
+	// stays in the open index until then, settled or not.
+	Withdrawing []Challenge `json:"withdrawing,omitempty"`
+	Applied     *bool       `json:"applied,omitempty"`
+	Settled     time.Time   `json:"settled,omitzero"`
 }
 
 func (r *record) answered(connID string) bool {
@@ -1078,10 +1084,32 @@ func (m *Manager) logAsk(ctx context.Context, connID, action string, exp time.Ti
 }
 
 func (m *Manager) cancel(ctx context.Context, chs []Challenge) {
+	m.cancelLeft(ctx, chs)
+}
+
+// cancelLeft withdraws chs and returns those whose withdraw failed. One
+// the peer no longer holds (answered, expired or withdrawn already) is
+// done.
+func (m *Manager) cancelLeft(ctx context.Context, chs []Challenge) []Challenge {
+	var left []Challenge
 	for _, c := range chs {
 		if _, err := m.Peer.CancelChallenge(ctx, c.RequestID); err != nil {
 			m.log().Warn("approval cancel", "request_id", c.RequestID, "err", errName(err))
+			left = append(left, c)
 		}
+	}
+	return left
+}
+
+// withdrawAgain withdraws r's Withdrawing challenges again and keeps
+// those that still fail.
+func (m *Manager) withdrawAgain(ctx context.Context, r *record) {
+	if len(r.Withdrawing) == 0 {
+		return
+	}
+	r.Withdrawing = m.cancelLeft(ctx, r.Withdrawing)
+	if len(r.Withdrawing) == 0 {
+		r.Withdrawing = nil
 	}
 }
 
@@ -1301,15 +1329,26 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 		// left out of remind_needed (a withdrawn challenge has no expiry
 		// event to clear it). An answer to one stops counting here, as it
 		// would at the save below (Answer counts the outstanding one only).
+		// They are named in Withdrawing in the same write, so one whose
+		// withdraw doesn't happen (a crash next, or a failed cancel) is
+		// withdrawn again by reevaluate, not left live at the member's
+		// vault, where an approval of it would show but never count.
+		r.Withdrawing = append(r.Withdrawing, to...)
 		pre := m.batch(now)
-		if err := pre.save(r); err != nil {
+		if err := errors.Join(pre.save(r), pre.audit(&AuditEntry{Type: AuditWithdrawn, ApprovalID: r.ID, Challenges: to})); err != nil {
 			return nil, err
 		}
 		if err := pre.apply(ctx); err != nil {
 			return nil, err
 		}
 	}
-	m.cancel(ctx, to)
+	left := m.cancelLeft(ctx, to)
+	r.Withdrawing = slices.DeleteFunc(r.Withdrawing, func(c Challenge) bool {
+		return slices.Contains(to, c) && !slices.Contains(left, c)
+	})
+	if len(r.Withdrawing) == 0 {
+		r.Withdrawing = nil
+	}
 	if r.Pending == nil {
 		r.Pending = map[string]string{}
 	}
@@ -1583,7 +1622,9 @@ func (m *Manager) settle(ctx context.Context, b *batch, r *record, status, reaso
 		out = append(out, Challenge{ConnectionID: c, RequestID: req})
 	}
 	r.Pending = nil
-	b.del(kindOpen, r.ID)
+	if len(r.Withdrawing) == 0 {
+		b.del(kindOpen, r.ID) // else reevaluate drops it once they are withdrawn
+	}
 	if status == StatusApproved && (r.Action == ActionAdminSetAdd || r.Action == ActionAdminSetRemove || r.Action == ActionAdminRepin) {
 		applied, err := m.applyAdminSet(ctx, b, r, set)
 		if err != nil {
@@ -1702,11 +1743,16 @@ func (m *Manager) reevaluate(ctx context.Context) error {
 		now := m.now()
 		b := m.batch(now)
 		var settled []Challenge
+		if r != nil {
+			m.withdrawAgain(ctx, r)
+		}
 		switch {
 		case r == nil:
 			b.del(kindOpen, o.ID)
 		case r.Status != StatusPending:
-			b.del(kindOpen, o.ID)
+			if len(r.Withdrawing) == 0 {
+				b.del(kindOpen, o.ID)
+			}
 		case !now.Before(r.Exp):
 			if settled, err = m.settle(ctx, b, r, StatusExpired, "", set); err != nil {
 				return err

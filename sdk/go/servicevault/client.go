@@ -399,7 +399,7 @@ type AuditChallenge struct {
 type AuditEntry struct {
 	ID           string           `json:"id"`
 	At           time.Time        `json:"at"`
-	Type         string           `json:"type"` // approval.requested | approval.response | approval.reminded | approval.approved | approval.denied | approval.expired | admin_set.changed | admin_set.bootstrap_armed
+	Type         string           `json:"type"` // approval.requested | approval.response | approval.reminded | approval.withdrawn | approval.approved | approval.denied | approval.expired | admin_set.changed | admin_set.bootstrap_armed
 	ApprovalID   string           `json:"approval_id,omitempty"`
 	Action       string           `json:"action,omitempty"`
 	Summary      string           `json:"summary,omitempty"`

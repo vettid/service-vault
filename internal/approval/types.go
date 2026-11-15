@@ -109,6 +109,10 @@ const (
 	AuditRequested = "approval.requested"
 	AuditResponse  = "approval.response"
 	AuditReminded  = "approval.reminded"
+	// AuditWithdrawn: a reminder replaced these challenges and is about to
+	// withdraw them (written before the withdraw, with the record naming
+	// them in Withdrawing until it succeeds).
+	AuditWithdrawn = "approval.withdrawn"
 	AuditApproved  = "approval.approved"
 	AuditDenied    = "approval.denied"
 	AuditExpired   = "approval.expired"
