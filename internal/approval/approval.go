@@ -29,7 +29,7 @@ import (
 // deployment).
 const (
 	kindApproval = "apv"          // an approval
-	kindOpen     = "apv_open"     // approval id -> "" while it is pending
+	kindOpen     = "apv_open"     // approval id -> "" while it is pending, or settled with withdraws owed
 	kindReq      = "apv_req"      // challenge request id -> approval id
 	kindSeen     = "apv_seen"     // peer event id -> "": an answer already handled
 	kindAdmins   = "admin_set"    // "admins" -> the admin set
@@ -270,11 +270,14 @@ type record struct {
 	Approvals []Approver        `json:"approvals,omitempty"`
 	Denials   []Denier          `json:"denials,omitempty"`
 	Pending   map[string]string `json:"pending,omitempty"` // admin connection id -> its outstanding challenge
-	// Withdrawing: challenges replaced by a reminder whose withdraw has
-	// not been confirmed (a crash after the early save, or a failed
-	// CancelChallenge). Never counted (Answer counts Pending only);
-	// reevaluate withdraws them again until it succeeds, and the record
-	// stays in the open index until then, settled or not.
+	// Withdrawing: challenges replaced by a reminder whose CancelChallenge
+	// hasn't succeeded: a crash after the early save, a peer not started,
+	// or a store error in the peer's flush. Never counted (Answer counts
+	// Pending only); reevaluate withdraws them again until CancelChallenge
+	// succeeds, and the record stays in the open index until then, settled
+	// or not. CancelChallenge succeeds without sending the member's vault a
+	// withdraw when the connection isn't active or its outbox is full
+	// (peer.CancelChallenge): such a challenge is not kept here.
 	Withdrawing []Challenge `json:"withdrawing,omitempty"`
 	Applied     *bool       `json:"applied,omitempty"`
 	Settled     time.Time   `json:"settled,omitzero"`

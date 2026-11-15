@@ -33,6 +33,10 @@ func (f *fixture) record(id string) *record {
 	return r
 }
 
+// errFlush is a store error in the peer's flush, one of the failures the
+// real CancelChallenge returns (with peer.ErrNotStarted).
+var errFlush = errors.New("peer flush: store down")
+
 func withdrawingIDs(r *record) []string {
 	var out []string
 	for _, c := range r.Withdrawing {
@@ -68,7 +72,7 @@ func TestWithdrawingRetriedOnTick(t *testing.T) {
 	f := newFixture(t, 2, "c1", "c2")
 	c, old := remindReplacing(t, f)
 	f.p.mu.Lock()
-	f.p.cancelFail = map[string]error{old.req: errors.New("outbox full")}
+	f.p.cancelFail = map[string]error{old.req: errFlush}
 	f.p.mu.Unlock()
 	if _, err := f.m.Remind(context.Background(), c.ID); err != nil {
 		t.Fatal(err)
@@ -109,7 +113,7 @@ func TestWithdrawingAfterCrash(t *testing.T) {
 	// The early save goes through and the withdraw fails, as if the
 	// process stopped between them; then the reminder's save fails.
 	f.p.mu.Lock()
-	f.p.cancelFail = map[string]error{old.req: errors.New("crashed")}
+	f.p.cancelFail = map[string]error{old.req: peer.ErrNotStarted}
 	f.p.mu.Unlock()
 	f.m.Store = &failAfterStore{Store: f.st, kind: kindApproval, ok: 1}
 	if _, err := f.m.Remind(context.Background(), c.ID); err == nil {
@@ -138,7 +142,7 @@ func TestWithdrawingOutlivesSettlement(t *testing.T) {
 	f := newFixture(t, 2, "c1", "c2")
 	c, old := remindReplacing(t, f)
 	f.p.mu.Lock()
-	f.p.cancelFail = map[string]error{old.req: errors.New("outbox full")}
+	f.p.cancelFail = map[string]error{old.req: errFlush}
 	f.p.mu.Unlock()
 	if _, err := f.m.Remind(context.Background(), c.ID); err != nil {
 		t.Fatal(err)
@@ -171,7 +175,7 @@ func TestWithdrawingOutlivesExpiry(t *testing.T) {
 	f := newFixture(t, 2, "c1", "c2")
 	c, old := remindReplacing(t, f)
 	f.p.mu.Lock()
-	f.p.cancelFail = map[string]error{old.req: errors.New("outbox full")}
+	f.p.cancelFail = map[string]error{old.req: errFlush}
 	f.p.mu.Unlock()
 	if _, err := f.m.Remind(context.Background(), c.ID); err != nil {
 		t.Fatal(err)
@@ -206,7 +210,7 @@ func TestWithdrawingSettledDoesNotWake(t *testing.T) {
 	f := newFixture(t, 2, "c1", "c2")
 	c, old := remindReplacing(t, f)
 	f.p.mu.Lock()
-	f.p.cancelFail = map[string]error{old.req: errors.New("not started")}
+	f.p.cancelFail = map[string]error{old.req: peer.ErrNotStarted}
 	f.p.mu.Unlock()
 	if _, err := f.m.Remind(context.Background(), c.ID); err != nil {
 		t.Fatal(err)
@@ -223,7 +227,7 @@ func TestWithdrawingSettledDoesNotWake(t *testing.T) {
 			t.Fatalf("pass %d woke Run", i)
 		}
 	}
-	if n := strings.Count(f.logs.String(), "approval settled"); n > 1 {
+	if n := strings.Count(f.logs.String(), "approval settled"); n != 0 {
 		t.Fatalf("settled logged %d times", n)
 	}
 	if f.openCount() != 1 {
@@ -239,7 +243,7 @@ func TestWithdrawingKeepsOnlyFailures(t *testing.T) {
 	o1, o2 := f.p.last("c1"), f.p.last("c2")
 	f.p.mu.Lock()
 	f.p.delivery = map[string]peer.Delivery{o1.req: peer.DeliveryUndelivered, o2.req: peer.DeliveryUndelivered}
-	f.p.cancelFail = map[string]error{o2.req: errors.New("outbox full")}
+	f.p.cancelFail = map[string]error{o2.req: errFlush}
 	f.p.mu.Unlock()
 	f.clk.Advance(RemindInterval)
 	if _, err := f.m.Remind(context.Background(), c.ID); err != nil {
@@ -247,5 +251,35 @@ func TestWithdrawingKeepsOnlyFailures(t *testing.T) {
 	}
 	if w := withdrawingIDs(f.record(c.ID)); !slices.Equal(w, []string{o2.req}) {
 		t.Fatalf("withdrawing %v, want only %s", w, o2.req)
+	}
+}
+
+// A later reminder keeps an earlier one's failed withdraw listed: X fails
+// at reminder 1; reminder 2 replaces Y, whose withdraw works; X stays.
+func TestWithdrawingKeptAcrossReminders(t *testing.T) {
+	f := newFixture(t, 3, "c1", "c2", "c3")
+	f.m.LongChallenges = true
+	c := f.create(ActionContractTemplateChange, "Open", `{}`)
+	x, y := f.p.last("c1"), f.p.last("c2")
+	f.p.mu.Lock()
+	f.p.delivery = map[string]peer.Delivery{x.req: peer.DeliveryUndelivered}
+	f.p.cancelFail = map[string]error{x.req: errFlush}
+	f.p.mu.Unlock()
+	f.clk.Advance(RemindInterval)
+	if _, err := f.m.Remind(context.Background(), c.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.p.mu.Lock()
+	f.p.delivery = map[string]peer.Delivery{y.req: peer.DeliveryUndelivered}
+	f.p.mu.Unlock()
+	f.clk.Advance(RemindInterval)
+	if _, err := f.m.Remind(context.Background(), c.ID); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(f.p.cancelled, y.req) {
+		t.Fatal("Y not withdrawn")
+	}
+	if w := withdrawingIDs(f.record(c.ID)); !slices.Equal(w, []string{x.req}) {
+		t.Fatalf("withdrawing %v, want only %s", w, x.req)
 	}
 }
