@@ -47,9 +47,9 @@ func (p *Peer) mintJTI(connID string, np *peerInfo, kind string, ttl time.Durati
 		return "", "", err
 	}
 	// relayclient backdates iat by 60 s (RELAY-PROTOCOL §5.2); exp = iat + ttl.
-	exp := now.UTC().Truncate(time.Second).Add(-peerwire.TokenBackdate).Add(ttl)
+	iat := now.UTC().Truncate(time.Second).Add(-peerwire.TokenBackdate)
 	p.seq++
-	p.issued[jti] = &IssuedToken{JTI: jti, Kind: kind, Sub: relayauth.EncodeKey(np.Relay.PK), ConnID: connID, Exp: exp, Seq: p.seq}
+	p.issued[jti] = &IssuedToken{JTI: jti, Kind: kind, Sub: relayauth.EncodeKey(np.Relay.PK), ConnID: connID, Exp: iat.Add(ttl), Iat: iat, Seq: p.seq}
 	p.markDirty(kindToken, jti)
 	return tok, jti, nil
 }

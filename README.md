@@ -283,11 +283,36 @@ destination.
   raises nothing, though its invitations stop working. If the relay's
   `max_token_lifetime` is now shorter, a member may keep its refused
   token where its exp is later than the new one's, until it refreshes.
-  The alarm also fires when nothing was lost, whenever a registration got
+  With a relay that doesn't report tombstones (before RELAY-PROTOCOL
+  0.12.0), the alarm also fires when nothing was lost, whenever a registration got
   no answer or a `5xx` and the next one a `200` (a timeout, a stop, a TLS
   failure at a start), since that attempt may have made the mailbox
   afresh unseen. Such a false alarm costs a 241-second delay (at a start,
-  before the service runs) and two messages to each member. A deleted mailbox may also
+  before the service runs) and two messages to each member.
+  A relay that reports tombstones (`limits.reports_tombstones`, 0.12.0
+  §6.1) says at registration whether, and from when, it refuses older
+  tokens (`tokens_not_before`, T), and the service goes by that instead:
+  - **T, and a token the service still relies on is older** (its iat is
+    before T, or unknown: a token from before this version): the
+    mailbox was lost. The alarm is raised with `tokens_not_before`, and
+    the wait is until T + 90 s (the clock skew RELAY-PROTOCOL §4.1
+    allows), not 241 s from the answer: after a deletion while the
+    service was down, usually none.
+  - **T, and every token relied on is at or after it:** nothing; the
+    relay may report the same T for good (DynamoDB relays do), and a T
+    already judged is not judged again. Either way no token is minted
+    before T + 90 s.
+  - **No T:** no token is refused because of a deletion, whatever the
+    last registration's fate: no alarm, no wait. Except a `201` for a
+    mailbox registered before: the relay holds no record of it (its
+    data was lost, or it was rebuilt). The members' tokens still work,
+    so nothing is re-minted and nothing waits, but the messages since
+    the last collect and the relay's denylist are gone: the alarm is
+    raised (`tokens_kept=true`), and every revocation still in force,
+    and the open token of every invitation no longer waiting, is sent
+    again.
+
+  A deleted mailbox may also
   mean the relay key is exposed: look at the relay's logs, and consider
   new keys and new invitations until the service can rotate its relay
   key.

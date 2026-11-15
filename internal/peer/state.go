@@ -411,6 +411,10 @@ type IssuedToken struct {
 	Sub    string    `json:"sub"`
 	ConnID string    `json:"conn_id,omitempty"`
 	Exp    time.Time `json:"exp"`
+	// Iat is the token's iat (whole seconds); zero on a record from before
+	// it was kept, which counts as older than any relay tombstone
+	// (mailbox.go).
+	Iat    time.Time `json:"iat,omitzero"`
 	Denied bool      `json:"denied,omitempty"`
 	// Carried: minted for a reconnect's hs.init or hs.resp, and that
 	// reconnect activated (markCarried). Prompt:

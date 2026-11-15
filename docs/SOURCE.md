@@ -14,7 +14,7 @@ tests passing (VAULT-SERVICE-INDEPENDENCE R5).
 
 | Module | Version in `go.mod` | Commit | Date (UTC) | What the service takes |
 |---|---|---|---|---|
-| `github.com/vettid/vettid-relay` | `v0.0.0-20261027144202-528df9b0bf76` | [`528df9b0bf76`](https://github.com/vettid/vettid-relay/commit/528df9b0bf76) | 2026-10-27 14:42:02 | `relayclient` and `relayauth`; newer than vettid-vault requires (token jtis from crypto/rand) |
+| `github.com/vettid/vettid-relay` | `v0.0.0-20261115002831-ff3b8249a875` | [`ff3b8249a875`](https://github.com/vettid/vettid-relay/commit/ff3b8249a875) | 2026-11-15 00:28:31 | `relayclient` and `relayauth`; newer than vettid-vault requires (token jtis from crypto/rand) |
 | `github.com/vettid/vettid-vault` | `v0.0.0-20261112163356-425a5aeaef1b` | [`425a5aeaef1b`](https://github.com/vettid/vettid-vault/commit/425a5aeaef1b) | 2026-11-12 16:33:56 | the wire packages `vms/*` (`credwire`, `envelope`, `handshake`, `invite`, `peerwire`, `strictjson`, `suite`, `votewire`; `manifest` in the `rootscheck` test only); the build fails if one moves or its exported API changes shape, and `deps_test.go` pins the shapes the service relies on |
 
 ## Other direct dependencies

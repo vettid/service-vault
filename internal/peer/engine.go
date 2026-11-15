@@ -143,7 +143,11 @@ type Peer struct {
 	rates      map[string]*rateWindow
 	// remintAt is a lost mailbox's re-mint owed (mailbox.go), zero when
 	// none; registerOwed, a registration while running that got no answer.
-	remintAt     time.Time
+	remintAt time.Time
+	// mintFloor is the tokens-not-before a relay that reports tombstones
+	// gave at the last registration (mailbox.go), zero when none: no
+	// token is minted before it plus TombstoneSkew.
+	mintFloor    time.Time
 	registerOwed bool
 	// outboxFull marks the connections whose contract update waits on a
 	// full outbox, its outbox_full already logged (sendContract).
@@ -251,7 +255,7 @@ func (p *Peer) Start(ctx context.Context) error {
 	// for it again. The lock is let go meanwhile; calls that would mint
 	// are refused (errMintWait, ErrNotStarted).
 	if p.mintWait(p.now()) {
-		d := p.remintAt.Sub(p.now())
+		d := p.mintWaitUntil().Sub(p.now())
 		p.mu.Unlock()
 		ok := p.cfg.Sleep(ctx, d)
 		p.mu.Lock()
