@@ -245,7 +245,7 @@ type Manager struct {
 	govWarned map[string]time.Time // admin -> when the migration last warned it waits for them
 	govDone   bool                 // migrateGov has seen every admin
 	// short: the admin set was below the threshold when last checked;
-	// shortLogged: when admins_short was last logged (checkShort).
+	// shortLogged: when admins_short was last logged (noteShort).
 	short       bool
 	shortLogged time.Time
 	shortAdmins int // the set's size when last found short
@@ -280,9 +280,10 @@ type record struct {
 	// or a store error in the peer's flush. Never counted (Answer counts
 	// Pending only); reevaluate withdraws them again until CancelChallenge
 	// succeeds, and the record stays in the open index until then, settled
-	// or not. CancelChallenge succeeds without sending the member's vault a
-	// withdraw when the connection isn't active or its outbox is full
-	// (peer.CancelChallenge): such a challenge is not kept here.
+	// or not. CancelChallenge also succeeds when it couldn't queue the
+	// member's withdraw (the connection not active, or its outbox full):
+	// the peer then owes it until the challenge's exp (WithdrawOwed), so
+	// such a challenge is not kept here.
 	Withdrawing []Challenge `json:"withdrawing,omitempty"`
 	Applied     *bool       `json:"applied,omitempty"`
 	Settled     time.Time   `json:"settled,omitzero"`
@@ -2216,10 +2217,11 @@ func (m *Manager) Tick(ctx context.Context) error {
 				if err := m.bootstrap(ctx, c); err != nil {
 					return err
 				}
-				if set, err = m.admins(ctx); err != nil {
-					return err
+				// The set it just filled, for the alarm: a failed read ends
+				// nothing (the next tick's check settles it).
+				if set, err := m.admins(ctx); err == nil {
+					m.noteShort(len(set))
 				}
-				m.noteShort(len(set))
 			}
 		}
 	}
