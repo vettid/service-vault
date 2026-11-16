@@ -478,12 +478,15 @@ destination.
     `suite.go` only adds a constant. The service doesn't run the pinned
     proposal validation on its own proposals: it refuses an eligible
     count above `vote.MaxEligible` in `vote.Proposal.Validate`, and an
-    empty, repeated or Abstain choice label in `ballot.checkInput`
-    (`internal/ballot/approved.go`). That label check compares
+    empty, repeated or Abstain choice label in `ballot.checkInput`'s
+    choice-label loop (`internal/ballot/approved.go`). That loop compares
     `strings.ToLower` keys, which group labels as the pinned `FoldLabel`
-    does only while `latin()` admits printable ASCII and Latin-1 letters
-    alone (their other case partners, such as the Kelvin sign or `Ÿ`,
-    are not admitted); widening `latin()` needs a real fold check there.
+    does only while `latin()` admits no more than printable ASCII and
+    the Latin-1 letters (it leaves out `ª`, `µ` and `º` too). Widening
+    `latin()` needs a real fold check there: beyond that set the two part
+    ways on long s (U+017F), format characters (the soft hyphen U+00AD
+    is in Latin-1), sequences NFC changes, and classes such as `µ`/`μ`
+    and `σ`/`ς`.
     The check compares code, not verdicts, and
     not the vault's call site (how a release passes the keys and the time
     to the verifier): a difference it lets through is one a person has

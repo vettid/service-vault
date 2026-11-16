@@ -289,7 +289,8 @@ func (v *verifierCheck) check(t *testing.T, r reporter, repo, channel string, n 
 // moveImport rewrites the import specs whose path is written exactly as
 // from (a quoted literal) to to, and nothing else in the file: the same
 // text in a comment or a string stays as it is, and so differs. A file
-// that doesn't parse is returned as it is (the caller reports it).
+// that doesn't parse is returned as it is: goImports parses it in the
+// same mode (ImportsOnly), so the caller reports it.
 func moveImport(name string, src []byte, from, to string) []byte {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, name, src, parser.ImportsOnly)
