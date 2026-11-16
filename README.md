@@ -475,7 +475,14 @@ destination.
     lenient than the service's (the service refuses first) and whose
     `votewire.go` and `body.go` lack things no check uses; staging 27,
     whose proposal validation is more lenient; and staging 30, whose
-    `suite.go` only adds a constant. It compares code, not verdicts, and
+    `suite.go` only adds a constant. The service doesn't run the pinned
+    proposal validation on its own proposals: it refuses an eligible
+    count above `vote.MaxEligible` in `vote.Proposal.Validate`, and an
+    empty, repeated or Abstain choice label in `ballot.checkInput`
+    (`internal/ballot/approved.go`). That label check compares
+    `strings.ToLower` keys, which equals the pinned `FoldLabel` only
+    while `latin()` admits printable ASCII and Latin-1 letters alone;
+    widening `latin()` needs a real fold check there. It compares code, not verdicts, and
     not the vault's call site (how a release passes the keys and the time
     to the verifier): a difference it lets through is one a person has
     judged. Comparing verdicts on shared bundle vectors is a possible

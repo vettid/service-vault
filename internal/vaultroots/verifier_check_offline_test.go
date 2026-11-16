@@ -236,6 +236,13 @@ func TestVerifierStrictjsonPlaces(t *testing.T) {
 		"vms/votewire/bundle.go":        strings.Replace(base["vms/votewire/bundle.go"], "vms/strictjson", "internal/strictjson", 1),
 	})
 	wantClean(t, runCheck(t, old, nil, nil))
+	// Only the import is undone: the same quoted path elsewhere in the file
+	// (here a string constant) is compared as it is.
+	const lit = "\nconst src = \"github.com/vettid/vettid-vault/vms/strictjson\"\n"
+	pinned := with(base, map[string]string{"vms/votewire/bundle.go": base["vms/votewire/bundle.go"] + lit})
+	oldLit := with(old, map[string]string{"vms/votewire/bundle.go": old["vms/votewire/bundle.go"] + strings.Replace(lit, "vms/strictjson", "internal/strictjson", 1)})
+	wantErr(t, runCheck(t, oldLit, pinned, nil), "vms/votewire/bundle.go differs")
+	wantClean(t, runCheck(t, with(old, map[string]string{"vms/votewire/bundle.go": old["vms/votewire/bundle.go"] + lit}), pinned, nil))
 }
 
 func TestVerifierBuildSettings(t *testing.T) {

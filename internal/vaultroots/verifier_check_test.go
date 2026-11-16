@@ -222,11 +222,11 @@ func (v *verifierCheck) check(t *testing.T, r reporter, repo, channel string, n 
 		return
 	}
 	moved := hasOld
-	norm := func(b []byte) []byte {
+	norm := func(name string, b []byte) []byte {
 		if !moved {
 			return b
 		}
-		return bytes.ReplaceAll(b, []byte(`"`+vvPrefix+strictjsonMove[0]+`"`), []byte(`"`+vvPrefix+strictjsonMove[1]+`"`))
+		return moveImport(name, b, `"`+vvPrefix+strictjsonMove[0]+`"`, `"`+vvPrefix+strictjsonMove[1]+`"`)
 	}
 	// An import, however written (a raw string, an escape), by the place
 	// the pinned module has.
@@ -274,7 +274,7 @@ func (v *verifierCheck) check(t *testing.T, r reporter, repo, channel string, n 
 			switch {
 			case !ok:
 				differ(pinned, "is at the tag but not in the pinned vettid-vault", raw, nil)
-			case !bytes.Equal(norm(raw), want):
+			case !bytes.Equal(norm(name, raw), want):
 				differ(pinned, "differs", raw, want)
 			}
 		}
@@ -284,6 +284,29 @@ func (v *verifierCheck) check(t *testing.T, r reporter, repo, channel string, n 
 			}
 		}
 	}
+}
+
+// moveImport rewrites the import specs whose path is written exactly as
+// from (a quoted literal) to to, and nothing else in the file: the same
+// text in a comment or a string stays as it is, and so differs. A file
+// that doesn't parse is returned as it is (the caller reports it).
+func moveImport(name string, src []byte, from, to string) []byte {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, name, src, parser.ImportsOnly)
+	if err != nil {
+		return src
+	}
+	var out []byte
+	last := 0
+	for _, imp := range f.Imports {
+		if imp.Path.Value != from {
+			continue
+		}
+		at := fset.Position(imp.Path.Pos()).Offset
+		out = append(append(out, src[last:at]...), to...)
+		last = at + len(from)
+	}
+	return append(out, src[last:]...)
 }
 
 // goImports lists a Go file's import paths, from its syntax.
