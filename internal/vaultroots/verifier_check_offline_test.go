@@ -236,6 +236,87 @@ func TestVerifierStrictjsonPlaces(t *testing.T) {
 		"vms/votewire/bundle.go":        strings.Replace(base["vms/votewire/bundle.go"], "vms/strictjson", "internal/strictjson", 1),
 	})
 	wantClean(t, runCheck(t, old, nil, nil))
+	// Only the import is undone: the same quoted path elsewhere in the file
+	// (here a string constant) is compared as it is.
+	const lit = "\nconst src = \"github.com/vettid/vettid-vault/vms/strictjson\"\n"
+	pinned := with(base, map[string]string{"vms/votewire/bundle.go": base["vms/votewire/bundle.go"] + lit})
+	oldLit := with(old, map[string]string{"vms/votewire/bundle.go": old["vms/votewire/bundle.go"] + strings.Replace(lit, "vms/strictjson", "internal/strictjson", 1)})
+	wantErr(t, runCheck(t, oldLit, pinned, nil), "vms/votewire/bundle.go differs")
+	wantClean(t, runCheck(t, with(old, map[string]string{"vms/votewire/bundle.go": old["vms/votewire/bundle.go"] + lit}), pinned, nil))
+	// A grouped, named import is undone too.
+	const grouped = "package votewire\n\nimport (\n\t\"errors\"\n\tsj \"github.com/vettid/vettid-vault/vms/strictjson\"\n)\n\nvar errX = errors.New(\"x\")\n\nfunc VerifyBundle(b []byte) error { return sj.Check(b) }\n"
+	pinnedGrouped := with(base, map[string]string{"vms/votewire/bundle.go": grouped})
+	wantClean(t, runCheck(t, with(old, map[string]string{"vms/votewire/bundle.go": strings.Replace(grouped, "vms/strictjson", "internal/strictjson", 1)}), pinnedGrouped, nil))
+}
+
+// Each pinned bundle.go below is compared with the same file whose every
+// "vms/strictjson" reads "internal/strictjson", at a tag with strictjson
+// in its old place: it compares equal only if each one is an import path.
+func TestVerifierMoveImportOnlyImports(t *testing.T) {
+	base := baseTree()
+	const body = `
+func VerifyBundle(b []byte) error { return strictjson.Check(b) }
+`
+	for name, c := range map[string]struct {
+		pinned string
+		want   []string // nil: compares equal
+	}{
+		"a comment above the import": {`package votewire
+
+// "github.com/vettid/vettid-vault/vms/strictjson"
+import "github.com/vettid/vettid-vault/vms/strictjson"
+` + body, []string{"bundle.go differs"}},
+		"a comment inside the import block": {`package votewire
+
+import (
+	// "github.com/vettid/vettid-vault/vms/strictjson"
+	"github.com/vettid/vettid-vault/vms/strictjson"
+)
+` + body, []string{"bundle.go differs"}},
+		"a comment after the imports": {`package votewire
+
+import "github.com/vettid/vettid-vault/vms/strictjson"
+
+// "github.com/vettid/vettid-vault/vms/strictjson"
+` + body, []string{"bundle.go differs"}},
+		"two import declarations": {`package votewire
+
+import "errors"
+import "github.com/vettid/vettid-vault/vms/strictjson"
+
+var errX = errors.New("x")
+` + body, nil},
+		"the same path twice": {`package votewire
+
+import (
+	"github.com/vettid/vettid-vault/vms/strictjson"
+	sj "github.com/vettid/vettid-vault/vms/strictjson"
+)
+
+var _ = sj.Check
+` + body, nil},
+		"a file that doesn't parse": {`package votewire
+
+import "github.com/vettid/vettid-vault/vms/strictjson"
+import (
+`, []string{"vms/votewire/bundle.go doesn't parse", "bundle.go differs"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tag := with(base, map[string]string{
+				"vms/strictjson/strict.go":      "",
+				"internal/strictjson/strict.go": base["vms/strictjson/strict.go"],
+				"vms/votewire/bundle.go":        strings.ReplaceAll(c.pinned, "vms/strictjson", "internal/strictjson"),
+			})
+			r := runCheck(t, tag, with(base, map[string]string{"vms/votewire/bundle.go": c.pinned}), nil)
+			if c.want == nil {
+				wantClean(t, r)
+				return
+			}
+			for _, w := range c.want {
+				wantErr(t, r, w)
+			}
+		})
+	}
 }
 
 func TestVerifierBuildSettings(t *testing.T) {
