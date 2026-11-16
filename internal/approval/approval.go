@@ -839,6 +839,19 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 		return nil, summaryError(err)
 	}
 	req.Summary = summary
+	// A member's vault silently drops a challenge whose document it would
+	// not accept (VAULT-MESSAGING §10.4 "Approval documents"), and the
+	// document is to go with every challenge (§15 item 53): refuse such
+	// an approval now, naming where, rather than ask for answers that
+	// would never come. When the challenges carry it, check it again where
+	// they are sent, for approvals made before this check.
+	if _, err := servicevault.ApprovalDocument(req.Action, req.Summary, payload); err != nil {
+		var de *servicevault.DocumentError
+		if errors.As(err, &de) {
+			return nil, &Error{Code: CodeInvalidPayload, Reason: de.Reason, Field: de.Field}
+		}
+		return nil, errCode(CodeInvalidPayload)
+	}
 	hash, err := servicevault.ActionHash(req.Action, req.Summary, payload)
 	if err != nil {
 		return nil, errCode(CodeInvalidPayload)

@@ -129,7 +129,7 @@ const (
 	// Admin approvals.
 	CodeInvalidAction     = "invalid_action"     // not one of the Action constants (400)
 	CodeInvalidSummary    = "invalid_summary"    // empty, over 120 bytes, or control or bidi characters (400)
-	CodeInvalidPayload    = "invalid_payload"    // not a JSON object of at most 16 KiB canonical, or a bad admin_set payload (400)
+	CodeInvalidPayload    = "invalid_payload"    // not a JSON object of at most 16 KiB canonical, a bad admin_set payload, or (with Reason and Field) a document a member's vault would drop (400)
 	CodeInvalidConnection = "invalid_connection" // admin_set.*: not an active connection, not an admin, or already one (422)
 	CodeUnreachable       = "unreachable"        // the threshold is more than the admins there are, or would be (422)
 	CodeLastAdmin         = "last_admin"         // admin_set.remove of the only admin (422)
@@ -152,6 +152,11 @@ type APIError struct {
 	// ProposalID is the body's "proposal_id": a proposal kept but not
 	// published (503 not_published), for PublishProposal to retry.
 	ProposalID string
+	// Reason is the body's "reason". For invalid_payload it is a
+	// DocumentError reason (DocumentDepth, DocumentNumber, DocumentSize)
+	// and Field, the body's "field", says where in the document
+	// (DocumentError.Field).
+	Reason, Field string
 }
 
 func (e *APIError) Error() string {
@@ -698,9 +703,11 @@ func (c *Client) once(ctx context.Context, method, path string, body []byte, aut
 		var e struct {
 			Error      string `json:"error"`
 			ProposalID string `json:"proposal_id"`
+			Reason     string `json:"reason"`
+			Field      string `json:"field"`
 		}
 		if json.Unmarshal(b, &e) == nil {
-			ae.Code, ae.ProposalID = e.Error, e.ProposalID
+			ae.Code, ae.ProposalID, ae.Reason, ae.Field = e.Error, e.ProposalID, e.Reason, e.Field
 		}
 		return resp.StatusCode >= 500, ae
 	}

@@ -33,6 +33,9 @@ func (f *fakeApprovals) Create(_ context.Context, req approval.Request) (*approv
 	if req.Summary == "burst" {
 		return nil, &approval.Error{Code: approval.CodeRateLimited}
 	}
+	if req.Summary == "number" {
+		return nil, &approval.Error{Code: approval.CodeInvalidPayload, Reason: "number", Field: "/payload/a"}
+	}
 	return &approval.Created{ID: "a1", ActionHash: strings.Repeat("ab", 32), Status: approval.StatusPending,
 		ExpiresAt: time.Unix(1_800_086_400, 0).UTC()}, nil
 }
@@ -113,8 +116,13 @@ func TestApprovalRoutes(t *testing.T) {
 			t.Errorf("%.60s: %d %v", body, rec.Code, m)
 		}
 	}
-	if _, m := do(t, h, "POST", "/v1/approvals", apiKey, `{"action":"contract_template.change","summary":"unreachable","payload":{}}`); m["error"] != "unreachable" {
+	if _, m := do(t, h, "POST", "/v1/approvals", apiKey, `{"action":"contract_template.change","summary":"unreachable","payload":{}}`); m["error"] != "unreachable" || len(m) != 1 {
 		t.Fatalf("%v", m)
+	}
+	// A document a member's vault would drop: why and where.
+	if rec, m := do(t, h, "POST", "/v1/approvals", apiKey, `{"action":"contract_template.change","summary":"number","payload":{"a":-1}}`); rec.Code != 400 ||
+		m["error"] != "invalid_payload" || m["reason"] != "number" || m["field"] != "/payload/a" || len(m) != 3 {
+		t.Fatalf("%d %v", rec.Code, m)
 	}
 	rec, m = do(t, h, "GET", "/v1/approvals/a1", apiKey, "")
 	ap, _ := m["approvals"].([]any)
