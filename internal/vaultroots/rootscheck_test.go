@@ -73,7 +73,7 @@ func TestCopiesMatchReleases(t *testing.T) {
 	if repo == "" {
 		t.Fatal("VAULTROOTS_VAULT_REPO is not set (a vettid-vault clone with its release tags)")
 	}
-	v := &verifierCheck{pkgs: pinnedVerifier(t), toolchain: serviceToolchain(t), known: readKnownDifferences(t), used: map[knownDifference]bool{}}
+	v := &verifierCheck{pkgs: pinnedVerifier(t), build: serviceBuild(t), known: readKnownDifferences(t), used: map[knownDifference]bool{}}
 	all := true
 	for _, channel := range Instances {
 		all = t.Run(channel, func(t *testing.T) { checkChannel(t, repo, channel, v) }) && all
@@ -100,19 +100,31 @@ func readKnownDifferences(t *testing.T) []knownDifference {
 	return out
 }
 
-// serviceToolchain is the service's go.mod toolchain line.
-func serviceToolchain(t *testing.T) string {
+// serviceBuild is the service's go.mod build settings (buildLines).
+func serviceBuild(t *testing.T) string {
 	t.Helper()
 	b, err := os.ReadFile("../../go.mod")
 	if err != nil {
 		t.Fatal(err)
 	}
-	tc := toolchainLine(b)
-	if tc == "" {
+	build := buildLines(b)
+	if !strings.Contains(build, "toolchain ") {
 		t.Fatal("../../go.mod has no toolchain line")
 	}
-	return tc
+	return build
 }
+
+// pinnedImportOK is excludedReach's import check for the pinned module: a
+// vettid-vault package votewire imports is compared (go list -deps), so
+// any of them is fine; it is votewire's dependencies that are compared.
+func pinnedImportOK(imp string) bool {
+	rest, vv := strings.CutPrefix(imp, vvPrefix)
+	return !vv || pinnedDeps[rest]
+}
+
+// pinnedDeps are the module-relative directories of the vettid-vault
+// packages votewire imports, as pinnedVerifier found them.
+var pinnedDeps = map[string]bool{}
 
 // pinnedVerifier reads the compared files from the vettid-vault version
 // go.mod pins: votewire's but votewireNotVerifier, and every non-test Go
@@ -134,6 +146,7 @@ func pinnedVerifier(t *testing.T) []verifierPkg {
 			t.Fatalf("package %s is not under the module directory %s", ip, modDir)
 		}
 		rel = filepath.ToSlash(rel)
+		pinnedDeps[rel] = true
 		p := verifierPkg{rel: rel, files: map[string][]byte{}}
 		ents, err := os.ReadDir(dir)
 		if err != nil {
@@ -154,7 +167,7 @@ func pinnedVerifier(t *testing.T) []verifierPkg {
 			}
 		}
 		if rel == "vms/votewire" {
-			for _, problem := range excludedReach(sources) {
+			for _, problem := range excludedReach(sources, pinnedImportOK) {
 				t.Errorf("the pinned vettid-vault: vms/votewire: %s: the files not compared reach the verifier", problem)
 			}
 		}

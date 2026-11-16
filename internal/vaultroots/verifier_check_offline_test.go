@@ -11,7 +11,7 @@ import (
 
 // The verifier comparison against a fixture vettid-vault repo, offline.
 
-const fixtureToolchain = "toolchain go1.26.10"
+const fixtureToolchain = "toolchain go1.26.10" // the base tree's
 
 // baseTree is a release's tree as the pinned module has it.
 func baseTree() map[string]string {
@@ -118,7 +118,7 @@ func runCheck(t *testing.T, tag, pinned map[string]string, known []knownDifferen
 		pinned = baseTree()
 	}
 	repo := fixtureRepo(t, map[uint64]map[string]string{1: tag})
-	v := &verifierCheck{pkgs: pinnedOf(pinned), toolchain: fixtureToolchain, known: known, used: map[knownDifference]bool{}}
+	v := &verifierCheck{pkgs: pinnedOf(pinned), build: buildLines([]byte(pinned["go.mod"])), known: known, used: map[knownDifference]bool{}}
 	r := &recorder{}
 	v.check(t, r, repo, "staging", 1)
 	v.stale(r)
@@ -206,13 +206,26 @@ func TestVerifierStrictjsonPlaces(t *testing.T) {
 	wantClean(t, runCheck(t, old, nil, nil))
 }
 
-func TestVerifierToolchain(t *testing.T) {
+func TestVerifierBuildSettings(t *testing.T) {
 	base := baseTree()
+	pinnedBuild := "go 1.26.0\n" + fixtureToolchain
+	if got := buildLines([]byte(base["go.mod"])); got != pinnedBuild {
+		t.Fatalf("buildLines = %q", got)
+	}
 	other := with(base, map[string]string{"go.mod": strings.Replace(base["go.mod"], "go1.26.10", "go1.26.9", 1)})
-	wantErr(t, runCheck(t, other, nil, nil), "release staging/1", "go.mod toolchain is \"toolchain go1.26.9\"")
+	wantErr(t, runCheck(t, other, nil, nil), "release staging/1", "go.mod go/toolchain/godebug are \"go 1.26.0\\ntoolchain go1.26.9\"")
 	none := with(base, map[string]string{"go.mod": strings.Replace(base["go.mod"], fixtureToolchain+"\n", "", 1)})
-	wantErr(t, runCheck(t, none, nil, nil), "go.mod toolchain is \"\"")
-	k := knownDifference{Release: "staging/1", Path: toolchainPath, SHA256: shaOf([]byte("toolchain go1.26.9")), PinnedSHA256: shaOf([]byte(fixtureToolchain)), Reason: "reviewed"}
+	wantErr(t, runCheck(t, none, nil, nil), "go.mod go/toolchain/godebug are \"go 1.26.0\"")
+	goLine := with(base, map[string]string{"go.mod": strings.Replace(base["go.mod"], "go 1.26.0", "go 1.25.0", 1)})
+	wantErr(t, runCheck(t, goLine, nil, nil), "go.mod go/toolchain/godebug")
+	godebug := with(base, map[string]string{"go.mod": base["go.mod"] + "\ngodebug x509negativeserial=1\n"})
+	wantErr(t, runCheck(t, godebug, nil, nil), "godebug x509negativeserial=1")
+	block := with(base, map[string]string{"go.mod": base["go.mod"] + "\ngodebug (\n\tasn1allowinvalid=1 // a comment\n)\n"})
+	wantErr(t, runCheck(t, block, nil, nil), "godebug asn1allowinvalid=1")
+	// Comments and spacing alone change nothing.
+	spaced := with(base, map[string]string{"go.mod": strings.Replace(base["go.mod"], fixtureToolchain, "toolchain   go1.26.10 // pinned", 1)})
+	wantClean(t, runCheck(t, spaced, nil, nil))
+	k := knownDifference{Release: "staging/1", Path: buildPath, SHA256: shaOf([]byte("go 1.26.0\ntoolchain go1.26.9")), PinnedSHA256: shaOf([]byte(pinnedBuild)), Reason: "reviewed"}
 	wantClean(t, runCheck(t, other, nil, []knownDifference{k}))
 }
 
@@ -225,10 +238,13 @@ func TestVerifierHpkederandOnlyFromRandVectors(t *testing.T) {
 	wantErr(t, r, "vms/votewire/bundle.go imports github.com/vettid/vettid-vault/internal/other")
 }
 
-// A file name with a space is read whole (ls-tree -z).
+// File names git would quote are read whole (ls-tree -z): a space, a
+// non-ASCII letter, a quote.
 func TestVerifierFileNameWithSpace(t *testing.T) {
-	r := runCheck(t, with(baseTree(), map[string]string{"vms/votewire/odd name.go": "package votewire\n"}), nil, nil)
-	wantErr(t, r, "vms/votewire/odd name.go is at the tag but not in the pinned vettid-vault")
+	for _, name := range []string{"odd name.go", "\u00e9t\u00e9.go", "a\"b.go"} {
+		r := runCheck(t, with(baseTree(), map[string]string{"vms/votewire/" + name: "package votewire\n"}), nil, nil)
+		wantErr(t, r, "vms/votewire/"+name+" is at the tag but not in the pinned vettid-vault")
+	}
 }
 
 func TestVerifierExcludedReachAtTag(t *testing.T) {
@@ -255,7 +271,11 @@ func TestExcludedReach(t *testing.T) {
 		}
 		return out
 	}
-	if p := excludedReach(base); len(p) != 0 {
+	vvOK := func(imp string) bool {
+		rest, vv := strings.CutPrefix(imp, vvPrefix)
+		return !vv || rest == "vms/strictjson" || rest == "vms/suite"
+	}
+	if p := excludedReach(base, vvOK); len(p) != 0 {
 		t.Fatalf("the base: %q", p)
 	}
 	for name, c := range map[string]struct {
@@ -268,10 +288,17 @@ func TestExcludedReach(t *testing.T) {
 		"a constant":                  {map[string]string{"bundle.go": "package votewire\n\nfunc VerifyBundle(b []byte) error { _ = jcsMax; return nil }\n"}, "bundle.go uses jcsMax, declared in jcs.go"},
 		"an init":                     {map[string]string{"body.go": "package votewire\n\ntype Body struct{ X int }\n\nfunc init() {}\n"}, "body.go has an init"},
 		"a call in a variable":        {map[string]string{"jcs.go": "package votewire\n\nconst jcsMax = 8\n\nvar _ = setUp()\n\nfunc setUp() int { return 0 }\n"}, "jcs.go: the package-level variable _'s initializer calls something"},
-		"a method on a compared type": {map[string]string{"documents.go": "package votewire\n\nvar docSchema = map[string]any{\"doc\": nil}\n\nfunc docHelper() int { return len(docSchema) }\n\nfunc (i *Info) Check() error { return nil }\n"}, "documents.go declares the method Info.Check on a compared file's type"},
-		"a parse error":               {map[string]string{"body.go": "package votewire\n\nfunc {\n"}, "body.go doesn't parse"},
+		"a method on a compared type": {map[string]string{"documents.go": "package votewire\n\nvar docSchema = map[string]any{\"doc\": nil}\n\nfunc docHelper() int { return len(docSchema) }\n\nfunc (i *Info) Check() error { return nil }\n"}, "documents.go declares the method Info.Check on a type the files not compared don't define"},
+		"a method on an alias of a compared type": {map[string]string{"body.go": "package votewire\n\ntype Body struct{ X int }\n\ntype info = Info\n\nfunc (i *info) UnmarshalJSON(b []byte) error { return nil }\n"}, "body.go declares the method info.UnmarshalJSON on a type the files not compared don't define"},
+		"cgo":                                {map[string]string{"jcs.go": "package votewire\n\nimport \"C\"\n\nconst jcsMax = 8\n"}, "jcs.go imports C"},
+		"unsafe":                             {map[string]string{"jcs.go": "package votewire\n\nimport \"unsafe\"\n\nconst jcsMax = 8\n\nvar _ = unsafe.Sizeof(0)\n"}, "jcs.go imports unsafe"},
+		"a blank import":                     {map[string]string{"jcs.go": "package votewire\n\nimport _ \"embed\"\n\nconst jcsMax = 8\n"}, "jcs.go has a _ import of embed"},
+		"a dot import":                       {map[string]string{"jcs.go": "package votewire\n\nimport . \"strings\"\n\nconst jcsMax = 8\n\nvar _ = ToUpper\n"}, "jcs.go has a . import of strings"},
+		"an uncompared vettid-vault package": {map[string]string{"body.go": "package votewire\n\nimport \"github.com/vettid/vettid-vault/internal/evil\"\n\ntype Body struct{ X int }\n\nvar _ = evil.X\n"}, "body.go imports github.com/vettid/vettid-vault/internal/evil, which isn't compared"},
+		"a key":                              {map[string]string{"bundle.go": "package votewire\n\nvar limits = map[int]bool{jcsMax: true}\n\nfunc VerifyBundle(b []byte) error { return nil }\n"}, "bundle.go uses jcsMax, declared in jcs.go, as a key"},
+		"a parse error":                      {map[string]string{"body.go": "package votewire\n\nfunc {\n"}, "body.go doesn't parse"},
 	} {
-		if p := excludedReach(set(c.changes)); !strings.Contains(strings.Join(p, "\n"), c.want) {
+		if p := excludedReach(set(c.changes), vvOK); !strings.Contains(strings.Join(p, "\n"), c.want) {
 			t.Errorf("%s: %q, want %q", name, p, c.want)
 		}
 	}
@@ -289,7 +316,7 @@ func VerifyBundle(b []byte) error {
 	return nil
 }
 `})
-	if p := excludedReach(alike); len(p) != 0 {
+	if p := excludedReach(alike, vvOK); len(p) != 0 {
 		t.Fatalf("look-alikes reported: %q", p)
 	}
 }
@@ -319,4 +346,37 @@ func TestKnownDifferencesFile(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
+}
+
+// What the files not compared may do: import the standard library, a
+// compared vettid-vault package or another module, and declare methods on
+// their own types.
+func TestExcludedReachAllowed(t *testing.T) {
+	src := map[string][]byte{
+		"bundle.go":    []byte("package votewire\n\nfunc VerifyBundle(b []byte) error { return nil }\n"),
+		"body.go":      []byte("package votewire\n\nimport (\n\t\"encoding/json\"\n\n\t\"github.com/vettid/vettid-vault/vms/strictjson\"\n)\n\ntype Body struct{ X int }\n\nfunc (b *Body) UnmarshalJSON(p []byte) error { _ = strictjson.Check; return json.Unmarshal(p, new(int)) }\n"),
+		"documents.go": []byte("package votewire\n\nimport \"golang.org/x/text/unicode/norm\"\n\nvar _ = norm.NFC\n"),
+	}
+	ok := func(imp string) bool {
+		rest, vv := strings.CutPrefix(imp, vvPrefix)
+		return !vv || rest == "vms/strictjson"
+	}
+	if p := excludedReach(src, ok); len(p) != 0 {
+		t.Fatalf("reported: %q", p)
+	}
+}
+
+// A release's files not compared import a vettid-vault package by its old
+// strictjson place: compared, after the move is undone.
+func TestVerifierExcludedImportOldStrictjson(t *testing.T) {
+	base := baseTree()
+	old := with(base, map[string]string{
+		"vms/strictjson/strict.go":      "",
+		"internal/strictjson/strict.go": base["vms/strictjson/strict.go"],
+		"vms/votewire/bundle.go":        strings.Replace(base["vms/votewire/bundle.go"], "vms/strictjson", "internal/strictjson", 1),
+		"vms/votewire/body.go":          "package votewire\n\nimport \"github.com/vettid/vettid-vault/internal/strictjson\"\n\ntype Body struct{ X int }\n\nvar _ = strictjson.Check\n",
+	})
+	wantClean(t, runCheck(t, old, nil, nil))
+	evil := with(base, map[string]string{"vms/votewire/body.go": "package votewire\n\nimport \"github.com/vettid/vettid-vault/internal/evil\"\n\ntype Body struct{ X int }\n\nvar _ = evil.X\n"})
+	wantErr(t, runCheck(t, evil, nil, nil), "release staging/1: vms/votewire: body.go imports github.com/vettid/vettid-vault/internal/evil, which isn't compared")
 }

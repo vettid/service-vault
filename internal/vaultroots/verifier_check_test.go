@@ -19,6 +19,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -28,9 +29,11 @@ import (
 // documents, JCS): every other file is compared, a new one included.
 // The excluded files aren't compared, so nothing in them may reach the
 // verifier: excludedReach fails on a compared file using one of their
-// top-level names, a method of theirs on a compared file's type, an init,
-// or a package-level variable whose initializer calls something. Their
-// own imports aren't checked (only their names reach the compared files).
+// top-level names, a method of theirs on any type they don't define
+// themselves (an alias of a compared type included), an init, a
+// package-level variable whose initializer calls something, or an import
+// that could run code of its own (cgo, unsafe, a blank or dot import, a
+// vettid-vault package that isn't compared).
 var votewireNotVerifier = []string{"body.go", "documents.go", "jcs.go"}
 
 // notCompared are vettid-vault packages one compared file may import while
@@ -64,14 +67,15 @@ type knownDifference struct {
 	Reason       string `json:"reason"`
 }
 
-// toolchainPath is the knownDifference path of the go.mod toolchain line.
-const toolchainPath = "go.mod toolchain"
+// buildPath is the knownDifference path of go.mod's build settings (its
+// go, toolchain and godebug lines).
+const buildPath = "go.mod go/toolchain/godebug"
 
 type verifierCheck struct {
-	pkgs      []verifierPkg
-	toolchain string // the service's go.mod toolchain line ("" if none)
-	known     []knownDifference
-	used      map[knownDifference]bool
+	pkgs  []verifierPkg
+	build string // the service's go.mod build settings (buildLines)
+	known []knownDifference
+	used  map[knownDifference]bool
 }
 
 // reporter is the part of *testing.T the comparison reports through (a
@@ -124,14 +128,30 @@ func compared(rel, name string) bool {
 // vvImport finds a file's imports of vettid-vault packages.
 var vvImport = regexp.MustCompile(`"` + regexp.QuoteMeta(vvPrefix) + `([^"]+)"`)
 
-// toolchainLine is go.mod's toolchain line, "" if it has none.
-func toolchainLine(gomod []byte) string {
+// buildLines is what of go.mod decides how the module is built: its go
+// and toolchain lines and its godebug settings (which set GODEBUG
+// defaults, crypto/x509's and encoding/asn1's among them), one per line
+// in order, comments and spacing dropped.
+func buildLines(gomod []byte) string {
+	var out []string
+	inGodebug := false
 	for _, l := range strings.Split(string(gomod), "\n") {
-		if l = strings.TrimSpace(l); strings.HasPrefix(l, "toolchain ") {
-			return l
+		if i := strings.Index(l, "//"); i >= 0 {
+			l = l[:i]
+		}
+		l = strings.Join(strings.Fields(l), " ")
+		switch {
+		case inGodebug && l == ")":
+			inGodebug = false
+		case inGodebug && l != "":
+			out = append(out, "godebug "+l)
+		case l == "godebug (":
+			inGodebug = true
+		case strings.HasPrefix(l, "go "), strings.HasPrefix(l, "toolchain "), strings.HasPrefix(l, "godebug "):
+			out = append(out, l)
 		}
 	}
-	return ""
+	return strings.Join(out, "\n")
 }
 
 // stale reports the known differences no release matched (call it only
@@ -162,9 +182,10 @@ func (v *verifierCheck) check(t *testing.T, r reporter, repo, channel string, n 
 		}
 		r.Errorf("release %s: %s %s: the release's bundle verifier differs from the service's (sha256 at the tag %s, pinned %s; if it is safe, list it in testdata/verifier_differences.json with the reason)", rel, p, why, h, ph)
 	}
-	// The toolchain the release builds with, against the service's.
-	if tc := toolchainLine(git(t, repo, "show", tag+":go.mod")); tc != v.toolchain {
-		differ(toolchainPath, fmt.Sprintf("is %q, the service's %q", tc, v.toolchain), []byte(tc), []byte(v.toolchain))
+	// How the release is built (go, toolchain, godebug), against the
+	// service.
+	if b := buildLines(git(t, repo, "show", tag+":go.mod")); b != v.build {
+		differ(buildPath, fmt.Sprintf("are %q, the service's %q", b, v.build), []byte(b), []byte(v.build))
 	}
 	// strictjson's old place only at a tag that doesn't have the new one.
 	hasOld, hasNew := treeHas(t, repo, tag, strictjsonMove[0]), treeHas(t, repo, tag, strictjsonMove[1])
@@ -204,7 +225,14 @@ func (v *verifierCheck) check(t *testing.T, r reporter, repo, channel string, n 
 			}
 		}
 		if p.rel == "vms/votewire" {
-			for _, problem := range excludedReach(sources) {
+			importOK := func(imp string) bool {
+				if moved && imp == vvPrefix+strictjsonMove[0] {
+					imp = vvPrefix + strictjsonMove[1]
+				}
+				rest, vv := strings.CutPrefix(imp, vvPrefix)
+				return !vv || known[rest]
+			}
+			for _, problem := range excludedReach(sources, importOK) {
 				r.Errorf("release %s: vms/votewire: %s: the files not compared reach the verifier", rel, problem)
 			}
 		}
@@ -235,12 +263,21 @@ func (v *verifierCheck) check(t *testing.T, r reporter, repo, channel string, n 
 
 // excludedReach lists how votewire's files that aren't compared
 // (votewireNotVerifier) could reach the verifier, given every non-test Go
-// file of the package (name to source): a compared file using one of
-// their top-level names (an identifier its own scopes don't declare), a
-// method of theirs on a type a compared file declares, an init, or a
-// package-level variable whose initializer calls something. A file that
-// doesn't parse is a problem too.
-func excludedReach(sources map[string][]byte) []string {
+// file of the package (name to source):
+//   - a compared file using one of their top-level names: an identifier
+//     its own scopes don't declare, or a composite literal key that names
+//     one and no struct field of the package;
+//   - a method of theirs on a type they don't define themselves: a
+//     compared file's type, or an alias (an alias of a compared type would
+//     give it the method, an UnmarshalJSON say);
+//   - an init, or a package-level variable whose initializer calls
+//     something;
+//   - an import that could run code of its own: cgo, unsafe, a blank or
+//     dot import, or one importOK refuses (a vettid-vault package that
+//     isn't compared).
+//
+// A file that doesn't parse is a problem too.
+func excludedReach(sources map[string][]byte, importOK func(string) bool) []string {
 	fset := token.NewFileSet()
 	var problems []string
 	files := map[string]*ast.File{}
@@ -259,16 +296,44 @@ func excludedReach(sources map[string][]byte) []string {
 	}
 	excluded := func(n string) bool { return slices.Contains(votewireNotVerifier, n) }
 	declared := map[string]string{} // an excluded file's top-level name -> the file
-	types := map[string]bool{}      // types the compared files declare
+	defined := map[string]bool{}    // the types the excluded files define (not aliases)
+	fields := map[string]bool{}     // every struct field name of the package
 	for _, n := range names {
 		f := files[n]
 		if f == nil {
 			continue
 		}
+		ast.Inspect(f, func(x ast.Node) bool {
+			if st, ok := x.(*ast.StructType); ok {
+				for _, fl := range st.Fields.List {
+					for _, id := range fl.Names {
+						fields[id.Name] = true
+					}
+					if len(fl.Names) == 0 { // embedded: named by its type
+						fields[receiverType(fl.Type)] = true
+					}
+				}
+			}
+			return true
+		})
+		if !excluded(n) {
+			continue
+		}
+		for _, imp := range f.Imports {
+			ip, _ := strconv.Unquote(imp.Path.Value)
+			switch {
+			case ip == "C" || ip == "unsafe":
+				problems = append(problems, fmt.Sprintf("%s imports %s", n, ip))
+			case imp.Name != nil && (imp.Name.Name == "_" || imp.Name.Name == "."):
+				problems = append(problems, fmt.Sprintf("%s has a %s import of %s", n, imp.Name.Name, ip))
+			case !importOK(ip):
+				problems = append(problems, fmt.Sprintf("%s imports %s, which isn't compared", n, ip))
+			}
+		}
 		for _, d := range f.Decls {
 			switch d := d.(type) {
 			case *ast.FuncDecl:
-				if excluded(n) && d.Recv == nil {
+				if d.Recv == nil {
 					if d.Name.Name == "init" {
 						problems = append(problems, n+" has an init")
 					} else {
@@ -279,9 +344,6 @@ func excludedReach(sources map[string][]byte) []string {
 				for _, s := range d.Specs {
 					switch s := s.(type) {
 					case *ast.ValueSpec:
-						if !excluded(n) {
-							continue
-						}
 						for _, id := range s.Names {
 							declared[id.Name] = n
 						}
@@ -298,10 +360,9 @@ func excludedReach(sources map[string][]byte) []string {
 							})
 						}
 					case *ast.TypeSpec:
-						if excluded(n) {
-							declared[s.Name.Name] = n
-						} else {
-							types[s.Name.Name] = true
+						declared[s.Name.Name] = n
+						if !s.Assign.IsValid() {
+							defined[s.Name.Name] = true
 						}
 					}
 				}
@@ -316,8 +377,8 @@ func excludedReach(sources map[string][]byte) []string {
 		if excluded(n) {
 			for _, d := range f.Decls {
 				if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv != nil && len(fd.Recv.List) > 0 {
-					if rt := receiverType(fd.Recv.List[0].Type); types[rt] {
-						problems = append(problems, fmt.Sprintf("%s declares the method %s.%s on a compared file's type", n, rt, fd.Name.Name))
+					if rt := receiverType(fd.Recv.List[0].Type); !defined[rt] {
+						problems = append(problems, fmt.Sprintf("%s declares the method %s.%s on a type the files not compared don't define", n, rt, fd.Name.Name))
 					}
 				}
 			}
@@ -328,6 +389,18 @@ func excludedReach(sources map[string][]byte) []string {
 				problems = append(problems, fmt.Sprintf("%s uses %s, declared in %s", n, id.Name, src))
 			}
 		}
+		// The parser leaves composite literal keys unresolved (a key may
+		// be a field): one that names no field is a value used.
+		ast.Inspect(f, func(x ast.Node) bool {
+			if kv, ok := x.(*ast.KeyValueExpr); ok {
+				if id, ok := kv.Key.(*ast.Ident); ok && !fields[id.Name] {
+					if src, ok := declared[id.Name]; ok {
+						problems = append(problems, fmt.Sprintf("%s uses %s, declared in %s, as a key", n, id.Name, src))
+					}
+				}
+			}
+			return true
+		})
 	}
 	slices.Sort(problems)
 	return slices.Compact(problems)
