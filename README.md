@@ -1444,11 +1444,14 @@ admin's connection.
   `servicevault.ActionHash` computes it, so the application can check the
   hash it is given; fixed vectors are in
   `sdk/go/servicevault/testdata/action_hash.json`.
-  - These canonical bytes are the approval's document, and a member's
-    vault drops a challenge whose document it would not accept, without
-    a word to the service (VAULT-MESSAGING §10.4 "Approval documents"),
-    so the approval would gather no answers. So the service refuses at
-    once (`invalid_payload`, with `reason` and `field`) a document:
+  - These canonical bytes are the approval's document. A member's vault
+    drops an approval challenge that carries a document it would not
+    accept, without a word to the service (VAULT-MESSAGING §10.4
+    "Approval documents"), so the approval would gather no answers. The
+    service is to send the document with its challenges (§15 item 53;
+    it does not yet), and must check it first as the vault will. So it
+    already refuses at once (`invalid_payload`, with `reason` and
+    `field`) an approval whose document is one:
     - with a number that is not, in its canonical form, an integer from
       0 to 2^53 − 1 (`reason: "number"`): `1.0`, `1e3` and `-0` are
       `1`, `1000` and `0` there and pass; `-1`, `0.5`, `1e21` and
@@ -1456,12 +1459,19 @@ admin's connection.
       or a larger one, as a string**;
     - nested more than 16 levels (`depth`): the document object is one,
       so the payload has at most 15, itself included;
-    - over 65,536 bytes (`size`; a payload within 16 KiB never is).
+    - over 65,536 bytes (`size`; a payload within 16 KiB never is);
+    - with an `action` outside `[a-z0-9_.]{1,64}` or a `summary` over
+      1,024 bytes (`shape`; the service's own bounds are narrower, so
+      only an application building a document itself meets it).
+
+    An application that sent such numbers before this release had its
+    approvals answered, since no document went with them; it now gets
+    `invalid_payload` and carries those values as strings.
 
     `field` is where, as a JSON pointer into the document (RFC 6901):
     `/payload/change/amount`, or `/payload/push/0` for an array's first
-    element; the object or array one level too deep for `depth`; empty
-    for `size`. The SDK's `servicevault.ApprovalDocument` (and
+    element; the object or array one level too deep for `depth`;
+    `/action` or `/summary` for `shape`; empty for `size`. The SDK's `servicevault.ApprovalDocument` (and
     `CheckDocument`) make the same checks, so an application can check
     before it submits; `APIError.Reason` and `APIError.Field` carry the
     refusal's.

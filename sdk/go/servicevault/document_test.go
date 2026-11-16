@@ -132,3 +132,38 @@ func TestCheckDocumentCanonical(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Two faults: the nesting is judged over the whole document first, as a
+// member's vault does.
+func TestApprovalDocumentDepthFirst(t *testing.T) {
+	p := `{"a":-1,"b":` + nested(16) + `}`
+	_, err := servicevault.ApprovalDocument("contract_template.change", "x", json.RawMessage(p))
+	if de := docErr(t, err); de == nil || de.Reason != servicevault.DocumentDepth || !strings.HasPrefix(de.Field, "/payload/b/") {
+		t.Fatalf("%v", err)
+	}
+}
+
+// The action and the summary are within the receiver's bounds.
+func TestApprovalDocumentShape(t *testing.T) {
+	for _, c := range []struct {
+		action, summary, field string
+	}{
+		{"", "x", "/action"},
+		{"Contract.change", "x", "/action"},
+		{"a-b", "x", "/action"},
+		{strings.Repeat("a", 65), "x", "/action"},
+		{"x", strings.Repeat("s", servicevault.MaxDocumentSummary+1), "/summary"},
+	} {
+		_, err := servicevault.ApprovalDocument(c.action, c.summary, json.RawMessage(`{}`))
+		if de := docErr(t, err); de == nil || de.Reason != servicevault.DocumentShape || de.Field != c.field {
+			t.Errorf("%.20q %d: %v", c.action, len(c.summary), err)
+		}
+	}
+	if _, err := servicevault.ApprovalDocument(strings.Repeat("a", 60)+"_.09", strings.Repeat("s", servicevault.MaxDocumentSummary), json.RawMessage(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	// Out of the double range: no canonical form.
+	if _, err := servicevault.ApprovalDocument("x", "x", json.RawMessage(`{"n":1E400}`)); !errors.Is(err, servicevault.ErrCanonical) {
+		t.Fatalf("1E400: %v", err)
+	}
+}

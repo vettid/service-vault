@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/vettid/service-vault/internal/peer"
+	"github.com/vettid/service-vault/internal/signin"
 	"github.com/vettid/service-vault/internal/webhook"
 	"github.com/vettid/service-vault/sdk/go/servicevault"
 )
@@ -1020,6 +1021,8 @@ func TestCreateRefuses(t *testing.T) {
 // canonical form.
 func TestCreateRefusesDocument(t *testing.T) {
 	f := newFixture(t, 1, "c1")
+	// A refused document does not count toward the limit (2 an hour).
+	f.m.Rate = &RateLimit{Counters: &signin.MemCounters{}, Limits: DefaultCreateLimits}
 	for _, c := range []struct{ payload, reason, field string }{
 		{`{"change":{"amount":-1}}`, "number", "/payload/change/amount"},
 		{`{"push":[0.5]}`, "number", "/payload/push/0"},
@@ -1032,6 +1035,11 @@ func TestCreateRefusesDocument(t *testing.T) {
 		if !errors.As(err, &e) || e.Code != CodeInvalidPayload || e.Reason != c.reason || e.Field != c.field {
 			t.Errorf("%.40s: %v, want %s at %s", c.payload, err, c.reason, c.field)
 		}
+	}
+	// Out of the double range: no canonical form, no reason.
+	_, err := f.m.Create(context.Background(), Request{Action: ActionContractTemplateChange, Summary: "x", Payload: json.RawMessage(`{"n":1E400}`)})
+	if e := (*Error)(nil); !errors.As(err, &e) || e.Code != CodeInvalidPayload || e.Reason != "" || e.Field != "" {
+		t.Fatalf("1E400: %v", err)
 	}
 	if len(f.p.sent) != 0 {
 		t.Fatalf("%d challenges sent", len(f.p.sent))
