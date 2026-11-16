@@ -32,6 +32,41 @@
     "path": "vms/suite/suite.go",
     "sha256": "72d7ca44fe495acf356903cf1ac4b7ef7c7bacab9dece5505e04be17d98ce4c8",
     "pinned_sha256": "8b4c62cd9ebaee91d2aeeb2521accbf94e3a7fa31c200a861fe328b22978f5c2",
-    "reason": "this release only adds the constant LabelRelayRotate (and realigns its const block); the bundle verifier uses no suite function, and suite.Verify (sign.go, reached through verify.go) is unchanged; reviewed in GC #10243"
+    "reason": "this release only adds the constant LabelRelayRotate (and realigns its const block); bundle.go and trust.go use no suite function, and suite.Verify (sign.go, reached through verify.go) is unchanged; reviewed in GC #10243"
+  },
+  {
+    "release": "staging/25",
+    "path": "vms/votewire/body.go",
+    "sha256": "ccc98f4ab4a0f99461cb1a67dd3d2cf7537072672a7015832078daa0fe2329eb",
+    "pinned_sha256": "aa83aac14f495f82846ce5501dda0452c532fc04704e4a112081e5607539ab78",
+    "reason": "the pinned file only adds Pad (the pad member beside a vote's choice_id, VAULT-MESSAGING 0.83.6 §10.19.5, which no signature covers and receivers ignore), its use in the cast body, and the strings import; no init, no package-level variable, nothing a bundle or root check uses; the strictjson import differs only by its old place"
+  },
+  {
+    "release": "staging/25",
+    "path": "vms/votewire/documents.go",
+    "sha256": "4badd3b7f7f8b5743d9b4ceadaf7520c3ddacdb73511b6c744ec2982289e0a3e",
+    "pinned_sha256": "7571a9347499e2d267fe615e72b599d5a524e649eefb9d9cd2de60a5a4c7fe79",
+    "reason": "the pinned file adds two refusals to proposal validation, eligible at most MaxEligible and choice labels distinct once folded (FoldLabel, golang.org/x/text/unicode/norm; VAULT-MESSAGING 0.88.12 §10.19.4): this release accepts a superset, so the service refuses first (fail-safe); no init, no package-level variable written, nothing a bundle or root check uses"
+  },
+  {
+    "release": "staging/26",
+    "path": "vms/votewire/body.go",
+    "sha256": "ccc98f4ab4a0f99461cb1a67dd3d2cf7537072672a7015832078daa0fe2329eb",
+    "pinned_sha256": "aa83aac14f495f82846ce5501dda0452c532fc04704e4a112081e5607539ab78",
+    "reason": "the pinned file only adds Pad (the pad member beside a vote's choice_id, VAULT-MESSAGING 0.83.6 §10.19.5, which no signature covers and receivers ignore), its use in the cast body, and the strings import; no init, no package-level variable, nothing a bundle or root check uses; the strictjson import differs only by its old place"
+  },
+  {
+    "release": "staging/26",
+    "path": "vms/votewire/documents.go",
+    "sha256": "4badd3b7f7f8b5743d9b4ceadaf7520c3ddacdb73511b6c744ec2982289e0a3e",
+    "pinned_sha256": "7571a9347499e2d267fe615e72b599d5a524e649eefb9d9cd2de60a5a4c7fe79",
+    "reason": "the pinned file adds two refusals to proposal validation, eligible at most MaxEligible and choice labels distinct once folded (FoldLabel, golang.org/x/text/unicode/norm; VAULT-MESSAGING 0.88.12 §10.19.4): this release accepts a superset, so the service refuses first (fail-safe); no init, no package-level variable written, nothing a bundle or root check uses"
+  },
+  {
+    "release": "staging/27",
+    "path": "vms/votewire/documents.go",
+    "sha256": "450ecccb42a792e46039b0522bd10a29ceadc99146750839ed0031b59e5645c7",
+    "pinned_sha256": "7571a9347499e2d267fe615e72b599d5a524e649eefb9d9cd2de60a5a4c7fe79",
+    "reason": "the pinned file adds one refusal to proposal validation, choice labels distinct once folded (FoldLabel, golang.org/x/text/unicode/norm; VAULT-MESSAGING 0.88.12 §10.19.4): this release accepts a superset, so the service refuses first (fail-safe); no init, no package-level variable written, nothing a bundle or root check uses"
   }
 ]

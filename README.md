@@ -458,20 +458,36 @@ destination.
     of the vettid-vault version in `go.mod` against each release's
     roots, not each release's own `votewire`. The daily `vault-roots`
     check (`rootscheck`) compares each supported release's verifier code
-    with that version, byte for byte: `votewire` (all but its message
-    bodies, documents and JCS: `body.go`, `documents.go`, `jcs.go`), and
-    the `strictjson` and `suite` packages it uses, and fails on an import
-    the pinned code doesn't have. A difference fails it, naming the
-    release, unless `internal/vaultroots/testdata/verifier_differences.json`
-    lists it, keyed by the sha256 of both files, with the reason it is
-    safe: a change on either side asks for a new review. Today it lists
-    staging 25 and 26, whose `strictjson` is more lenient than the
-    service's (the service refuses first) and whose `votewire.go` lacks
-    two things no check uses, and staging 30, whose `suite.go` only adds
-    a constant. It compares code, not verdicts, and not the vault's call
-    site (how a release passes the keys and the time to the verifier): a
-    difference it lets through is one a person has judged. Comparing
-    verdicts on shared bundle vectors is a possible later step.
+    with that version, byte for byte: every non-test Go file of
+    `votewire` (its message bodies, documents and JCS too: code there
+    runs in the same process, and no list of rules would cover all it
+    could do), and of the `strictjson` and `suite` packages it uses. It
+    fails on an import the pinned code doesn't have, on a file in those
+    packages that isn't Go, docs or testdata, and on a release built
+    differently from the service: `go.mod`'s `go`, `toolchain` and
+    `godebug` settings, and `//go:debug` directives (GODEBUG defaults
+    decide some of crypto/x509's and encoding/asn1's parsing). A
+    difference fails it, naming the release, unless
+    `internal/vaultroots/testdata/verifier_differences.json` lists it,
+    keyed by the sha256 of both files, with the reason it is safe: a
+    change on either side asks for a new review. Today it lists staging
+    25 and 26, whose `strictjson` and proposal validation are more
+    lenient than the service's (the service refuses first) and whose
+    `votewire.go` and `body.go` lack things no check uses; staging 27,
+    whose proposal validation is more lenient; and staging 30, whose
+    `suite.go` only adds a constant. It compares code, not verdicts, and
+    not the vault's call site (how a release passes the keys and the time
+    to the verifier): a difference it lets through is one a person has
+    judged. Comparing verdicts on shared bundle vectors is a possible
+    later step. It doesn't cover: `go.mod`'s dependency versions
+    (`golang.org/x/...` and the rest), `replace` lines, a `vendor/`
+    directory or a `go.work`; the vault's other packages, which run in
+    the same process and could change shared state (reassign an exported
+    sentinel, set `GODEBUG`, change standard-library state); how the
+    vault is built (its `Dockerfile.enclave`: Go image, build tags) and a
+    `GODEBUG` set in its environment; and the service's own build
+    toolchain, its Dockerfile's image, which the `toolchain` line only
+    stands for.
   - **The signed service list.** The anchor key is not looked up in the
     signed service list. A key missing from it passes here, and member
     vaults then refuse the bundle (`service_list`). That fails closed at
