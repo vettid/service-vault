@@ -480,9 +480,11 @@ destination.
     count above `vote.MaxEligible` in `vote.Proposal.Validate`, and an
     empty, repeated or Abstain choice label in `ballot.checkInput`
     (`internal/ballot/approved.go`). That label check compares
-    `strings.ToLower` keys, which equals the pinned `FoldLabel` only
-    while `latin()` admits printable ASCII and Latin-1 letters alone;
-    widening `latin()` needs a real fold check there. It compares code, not verdicts, and
+    `strings.ToLower` keys, which group labels as the pinned `FoldLabel`
+    does only while `latin()` admits printable ASCII and Latin-1 letters
+    alone (their other case partners, such as the Kelvin sign or `Ÿ`,
+    are not admitted); widening `latin()` needs a real fold check there.
+    The check compares code, not verdicts, and
     not the vault's call site (how a release passes the keys and the time
     to the verifier): a difference it lets through is one a person has
     judged. Comparing verdicts on shared bundle vectors is a possible

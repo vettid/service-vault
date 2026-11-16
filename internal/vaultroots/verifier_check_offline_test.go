@@ -243,6 +243,10 @@ func TestVerifierStrictjsonPlaces(t *testing.T) {
 	oldLit := with(old, map[string]string{"vms/votewire/bundle.go": old["vms/votewire/bundle.go"] + strings.Replace(lit, "vms/strictjson", "internal/strictjson", 1)})
 	wantErr(t, runCheck(t, oldLit, pinned, nil), "vms/votewire/bundle.go differs")
 	wantClean(t, runCheck(t, with(old, map[string]string{"vms/votewire/bundle.go": old["vms/votewire/bundle.go"] + lit}), pinned, nil))
+	// A grouped, named import is undone too.
+	const grouped = "package votewire\n\nimport (\n\t\"errors\"\n\tsj \"github.com/vettid/vettid-vault/vms/strictjson\"\n)\n\nvar errX = errors.New(\"x\")\n\nfunc VerifyBundle(b []byte) error { return sj.Check(b) }\n"
+	pinnedGrouped := with(base, map[string]string{"vms/votewire/bundle.go": grouped})
+	wantClean(t, runCheck(t, with(old, map[string]string{"vms/votewire/bundle.go": strings.Replace(grouped, "vms/strictjson", "internal/strictjson", 1)}), pinnedGrouped, nil))
 }
 
 func TestVerifierBuildSettings(t *testing.T) {
