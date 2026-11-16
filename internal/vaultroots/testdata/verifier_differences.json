@@ -32,6 +32,6 @@
     "path": "vms/suite/suite.go",
     "sha256": "72d7ca44fe495acf356903cf1ac4b7ef7c7bacab9dece5505e04be17d98ce4c8",
     "pinned_sha256": "8b4c62cd9ebaee91d2aeeb2521accbf94e3a7fa31c200a861fe328b22978f5c2",
-    "reason": "this release only adds the constant LabelRelayRotate (and realigns its const block); the bundle verifier uses no suite function, and suite.Verify (sign.go, reached through verify.go) is unchanged; reviewed in GC #10243"
+    "reason": "this release only adds the constant LabelRelayRotate (and realigns its const block); bundle.go and trust.go use no suite function, and suite.Verify (sign.go, reached through verify.go) is unchanged; reviewed in GC #10243"
   }
 ]

@@ -40,7 +40,12 @@ jobs:
       - name: the copies match the supported releases
         env:
           VAULTROOTS_VAULT_REPO: ${{ runner.temp }}/vettid-vault
-        run: go test -count=1 -v -tags rootscheck -run TestCopiesMatchReleases ./internal/vaultroots/
+        # A renamed test would match nothing and pass silently ("no tests
+        # to run"): the run must show it passed.
+        run: |
+          set -o pipefail
+          go test -count=1 -v -tags rootscheck -run '^TestCopiesMatchReleases$' ./internal/vaultroots/ | tee "$RUNNER_TEMP/rootscheck.log"
+          grep -q '^--- PASS: TestCopiesMatchReleases ' "$RUNNER_TEMP/rootscheck.log" || { echo "TestCopiesMatchReleases did not run and pass"; exit 1; }
 
   sigstore:
     runs-on: ubuntu-26.04

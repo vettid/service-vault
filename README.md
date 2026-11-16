@@ -461,7 +461,12 @@ destination.
     with that version, byte for byte: `votewire` (all but its message
     bodies, documents and JCS: `body.go`, `documents.go`, `jcs.go`), and
     the `strictjson` and `suite` packages it uses, and fails on an import
-    the pinned code doesn't have. A difference fails it, naming the
+    the pinned code doesn't have, on anything in the three files left
+    out that the compared ones could reach (a name they use, a method on
+    their types, an `init`), and on a release built with another Go
+    toolchain than the service's (`go.mod`'s `toolchain` line). It
+    doesn't compare `go.mod`'s dependency versions (`golang.org/x/...`
+    and the rest). A difference fails it, naming the
     release, unless `internal/vaultroots/testdata/verifier_differences.json`
     lists it, keyed by the sha256 of both files, with the reason it is
     safe: a change on either side asks for a new review. Today it lists
