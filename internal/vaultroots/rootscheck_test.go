@@ -23,9 +23,11 @@ package vaultroots
 // verifier_check_test.go): every non-test Go file of votewire but
 // votewireNotVerifier, and of the vettid-vault packages votewire imports
 // (strictjson, suite), equal byte for byte to the vettid-vault version
-// go.mod pins; nothing of votewireNotVerifier reaching the compared files;
-// no import of a vettid-vault package at the tag that the pinned votewire
-// doesn't have; and the release's go.mod toolchain line the service's.
+// go.mod pins; nothing of votewireNotVerifier reaching the compared files
+// (excludedReach); no import of a vettid-vault package at the tag that the
+// pinned votewire doesn't have; only Go files, docs and testdata in those
+// packages; and the release's build settings (go.mod's go, toolchain and
+// godebug, //go:debug) the service's.
 // strictjson's move from internal/ to vms/ (vettid-vault #237) is undone
 // at a tag that has only the old place. A difference fails, naming the
 // release and the file, unless testdata/verifier_differences.json lists
@@ -49,9 +51,7 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
-	"os/exec"
 	"path"
-	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
@@ -73,7 +73,7 @@ func TestCopiesMatchReleases(t *testing.T) {
 	if repo == "" {
 		t.Fatal("VAULTROOTS_VAULT_REPO is not set (a vettid-vault clone with its release tags)")
 	}
-	v := &verifierCheck{pkgs: pinnedVerifier(t), build: serviceBuild(t), known: readKnownDifferences(t), used: map[knownDifference]bool{}}
+	v := &verifierCheck{pkgs: pinnedVerifier(t, t), build: serviceBuild(t), known: readKnownDifferences(t), used: map[knownDifference]bool{}}
 	all := true
 	for _, channel := range Instances {
 		all = t.Run(channel, func(t *testing.T) { checkChannel(t, repo, channel, v) }) && all
@@ -84,9 +84,6 @@ func TestCopiesMatchReleases(t *testing.T) {
 	v.stale(t)
 }
 
-// votewirePkg is the vault's bundle verifier package.
-const votewirePkg = "github.com/vettid/vettid-vault/vms/votewire"
-
 func readKnownDifferences(t *testing.T) []knownDifference {
 	t.Helper()
 	b, err := os.ReadFile("testdata/verifier_differences.json")
@@ -96,97 +93,6 @@ func readKnownDifferences(t *testing.T) []knownDifference {
 	out, err := parseKnownDifferences(b)
 	if err != nil {
 		t.Fatalf("testdata/verifier_differences.json: %v", err)
-	}
-	return out
-}
-
-// serviceBuild is the service's go.mod build settings (buildLines).
-func serviceBuild(t *testing.T) string {
-	t.Helper()
-	b, err := os.ReadFile("../../go.mod")
-	if err != nil {
-		t.Fatal(err)
-	}
-	build := buildLines(b)
-	if !strings.Contains(build, "toolchain ") {
-		t.Fatal("../../go.mod has no toolchain line")
-	}
-	return build
-}
-
-// pinnedImportOK is excludedReach's import check for the pinned module: a
-// vettid-vault package votewire imports is compared (go list -deps), so
-// any of them is fine; it is votewire's dependencies that are compared.
-func pinnedImportOK(imp string) bool {
-	rest, vv := strings.CutPrefix(imp, vvPrefix)
-	return !vv || pinnedDeps[rest]
-}
-
-// pinnedDeps are the module-relative directories of the vettid-vault
-// packages votewire imports, as pinnedVerifier found them.
-var pinnedDeps = map[string]bool{}
-
-// pinnedVerifier reads the compared files from the vettid-vault version
-// go.mod pins: votewire's but votewireNotVerifier, and every non-test Go
-// file of the vettid-vault packages votewire imports (go list -deps).
-func pinnedVerifier(t *testing.T) []verifierPkg {
-	t.Helper()
-	modDir := strings.TrimSpace(string(goCmd(t, "list", "-m", "-f", "{{.Dir}}", "github.com/vettid/vettid-vault")))
-	if modDir == "" {
-		t.Fatal("go list -m: no directory for github.com/vettid/vettid-vault (a vendor directory, or not downloaded)")
-	}
-	var out []verifierPkg
-	for _, line := range strings.Split(strings.TrimSpace(string(goCmd(t, "list", "-deps", "-f", "{{.ImportPath}}\t{{.Dir}}", votewirePkg))), "\n") {
-		ip, dir, ok := strings.Cut(line, "\t")
-		if !ok || !strings.HasPrefix(ip, vvPrefix) {
-			continue
-		}
-		rel, err := filepath.Rel(modDir, dir)
-		if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
-			t.Fatalf("package %s is not under the module directory %s", ip, modDir)
-		}
-		rel = filepath.ToSlash(rel)
-		pinnedDeps[rel] = true
-		p := verifierPkg{rel: rel, files: map[string][]byte{}}
-		ents, err := os.ReadDir(dir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		sources := map[string][]byte{}
-		for _, e := range ents {
-			if !goSource(e.Name()) {
-				continue
-			}
-			b, err := os.ReadFile(path.Join(dir, e.Name()))
-			if err != nil {
-				t.Fatal(err)
-			}
-			sources[e.Name()] = b
-			if compared(rel, e.Name()) {
-				p.files[e.Name()] = b
-			}
-		}
-		if rel == "vms/votewire" {
-			for _, problem := range excludedReach(sources, pinnedImportOK) {
-				t.Errorf("the pinned vettid-vault: vms/votewire: %s: the files not compared reach the verifier", problem)
-			}
-		}
-		out = append(out, p)
-	}
-	if !slices.ContainsFunc(out, func(p verifierPkg) bool { return p.rel == "vms/votewire" && p.files["bundle.go"] != nil }) {
-		t.Fatal("vms/votewire/bundle.go is not in the pinned vettid-vault")
-	}
-	return out
-}
-
-func goCmd(t *testing.T, args ...string) []byte {
-	t.Helper()
-	cmd := exec.Command("go", args...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("go %s: %v: %s", strings.Join(args, " "), err, stderr.String())
 	}
 	return out
 }

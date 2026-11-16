@@ -461,18 +461,24 @@ destination.
     with that version, byte for byte: `votewire` (all but its message
     bodies, documents and JCS: `body.go`, `documents.go`, `jcs.go`), and
     the `strictjson` and `suite` packages it uses, and fails on an import
-    the pinned code doesn't have. It also fails on anything in the three
-    files left out that the compared ones could reach: a name they use,
-    a method on a type those files don't define (an alias of a compared
-    type included), an `init`, a variable initializer that calls
-    something, cgo, `unsafe`, a blank or dot import, or an import of a
-    vettid-vault package that isn't compared. And it fails on a release
-    whose `go.mod` sets another build than the service's: its `go`,
-    `toolchain` and `godebug` lines (GODEBUG defaults decide some of
-    crypto/x509's and encoding/asn1's parsing). It doesn't compare
-    `go.mod`'s dependency versions (`golang.org/x/...` and the rest),
-    and the service's own build toolchain is its Dockerfile's image,
-    which the `toolchain` line only stands for. A difference fails it, naming the
+    the pinned code doesn't have, or on a file in those packages that
+    isn't Go, docs or testdata. It also fails on anything in the three
+    files left out that could reach the compared ones: a name the
+    compared files use, a method on a type those files don't define (an
+    alias of a compared type included), an `init`, a variable
+    initializer that calls something, any use of a compared package-level
+    variable but a plain read of an error sentinel (so they can't reset
+    `ErrBundleRoot` or write an OID table), a predeclared name redeclared,
+    cgo, `unsafe`, a blank or dot import, or an import of a vettid-vault
+    package that isn't compared. And it fails on a release built
+    differently from the service: `go.mod`'s `go`, `toolchain` and
+    `godebug` settings, and `//go:debug` directives (GODEBUG defaults
+    decide some of crypto/x509's and encoding/asn1's parsing). It doesn't
+    cover: `go.mod`'s dependency versions (`golang.org/x/...` and the
+    rest), `replace` lines, a `vendor/` directory or a `go.work`; other
+    vault packages, which could reassign the exported sentinels or set
+    `GODEBUG` at run time; and the service's own build toolchain, its
+    Dockerfile's image, which the `toolchain` line only stands for. A difference fails it, naming the
     release, unless `internal/vaultroots/testdata/verifier_differences.json`
     lists it, keyed by the sha256 of both files, with the reason it is
     safe: a change on either side asks for a new review. Today it lists
