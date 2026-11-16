@@ -561,6 +561,9 @@ func (s *Server) approvalError(w http.ResponseWriter, what string, err error) {
 	switch {
 	case errors.Is(err, approval.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not_found")
+	case errors.As(err, &ae) && ae.Reason != "" && approvalStatusCodes[ae.Code] != 0:
+		// A document a member's vault would drop: why, and where.
+		writeJSON(w, approvalStatusCodes[ae.Code], map[string]string{"error": ae.Code, "reason": ae.Reason, "field": ae.Field})
 	case errors.As(err, &ae) && approvalStatusCodes[ae.Code] != 0:
 		writeError(w, approvalStatusCodes[ae.Code], ae.Code)
 	default:

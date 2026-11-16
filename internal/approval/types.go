@@ -246,9 +246,19 @@ const (
 )
 
 // Error is a request the service refuses, with its API error code.
-type Error struct{ Code string }
+type Error struct {
+	Code string
+	// Reason and Field: for an invalid_payload whose document a member's
+	// vault would drop, servicevault.DocumentError's Reason and Field.
+	Reason, Field string
+}
 
-func (e *Error) Error() string { return "approval: " + e.Code }
+func (e *Error) Error() string {
+	if e.Reason == "" {
+		return "approval: " + e.Code
+	}
+	return fmt.Sprintf("approval: %s (%s %q)", e.Code, e.Reason, e.Field)
+}
 
 func errCode(c string) error { return &Error{Code: c} }
 

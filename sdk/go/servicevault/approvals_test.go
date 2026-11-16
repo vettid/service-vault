@@ -31,6 +31,14 @@ func TestApprovalsAgainstAPI(t *testing.T) {
 		Payload: json.RawMessage(`{}`)}); apiCode(err) != servicevault.CodeUnreachable {
 		t.Fatalf("no admins: %v", err)
 	}
+	// A number a member's vault would drop is refused, naming where.
+	_, err := c.CreateApproval(ctx, servicevault.ApprovalRequest{Action: servicevault.ActionContractTemplateChange, Summary: "Open",
+		Payload: json.RawMessage(`{"change":{"amount":-1}}`)})
+	var ae *servicevault.APIError
+	if !errors.As(err, &ae) || ae.Status != 400 || ae.Code != servicevault.CodeInvalidPayload ||
+		ae.Reason != servicevault.DocumentNumber || ae.Field != "/payload/change/amount" {
+		t.Fatalf("negative number: %#v", err)
+	}
 	f.deliver(t, peer.Event{ID: "01JEVENTA", Type: peer.EventConnectionAdded, ConnectionID: "c1", Tag: f.emailKey})
 	if err := f.tick(ctx); err != nil {
 		t.Fatal(err)

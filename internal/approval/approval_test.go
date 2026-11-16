@@ -1014,6 +1014,35 @@ func TestCreateRefuses(t *testing.T) {
 	f.create(ActionContractTemplateChange, "Tâche ✓ — d’accord", `{}`) // plain Unicode text is fine
 }
 
+// A payload whose document a member's vault would drop (a number other
+// than an integer from 0 to 2^53 - 1, or more than 16 levels) is refused
+// at once, naming where; nothing is sent. Numbers are judged in their
+// canonical form.
+func TestCreateRefusesDocument(t *testing.T) {
+	f := newFixture(t, 1, "c1")
+	for _, c := range []struct{ payload, reason, field string }{
+		{`{"change":{"amount":-1}}`, "number", "/payload/change/amount"},
+		{`{"push":[0.5]}`, "number", "/payload/push/0"},
+		{`{"n":9007199254740992}`, "number", "/payload/n"},
+		{`{"n":1e21}`, "number", "/payload/n"},
+		{strings.Repeat(`{"a":`, 15) + `[]` + strings.Repeat(`}`, 15), "depth", "/payload" + strings.Repeat("/a", 15)},
+	} {
+		_, err := f.m.Create(context.Background(), Request{Action: ActionContractTemplateChange, Summary: "x", Payload: json.RawMessage(c.payload)})
+		var e *Error
+		if !errors.As(err, &e) || e.Code != CodeInvalidPayload || e.Reason != c.reason || e.Field != c.field {
+			t.Errorf("%.40s: %v, want %s at %s", c.payload, err, c.reason, c.field)
+		}
+	}
+	if len(f.p.sent) != 0 {
+		t.Fatalf("%d challenges sent", len(f.p.sent))
+	}
+	f.create(ActionContractTemplateChange, "x", `{"a":1.0,"b":1e3,"c":-0,"d":9007199254740991}`)
+	f.create(ActionContractTemplateChange, "y", strings.Repeat(`{"a":`, 14)+`[]`+strings.Repeat(`}`, 14))
+	if len(f.p.sent) != 2 {
+		t.Fatalf("%d challenges sent", len(f.p.sent))
+	}
+}
+
 func TestChallengeContext(t *testing.T) {
 	hash := strings.Repeat("ab", 32)
 	const act = ActionContractTemplateChange

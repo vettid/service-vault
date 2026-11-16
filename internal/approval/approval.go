@@ -839,6 +839,16 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 		return nil, summaryError(err)
 	}
 	req.Summary = summary
+	// A member's vault drops a document it would not accept, silently
+	// (VAULT-MESSAGING §10.4 "Approval documents"; §15 item 53): refuse
+	// one now, naming where, rather than ask for answers that never come.
+	if _, err := servicevault.ApprovalDocument(req.Action, req.Summary, payload); err != nil {
+		var de *servicevault.DocumentError
+		if errors.As(err, &de) {
+			return nil, &Error{Code: CodeInvalidPayload, Reason: de.Reason, Field: de.Field}
+		}
+		return nil, errCode(CodeInvalidPayload)
+	}
 	hash, err := servicevault.ActionHash(req.Action, req.Summary, payload)
 	if err != nil {
 		return nil, errCode(CodeInvalidPayload)
