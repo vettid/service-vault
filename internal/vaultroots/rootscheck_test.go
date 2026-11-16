@@ -20,14 +20,13 @@ package vaultroots
 //
 // It also requires, for each of those releases, the vault's bundle
 // verifier at its tag to be the one the service runs (verifierCheck,
-// verifier_check_test.go): every non-test Go file of votewire but
-// votewireNotVerifier, and of the vettid-vault packages votewire imports
-// (strictjson, suite), equal byte for byte to the vettid-vault version
-// go.mod pins; nothing of votewireNotVerifier reaching the compared files
-// (excludedReach); no import of a vettid-vault package at the tag that the
-// pinned votewire doesn't have; only Go files, docs and testdata in those
-// packages; and the release's build settings (go.mod's go, toolchain and
-// godebug, //go:debug) the service's.
+// verifier_check_test.go): every non-test Go file of votewire and of the
+// vettid-vault packages votewire imports (strictjson, suite), equal byte
+// for byte to the vettid-vault version go.mod pins; no import of a
+// vettid-vault package at the tag that the pinned votewire doesn't have;
+// only Go files, docs and testdata in those packages; and the release's
+// build settings (go.mod's go, toolchain and godebug, //go:debug) the
+// service's.
 // strictjson's move from internal/ to vms/ (vettid-vault #237) is undone
 // at a tag that has only the old place. A difference fails, naming the
 // release and the file, unless testdata/verifier_differences.json lists
