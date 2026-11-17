@@ -41,6 +41,17 @@ go test -race -count=1 ./...
 - Emails are stored only as an HMAC under a server-side pepper; lookups
   answer uniformly whether or not the email is known.
 
+## No backward compatibility before production users
+
+(Owner, 2026-11-17; Ground Control rule 3 once adopted.) VettID has no users yet; staging runs only the current release of every part, and compatibility work waits for the production-launch checklist.
+
+- Member vaults and the service vault pair only with the current release. Don't build, test or review rollback, downgrade, older-image or older-vault behavior; if a change breaks old state, the test setup re-enrolls (no migrations).
+- Review briefs say so, and reviewers don't raise findings about older releases.
+- No per-feature dormant paths for older vault releases.
+- Vault and service vault ship together on staging: keep the `contract` field and release tags, but the N/N-1 window against vault releases waits for the first production service.
+- Staging data and keys may be reset instead of migrated, with the owner's go for anything public or permanent.
+- Never weakened: security checks, fail-closed behavior, the reviews themselves; version markers stay.
+
 ## Coordination rules
 
 1. **Scope.** Work in this repository. Read vettid-vault, vettid-relay,
