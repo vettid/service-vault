@@ -63,6 +63,9 @@ type vectors struct {
 	Merkle    []merkleVector `json:"merkle"`
 	Ed25519   []sigVector    `json:"ed25519"`
 	Documents docVectors     `json:"documents"`
+	// DocumentsDecided is the same vote with four members, all voting
+	// (yes, no, abstain, yes): its outcome is decided, for yes (0.14.0).
+	DocumentsDecided docVectors `json:"documents_decided"`
 	// Outcomes, Decisions and OutcomeShapes are §11 item 5 (0.14.0).
 	Outcomes      []outcomeCase  `json:"outcomes"`
 	Decisions     []decisionCase `json:"decisions"`
@@ -181,7 +184,8 @@ func makeVectors(t *testing.T) *vectors {
 		v.Merkle = append(v.Merkle, mv)
 	}
 	v.Ed25519 = sigVectors(t, sk, msg)
-	v.Documents = makeDocVectors(t)
+	v.Documents = makeDocVectors(t, 3, 2)
+	v.DocumentsDecided = makeDocVectors(t, 4, 4)
 	v.Outcomes, v.Decisions, v.OutcomeShapes = outcomeCases(), decisionCases(), outcomeShapes()
 	return &v
 }
@@ -544,9 +548,9 @@ func TestEncodingBounds(t *testing.T) {
 	}
 }
 
-func makeDocVectors(t *testing.T) docVectors {
+func makeDocVectors(t *testing.T, n, k int) docVectors {
 	t.Helper()
-	v := newVote(t, 3, 2)
+	v := newVote(t, n, k)
 	p, err := ParseProposal(v.propDoc)
 	if err != nil {
 		t.Fatal(err)

@@ -1,6 +1,7 @@
 package vote
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/json"
 	"testing"
@@ -94,6 +95,15 @@ func outcomeCases() []outcomeCase {
 		c("no_quorum over a plurality tie", plurality, false, 10, 20, three, t3(1, 1, 0, 0), 2, noQuorum),
 		c("quorum met exactly, abstain counts toward it", majCast, false, 3, 20, two, t2(1, 0, 2), 3, decided("c1")),
 		c("quorum one ballot short", majCast, false, 3, 20, two, t2(1, 0, 1), 2, noQuorum),
+		c("zero ballots, min_ballots 1, cast: no_quorum before base 0", majCast, false, 1, 20, two, t2(0, 0, 0), 0, noQuorum),
+		c("zero ballots, min_ballots 1, voted: no_quorum before base 0", majVoted, false, 1, 20, two, t2(0, 0, 0), 0, noQuorum),
+		c("every ballot abstains below quorum, cast", majCast, false, 5, 20, two, t2(0, 0, 4), 4, noQuorum),
+		c("every ballot abstains below quorum, voted", thr(2, 3, BaseVoted), false, 5, 20, two, t2(0, 0, 4), 4, noQuorum),
+		c("threshold 2/3 of voted, abstain alone meets the fraction", thr(2, 3, BaseVoted), false, 1, 20, two, t2(1, 0, 8), 9, notDecided),
+		c("threshold 3/4 of elig, just below", thr(3, 4, BaseElig), true, 1, 8, two, t2(5, 1, 0), 6, notDecided),
+		c("majority of elig, three choices", majElig, true, 1, 10, three, t3(6, 2, 1, 0), 9, decided("c1")),
+		c("threshold 2/3 of elig, three choices, none", thr(2, 3, BaseElig), true, 1, 9, three, t3(5, 2, 1, 0), 8, notDecided),
+		c("plurality, a top tie over a lower third", plurality, false, 1, 20, three, t3(3, 3, 1, 0), 7, tied),
 		c("refused: tally doesn't sum to ballots", majCast, false, 1, 20, two, t2(3, 1, 0), 5, nil),
 		c("refused: a negative count", majCast, false, 1, 20, two, t2(10, -3, 0), 7, nil),
 		c("refused: tally lacks a choice", majCast, false, 1, 20, two, map[string]int64{"c1": 1, AbstainID: 0}, 1, nil),
@@ -126,6 +136,11 @@ func decisionCases() []decisionCase {
 		c("den 0", `{"base":"cast","rule":"threshold","threshold":{"den":0,"num":0}}`, false, false),
 		c("an unknown rule", `{"base":"cast","rule":"unanimity","threshold":null}`, false, false),
 		c("an unknown base", `{"base":"all","rule":"majority","threshold":null}`, false, false),
+		c("plurality with a threshold", `{"base":null,"rule":"plurality","threshold":{"den":3,"num":2}}`, false, false),
+		c("majority, a null base and a threshold", `{"base":null,"rule":"majority","threshold":{"den":3,"num":2}}`, false, false),
+		c("base absent", `{"rule":"plurality","threshold":null}`, false, false),
+		c("threshold absent", `{"base":"cast","rule":"majority"}`, false, false),
+		c("an unknown member", `{"base":"cast","extra":null,"rule":"majority","threshold":null}`, false, false),
 	}
 }
 
@@ -143,6 +158,11 @@ func outcomeShapes() []outcomeShape {
 		c("tied with a choice", `{"choice":"c1","quorum_met":true,"status":"tied"}`, false),
 		c("abstain decided", `{"choice":"abstain","quorum_met":true,"status":"decided"}`, false),
 		c("an unknown status", `{"choice":null,"quorum_met":true,"status":"passed"}`, false),
+		c("decided, a choice id outside the grammar", `{"choice":"C1","quorum_met":true,"status":"decided"}`, false),
+		c("decided, an empty choice", `{"choice":"","quorum_met":true,"status":"decided"}`, false),
+		c("no_quorum with a choice", `{"choice":"c1","quorum_met":false,"status":"no_quorum"}`, false),
+		c("quorum not met, not_decided", `{"choice":null,"quorum_met":false,"status":"not_decided"}`, false),
+		c("quorum not met, tied", `{"choice":null,"quorum_met":false,"status":"tied"}`, false),
 	}
 }
 
@@ -175,13 +195,23 @@ func TestDecide(t *testing.T) {
 	}
 }
 
+// TestDecisionValidate judges each decision as a proposal's member: in a
+// proposal document of its own, with its removed_may_vote.
 func TestDecisionValidate(t *testing.T) {
+	ik := ed25519.NewKeyFromSeed(digest("ik")).Public().(ed25519.PublicKey)
 	for _, c := range decisionCases() {
-		var d Decision
-		if err := json.Unmarshal(c.Decision, &d); err != nil {
+		p := testProposal(t, ik, [][]byte{digest("t1"), digest("t2")})
+		p.RemovedMayVote = c.RemovedMayVote
+		doc, err := encodeCanonical(p)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if err := d.Validate(c.RemovedMayVote); (err == nil) != c.Valid {
+		was := `"decision":{"base":"cast","rule":"majority","threshold":null}`
+		if !bytes.Contains(doc, []byte(was)) {
+			t.Fatalf("%s: no decision in %s", c.Case, doc)
+		}
+		doc = bytes.Replace(doc, []byte(was), []byte(`"decision":`+string(c.Decision)), 1)
+		if _, err := ParseProposal(doc); (err == nil) != c.Valid {
 			t.Errorf("%s: valid %v, err %v", c.Case, c.Valid, err)
 		}
 	}
@@ -202,11 +232,15 @@ func TestOutcomeShapes(t *testing.T) {
 // TestCheckRefusesOutcome: an observer refuses results whose outcome
 // doesn't recompute, even when every signature holds.
 func TestCheckRefusesOutcome(t *testing.T) {
-	v := newVote(t, 3, 2)
+	// Four ballots: yes, no, abstain, yes. Majority of cast: yes, 2 of 3.
+	v := newVote(t, 4, 4)
 	rows, results, _ := v.count(t)
 	r, err := ParseResults(results)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !sameOutcome(r.Outcome, *decided("yes")) {
+		t.Fatalf("fixture outcome %+v", r.Outcome)
 	}
 	for _, o := range []Outcome{
 		{QuorumMet: true, Status: StatusNotDecided},
@@ -214,7 +248,9 @@ func TestCheckRefusesOutcome(t *testing.T) {
 		{Status: StatusNoQuorum},
 		{QuorumMet: true, Status: StatusDecided, Choice: sp("no")},
 	} {
-		if sameOutcome(o, r.Outcome) {
+		// Compared field by field, not with sameOutcome, which Check uses.
+		if o.Status == r.Outcome.Status && o.QuorumMet == r.Outcome.QuorumMet &&
+			(o.Choice == nil) == (r.Outcome.Choice == nil) && (o.Choice == nil || *o.Choice == *r.Outcome.Choice) {
 			continue
 		}
 		bad := *r
@@ -288,5 +324,20 @@ func TestProposalRefusesQuorumAndDecision(t *testing.T) {
 	p.Quorum.MinBallots = p.Eligible
 	if _, err := EncodeProposal(p); err != nil {
 		t.Errorf("quorum of every eligible member: %v", err)
+	}
+}
+
+// Decide refuses a decision it can't apply, rather than panic on a nil
+// base or read an unknown rule as not_decided.
+func TestDecideRefusesDecision(t *testing.T) {
+	for name, d := range map[string]Decision{
+		"majority, null base": {Rule: RuleMajority},
+		"an unknown rule":     {Rule: "unanimity", Base: BaseOf(BaseCast)},
+		"an unknown base":     {Rule: RuleMajority, Base: BaseOf("all")},
+	} {
+		c := outcomeCase{Decision: d, MinBallots: 1, Eligible: 20, Choices: two, Tally: map[string]int64{"c1": 2, "c2": 1, AbstainID: 0}, Ballots: 3}
+		if o, err := Decide(c.proposal(), c.Tally, c.Ballots); err == nil {
+			t.Errorf("%s: %+v", name, o)
+		}
 	}
 }

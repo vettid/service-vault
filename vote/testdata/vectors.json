@@ -289,6 +289,16 @@
   "results": "{\"counts\":{\"ballots\":2,\"eligible\":3,\"removed\":1,\"unhandled\":0},\"extensions\":[{\"doc\":\"eyJjbG9zZXNfYXQiOjE3OTM3ODY0MDAsIm4iOjEsIm91dGFnZSI6eyJmcm9tIjoxNzkzNzczODAwLCJzb3VyY2UiOiJodHRwczovL3N0YXR1cy52ZXR0aWQub3JnLyIsInRvIjoxNzkzNzc3NDAwfSwicHJvcG9zYWxfaWQiOiIwMUpCUVowMDAwMDAwMDAwMDAwMDAwMDAwQSIsInYiOjF9\",\"sig\":\"OxelSq1YCh1F0DiuuVEeuewfDRbjO+WkfKKVo8gBwoeQ8imNqiVr1EulbsDH+UWTqGvoq77iXHzIFvqG2g40Dg==\"}],\"outcome\":{\"choice\":null,\"quorum_met\":true,\"status\":\"not_decided\"},\"proposal\":{\"doc\":\"eyJiaW5kaW5nIjpmYWxzZSwiY2hvaWNlcyI6W3siaWQiOiJ5ZXMiLCJsYWJlbCI6IlllcyJ9LHsiaWQiOiJubyIsImxhYmVsIjoiTm8ifSx7ImlkIjoiYWJzdGFpbiIsImxhYmVsIjoiQWJzdGFpbiJ9XSwiY2xvc2VzX2F0IjoxNzkzNzc5MjAwLCJkZWNpc2lvbiI6eyJiYXNlIjoiY2FzdCIsInJ1bGUiOiJtYWpvcml0eSIsInRocmVzaG9sZCI6bnVsbH0sImVsaWdpYmxlIjozLCJvcGVuc19hdCI6MTc5MzUyMDAwMCwib3V0YWdlX3J1bGUiOiJFeHRlbmRlZCBieSBhIHJlbGF5IG91dGFnZSBvdmVyIDEgaG91ciwgMjQgaCBhdCBtb3N0LiIsInByb3Bvc2FsX2lkIjoiMDFKQlFaMDAwMDAwMDAwMDAwMDAwMDAwMEEiLCJxdW9ydW0iOnsibWluX2JhbGxvdHMiOjEsInRleHQiOiJBIHRoaXJkIG9mIHRoZSBtZW1iZXJzIn0sInJlY29yZF9hdCI6MTc5MzUwMDAwMCwicmVjb3JkX3Jvb3QiOiJxUVVUcnIyQVYwMjQ5ZytSVkszQm9HMStmS1c3bGlYakFBTFFGZ2Q3RlNRPSIsInJlbW92ZWRfbWF5X3ZvdGUiOmZhbHNlLCJzZXJ2aWNlIjoiQjlSSW9SUEZZM2kvc2JIcmM0UktuUUtuTkFzRUp0TGNnUDNpc1U2Z1VQUT0iLCJ0ZXh0IjoiVGhlIGJ1ZGdldCBhcyBjaXJjdWxhdGVkIG9uIDEgTm92ZW1iZXIuIiwidGl0bGUiOiJBZG9wdCB0aGUgMjAyNyBidWRnZXQiLCJ2IjoxfQ==\",\"sig\":\"eNzEzgHRaW2o1DdweRdB4n4gM2f/Czcs7Wvzfyw3TngD+MCfDyQeqYP0/9/OAqCkJ1oTs64HeZS2QsEHkpvQDg==\"},\"proposal_id\":\"01JBQZ0000000000000000000A\",\"rows_hash\":\"WP2O5vfdDCEUNI2WTxaM0mjaV1Oa/qgDeqIDYk7lGv8=\",\"rows_root\":\"GhBEnSaX6FjdZfQ8Bem2N7BqHVRLYl1/90E1pqNm9cM=\",\"tally\":{\"abstain\":0,\"no\":1,\"yes\":1},\"v\":1}",
   "results_sig": "656ad9c07753806a901d8385f4a423fc019363ab6226e720c0ec7de577c0b709a3f69b84b0240f2e9cf66b4dcc647787590612cee23a3e68776a604ca37b420b"
  },
+ "documents_decided": {
+  "service_seed": "9c0db9489030b1b49576f698ed3c78d3408ac66601225c2c06e3c8822a6cb7c5",
+  "proposal": "{\"binding\":false,\"choices\":[{\"id\":\"yes\",\"label\":\"Yes\"},{\"id\":\"no\",\"label\":\"No\"},{\"id\":\"abstain\",\"label\":\"Abstain\"}],\"closes_at\":1793779200,\"decision\":{\"base\":\"cast\",\"rule\":\"majority\",\"threshold\":null},\"eligible\":4,\"opens_at\":1793520000,\"outage_rule\":\"Extended by a relay outage over 1 hour, 24 h at most.\",\"proposal_id\":\"01JBQZ0000000000000000000A\",\"quorum\":{\"min_ballots\":1,\"text\":\"A third of the members\"},\"record_at\":1793500000,\"record_root\":\"WZylKvPVhNvJ55B7tgSr+WqR3LtjFmrYVUI8mkf8foE=\",\"removed_may_vote\":false,\"service\":\"B9RIoRPFY3i/sbHrc4RKnQKnNAsEJtLcgP3isU6gUPQ=\",\"text\":\"The budget as circulated on 1 November.\",\"title\":\"Adopt the 2027 budget\",\"v\":1}",
+  "proposal_sig": "ca1c356dca86c7be9d5d9bb0ff58c391c9ad9808e3cea4ee0f7a06a413858d3b392ecbdaa5828baf63efa1bcf0f18fdc3df01f4ee3c2d5b8bb4fe31c97c38207",
+  "extension": "{\"closes_at\":1793786400,\"n\":1,\"outage\":{\"from\":1793773800,\"source\":\"https://status.vettid.org/\",\"to\":1793777400},\"proposal_id\":\"01JBQZ0000000000000000000A\",\"v\":1}",
+  "extension_sig": "8870ba914dd621f587b30b890da3eeabd8cf568ae2f65b5433a8408f9981c963f06c78271852b3537832ab4b596f0f4a79816246a25612a4c6e06a0612a5dd07",
+  "rows": "{\"proposal_id\":\"01JBQZ0000000000000000000A\",\"rows\":[{\"ballot\":{\"ballot_sig\":\"uLlptCyta5H2W7xMJhG7W/oBm35GJhpNiD9ScRCANn+SooOm1U4kM3uuJMj10K+BR3Cqe0g8LvQ9xi0ZHA/bDg==\",\"choice_id\":\"yes\",\"vk\":\"82xjoLAtd++pcsOhsIZdOSR9vYTf/C9GapTbrkT3Z+c=\"},\"record_tag\":\"C84TLypIjROQ7K7jeg59uszFWPoHMA6Ca0fm5tso1ZI=\"},{\"ballot\":{\"ballot_sig\":\"WoA39zbC3hQrysD71AHL35OMfhjHnPSx0sjYN08MrdQD7omL0B4/Z4sZKPU0jAMCE8AGqrT9SDjyeo6iqIYXDw==\",\"choice_id\":\"no\",\"vk\":\"jGPIqZHfFrsWJcNx3mWiUF2DTlHgcayRWlLj6WfYf64=\"},\"record_tag\":\"ZkN1QHDa7CqSiRoXxL6qMTdrpGSJh5n2a42bAx9WDlg=\"},{\"ballot\":{\"ballot_sig\":\"dQ9WN9k2mR1a7OrgSd/FNBNumq8xM3NzILn6uaIrdHFN4f/OM84XSPMezvl0b7FawcwIB+KBtJ8zPYqMvMZyCQ==\",\"choice_id\":\"yes\",\"vk\":\"EpVEP+hBd8X+lHTjy3rgfyOsFlsAhcl3z4ra5eLahwQ=\"},\"record_tag\":\"Z1cGcYia7pbpKDrI5Rsn1b7uBW2g3oPQ7+o/AtUacg4=\"},{\"ballot\":{\"ballot_sig\":\"B92GureLjCbW0Qr21V4MaDv6DiVUr6Su3ue1X3Nwf1HGKSqmNmewgbBVzldW11b/f1EGoZhQQYEaUGFBBO4yBA==\",\"choice_id\":\"abstain\",\"vk\":\"Biru1Lyivyxaq9ILD26k653mnwH+4CiUJ428CQAsxe4=\"},\"record_tag\":\"psIVT5ZQNTitKklxk2O7kOsVpMprH29lq7Jnm3SE3mk=\"}],\"v\":1}",
+  "results": "{\"counts\":{\"ballots\":4,\"eligible\":4,\"removed\":1,\"unhandled\":0},\"extensions\":[{\"doc\":\"eyJjbG9zZXNfYXQiOjE3OTM3ODY0MDAsIm4iOjEsIm91dGFnZSI6eyJmcm9tIjoxNzkzNzczODAwLCJzb3VyY2UiOiJodHRwczovL3N0YXR1cy52ZXR0aWQub3JnLyIsInRvIjoxNzkzNzc3NDAwfSwicHJvcG9zYWxfaWQiOiIwMUpCUVowMDAwMDAwMDAwMDAwMDAwMDAwQSIsInYiOjF9\",\"sig\":\"iHC6kU3WIfWHswuJDaPuq9jPVori9ltUM6hAj5mByWPwbHgnGFKzU3gyq0tZbw9KeYFiRqJWEqTG4GoGEqXdBw==\"}],\"outcome\":{\"choice\":\"yes\",\"quorum_met\":true,\"status\":\"decided\"},\"proposal\":{\"doc\":\"eyJiaW5kaW5nIjpmYWxzZSwiY2hvaWNlcyI6W3siaWQiOiJ5ZXMiLCJsYWJlbCI6IlllcyJ9LHsiaWQiOiJubyIsImxhYmVsIjoiTm8ifSx7ImlkIjoiYWJzdGFpbiIsImxhYmVsIjoiQWJzdGFpbiJ9XSwiY2xvc2VzX2F0IjoxNzkzNzc5MjAwLCJkZWNpc2lvbiI6eyJiYXNlIjoiY2FzdCIsInJ1bGUiOiJtYWpvcml0eSIsInRocmVzaG9sZCI6bnVsbH0sImVsaWdpYmxlIjo0LCJvcGVuc19hdCI6MTc5MzUyMDAwMCwib3V0YWdlX3J1bGUiOiJFeHRlbmRlZCBieSBhIHJlbGF5IG91dGFnZSBvdmVyIDEgaG91ciwgMjQgaCBhdCBtb3N0LiIsInByb3Bvc2FsX2lkIjoiMDFKQlFaMDAwMDAwMDAwMDAwMDAwMDAwMEEiLCJxdW9ydW0iOnsibWluX2JhbGxvdHMiOjEsInRleHQiOiJBIHRoaXJkIG9mIHRoZSBtZW1iZXJzIn0sInJlY29yZF9hdCI6MTc5MzUwMDAwMCwicmVjb3JkX3Jvb3QiOiJXWnlsS3ZQVmhOdko1NUI3dGdTcitXcVIzTHRqRm1yWVZVSThta2Y4Zm9FPSIsInJlbW92ZWRfbWF5X3ZvdGUiOmZhbHNlLCJzZXJ2aWNlIjoiQjlSSW9SUEZZM2kvc2JIcmM0UktuUUtuTkFzRUp0TGNnUDNpc1U2Z1VQUT0iLCJ0ZXh0IjoiVGhlIGJ1ZGdldCBhcyBjaXJjdWxhdGVkIG9uIDEgTm92ZW1iZXIuIiwidGl0bGUiOiJBZG9wdCB0aGUgMjAyNyBidWRnZXQiLCJ2IjoxfQ==\",\"sig\":\"yhw1bcqGx76dXZuw/1jDkcmtmAjjzqTuD3oGpBOFjTs5LsvapYKLr2Pvobzw8Y/cPfAfTuPC1bi7T+Mcl8OCBw==\"},\"proposal_id\":\"01JBQZ0000000000000000000A\",\"rows_hash\":\"hlaSLFmRAiaxC+Mg8VYs2XAbbdZTiNOu35+dtge7grk=\",\"rows_root\":\"3UdVmrTA3EzmfR9+k0MENWS7CfClSsf8aPk7IT1tkFY=\",\"tally\":{\"abstain\":1,\"no\":1,\"yes\":2},\"v\":1}",
+  "results_sig": "5e01020d1737f9a9da08b618e94d9429c7596cbd6ef98575e9d87a474e7a87357acfda8340d2b45b4c0f322f043c9f3053e1b3e5b40970f5b4706711c1f17703"
+ },
  "outcomes": [
   {
    "case": "majority of cast",
@@ -1031,6 +1041,267 @@
    }
   },
   {
+   "case": "zero ballots, min_ballots 1, cast: no_quorum before base 0",
+   "decision": {
+    "rule": "majority",
+    "base": "cast",
+    "threshold": null
+   },
+   "removed_may_vote": false,
+   "min_ballots": 1,
+   "eligible": 20,
+   "choices": [
+    "c1",
+    "c2",
+    "abstain"
+   ],
+   "tally": {
+    "abstain": 0,
+    "c1": 0,
+    "c2": 0
+   },
+   "ballots": 0,
+   "outcome": {
+    "quorum_met": false,
+    "status": "no_quorum",
+    "choice": null
+   }
+  },
+  {
+   "case": "zero ballots, min_ballots 1, voted: no_quorum before base 0",
+   "decision": {
+    "rule": "majority",
+    "base": "voted",
+    "threshold": null
+   },
+   "removed_may_vote": false,
+   "min_ballots": 1,
+   "eligible": 20,
+   "choices": [
+    "c1",
+    "c2",
+    "abstain"
+   ],
+   "tally": {
+    "abstain": 0,
+    "c1": 0,
+    "c2": 0
+   },
+   "ballots": 0,
+   "outcome": {
+    "quorum_met": false,
+    "status": "no_quorum",
+    "choice": null
+   }
+  },
+  {
+   "case": "every ballot abstains below quorum, cast",
+   "decision": {
+    "rule": "majority",
+    "base": "cast",
+    "threshold": null
+   },
+   "removed_may_vote": false,
+   "min_ballots": 5,
+   "eligible": 20,
+   "choices": [
+    "c1",
+    "c2",
+    "abstain"
+   ],
+   "tally": {
+    "abstain": 4,
+    "c1": 0,
+    "c2": 0
+   },
+   "ballots": 4,
+   "outcome": {
+    "quorum_met": false,
+    "status": "no_quorum",
+    "choice": null
+   }
+  },
+  {
+   "case": "every ballot abstains below quorum, voted",
+   "decision": {
+    "rule": "threshold",
+    "base": "voted",
+    "threshold": {
+     "num": 2,
+     "den": 3
+    }
+   },
+   "removed_may_vote": false,
+   "min_ballots": 5,
+   "eligible": 20,
+   "choices": [
+    "c1",
+    "c2",
+    "abstain"
+   ],
+   "tally": {
+    "abstain": 4,
+    "c1": 0,
+    "c2": 0
+   },
+   "ballots": 4,
+   "outcome": {
+    "quorum_met": false,
+    "status": "no_quorum",
+    "choice": null
+   }
+  },
+  {
+   "case": "threshold 2/3 of voted, abstain alone meets the fraction",
+   "decision": {
+    "rule": "threshold",
+    "base": "voted",
+    "threshold": {
+     "num": 2,
+     "den": 3
+    }
+   },
+   "removed_may_vote": false,
+   "min_ballots": 1,
+   "eligible": 20,
+   "choices": [
+    "c1",
+    "c2",
+    "abstain"
+   ],
+   "tally": {
+    "abstain": 8,
+    "c1": 1,
+    "c2": 0
+   },
+   "ballots": 9,
+   "outcome": {
+    "quorum_met": true,
+    "status": "not_decided",
+    "choice": null
+   }
+  },
+  {
+   "case": "threshold 3/4 of elig, just below",
+   "decision": {
+    "rule": "threshold",
+    "base": "elig",
+    "threshold": {
+     "num": 3,
+     "den": 4
+    }
+   },
+   "removed_may_vote": true,
+   "min_ballots": 1,
+   "eligible": 8,
+   "choices": [
+    "c1",
+    "c2",
+    "abstain"
+   ],
+   "tally": {
+    "abstain": 0,
+    "c1": 5,
+    "c2": 1
+   },
+   "ballots": 6,
+   "outcome": {
+    "quorum_met": true,
+    "status": "not_decided",
+    "choice": null
+   }
+  },
+  {
+   "case": "majority of elig, three choices",
+   "decision": {
+    "rule": "majority",
+    "base": "elig",
+    "threshold": null
+   },
+   "removed_may_vote": true,
+   "min_ballots": 1,
+   "eligible": 10,
+   "choices": [
+    "c1",
+    "c2",
+    "c3",
+    "abstain"
+   ],
+   "tally": {
+    "abstain": 0,
+    "c1": 6,
+    "c2": 2,
+    "c3": 1
+   },
+   "ballots": 9,
+   "outcome": {
+    "quorum_met": true,
+    "status": "decided",
+    "choice": "c1"
+   }
+  },
+  {
+   "case": "threshold 2/3 of elig, three choices, none",
+   "decision": {
+    "rule": "threshold",
+    "base": "elig",
+    "threshold": {
+     "num": 2,
+     "den": 3
+    }
+   },
+   "removed_may_vote": true,
+   "min_ballots": 1,
+   "eligible": 9,
+   "choices": [
+    "c1",
+    "c2",
+    "c3",
+    "abstain"
+   ],
+   "tally": {
+    "abstain": 0,
+    "c1": 5,
+    "c2": 2,
+    "c3": 1
+   },
+   "ballots": 8,
+   "outcome": {
+    "quorum_met": true,
+    "status": "not_decided",
+    "choice": null
+   }
+  },
+  {
+   "case": "plurality, a top tie over a lower third",
+   "decision": {
+    "rule": "plurality",
+    "base": null,
+    "threshold": null
+   },
+   "removed_may_vote": false,
+   "min_ballots": 1,
+   "eligible": 20,
+   "choices": [
+    "c1",
+    "c2",
+    "c3",
+    "abstain"
+   ],
+   "tally": {
+    "abstain": 0,
+    "c1": 3,
+    "c2": 3,
+    "c3": 1
+   },
+   "ballots": 7,
+   "outcome": {
+    "quorum_met": true,
+    "status": "tied",
+    "choice": null
+   }
+  },
+  {
    "case": "refused: tally doesn't sum to ballots",
    "decision": {
     "rule": "majority",
@@ -1362,6 +1633,61 @@
    },
    "removed_may_vote": false,
    "valid": false
+  },
+  {
+   "case": "plurality with a threshold",
+   "decision": {
+    "base": null,
+    "rule": "plurality",
+    "threshold": {
+     "den": 3,
+     "num": 2
+    }
+   },
+   "removed_may_vote": false,
+   "valid": false
+  },
+  {
+   "case": "majority, a null base and a threshold",
+   "decision": {
+    "base": null,
+    "rule": "majority",
+    "threshold": {
+     "den": 3,
+     "num": 2
+    }
+   },
+   "removed_may_vote": false,
+   "valid": false
+  },
+  {
+   "case": "base absent",
+   "decision": {
+    "rule": "plurality",
+    "threshold": null
+   },
+   "removed_may_vote": false,
+   "valid": false
+  },
+  {
+   "case": "threshold absent",
+   "decision": {
+    "base": "cast",
+    "rule": "majority"
+   },
+   "removed_may_vote": false,
+   "valid": false
+  },
+  {
+   "case": "an unknown member",
+   "decision": {
+    "base": "cast",
+    "extra": null,
+    "rule": "majority",
+    "threshold": null
+   },
+   "removed_may_vote": false,
+   "valid": false
   }
  ],
  "outcome_shapes": [
@@ -1461,6 +1787,51 @@
     "choice": null,
     "quorum_met": true,
     "status": "passed"
+   },
+   "valid": false
+  },
+  {
+   "case": "decided, a choice id outside the grammar",
+   "outcome": {
+    "choice": "C1",
+    "quorum_met": true,
+    "status": "decided"
+   },
+   "valid": false
+  },
+  {
+   "case": "decided, an empty choice",
+   "outcome": {
+    "choice": "",
+    "quorum_met": true,
+    "status": "decided"
+   },
+   "valid": false
+  },
+  {
+   "case": "no_quorum with a choice",
+   "outcome": {
+    "choice": "c1",
+    "quorum_met": false,
+    "status": "no_quorum"
+   },
+   "valid": false
+  },
+  {
+   "case": "quorum not met, not_decided",
+   "outcome": {
+    "choice": null,
+    "quorum_met": false,
+    "status": "not_decided"
+   },
+   "valid": false
+  },
+  {
+   "case": "quorum not met, tied",
+   "outcome": {
+    "choice": null,
+    "quorum_met": false,
+    "status": "tied"
    },
    "valid": false
   }

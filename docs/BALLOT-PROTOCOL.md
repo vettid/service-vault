@@ -332,7 +332,9 @@ the service's copy, and its id), the new close, the outage and its source.
 (0.14.0.) The creation summary reads
 `BINDING, opens 2026-11-18 14:00Z, closes 11-25 14:00Z, quorum 10, rule >1/2 cast, choices "Approve"/"Reject", removed votes, title "…"`:
 - **The close is shown without its year:** it is at most 7 days after
-  the opening, which is shown with it.
+  the opening, which is shown with it. An input whose window doesn't
+  close after it opens, within 7 days, is refused before any summary is
+  built, so the text is true on its own.
 - **The rule** shows its comparison, its fraction and its base:
   `rule >1/2 cast`, `rule >=2/3 voted`, `rule >=9/10 elig`, or
   `rule most` for a plurality.
@@ -1075,14 +1077,18 @@ item.
    - three choices with none over half;
    - a three-way plurality tie, a tie below the top, and every real
      choice at 0;
-   - zero ballots with `min_ballots` 0;
+   - zero ballots with `min_ballots` 0, and with `min_ballots` 1
+     (`no_quorum` comes before base 0);
+   - every ballot abstaining below the quorum;
    - the quorum met exactly, and one ballot short;
    - `no_quorum` over a majority and over a tie;
    - tallies refused: a wrong sum, a negative count, a missing or extra
      choice, more ballots than eligible.
 
-   Also **decisions** (`decisions`), valid and refused, and **outcome
-   objects** (`outcome_shapes`), consistent and not.
+   Also **decisions** (`decisions`), valid and refused, each judged as
+   a proposal's member (an absent or unknown member is refused); **outcome
+   objects** (`outcome_shapes`), consistent and not; and a second set of
+   documents (`documents_decided`) whose outcome is `decided`.
 
 ## 12. Decisions for the owner
 

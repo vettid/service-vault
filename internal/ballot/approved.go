@@ -130,8 +130,7 @@ const (
 // approval.MaxServiceName), the action's label, the framing and the ref
 // take the rest. A summary is shown whole or refused, never cut.
 const (
-	maxSummaryFixed = 115 // everything but the title
-	maxSummary      = 172 // the whole (the room left by the longest service name and label)
+	maxSummary = 172 // the whole (the room left by the longest service name and label)
 )
 
 // errTooLong: what the admins would read does not fit the challenge's
@@ -328,15 +327,24 @@ func checkInput(in *ProposalInput) error {
 	if in.Quorum.MinBallots < 0 || in.Quorum.MinBallots > vote.MaxEligible {
 		return errors.New("ballot: quorum out of range")
 	}
+	// The summary shows the close without its year, so it is true only
+	// for a window of at most 7 days that closes after it opens (§3.4).
+	if in.OpensAt >= in.ClosesAt || in.ClosesAt-in.OpensAt > vote.MaxWindow {
+		return errors.New("ballot: the window must close after it opens, within 7 days")
+	}
 	return in.Decision.Validate(in.RemovedMayVote)
 }
 
-// ProposalMinBallots is the quorum's min_ballots of a proposal.create
-// payload, so that an approval whose quorum the roster can't reach is
-// refused before the admins are asked.
+// ProposalMinBallots is the quorum's min_ballots of a valid
+// proposal.create payload, so that an approval whose quorum the roster
+// can't reach is refused before the admins are asked. An invalid payload
+// is an error (its summary says why).
 func ProposalMinBallots(payload []byte) (int64, error) {
 	var in ProposalInput
 	if err := parseCanonical(payload, &in); err != nil {
+		return 0, err
+	}
+	if err := checkInput(&in); err != nil {
 		return 0, err
 	}
 	return in.Quorum.MinBallots, nil

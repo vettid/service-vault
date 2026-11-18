@@ -99,6 +99,34 @@ func TestCreateRefusesDecision(t *testing.T) {
 	}
 }
 
+// The summary shows the close without its year, so a window that doesn't
+// close after it opens, within 7 days, is refused before any summary.
+func TestSummaryRefusesWindow(t *testing.T) {
+	ctx := context.Background()
+	for name, mod := range map[string]func(*ProposalInput){
+		"reversed":       func(i *ProposalInput) { i.ClosesAt = i.OpensAt - 3600 },
+		"empty":          func(i *ProposalInput) { i.ClosesAt = i.OpensAt },
+		"over 7 days":    func(i *ProposalInput) { i.ClosesAt = i.OpensAt + vote.MaxWindow + 1 },
+		"a year and two": func(i *ProposalInput) { i.ClosesAt = i.OpensAt + 372*86400 },
+	} {
+		in := input()
+		mod(&in)
+		if _, err := ProposalSummary(mustCanon(t, in)); err == nil {
+			t.Errorf("%s: summarised", name)
+		}
+		m, _, _, a := strictManager(t)
+		a.add("a", ActionProposalCreate, mustCanon(t, in), "")
+		if _, err := m.Create(ctx, "a", in); err == nil || a.used["a"] {
+			t.Errorf("%s: %v, used %v", name, err, a.used["a"])
+		}
+	}
+	in := input()
+	in.ClosesAt = in.OpensAt + vote.MaxWindow
+	if _, err := ProposalSummary(mustCanon(t, in)); err != nil {
+		t.Errorf("a 7-day window: %v", err)
+	}
+}
+
 // A quorum over the roster's eligible members is refused at the moment of
 // use, before the approval is used (§3.4).
 func TestCreateQuorumUnreachable(t *testing.T) {

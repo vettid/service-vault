@@ -777,7 +777,7 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 		if n > ballot.MaxEligible {
 			return nil, errCode(CodeTooManyEligible)
 		}
-		// A payload that doesn't parse is refused by its summary below.
+		// An invalid payload is refused by its summary below.
 		if q, err := ballot.ProposalMinBallots(payload); err == nil && q > int64(n) {
 			return nil, errCode(CodeQuorumUnreachable)
 		}

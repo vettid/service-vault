@@ -101,11 +101,14 @@ func (d *Decision) Validate(removedMayVote bool) error {
 	return nil
 }
 
-// Decide computes the outcome (§7.1) from a valid proposal, the tally and
-// the number of ballots. It refuses a tally that doesn't name exactly the
-// proposal's choices, a negative count, a sum other than ballots, or more
-// ballots than eligible members.
+// Decide computes the outcome (§7.1) from the proposal, the tally and the
+// number of ballots. It refuses a decision §3.5 doesn't allow, a tally that
+// doesn't name exactly the proposal's choices, a negative count, a sum
+// other than ballots, or more ballots than eligible members.
 func Decide(p *Proposal, tally map[string]int64, ballots int64) (Outcome, error) {
+	if err := p.Decision.Validate(p.RemovedMayVote); err != nil {
+		return Outcome{}, err
+	}
 	if len(tally) != len(p.Choices) || ballots < 0 || ballots > p.Eligible {
 		return Outcome{}, errors.New("ballot: tally doesn't match the proposal")
 	}
