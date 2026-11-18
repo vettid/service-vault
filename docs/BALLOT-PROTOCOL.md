@@ -1034,8 +1034,9 @@ SubjectPublicKeyInfo; `?` marks a field present only where stated.
 - **Withholding the results, or extending after reading the running
   tally:** visible to everyone (no results; an extension with its
   stated outage), not prevented. (0.15.0) With results withheld
-  entirely, nothing proves a dropped ballot either (no status answer is
-  evidence, §8.3): the withholding itself is what shows.
+  entirely, nothing proves a dropped ballot either (no status answer
+  about the ballot is evidence, §8.3): the withholding itself is what
+  shows.
 - **A split view:** the site refuses a second document at one path, and
   every vault checks its own proposal and row against the site, but
   Rekor proves only existence and time, so a site and service colluding
@@ -1296,7 +1297,8 @@ item.
     version still are; a signed `not_eligible` is evidence under the
     proposal's hash, not a zero one. With results withheld, the withholding is what shows.
   - **§2, §8.5, §11, §12:** the label version per message, the new
-    fields, the vectors (v2 status and refusal, `refusal_not_held`).
+    fields, the vectors (v2 status and refusal, `refusal_not_held`,
+    `refusal_status_unknown`).
   - **Rollout (Rule 3):** no v1 support. The service deploys first, only
     once the current vault release treats a status or refusal failing
     verification as no answer (al-cal confirmed, GC #13902), with no
