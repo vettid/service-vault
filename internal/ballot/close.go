@@ -173,6 +173,7 @@ type ResultsSummary struct {
 	ResultsHash []byte           `json:"results_hash"`
 	Tally       map[string]int64 `json:"tally"`
 	Counts      vote.Counts      `json:"counts"`
+	Outcome     vote.Outcome     `json:"outcome"`
 }
 
 // Close counts a vote and publishes its results, or reports them if they
@@ -292,7 +293,7 @@ func (m *Manager) Close(ctx context.Context, id string) (*ResultsSummary, error)
 	if err != nil {
 		return nil, err
 	}
-	return &ResultsSummary{ProposalID: id, ResultsHash: sum(pr.Results), Tally: res.Tally, Counts: res.Counts}, nil
+	return &ResultsSummary{ProposalID: id, ResultsHash: sum(pr.Results), Tally: res.Tally, Counts: res.Counts, Outcome: res.Outcome}, nil
 }
 
 // removed counts the proposal's members no longer on the roster.

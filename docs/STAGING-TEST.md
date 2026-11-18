@@ -115,7 +115,7 @@ a real service's members sign in themselves.
    the input, and prints the summary the service built from it and
    `action_hash_check: ok`. It takes no `-summary`.
 2. Member: the note reads *Approve on VettID Member Service: New vote:
-   BINDING (or ADVISORY), opens …, closes …, quorum …, choices …, title … —
+   BINDING (or ADVISORY), opens …, closes …, quorum …, rule …, choices …, title … —
    ref xxxxxxxxxxxxxxxx*, from the input and nothing else. Check the window
    and the title, then authenticate.
 3. Operator: once `status: approved`, svctl creates the proposal with the

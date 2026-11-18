@@ -33,6 +33,7 @@ func newTestVote(t *testing.T, n int) *testVote {
 		V: 1, ProposalID: "01JBQZ0000000000000000000A", Service: v.ik.Public().(ed25519.PublicKey),
 		Title: "Adopt the 2027 budget", Text: "The budget as circulated on 1 November.",
 		Choices:  []vote.Choice{{ID: "yes", Label: "Yes"}, {ID: "no", Label: "No"}, {ID: vote.AbstainID, Label: "Abstain"}},
+		Decision: vote.Decision{Rule: vote.RuleMajority, Base: vote.BaseOf(vote.BaseCast)},
 		Quorum:   vote.Quorum{Text: "A third of the members", MinBallots: 1},
 		RecordAt: 1793500000, OpensAt: 1793520000, ClosesAt: 1793520000 + 3*86400,
 		Eligible: int64(len(sorted)), RecordRoot: vote.Root(sorted), OutageRule: "Extended by a relay outage over 1 hour, 24 h at most.",

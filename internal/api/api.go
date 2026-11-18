@@ -554,6 +554,7 @@ var approvalStatusCodes = map[string]int{
 	approval.CodeRateLimited:       http.StatusTooManyRequests,
 	approval.CodeOutageNotOver:     http.StatusUnprocessableEntity,
 	approval.CodeTooManyEligible:   http.StatusBadRequest,
+	approval.CodeQuorumUnreachable: http.StatusBadRequest,
 }
 
 func (s *Server) approvalError(w http.ResponseWriter, what string, err error) {
@@ -655,6 +656,8 @@ func (s *Server) createProposal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "bundle_check_not_configured")
 	case errors.Is(err, ballot.ErrTooManyEligible):
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "too_many_eligible", "max_eligible": ballot.MaxEligible})
+	case errors.Is(err, ballot.ErrQuorumUnreachable):
+		writeError(w, http.StatusBadRequest, approval.CodeQuorumUnreachable)
 	case errors.As(err, &ei):
 		writeError(w, http.StatusBadRequest, "invalid_proposal")
 	case errors.Is(err, ballot.ErrNoPublisher):

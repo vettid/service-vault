@@ -620,7 +620,7 @@ func TestRenderQR(t *testing.T) {
 // proposalFile is a proposal input a file can hold; the extension file
 // is an extension of it.
 const (
-	proposalFile  = `{"title":"T","text":"","choices":[{"label":"Yes"},{"label":"No"}],"quorum":{"text":"","min_ballots":1},"binding":true,"opens_at":1793520000,"closes_at":1793606400,"outage_rule":""}`
+	proposalFile  = `{"title":"T","text":"","choices":[{"label":"Yes"},{"label":"No"}],"decision":{"rule":"threshold","base":"voted","threshold":{"num":2,"den":3}},"quorum":{"text":"","min_ballots":1},"binding":true,"opens_at":1793520000,"closes_at":1793606400,"outage_rule":""}`
 	extensionFile = `{"closes_at":1793613600,"outage":{"from":1793600000,"to":1793605400,"source":"https://status.vettid.org/"}}`
 )
 
@@ -829,7 +829,8 @@ func TestProposalNeedsApproval(t *testing.T) {
 	}
 	// The payload is the input in canonical full form.
 	want, _ := ballot.CanonicalProposal(ballot.ProposalInput{Title: "T", Choices: []ballot.ChoiceInput{{Label: "Yes"}, {Label: "No"}},
-		Quorum: vote.Quorum{MinBallots: 1}, Binding: true, OpensAt: 1793520000, ClosesAt: 1793606400})
+		Decision: vote.Decision{Rule: vote.RuleThreshold, Base: vote.BaseOf(vote.BaseVoted), Threshold: &vote.Threshold{Num: 2, Den: 3}},
+		Quorum:   vote.Quorum{MinBallots: 1}, Binding: true, OpensAt: 1793520000, ClosesAt: 1793606400})
 	if string(f.apv.req.Payload) != string(want) {
 		t.Fatalf("payload %s", f.apv.req.Payload)
 	}

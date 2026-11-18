@@ -63,6 +63,10 @@ type vectors struct {
 	Merkle    []merkleVector `json:"merkle"`
 	Ed25519   []sigVector    `json:"ed25519"`
 	Documents docVectors     `json:"documents"`
+	// Outcomes, Decisions and OutcomeShapes are §11 item 5 (0.14.0).
+	Outcomes      []outcomeCase  `json:"outcomes"`
+	Decisions     []decisionCase `json:"decisions"`
+	OutcomeShapes []outcomeShape `json:"outcome_shapes"`
 }
 
 // docVectors is §11 item 3: a vote of three members, two of whom voted,
@@ -178,6 +182,7 @@ func makeVectors(t *testing.T) *vectors {
 	}
 	v.Ed25519 = sigVectors(t, sk, msg)
 	v.Documents = makeDocVectors(t)
+	v.Outcomes, v.Decisions, v.OutcomeShapes = outcomeCases(), decisionCases(), outcomeShapes()
 	return &v
 }
 

@@ -18,8 +18,9 @@ import (
 
 func proposalInput() ballot.ProposalInput {
 	return ballot.ProposalInput{Title: "Adopt the 2027 budget",
-		Choices: []ballot.ChoiceInput{{Label: "Yes"}, {Label: "No"}},
-		Quorum:  vote.Quorum{MinBallots: 1}, Binding: true, OpensAt: 1793520000, ClosesAt: 1793520000 + 86400,
+		Choices:  []ballot.ChoiceInput{{Label: "Yes"}, {Label: "No"}},
+		Decision: vote.Decision{Rule: vote.RuleMajority, Base: vote.BaseOf(vote.BaseCast)},
+		Quorum:   vote.Quorum{MinBallots: 1}, Binding: true, OpensAt: 1793520000, ClosesAt: 1793520000 + 86400,
 		OutageRule: ballot.DefaultOutageRule}
 }
 
@@ -613,4 +614,21 @@ func TestProposalApprovalTooManyEligible(t *testing.T) {
 	}
 	n = ballot.MaxEligible
 	f.built(ActionProposalCreate, canonProposal(t, proposalInput()))
+}
+
+// A proposal.create approval whose quorum is more than the eligible
+// members is refused (quorum_unreachable) before anyone is asked.
+func TestProposalApprovalQuorumUnreachable(t *testing.T) {
+	f := newFixture(t, 1, "c1")
+	f.m.EligibleCount = func(context.Context) (int, error) { return 4, nil }
+	in := proposalInput()
+	in.Quorum.MinBallots = 5
+	if _, err := f.m.Create(context.Background(), Request{Action: ActionProposalCreate, Payload: json.RawMessage(canonProposal(t, in))}); codeOf(err) != CodeQuorumUnreachable {
+		t.Fatalf("quorum over the eligible: %v", err)
+	}
+	if len(f.p.sent) != 0 || f.openCount() != 0 {
+		t.Fatal("sent or stored")
+	}
+	in.Quorum.MinBallots = 4
+	f.built(ActionProposalCreate, canonProposal(t, in))
 }

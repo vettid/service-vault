@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -106,7 +107,7 @@ func parseCanonical(payload []byte, v any) error {
 // What a proposal.create approval's payload carries, field by field
 // (BALLOT-PROTOCOL §3.4): the fields shown to the admins (title, choices'
 // labels, binding, removed_may_vote, opens_at, closes_at, quorum's
-// min_ballots), the fields the service sets (the choice ids, the default
+// min_ballots, the decision), the fields the service sets (the choice ids, the default
 // abstain choice, outage_rule, record_at, the roster) and the fields it
 // refuses unless they say what the service would set anyway (text, quorum
 // text, outage_rule).
@@ -193,16 +194,75 @@ func widestExtension() []byte {
 	return p
 }
 
-// MaxTitleBytes is the longest title create accepts, which is the longest
-// that still fits whole in an extension's summary.
-func MaxTitleBytes() int {
-	n := 0
-	for ; n < 200; n++ {
-		if _, err := ExtensionSummary(widestExtension(), strings.Repeat("T", n+1)); err != nil {
+// MaxTitleBytes is the longest title create accepts, counted as it is
+// quoted in a summary (strconv.Quote doubles `"` and `\`): the longest
+// that still fits whole in an extension's summary and, with the labels
+// "Approve" and "Reject", in the widest creation summary (§3.4), so that a
+// two-choice motion always fits.
+func MaxTitleBytes() int { return maxTitle() }
+
+var maxTitle = sync.OnceValue(func() int {
+	ext := 0
+	for ; ext < 200; ext++ {
+		if _, err := ExtensionSummary(widestExtension(), strings.Repeat("T", ext+1)); err != nil {
 			break
 		}
 	}
-	return n
+	in := widestProposal()
+	create := 0
+	for ; create < 200; create++ {
+		in.Title = strings.Repeat("T", create+1)
+		if len(proposalSummaryText(&in, "2000-01-01 00:00Z", "2000-01-01 00:00Z")) > maxSummary {
+			break
+		}
+	}
+	return min(ext, create)
+})
+
+// widestProposal is the input of the widest creation summary but the
+// title: advisory, removed members voting, the largest quorum, the longest
+// rule text and the labels "Approve" and "Reject".
+func widestProposal() ProposalInput {
+	in := ProposalInput{Choices: []ChoiceInput{{Label: "Approve"}, {Label: "Reject"}}, RemovedMayVote: true,
+		Quorum: vote.Quorum{MinBallots: vote.MaxEligible}}
+	for _, d := range validDecisions() {
+		if len(decisionText(d)) > len(decisionText(in.Decision)) || in.Decision.Rule == "" {
+			in.Decision = d
+		}
+	}
+	return in
+}
+
+// validDecisions lists every decision a proposal may carry when removed
+// members may vote.
+func validDecisions() []vote.Decision {
+	out := []vote.Decision{{Rule: vote.RulePlurality}}
+	for _, b := range []string{vote.BaseCast, vote.BaseVoted, vote.BaseElig} {
+		out = append(out, vote.Decision{Rule: vote.RuleMajority, Base: vote.BaseOf(b)})
+		for den := int64(1); den <= vote.MaxThresholdDen; den++ {
+			for num := int64(1); num <= den; num++ {
+				d := vote.Decision{Rule: vote.RuleThreshold, Base: vote.BaseOf(b), Threshold: &vote.Threshold{Num: num, Den: den}}
+				if d.Validate(true) == nil {
+					out = append(out, d)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// decisionText is the rule as the admins read it: ">1/2 cast",
+// ">=2/3 elig", "most". d must be valid.
+func decisionText(d vote.Decision) string {
+	switch d.Rule {
+	case vote.RuleMajority:
+		return ">1/2 " + *d.Base
+	case vote.RuleThreshold:
+		return fmt.Sprintf(">=%d/%d %s", d.Threshold.Num, d.Threshold.Den, *d.Base)
+	case vote.RulePlurality:
+		return "most"
+	}
+	return ""
 }
 
 // asciiGraphic accepts visible ASCII only (no space), so a source URL
@@ -227,6 +287,9 @@ func checkInput(in *ProposalInput) error {
 	}
 	if !latin(in.Title) {
 		return ErrCharset
+	}
+	if len(strconv.Quote(in.Title))-2 > MaxTitleBytes() {
+		return errTooLong
 	}
 	// Every vote must be extendable: the title has to fit whole in the
 	// summary of the longest extension (the longest source and the widest
@@ -262,15 +325,27 @@ func checkInput(in *ProposalInput) error {
 		}
 		seen[key] = true
 	}
-	if in.Quorum.MinBallots < 0 {
-		return errors.New("ballot: negative quorum")
+	if in.Quorum.MinBallots < 0 || in.Quorum.MinBallots > vote.MaxEligible {
+		return errors.New("ballot: quorum out of range")
 	}
-	return nil
+	return in.Decision.Validate(in.RemovedMayVote)
+}
+
+// ProposalMinBallots is the quorum's min_ballots of a proposal.create
+// payload, so that an approval whose quorum the roster can't reach is
+// refused before the admins are asked.
+func ProposalMinBallots(payload []byte) (int64, error) {
+	var in ProposalInput
+	if err := parseCanonical(payload, &in); err != nil {
+		return 0, err
+	}
+	return in.Quorum.MinBallots, nil
 }
 
 // ProposalSummary is what the admins read when asked to approve a
-// proposal.create payload: whether the vote is binding, its window, its
-// quorum, its choices and its title, all taken from the payload, after
+// proposal.create payload: whether the vote is binding, its window (the
+// close without its year: it is at most 7 days after the opening), its
+// quorum, its rule, its choices and its title, all taken from the payload, after
 // the action's label (approval.ActionLabel). It is an error unless the
 // payload is the canonical full form of a proposal input that checkInput
 // accepts.
@@ -290,6 +365,17 @@ func ProposalSummary(payload []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// The title is shown whole or the approval is refused: the motion may
+	// be the title, and a cut title would hide the rest of it.
+	if s := proposalSummaryText(&in, opens, closes); len(s) <= maxSummary {
+		return s, nil
+	}
+	return "", errTooLong
+}
+
+// proposalSummaryText builds a creation summary from a checked input and
+// its formatted times.
+func proposalSummaryText(in *ProposalInput, opens, closes string) string {
 	labels := make([]string, 0, len(in.Choices))
 	for _, c := range in.Choices {
 		labels = append(labels, strconv.Quote(c.Label))
@@ -298,18 +384,12 @@ func ProposalSummary(payload []byte) (string, error) {
 	if in.Binding {
 		kind = "BINDING"
 	}
-	head := fmt.Sprintf("%s, opens %s, closes %s, quorum %d, choices %s", kind, opens, closes, in.Quorum.MinBallots,
-		strings.Join(labels, "/"))
+	s := fmt.Sprintf("%s, opens %s, closes %s, quorum %d, rule %s, choices %s", kind, opens, closes[5:], in.Quorum.MinBallots,
+		decisionText(in.Decision), strings.Join(labels, "/"))
 	if in.RemovedMayVote {
-		head += ", removed may vote"
+		s += ", removed votes"
 	}
-	head += ", title "
-	// The title is shown whole or the approval is refused: the motion may
-	// be the title, and a cut title would hide the rest of it.
-	if s := head + strconv.Quote(in.Title); len(s) <= maxSummary {
-		return s, nil
-	}
-	return "", errTooLong
+	return s + ", title " + strconv.Quote(in.Title)
 }
 
 // ExtensionProposalID is the proposal a vote.extend payload is for.
