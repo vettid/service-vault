@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.14.2 (2026-11-18)
+**Status:** 0.15.0 (2026-11-18)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -49,7 +49,9 @@ members' signatures, for the organisation.
 - `H` is SHA-256.
 - **Labels** are ASCII strings embedding the version, like the VMS
   labels (VAULT-MESSAGING §4.1), but unlike them **each ends in a `0x00`
-  byte** and contains no other, for example `"vettid/vote/1/ballot\x00"`
+  byte** and contains no other, for example `"vettid/vote/1/ballot\x00"`.
+  The version number is per message: `status` and `refusal` are at `/2/`
+  (0.15.0), the others at `/1/`
   (0.13.11: VMS labels have no terminator, so this is a difference, not
   the VMS convention). The terminator makes the vote labels prefix-free
   among themselves (no label is the start of another, whatever follows
@@ -445,7 +447,7 @@ listed anchor key. A second, different proposal under the same
 | Type | Body | Answer |
 |---|---|---|
 | `vote.cast` | `{proposal_id, record_tag, vk, choice_id, ballot_sig, cast_sig, pad?}` (§5) | `{proposal_id, msg_ms, receipt_sig}`, or a refusal |
-| `vote.status` | `{proposal_id}` | `{proposal_id, proposal, proposal_sig, bundle, record_secret, record_proof, ballot?, msg_ms?, receipt_sig?, status_sig}`, or a refusal |
+| `vote.status` | `{proposal_id}` | `{proposal_id, connection, status_msg_ms, proposal, proposal_sig, bundle, record_secret, record_proof, ballot?, msg_ms?, receipt_sig?, status_sig}`, or a refusal |
 
 Every JSON object above that carries a member's `choice_id` (the
 `vote.cast` body, the `ballot` of the `vote.status` answer and the
@@ -493,23 +495,57 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
   over and inside the window (here, from the loss to the publication), a
   request more than a minute before the close and at most 24 h in all,
   so a publication lost within the last hour or so before the close
-  cannot be covered: those casts may be left out, which is accepted. The answer is signed:
-  `status_sig = Sign(service IK, "vettid/vote/1/status\x00", lp(proposal_id) ‖ lp(record_tag) ‖ H(ballot_leaf))`,
-  where with no ballot `H` is taken of the empty string.
+  cannot be covered: those casts may be left out, which is accepted. The answer is signed
+  (0.15.0):
+  `status_sig = Sign(service IK, "vettid/vote/2/status\x00", proposal_hash ‖ lp(connection) ‖ lp(record_tag) ‖ H(ballot_leaf) ‖ u64(status_msg_ms))`,
+  where `proposal_hash` is H(the `proposal` bytes in that answer),
+  `connection` is `H(the connection's peer identity key)` and
+  `status_msg_ms` the relay's time of the `vote.status` request, both
+  also members of the answer (`msg_ms` there stays the ballot's receipt
+  time), and with no ballot `H` is taken of the empty string. The
+  bindings describe the answer: which signed proposal, which member, and
+  when it was asked, so an exported answer stands on its own.
   A vault asks it for a proposal on the site's index that it doesn't
   hold, after a restore (§5), and when a cast has had no answer for 24
   hours.
-- **Refusals** are signed, so a member can show them:
-  `refusal_sig = Sign(service IK, "vettid/vote/1/refusal\x00", lp(proposal_id) ‖ lp(connection) ‖ lp(record_tag) ‖ lp(type) ‖ lp(code) ‖ u64(msg_ms) ‖ request_hash)`,
-  in the error body as `{refusal_sig, msg_ms, connection, record_tag}`,
-  where `connection` is `H(the connection's peer identity key)`,
+- **Refusals** are signed, so a member can show them (0.15.0):
+  `refusal_sig = Sign(service IK, "vettid/vote/2/refusal\x00", proposal_hash ‖ lp(connection) ‖ lp(record_tag) ‖ lp(type) ‖ lp(code) ‖ u64(msg_ms) ‖ request_hash)`,
+  in the error body as `{refusal_sig, proposal_hash, msg_ms, connection, record_tag}`,
+  where `proposal_hash` is the hash of the published proposal under the
+  id named, or 32 zero bytes when the service holds none published under
+  it (accepted only with `unknown_proposal` or `not_eligible`),
+  `connection` is `H(the connection's peer identity key)`,
   `record_tag` is empty when the connection has none, `msg_ms` is the
   relay's time of the request (§6), and `request_hash` is
-  `H(ballot_leaf)` for `vote.cast` and `H(proposal_id)` for
-  `vote.status`, or `H(the request body)` when the body is too malformed
-  to form them. A request that names no valid `proposal_id` gets an
-  unsigned refusal, whose `refusal_sig` is `null`. A vault treats an
-  unsigned refusal as no answer.
+  `H(ballot_leaf)` for `vote.cast`, whenever the body forms a leaf (it
+  needs no proposal, so also for a proposal not held), and
+  `H(proposal_id)` for `vote.status`, or `H(the request body)` when the
+  body is too malformed to form them. A request that names no valid
+  `proposal_id` gets an unsigned refusal, whose `refusal_sig` is `null`.
+  A vault treats an unsigned refusal as no answer.
+  - **Tying a refusal to its id:** the signed bytes carry the proposal's
+    hash, not its id. For `vote.status`, `request_hash` = H(proposal_id)
+    names it. For `vote.cast`, H(ballot_leaf) does: the leaf's tag
+    recomputes from that `proposal_id` and the member's `record_secret`
+    (§3.2), and `ballot_sig` binds the proposal's hash. For a malformed
+    body, the body whose hash was signed names it. The member's vault
+    also pairs each answer with its request by `re`.
+- **What a verifier checks** (0.15.0; the member's vault, VAULT-MESSAGING):
+  - `connection` and a non-empty `record_tag` are exactly 32 bytes;
+    `connection` is H of the vault's current or any earlier identity key
+    on that connection (the key may have rotated);
+  - `status_msg_ms`, and a refusal's `msg_ms`, equal the time of a
+    `msg_id` the relay returned for one of the vault's own deposits of
+    that request (all kept across retries). A mismatch, or a request
+    whose deposit answer was lost, makes the answer invalid: no answer,
+    and the vault asks again with a new request, keeping a local
+    diagnostic only, never evidence (the relay's answers are unsigned).
+    A final refusal of a cast whose deposit answer was lost is discarded
+    likewise; sending the cast again is idempotent and harmless (§6
+    step 1);
+  - a zero `proposal_hash` for a proposal the vault holds signed is kept
+    and shown, not evidence: an honest service gives it to a replaced
+    connection after a restore.
 
 | Code | For | Meaning |
 |---|---|---|
@@ -853,7 +889,22 @@ publishes its results has every member's check settle by itself.
 4. **Outcome:** a failure is shown to the member with the evidence: the
    signed proposal, the receipt or signed refusals, and the results. The
    app can export it. A receipt for a ballot the results lack or change
-   proves the service at fault. A ballot under the tag of a member who
+   proves the service at fault. (0.15.0; owner decision 2026-11-18, GC
+   #1375) **No status answer is evidence by itself:** a signed "no
+   ballot" never proves fault, whenever it was asked, because the service
+   need not handle a connection's messages in relay order (an unacked
+   message, a failed batch, §7's 24 h wait). These are evidence, whatever
+   the times:
+   - a status naming a different ballot than the member's receipt, when
+     `receipt_sig` and `status_sig` verify under the same identity key,
+     the receipt's `proposal_hash` equals the status's, the receipt's
+     `ballot_leaf` is shown and its `record_tag` (first 32 bytes) equals
+     the status's, and H(that leaf) differs from the H(ballot_leaf) the
+     status signs (one ballot per tag);
+   - a status whose `proposal_hash` differs from a signed proposal the
+     vault holds under that id: two signed proposals under one id;
+   - a refusal whose `proposal_hash` (not zero) differs from it: a
+     refusal signed for another version under that id. A ballot under the tag of a member who
    says they never voted is settled by the organisation's record: the
    service holds the member's `cast_sig` for it, or it doesn't.
 
@@ -910,8 +961,9 @@ SubjectPublicKeyInfo; `?` marks a field present only where stated.
   `services.json` and `services.json.sig`.
 - **Message bodies** are as §4 gives them, with these types: `proposal`,
   `extension` `b64`; `*_sig` `sig`; `record_secret`, `results_hash`,
-  `record_tag` `hash`; `vk` `b64`; `msg_ms` a JSON integer; `bundle` a
-  Sigstore bundle as JSON.
+  `record_tag`, `connection`, `proposal_hash` `hash`; `vk` `b64`;
+  `msg_ms`, `status_msg_ms` (0.15.0) JSON integers; `bundle` a Sigstore
+  bundle as JSON.
 - **Rekor profile:** a `hashedrekord` entry (digest SHA-256 of the
   document bytes; key the anchor key as PKIX DER; ASN.1 DER ECDSA
   signature) in a Rekor log named in the Sigstore trusted root pinned in
@@ -976,7 +1028,9 @@ SubjectPublicKeyInfo; `?` marks a field present only where stated.
   held ballot still counts; a dropped one is retried.
 - **Withholding the results, or extending after reading the running
   tally:** visible to everyone (no results; an extension with its
-  stated outage), not prevented.
+  stated outage), not prevented. (0.15.0) With results withheld
+  entirely, nothing proves a dropped ballot either (no status answer is
+  evidence, §8.3): the withholding itself is what shows.
 - **A split view:** the site refuses a second document at one path, and
   every vault checks its own proposal and row against the site, but
   Rekor proves only existence and time, so a site and service colluding
@@ -1127,7 +1181,9 @@ Produced by the reference implementation (item 5.4) and copied by
 vettid-vault; a copied vector that stops matching is a stop-and-report
 item.
 1. `record_tag`, `ballot_msg`, `ballot_sig`, `ballot_leaf`, `cast_sig`,
-   a receipt, a status answer and a refusal, from fixed keys.
+   a receipt, a status answer and a refusal, from fixed keys. (0.15.0)
+   The status and refusal are v2, and `refusal_not_held` is a cast's
+   refusal for a proposal not held: the zero hash and H(ballot_leaf).
 2. Merkle: trees of 0, 1, 2, 3, 5 and 8 leaves, and an inclusion proof
    for every leaf of the 5-leaf tree.
 3. Documents: a proposal, an extension, rows and results, with their
@@ -1180,7 +1236,8 @@ item.
 
 **Choices this document makes:**
 
-5. **Labels:** `vettid/vote/1/...\x00`, the VMS convention (§2).
+5. **Labels:** `vettid/vote/N/...\x00`, the VMS convention (§2), the
+   version per message (`status` and `refusal` at 2 from 0.15.0).
 6. **Ballots go over the member's connection,** signed by a
    per-proposal key and by the member's credential key, with a signed
    receipt (§5).
@@ -1210,8 +1267,32 @@ item.
 17. **A leave ends voting at its relay time,** and a cast before it
     counts (§6 "Leaving", 0.14.2; GC #1374). Stale is active; nothing is
     accepted once suspended; a replacement is a leave.
+18. **A signed "no ballot" is never proof of fault** (§8.3, 0.15.0; GC
+    #1375, owner's (c)): receipt against results stays the check.
 
 ## Changes
+
+- **0.15.0 (2026-11-18):** (owner decision 2026-11-18, GC #1375: (c))
+  Status answers and refusals bind the proposal's hash.
+  - **§4.2:** `status_sig` (label `/2/status`) binds `proposal_hash`,
+    `connection` and `status_msg_ms`, both new members of the answer.
+    `refusal_sig` (label `/2/refusal`) binds `proposal_hash` instead of
+    `lp(proposal_id)`, with 32 zero bytes for no published proposal, and
+    carries it in the body. A cast's refusal signs H(ballot_leaf)
+    whenever the body forms one, also for a proposal not held (the
+    service signed H(body) there before). What a verifier checks, and how
+    a refusal is tied to its id.
+  - **§8.3, §9.2:** no status answer is evidence by itself; a different
+    ballot, a second signed proposal and a refusal for another version
+    still are. With results withheld, the withholding is what shows.
+  - **§2, §8.5, §11, §12:** the label version per message, the new
+    fields, the vectors (v2 status and refusal, `refusal_not_held`).
+  - **Rollout (Rule 3):** no v1 support. The service deploys first, only
+    once the current vault release treats a status or refusal failing
+    verification as no answer (al-cal confirmed, GC #13902), with no
+    staging vote open at the deploy and none opened until the vault
+    release that verifies v2. Stored v1 answers stay in `vote.evidence`,
+    marked "unverifiable (v1)".
 
 - **0.14.2 (2026-11-18):** (owner decision 2026-11-18, GC #1374: D2-c,
   R-a) When a leave ends voting.

@@ -148,6 +148,9 @@ type answer struct {
 	RecordProof recordProof     `json:"record_proof"`
 	StatusSig   []byte          `json:"status_sig"`
 	Bundle      json.RawMessage `json:"bundle"`
+	// 0.15.0
+	ProposalHash []byte `json:"proposal_hash"`
+	StatusMsgMS  uint64 `json:"status_msg_ms"`
 }
 
 func parseAnswer(t *testing.T, a peer.VoteAnswer) answer {
@@ -171,7 +174,10 @@ func (f *boxFixture) checkRefusal(a peer.VoteAnswer, conn, code string, tag, req
 	if !bytes.Equal(x.Connection, c[:]) || !bytes.Equal(x.RecordTag, tag) {
 		f.t.Fatalf("%s: refusal names another connection or tag", code)
 	}
-	msg, _ := vote.RefusalMsg(f.p.ProposalID, c[:], tag, TypeCast, code, x.MsgMS, reqHash)
+	msg, _ := vote.RefusalMsg(f.v.ph, c[:], tag, TypeCast, code, x.MsgMS, reqHash)
+	if !bytes.Equal(x.ProposalHash, f.v.ph) {
+		f.t.Fatalf("%s: refusal names another proposal hash", code)
+	}
 	if vote.Verify(f.ik(), vote.LabelRefusal, msg, x.RefusalSig) != nil {
 		f.t.Fatalf("%s: refusal signature", code)
 	}
@@ -333,7 +339,11 @@ func TestStatus(t *testing.T) {
 		} else if x.Ballot != nil || x.MsgMS != 0 || x.ReceiptSig != nil {
 			t.Fatal("a ballot or receipt before any cast")
 		}
-		smsg, _ := vote.StatusMsg(f.p.ProposalID, m.Tag, leaf)
+		c := sha256.Sum256(ed25519.NewKeyFromSeed(digest("peer c0")).Public().(ed25519.PublicKey))
+		if !bytes.Equal(x.Connection, c[:]) || x.StatusMsgMS != f.during() {
+			t.Fatalf("status names another connection or time: %x %d", x.Connection, x.StatusMsgMS)
+		}
+		smsg, _ := vote.StatusMsg(f.v.ph, c[:], m.Tag, leaf, x.StatusMsgMS)
 		if vote.Verify(f.ik(), vote.LabelStatus, smsg, x.StatusSig) != nil {
 			t.Fatal("status signature")
 		}
@@ -452,7 +462,7 @@ func TestBallotAnswersHaveOneSize(t *testing.T) {
 		if x.Ballot == nil || x.Ballot.ChoiceID != choice || len(x.Ballot.Pad) != 32-n || strings.Trim(x.Ballot.Pad, "0") != "" {
 			t.Fatalf("n=%d: ballot %+v", n, x.Ballot)
 		}
-		smsg, _ := vote.StatusMsg(f.p.ProposalID, m.Tag, leaf)
+		smsg, _ := vote.StatusMsg(f.v.ph, x.Connection, m.Tag, leaf, x.StatusMsgMS)
 		if vote.Verify(f.ik(), vote.LabelStatus, smsg, x.StatusSig) != nil {
 			t.Fatalf("n=%d: status signature", n)
 		}
