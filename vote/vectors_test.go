@@ -70,6 +70,9 @@ type vectors struct {
 	Outcomes      []outcomeCase  `json:"outcomes"`
 	Decisions     []decisionCase `json:"decisions"`
 	OutcomeShapes []outcomeShape `json:"outcome_shapes"`
+	// ProposalRemovedMayVote is a canonical proposal whose
+	// removed_may_vote is true: every verifier refuses it (0.14.1).
+	ProposalRemovedMayVote string `json:"proposal_removed_may_vote_true"`
 }
 
 // docVectors is §11 item 3: a vote of three members, two of whom voted,
@@ -187,6 +190,18 @@ func makeVectors(t *testing.T) *vectors {
 	v.Documents = makeDocVectors(t, 3, 2)
 	v.DocumentsDecided = makeDocVectors(t, 4, 4)
 	v.Outcomes, v.Decisions, v.OutcomeShapes = outcomeCases(), decisionCases(), outcomeShapes()
+	{
+		p := testProposal(t, ed25519.NewKeyFromSeed(digest("service ik")).Public().(ed25519.PublicKey), [][]byte{digest("t1"), digest("t2")})
+		p.RemovedMayVote = true
+		doc, err := encodeCanonical(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ParseProposal(doc); err == nil {
+			t.Fatal("a proposal with removed_may_vote true parsed")
+		}
+		v.ProposalRemovedMayVote = string(doc)
+	}
 	return &v
 }
 

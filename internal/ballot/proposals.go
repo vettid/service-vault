@@ -241,10 +241,10 @@ type ChoiceInput struct {
 
 // ProposalInput is what the application asks for (§3.1, §3.4); the rest
 // of the proposal is the service's. Of its fields the admins are shown
-// the title, the labels, binding, removed_may_vote, the times, the
-// quorum's min_ballots and the decision; text must be empty or the title,
-// quorum.text must be empty, and outage_rule must be empty or
-// DefaultOutageRule.
+// the title, the labels, binding, the times, the quorum's min_ballots and
+// the decision; text must be empty or the title, quorum.text must be
+// empty, outage_rule must be empty or DefaultOutageRule, and
+// removed_may_vote must be false.
 type ProposalInput struct {
 	Title          string        `json:"title"`
 	Text           string        `json:"text"`

@@ -21,8 +21,9 @@ type outcomeCase struct {
 	Outcome        *Outcome         `json:"outcome"`
 }
 
-// decisionCase is a decision with the proposal's removed_may_vote, and
-// whether a proposal may carry it.
+// decisionCase is a decision, judged in a proposal with its
+// removed_may_vote (always false from 0.14.1), and whether a proposal may
+// carry it.
 type decisionCase struct {
 	Case           string          `json:"case"`
 	Decision       json.RawMessage `json:"decision"`
@@ -74,13 +75,13 @@ func outcomeCases() []outcomeCase {
 		c("majority of cast, every ballot abstains (base 0)", majCast, false, 1, 20, two, t2(0, 0, 4), 4, notDecided),
 		c("majority of voted, abstain holds the majority", majVoted, false, 1, 20, two, t2(2, 1, 10), 13, notDecided),
 		c("majority of voted", majVoted, false, 1, 20, two, t2(7, 1, 5), 13, decided("c1")),
-		c("majority of elig, exactly half", majElig, true, 1, 20, two, t2(10, 0, 0), 10, notDecided),
-		c("majority of elig", majElig, true, 1, 20, two, t2(11, 0, 0), 11, decided("c1")),
+		c("majority of elig, exactly half", majElig, false, 1, 20, two, t2(10, 0, 0), 10, notDecided),
+		c("majority of elig", majElig, false, 1, 20, two, t2(11, 0, 0), 11, decided("c1")),
 		c("threshold 2/3 of cast, at the boundary", thr(2, 3, BaseCast), false, 1, 20, two, t2(6, 3, 0), 9, decided("c1")),
 		c("threshold 2/3 of cast, just below", thr(2, 3, BaseCast), false, 1, 20, two, t2(5, 3, 0), 8, notDecided),
 		c("threshold 2/3 of voted, abstain counts", thr(2, 3, BaseVoted), false, 1, 20, two, t2(6, 0, 4), 10, notDecided),
 		c("threshold 2/3 of voted", thr(2, 3, BaseVoted), false, 1, 20, two, t2(6, 0, 3), 9, decided("c1")),
-		c("threshold 3/4 of elig", thr(3, 4, BaseElig), true, 1, 8, two, t2(6, 1, 0), 7, decided("c1")),
+		c("threshold 3/4 of elig", thr(3, 4, BaseElig), false, 1, 8, two, t2(6, 1, 0), 7, decided("c1")),
 		c("threshold 1/1 of cast", thr(1, 1, BaseCast), false, 1, 20, two, t2(4, 0, 2), 6, decided("c1")),
 		c("threshold 1/1 of cast, one against", thr(1, 1, BaseCast), false, 1, 20, two, t2(4, 1, 0), 5, notDecided),
 		c("threshold 2/3 of cast, base 0", thr(2, 3, BaseCast), false, 0, 20, two, t2(0, 0, 0), 0, notDecided),
@@ -100,9 +101,9 @@ func outcomeCases() []outcomeCase {
 		c("every ballot abstains below quorum, cast", majCast, false, 5, 20, two, t2(0, 0, 4), 4, noQuorum),
 		c("every ballot abstains below quorum, voted", thr(2, 3, BaseVoted), false, 5, 20, two, t2(0, 0, 4), 4, noQuorum),
 		c("threshold 2/3 of voted, abstain alone meets the fraction", thr(2, 3, BaseVoted), false, 1, 20, two, t2(1, 0, 8), 9, notDecided),
-		c("threshold 3/4 of elig, just below", thr(3, 4, BaseElig), true, 1, 8, two, t2(5, 1, 0), 6, notDecided),
-		c("majority of elig, three choices", majElig, true, 1, 10, three, t3(6, 2, 1, 0), 9, decided("c1")),
-		c("threshold 2/3 of elig, three choices, none", thr(2, 3, BaseElig), true, 1, 9, three, t3(5, 2, 1, 0), 8, notDecided),
+		c("threshold 3/4 of elig, just below", thr(3, 4, BaseElig), false, 1, 8, two, t2(5, 1, 0), 6, notDecided),
+		c("majority of elig, three choices", majElig, false, 1, 10, three, t3(6, 2, 1, 0), 9, decided("c1")),
+		c("threshold 2/3 of elig, three choices, none", thr(2, 3, BaseElig), false, 1, 9, three, t3(5, 2, 1, 0), 8, notDecided),
 		c("plurality, a top tie over a lower third", plurality, false, 1, 20, three, t3(3, 3, 1, 0), 7, tied),
 		c("refused: tally doesn't sum to ballots", majCast, false, 1, 20, two, t2(3, 1, 0), 5, nil),
 		c("refused: a negative count", majCast, false, 1, 20, two, t2(10, -3, 0), 7, nil),
@@ -119,9 +120,9 @@ func decisionCases() []decisionCase {
 	return []decisionCase{
 		c("majority of cast", `{"base":"cast","rule":"majority","threshold":null}`, false, true),
 		c("majority of voted", `{"base":"voted","rule":"majority","threshold":null}`, false, true),
-		c("majority of elig, removed may vote", `{"base":"elig","rule":"majority","threshold":null}`, true, true),
+		c("majority of elig", `{"base":"elig","rule":"majority","threshold":null}`, false, true),
 		c("threshold 2/3 of cast", `{"base":"cast","rule":"threshold","threshold":{"den":3,"num":2}}`, false, true),
-		c("threshold 9/10 of elig, removed may vote", `{"base":"elig","rule":"threshold","threshold":{"den":10,"num":9}}`, true, true),
+		c("threshold 9/10 of elig", `{"base":"elig","rule":"threshold","threshold":{"den":10,"num":9}}`, false, true),
 		c("threshold 1/1 of voted", `{"base":"voted","rule":"threshold","threshold":{"den":1,"num":1}}`, false, true),
 		c("plurality", `{"base":null,"rule":"plurality","threshold":null}`, false, true),
 		c("elig with removed_may_vote false (0.14.1)", `{"base":"elig","rule":"majority","threshold":null}`, false, true),
@@ -196,7 +197,7 @@ func TestDecide(t *testing.T) {
 }
 
 // TestDecisionValidate judges each decision as a proposal's member: in a
-// proposal document of its own, with its removed_may_vote.
+// proposal document of its own.
 func TestDecisionValidate(t *testing.T) {
 	ik := ed25519.NewKeyFromSeed(digest("ik")).Public().(ed25519.PublicKey)
 	for _, c := range decisionCases() {
@@ -303,6 +304,7 @@ func TestProposalRefusesQuorumAndDecision(t *testing.T) {
 		"quorum over eligible":  func(p *Proposal) { p.Quorum.MinBallots = p.Eligible + 1 },
 		"no decision":           func(p *Proposal) { p.Decision = Decision{} },
 		"plurality with a base": func(p *Proposal) { p.Decision.Rule = RulePlurality },
+		"removed_may_vote true": func(p *Proposal) { p.RemovedMayVote = true },
 	} {
 		p := testProposal(t, ik, [][]byte{digest("t1"), digest("t2")})
 		if _, err := EncodeProposal(p); err != nil {

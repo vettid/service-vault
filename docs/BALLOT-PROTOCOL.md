@@ -109,7 +109,7 @@ The proposal is a document (§8.5).
 | `decision` | How the vote is decided: a rule, its base and its threshold (§3.5; 0.14.0). |
 | `quorum` | The quorum rule, as text (UTF-8, at most 1,024 bytes, may be empty), and the number of ballots it needs (`min_ballots`, at least 0 and, from 0.14.0, at most `eligible`). `abstain` counts toward it. |
 | `binding` | Whether the organisation treats the result as binding. The protocol is the same either way. |
-| `removed_may_vote` | Always `false` (0.14.1; owner decision 2026-11-18): a member removed or suspended after `record_at` can't vote after leaving. The service refuses `true` (§3.4); a document with `true` still parses. |
+| `removed_may_vote` | Always `false` (0.14.1; owner decision 2026-11-18): a member removed or suspended after `record_at` can't vote after leaving. The service refuses `true` before signing (§3.4), and every verifier refuses a proposal with `true`: a member's vault on arrival (VAULT-MESSAGING §10.19.4 step 2), the site's upload, and an observer (§8.4). |
 | `record_at` | The roster snapshot, at or before creation (§3.2) and at or before `opens_at`. |
 | `opens_at`, `closes_at` | The voting window, `opens_at` before `closes_at`: a ballot counts if the relay received it in `[opens_at, closes_at)` (§6). At most 7 days (owner decision). |
 | `eligible`, `record_root` | The number of eligible members, at least 1, and the Merkle root of their tags (§3.2). |
@@ -515,7 +515,7 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
 |---|---|---|
 | `not_eligible` | both | The connection has no tag for this proposal. |
 | `not_open`, `closed` | `vote.cast` | The relay's time is outside the window. |
-| `not_active` | `vote.cast` | Removed or suspended, and `removed_may_vote` is false. |
+| `not_active` | `vote.cast` | Removed or suspended (0.14.1: `removed_may_vote` is always false). |
 | `not_signed_in` | `vote.cast` | The member has never signed in, so no credential key is pinned (§5). |
 | `already_voted` | `vote.cast` | A different ballot is already recorded for this tag; the body also carries that ballot as `ballot` `{vk, choice_id, ballot_sig, pad}`, with its `ballot_msg_ms` and `receipt_sig`. |
 | `bad_ballot` | `vote.cast` | The tag isn't the connection's, the choice isn't the proposal's, or a signature fails. After a credential-key rotation (`connection.authenticate.rotated`, VAULT-MESSAGING §10.4) the vault may sign `cast_sig` again under its current key and send the same ballot once more; the service checks `cast_sig` under the key pinned when the cast arrives. |
@@ -582,7 +582,8 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
      `[opens_at, closes_at)`, as extended (§10.2). A ballot queued at
      the relay during an outage still counts.
   3. **Eligibility:** the connection is eligible, `record_tag` is its
-     tag, and it is active or `removed_may_vote` is true.
+     tag, and it is active (0.14.1: `removed_may_vote` is always false;
+     0.14.2 judges this at the relay's time).
   4. **Ballot:** `choice_id` is the proposal's, `ballot_sig` verifies
      under `vk`, and `cast_sig` verifies under the connection's pinned
      credential key (§2); with no key pinned, `not_signed_in`.
@@ -783,7 +784,8 @@ publishes its results has every member's check settle by itself.
    early or unverifiable bundle is kept, with an alarm, and not uploaded
    again. The vault also checks that the proposal
    and extensions in `results.json` are the ones it received; and its
-   row's proof. (0.14.0) From `results.json` alone it checks the tally
+   row's proof. (0.14.1) It refuses a proposal with `removed_may_vote`
+   true, on arrival and here. (0.14.0) From `results.json` alone it checks the tally
    and the outcome: the tally names exactly the proposal's choices,
    every count is at least 0, the tally's sum is `counts.ballots`, at
    most `counts.eligible`, which is the proposal's `eligible`, and
@@ -806,7 +808,7 @@ publishes its results has every member's check settle by itself.
 
 From votes.vettid.org alone:
 1. `results_sig` and every document's signature hold under the service's
-   identity key; every bundle verifies under a listed anchor key; the
+   identity key, and (0.14.1) the proposal's `removed_may_vote` is false; every bundle verifies under a listed anchor key; the
    service list verifies;
 2. `H(rows bytes)` is `rows_hash`; the tags are unique, number
    `eligible` and reach `record_root`; the rows reach `rows_root`;
@@ -933,10 +935,14 @@ SubjectPublicKeyInfo; `?` marks a field present only where stated.
   who never sign in (their vaults refuse to vote until they do, §3.2),
   the moment the operator picks for `record_at`, and every removal or
   suspension during the vote shape the outcome. An operator removal bars
-  the member at once and, under `elig`, makes them a certain "against".
+  a member who hasn't voted yet at once and, under `elig`, makes them a
+  certain "against".
   It shows only in `counts.removed`, a count the service reports, which
   can be checked only against the organisation's audit record and by the
   removed members themselves.
+- **Until 0.14.2:** a ballot the relay received before a removal but that
+  the service handles after it is still refused (the cast is judged when
+  it is handled). 0.14.2 judges it at the relay's time.
 - **A quorum made unreachable later:** `quorum_unreachable` is judged at
   creation. Removals after it can still leave fewer members able to vote
   than the quorum needs.
@@ -1147,11 +1153,17 @@ item.
     summaries no longer show `removed votes`. The title limit, still
     derived from the summary builders, becomes 35 bytes.
   - **§3.5:** `elig` no longer needs `removed_may_vote: true`.
-  - **§9.2:** what removals do to `elig`, plainly.
+  - **§5, §6, §8.3, §8.4:** every verifier refuses a proposal with
+    `removed_may_vote: true`, a value check (fail closed); `not_active`
+    and step 3 no longer read as if the flag operates.
+  - **§9.2:** what removals do to `elig`, plainly, and the gap until
+    0.14.2.
   - **§11:** one decision vector changes (`elig` with `removed_may_vote`
-    false is valid).
-  - **No schema change.** A document with `removed_may_vote: true` still
-    parses; the 0.14.0 vault, site and app cards build against 0.14.1.
+    false is valid), the decisions with `elig` are judged with the flag
+    false, and `proposal_removed_may_vote_true` is a refused proposal.
+  - **§12:** item 15.
+  - **No schema change.** The 0.14.0 vault, site and app cards build
+    against 0.14.1.
   - When a leave ends a member's voting (the relay's time) is 0.14.2.
 
 - **0.14.0 (2026-11-18):** (owner decision 2026-11-18, GC #1367) How a

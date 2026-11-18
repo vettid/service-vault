@@ -237,7 +237,9 @@ func TestCastExtensionAndRemoval(t *testing.T) {
 	if a := f.send("c0", TypeCast, body, uint64(f.p.ClosesAt)*1000+1000, true); a.Code != "" {
 		t.Fatalf("a cast inside the extension refused: %s", a.Code)
 	}
-	// removed_may_vote lets an inactive connection vote.
+	// removed_may_vote lets an inactive connection vote. No proposal
+	// carries true from 0.14.1 (this one is changed in memory); 0.14.2
+	// replaces the check with membership at the relay's time.
 	f.p.RemovedMayVote = true
 	f.open.p = f.p
 	b1, _ := f.castBody("c1", "yes")

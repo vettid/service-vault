@@ -106,11 +106,11 @@ func parseCanonical(payload []byte, v any) error {
 
 // What a proposal.create approval's payload carries, field by field
 // (BALLOT-PROTOCOL §3.4): the fields shown to the admins (title, choices'
-// labels, binding, removed_may_vote, opens_at, closes_at, quorum's
-// min_ballots, the decision), the fields the service sets (the choice ids, the default
+// labels, binding, opens_at, closes_at, quorum's min_ballots, the
+// decision), the fields the service sets (the choice ids, the default
 // abstain choice, outage_rule, record_at, the roster) and the fields it
 // refuses unless they say what the service would set anyway (text, quorum
-// text, outage_rule).
+// text, outage_rule, and removed_may_vote, which must be false).
 const (
 	// DefaultOutageRule is the outage_rule of every proposal (§10.2): the
 	// only value accepted, or empty.

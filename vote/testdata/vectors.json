@@ -442,7 +442,7 @@
     "base": "elig",
     "threshold": null
    },
-   "removed_may_vote": true,
+   "removed_may_vote": false,
    "min_ballots": 1,
    "eligible": 20,
    "choices": [
@@ -469,7 +469,7 @@
     "base": "elig",
     "threshold": null
    },
-   "removed_may_vote": true,
+   "removed_may_vote": false,
    "min_ballots": 1,
    "eligible": 20,
    "choices": [
@@ -619,7 +619,7 @@
      "den": 4
     }
    },
-   "removed_may_vote": true,
+   "removed_may_vote": false,
    "min_ballots": 1,
    "eligible": 8,
    "choices": [
@@ -1191,7 +1191,7 @@
      "den": 4
     }
    },
-   "removed_may_vote": true,
+   "removed_may_vote": false,
    "min_ballots": 1,
    "eligible": 8,
    "choices": [
@@ -1218,7 +1218,7 @@
     "base": "elig",
     "threshold": null
    },
-   "removed_may_vote": true,
+   "removed_may_vote": false,
    "min_ballots": 1,
    "eligible": 10,
    "choices": [
@@ -1250,7 +1250,7 @@
      "den": 3
     }
    },
-   "removed_may_vote": true,
+   "removed_may_vote": false,
    "min_ballots": 1,
    "eligible": 9,
    "choices": [
@@ -1438,13 +1438,13 @@
    "valid": true
   },
   {
-   "case": "majority of elig, removed may vote",
+   "case": "majority of elig",
    "decision": {
     "base": "elig",
     "rule": "majority",
     "threshold": null
    },
-   "removed_may_vote": true,
+   "removed_may_vote": false,
    "valid": true
   },
   {
@@ -1461,7 +1461,7 @@
    "valid": true
   },
   {
-   "case": "threshold 9/10 of elig, removed may vote",
+   "case": "threshold 9/10 of elig",
    "decision": {
     "base": "elig",
     "rule": "threshold",
@@ -1470,7 +1470,7 @@
      "num": 9
     }
    },
-   "removed_may_vote": true,
+   "removed_may_vote": false,
    "valid": true
   },
   {
@@ -1835,5 +1835,6 @@
    },
    "valid": false
   }
- ]
+ ],
+ "proposal_removed_may_vote_true": "{\"binding\":false,\"choices\":[{\"id\":\"yes\",\"label\":\"Yes\"},{\"id\":\"no\",\"label\":\"No\"},{\"id\":\"abstain\",\"label\":\"Abstain\"}],\"closes_at\":1793779200,\"decision\":{\"base\":\"cast\",\"rule\":\"majority\",\"threshold\":null},\"eligible\":2,\"opens_at\":1793520000,\"outage_rule\":\"Extended by a relay outage over 1 hour, 24 h at most.\",\"proposal_id\":\"01JBQZ0000000000000000000A\",\"quorum\":{\"min_ballots\":1,\"text\":\"A third of the members\"},\"record_at\":1793500000,\"record_root\":\"CyVaCducqfssjghpBlWWLJ8jRmCmqw34/10qXudcLzU=\",\"removed_may_vote\":true,\"service\":\"B9RIoRPFY3i/sbHrc4RKnQKnNAsEJtLcgP3isU6gUPQ=\",\"text\":\"The budget as circulated on 1 November.\",\"title\":\"Adopt the 2027 budget\",\"v\":1}"
 }

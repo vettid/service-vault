@@ -16,6 +16,15 @@ func TestMaxTitleBytes(t *testing.T) {
 	if n := MaxTitleBytes(); n != 35 {
 		t.Fatalf("title limit %d, want 35", n)
 	}
+	// The edge itself: the widest extension summary is exactly
+	// maxSummary at 35 bytes, and refused at 36.
+	s, err := ExtensionSummary(widestExtension(), strings.Repeat("T", 35))
+	if err != nil || len(s) != maxSummary || maxSummary != 172 {
+		t.Fatalf("at 35: %d %v", len(s), err)
+	}
+	if _, err := ExtensionSummary(widestExtension(), strings.Repeat("T", 36)); err == nil {
+		t.Fatal("36 bytes fit")
+	}
 }
 
 // A two-choice "Approve"/"Reject" motion always fits: every decision,
