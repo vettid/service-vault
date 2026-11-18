@@ -28,10 +28,10 @@ const signerAccount = need('signerAccount');
 const auditAccount = need('auditAccount');
 const alarmEmail = need('alarmEmail');
 
-new SignerAuditStack(app, 'SignerAudit-staging', {
+const audit = new SignerAuditStack(app, 'SignerAudit-staging', {
   envName, signerAccount, alarmEmail, env: { account: auditAccount, region },
 });
-new AnchorSignerStack(app, 'AnchorSigner-staging', {
+const signer = new AnchorSignerStack(app, 'AnchorSigner-staging', {
   envName,
   taskRoleArn: need('taskRoleArn'),
   breakGlassRoleArn: need('breakGlassRoleArn'),
@@ -43,3 +43,6 @@ new AnchorSignerStack(app, 'AnchorSigner-staging', {
   env: { account: signerAccount, region },
   // No release: the function isn't created, so nothing can sign.
 });
+// SignerAudit first (the locked bucket and the bus name the signer's roles):
+// the order only, no references between the stacks.
+signer.addDependency(audit);

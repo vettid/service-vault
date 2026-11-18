@@ -168,19 +168,21 @@ export class SignerAuditStack extends cdk.Stack {
       eventPattern: { account: [props.signerAccount], detailType: [{ 'anything-but': ['Scheduled Event'] }] as any },
     });
     // The topic's policy, written out: the rule publishes through a role
-    // of its own (no conditioned service principal), and this account's
-    // alarms by prefix (a topic policy replaces the default, so without
-    // that statement no alarm could publish).
+    // of its own (no conditioned service principal), whose own policy is
+    // enough in this account, so the topic policy names no role (one
+    // created moments before could fail the create); its trust admits only
+    // this account's rules. This account's alarms publish by prefix (a
+    // topic policy replaces the default, so without that statement no
+    // alarm could publish).
     const publish = new iam.Role(this, 'TopicPublishRole', {
       description: 'VettID signer audit: the alarm bus\'s rule publishes to the owner\'s topic',
-      assumedBy: new iam.ServicePrincipal('events.amazonaws.com', { conditions: { StringEquals: { 'aws:SourceAccount': this.account } } }),
+      assumedBy: new iam.ServicePrincipal('events.amazonaws.com', { conditions: {
+        StringEquals: { 'aws:SourceAccount': this.account },
+        ArnLike: { 'aws:SourceArn': `arn:${this.partition}:events:${this.region}:${this.account}:rule/*` },
+      } }),
     });
     publish.addToPrincipalPolicy(new iam.PolicyStatement({ sid: 'PublishAlarms', actions: ['sns:Publish'], resources: [this.topic.topicArn] }));
     (signerAlarms.node.defaultChild as events.CfnRule).targets = [{ id: 'Topic', arn: this.topic.topicArn, roleArn: publish.roleArn }];
-    this.topic.addToResourcePolicy(new iam.PolicyStatement({
-      sid: 'RulesOfThisAccount', principals: [new iam.ArnPrincipal(publish.roleArn)], actions: ['sns:Publish'],
-      resources: [this.topic.topicArn],
-    }));
     this.topic.addToResourcePolicy(new iam.PolicyStatement({
       sid: 'AlarmsOfThisAccount', principals: [new iam.ServicePrincipal('cloudwatch.amazonaws.com')], actions: ['sns:Publish'],
       resources: [this.topic.topicArn], conditions: {
@@ -222,7 +224,8 @@ export class SignerAuditStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.BREACHING,
     }).addAlarmAction(new cwactions.SnsAction(this.topic));
 
-    // A rule here failing to deliver (the topic, the heartbeat log): any rule.
+    // A rule here failing to deliver (the topic, the heartbeat log): any
+    // rule, the custom bus's included (RULE_TARGET_FAILED has no SCHEMA).
     new cloudwatch.Alarm(this, 'RuleTargetFailed', {
       alarmName: `vettid-signer-audit-${envName}-rule_target_failed`,
       alarmDescription: 'An EventBridge rule in the management account could not deliver to its target (the owner\'s topic or the heartbeat log)',

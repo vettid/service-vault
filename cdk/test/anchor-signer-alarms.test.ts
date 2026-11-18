@@ -53,19 +53,21 @@ describe('targets and the topic', () => {
     const policies = Object.values<any>(t.findResources('AWS::SNS::TopicPolicy'));
     expect(policies).toHaveLength(1);
     const st = policies[0].Properties.PolicyDocument.Statement;
-    expect(st.map((x: any) => x.Sid).sort()).toEqual(['AlarmsOfThisAccount', 'RulesOfThisAccount']);
-    // The rules publish through a role of their own, not a conditioned service principal.
-    const ev = st.find((x: any) => x.Sid === 'RulesOfThisAccount');
-    expect(s(ev.Principal)).toContain('TopicPublishRole');
-    expect(ev.Action).toBe('sns:Publish');
-    expect(ev.Condition).toBeUndefined();
+    // The rules publish through a role of their own, whose own policy is
+    // enough in this account: the topic policy names no role.
+    expect(st.map((x: any) => x.Sid).sort()).toEqual(['AlarmsOfThisAccount']);
     const role = Object.entries<any>(t.findResources('AWS::IAM::Role')).find(([id]) => id.startsWith('TopicPublishRole'))![1];
-    expect(role.Properties.AssumeRolePolicyDocument.Statement[0].Principal).toEqual({ Service: 'events.amazonaws.com' });
-    expect(role.Properties.AssumeRolePolicyDocument.Statement[0].Condition).toEqual({ StringEquals: { 'aws:SourceAccount': SIGNER_ACCT } });
+    const trust = role.Properties.AssumeRolePolicyDocument.Statement;
+    expect(trust).toHaveLength(1);
+    expect(trust[0].Principal).toEqual({ Service: 'events.amazonaws.com' });
+    expect(trust[0].Condition.StringEquals).toEqual({ 'aws:SourceAccount': SIGNER_ACCT });
+    expect(s(trust[0].Condition.ArnLike['aws:SourceArn'])).toMatch(/:events:.*:rule\/\*/);
     const rp = Object.values<any>(t.findResources('AWS::IAM::Policy')).filter((p) => s(p.Properties.Roles).includes('TopicPublishRole'))
       .flatMap((p) => p.Properties.PolicyDocument.Statement);
     expect(rp).toHaveLength(1);
     expect(rp[0].Action).toBe('sns:Publish');
+    expect(s(rp[0].Resource)).toContain(topicId());
+    expect(s(rp[0].Resource)).not.toContain('"*"');
     for (const r of rules(t)) {
       const topic = r.Properties.Targets.find((x: any) => s(x.Arn).includes(topicId()));
       if (topic) expect(s(topic.RoleArn)).toContain('TopicPublishRole');
@@ -323,9 +325,15 @@ test('no other function in the signer account: without a release, none at all (n
 
 test('a rule failing to deliver to its target alarms (any rule)', () => {
   const a = alarm('rule_target_failed');
-  // A Metrics Insights query: an alarm can't use SEARCH.
-  expect(RULE_TARGET_FAILED).toBe('SELECT SUM(FailedInvocations) FROM SCHEMA("AWS/Events", RuleName)');
-  expect(a.Metrics.find((m: any) => m.Expression).Expression).toBe(RULE_TARGET_FAILED);
+  // A Metrics Insights query (an alarm can't use SEARCH), with no SCHEMA,
+  // so custom-bus rules ({EventBusName, RuleName}) count as well.
+  expect(RULE_TARGET_FAILED).toBe('SELECT SUM(FailedInvocations) FROM "AWS/Events"');
+  const q = a.Metrics.find((m: any) => m.Expression);
+  expect(q.Expression).toBe(RULE_TARGET_FAILED);
+  expect(q.Period).toBe(300);
+  expect(a.Threshold).toBe(1);
+  expect(a.ComparisonOperator).toBe('GreaterThanOrEqualToThreshold');
+  expect(a.TreatMissingData).toBe('notBreaching');
   expect(s(a.Metrics)).not.toContain('SEARCH(');
   expect(s(a.AlarmActions)).toContain(topicId());
 });

@@ -73,8 +73,13 @@ export const COUNT_EVALUATION_PERIODS = 3;
 /** The journal copy's delivery failing: records came in and delivery didn't succeed (a missing success datapoint counts as none failed). */
 export const JOURNAL_COPY_FAILED = 'IF(ok < 1, 1, 0)';
 
-/** Any rule's FailedInvocations, as a Metrics Insights query (alarms can't use SEARCH). */
-export const RULE_TARGET_FAILED = 'SELECT SUM(FailedInvocations) FROM SCHEMA("AWS/Events", RuleName)';
+/**
+ * Any rule's FailedInvocations, as a Metrics Insights query (alarms can't
+ * use SEARCH). No SCHEMA: a default-bus rule's datapoints carry
+ * {RuleName} and a custom bus's {EventBusName, RuleName}, and the query
+ * must count both.
+ */
+export const RULE_TARGET_FAILED = 'SELECT SUM(FailedInvocations) FROM "AWS/Events"';
 
 /**
  * Alarms on the trail's log group, which receives every region's events:
@@ -163,19 +168,20 @@ export function addSignerAlarms(stack: cdk.Stack, props: SignerAlarmsProps): voi
 
   // The topic's policy, written out: the rules publish through a role of
   // their own (no conditioned service principal, whose condition keys
-  // EventBridge may not send), and this account's CloudWatch alarms by
-  // prefix (a topic policy replaces the default, so without that statement
-  // no alarm could publish).
+  // EventBridge may not send). The role is in this account, so its own
+  // policy is enough and the topic policy names no role (one created
+  // moments before could fail the create); its trust admits only this
+  // account's rules. This account's CloudWatch alarms publish by prefix (a
+  // topic policy replaces the default, so without that statement no alarm
+  // could publish).
   const rules: events.Rule[] = [];
   const publish = new iam.Role(stack, 'TopicPublishRole', {
     description: 'VettID anchor signer: the account\'s rules publish to its alarm topic',
-    assumedBy: new iam.ServicePrincipal('events.amazonaws.com', { conditions: { StringEquals: { 'aws:SourceAccount': stack.account } } }),
+    assumedBy: new iam.ServicePrincipal('events.amazonaws.com', { conditions: {
+      StringEquals: { 'aws:SourceAccount': stack.account }, ArnLike: { 'aws:SourceArn': arn('events', 'rule/*') },
+    } }),
   });
   publish.addToPrincipalPolicy(new iam.PolicyStatement({ sid: 'PublishAlarms', actions: ['sns:Publish'], resources: [props.topic.topicArn] }));
-  props.topic.addToResourcePolicy(new iam.PolicyStatement({
-    sid: 'RulesOfThisAccount', principals: [new iam.ArnPrincipal(publish.roleArn)], actions: ['sns:Publish'],
-    resources: [props.topic.topicArn],
-  }));
   props.topic.addToResourcePolicy(new iam.PolicyStatement({
     sid: 'AlarmsOfThisAccount', principals: [new iam.ServicePrincipal('cloudwatch.amazonaws.com')], actions: ['sns:Publish'],
     resources: [props.topic.topicArn], conditions: {

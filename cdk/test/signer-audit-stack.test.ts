@@ -111,18 +111,35 @@ test('refuses: no account, the signer account as itself, a bad address', () => {
 
 test("the topic's policy: this account's rules and alarms only; every alarm and the bus rule reach it", () => {
   const st = Object.values<any>(t.findResources('AWS::SNS::TopicPolicy'))[0].Properties.PolicyDocument.Statement;
-  expect(st.map((x: any) => x.Sid).sort()).toEqual(['AlarmsOfThisAccount', 'RulesOfThisAccount']);
+  // The bus rule publishes through its role's own policy: the topic policy names no role.
+  expect(st.map((x: any) => x.Sid).sort()).toEqual(['AlarmsOfThisAccount']);
   const cw = st.find((x: any) => x.Sid === 'AlarmsOfThisAccount');
   expect(cw.Principal).toEqual({ Service: 'cloudwatch.amazonaws.com' });
   expect(cw.Condition.StringEquals).toEqual({ 'aws:SourceAccount': MGMT });
   expect(s(cw.Condition.ArnLike['aws:SourceArn'])).toContain(`:alarm:vettid-signer-audit-staging-*`);
-  const ev = st.find((x: any) => x.Sid === 'RulesOfThisAccount');
-  expect(s(ev.Principal)).toContain('TopicPublishRole');
-  expect(ev.Condition).toBeUndefined();
+  const role = Object.entries<any>(t.findResources('AWS::IAM::Role')).find(([id]) => id.startsWith('TopicPublishRole'))![1];
+  const trust = role.Properties.AssumeRolePolicyDocument.Statement;
+  expect(trust).toHaveLength(1);
+  expect(trust[0].Principal).toEqual({ Service: 'events.amazonaws.com' });
+  expect(trust[0].Condition.StringEquals).toEqual({ 'aws:SourceAccount': MGMT });
+  expect(s(trust[0].Condition.ArnLike['aws:SourceArn'])).toMatch(/:events:.*:rule\/\*/);
+  const rp = Object.values<any>(t.findResources('AWS::IAM::Policy')).filter((p) => s(p.Properties.Roles).includes('TopicPublishRole'))
+    .flatMap((p) => p.Properties.PolicyDocument.Statement);
+  expect(rp).toHaveLength(1);
+  expect(rp[0].Action).toBe('sns:Publish');
+  expect(s(rp[0].Resource)).toContain('AlarmTopic');
+  expect(s(rp[0].Resource)).not.toContain('"*"');
   const bus = Object.values<any>(t.findResources('AWS::Events::Rule')).find((r) => r.Properties.Description.includes('alarms')).Properties;
   expect(s(bus.Targets[0].RoleArn)).toContain('TopicPublishRole');
+  // The alarm counts the custom bus's rules: the query has no SCHEMA
+  // (their datapoints carry {EventBusName, RuleName}).
   const q = Object.values<any>(t.findResources('AWS::CloudWatch::Alarm')).find((x) => x.Properties.AlarmName.endsWith('-rule_target_failed')).Properties;
-  expect(s(q.Metrics)).toContain('SELECT SUM(FailedInvocations) FROM SCHEMA');
+  const e = q.Metrics.find((m: any) => m.Expression);
+  expect(e.Expression).toBe('SELECT SUM(FailedInvocations) FROM "AWS/Events"');
+  expect(e.Period).toBe(300);
+  expect(q.Threshold).toBe(1);
+  expect(q.ComparisonOperator).toBe('GreaterThanOrEqualToThreshold');
+  expect(q.TreatMissingData).toBe('notBreaching');
   expect(cw.Action).toBe('sns:Publish');
   for (const a of Object.values<any>(t.findResources('AWS::CloudWatch::Alarm'))) expect(s(a.Properties.AlarmActions)).toContain('AlarmTopic');
 });
