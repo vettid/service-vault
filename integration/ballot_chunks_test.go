@@ -76,7 +76,8 @@ func TestBallotChunksAtCapOnDynamoDB(t *testing.T) {
 	m.SetEligibleCapForTest(ballot.PlannedMaxEligible)
 	opens := now.Add(time.Hour).Unix()
 	in := ballot.ProposalInput{Title: "Adopt the 2027 budget", Choices: []ballot.ChoiceInput{{Label: "Yes"}, {Label: "No"}},
-		Quorum: vote.Quorum{MinBallots: 0}, OpensAt: opens, ClosesAt: opens + 86400, OutageRule: ballot.DefaultOutageRule}
+		Decision: vote.Decision{Rule: vote.RulePlurality},
+		Quorum:   vote.Quorum{MinBallots: 0}, OpensAt: opens, ClosesAt: opens + 86400, OutageRule: ballot.DefaultOutageRule}
 	c, err := m.Create(ctx, "apv", in)
 	if err != nil {
 		t.Fatal(err)

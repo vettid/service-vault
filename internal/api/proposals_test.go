@@ -103,7 +103,7 @@ func TestProposalRoutes(t *testing.T) {
 	if rec, _ := do(t, h, "POST", "/v1/proposals", "", `{}`); rec.Code != 401 {
 		t.Fatalf("unauthenticated: %d", rec.Code)
 	}
-	body := `{"approval_id":"A1","title":"T","text":"x","choices":[{"label":"Yes"},{"label":"No"}],"quorum":{"text":"q","min_ballots":1},"binding":false,"removed_may_vote":false,"opens_at":1,"closes_at":2,"outage_rule":"r"}`
+	body := `{"approval_id":"A1","title":"T","text":"x","choices":[{"label":"Yes"},{"label":"No"}],"decision":{"rule":"plurality","base":null,"threshold":null},"quorum":{"text":"q","min_ballots":1},"binding":false,"removed_may_vote":false,"opens_at":1,"closes_at":2,"outage_rule":"r"}`
 	rec, m := do(t, h, "POST", "/v1/proposals", apiKey, body)
 	if rec.Code != 201 || m["proposal_id"] != "01JBQZ0000000000000000000A" || m["eligible"] != float64(3) || m["unsigned"] != float64(1) || fp.last.Title != "T" || fp.lastAppr != "A1" || len(fp.last.Choices) != 2 {
 		t.Fatalf("%d %v", rec.Code, m)
@@ -144,6 +144,7 @@ func TestProposalRoutes(t *testing.T) {
 		errors.New("store down"):                 "unavailable",
 		&ballot.ErrNotPublished{ProposalID: "p1", Err: errors.New("rekor down")}: "not_published",
 		fmt.Errorf("%w: the roster has 1001", ballot.ErrTooManyEligible):         "too_many_eligible",
+		fmt.Errorf("%w: 3 eligible, quorum 4", ballot.ErrQuorumUnreachable):      "quorum_unreachable",
 		ballot.ErrNoBundleCheck: "bundle_check_not_configured",
 	} {
 		fp.err = err

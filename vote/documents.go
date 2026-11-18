@@ -56,6 +56,7 @@ type Proposal struct {
 	Title          string   `json:"title"`
 	Text           string   `json:"text"`
 	Choices        []Choice `json:"choices"`
+	Decision       Decision `json:"decision"`
 	Quorum         Quorum   `json:"quorum"`
 	Binding        bool     `json:"binding"`
 	RemovedMayVote bool     `json:"removed_may_vote"`
@@ -132,6 +133,7 @@ type Results struct {
 	RowsRoot   []byte           `json:"rows_root"`
 	Tally      map[string]int64 `json:"tally"`
 	Counts     Counts           `json:"counts"`
+	Outcome    Outcome          `json:"outcome"`
 }
 
 // schema is the exact member names of a document's objects: a key maps to
@@ -143,9 +145,10 @@ var (
 	signedSchema   = schema{"doc": nil, "sig": nil}
 	proposalSchema = schema{
 		"v": nil, "proposal_id": nil, "service": nil, "title": nil, "text": nil,
-		"choices": []any{schema{"id": nil, "label": nil}},
-		"quorum":  schema{"text": nil, "min_ballots": nil},
-		"binding": nil, "removed_may_vote": nil, "record_at": nil, "opens_at": nil,
+		"choices":  []any{schema{"id": nil, "label": nil}},
+		"decision": schema{"rule": nil, "base?": nil, "threshold?": schema{"num": nil, "den": nil}},
+		"quorum":   schema{"text": nil, "min_ballots": nil},
+		"binding":  nil, "removed_may_vote": nil, "record_at": nil, "opens_at": nil,
 		"closes_at": nil, "eligible": nil, "record_root": nil, "outage_rule": nil,
 	}
 	extensionSchema = schema{
@@ -159,8 +162,9 @@ var (
 	resultsSchema = schema{
 		"v": nil, "proposal_id": nil, "proposal": signedSchema,
 		"extensions": []any{signedSchema}, "rows_hash": nil, "rows_root": nil,
-		"tally":  "map",
-		"counts": schema{"eligible": nil, "ballots": nil, "removed": nil, "unhandled": nil},
+		"tally":   "map",
+		"counts":  schema{"eligible": nil, "ballots": nil, "removed": nil, "unhandled": nil},
+		"outcome": schema{"quorum_met": nil, "status": nil, "choice?": nil},
 	}
 )
 
@@ -297,7 +301,7 @@ func (p *Proposal) Validate() error {
 		return bad("text")
 	case len(p.Choices) < 3 || len(p.Choices) > 17:
 		return bad("number of choices")
-	case p.Quorum.MinBallots < 0 || len(p.Quorum.Text) > 1024:
+	case p.Quorum.MinBallots < 0 || p.Quorum.MinBallots > p.Eligible || len(p.Quorum.Text) > 1024:
 		return bad("quorum")
 	case len(p.OutageRule) > 1024:
 		return bad("outage rule")
@@ -316,6 +320,9 @@ func (p *Proposal) Validate() error {
 	}
 	if !abstain {
 		return bad("without abstain")
+	}
+	if err := p.Decision.Validate(p.RemovedMayVote); err != nil {
+		return err
 	}
 	strs := []string{p.Title, p.Text, p.Quorum.Text, p.OutageRule}
 	for _, c := range p.Choices {
@@ -440,8 +447,16 @@ func ParseResults(data []byte) (*Results, error) {
 func (r *Results) validate() error {
 	if r.V != 1 || !ValidProposalID(r.ProposalID) || len(r.RowsHash) != HashLen || len(r.RowsRoot) != HashLen ||
 		len(r.Proposal.Sig) != SigLen || r.Tally == nil || r.Extensions == nil ||
-		r.Counts.Removed < 0 || r.Counts.Unhandled < 0 {
+		r.Counts.Eligible < 0 || r.Counts.Ballots < 0 || r.Counts.Removed < 0 || r.Counts.Unhandled < 0 {
 		return fmt.Errorf("ballot: results fields")
+	}
+	for _, n := range r.Tally {
+		if n < 0 {
+			return fmt.Errorf("ballot: results tally")
+		}
+	}
+	if err := r.Outcome.validate(); err != nil {
+		return err
 	}
 	for _, e := range r.Extensions {
 		if len(e.Sig) != SigLen {

@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.13.13 (2026-11-12)
+**Status:** 0.14.0 (2026-11-18)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -24,7 +24,7 @@ key made for that proposal only, and also signs it with the member's
 credential key, so the ballot is provably theirs. It goes over the
 member's ordinary connection, and the service answers with a signed
 receipt. At the close the service publishes every tag with its ballot
-or none, and the tally. Anyone can check the signatures, one ballot per
+or none, the tally, and the outcome that the proposal's rule gives. Anyone can check the signatures, one ballot per
 tag and the tally; each member's vault checks its own row. The public
 sees tags and per-proposal keys, never names, emails or connections.
 The service knows who voted how, and keeps that record, with the
@@ -106,7 +106,8 @@ The proposal is a document (§8.5).
 | `service` | The service identity key that signs it. |
 | `title`, `text` | UTF-8; `title` 1–200 bytes, `text` at most 16,384 bytes. |
 | `choices` | 3–17 entries `{id, label}`, in display order, with `id` matching `[a-z0-9-]{1,32}` and unique and `label` UTF-8 of 1–200 bytes: at least two real choices (16 at most), and `abstain`, reserved and always present, for a member who wants to be counted without choosing. The service vault assigns the ids itself (`c1`, `c2`, …, §3.4) and always adds `abstain`; a member's vault checks this grammar and (0.13.11) that **no two labels are the same once folded**: the format characters (Unicode Cf, the bidirectional marks and isolates among them) removed, NFC, then **simple** Unicode case folding (not full folding: `ß` is not `ss`); `abstain`'s label counts, so a real choice can't read as it (VAULT-MESSAGING 0.88.12 §10.19.4 step 2). The service's own rule (§3.4: distinct under `strings.ToLower`, printable ASCII and the Latin-1 letters U+00C0–U+00FF only, `×` and `÷` excluded) agrees with simple folding in that range, and a label empty once folded is refused too, so it never signs what a vault refuses. |
-| `quorum` | The quorum rule, as text (UTF-8, at most 1,024 bytes, may be empty), and the number of ballots it needs (`min_ballots`, at least 0). `abstain` counts toward it. |
+| `decision` | How the vote is decided: a rule, its base and its threshold (§3.5; 0.14.0). |
+| `quorum` | The quorum rule, as text (UTF-8, at most 1,024 bytes, may be empty), and the number of ballots it needs (`min_ballots`, at least 0 and, from 0.14.0, at most `eligible`). `abstain` counts toward it. |
 | `binding` | Whether the organisation treats the result as binding. The protocol is the same either way. |
 | `removed_may_vote` | Whether a member removed or suspended after `record_at` may still vote. |
 | `record_at` | The roster snapshot, at or before creation (§3.2) and at or before `opens_at`. |
@@ -322,11 +323,23 @@ and the same approval can be used again.
 The label `New vote:` is the service's, put before every summary of this
 action (and `Extend vote:` before an extension's); the application
 writes no text of either. The summary is built from the payload: binding
-or advisory, the window, the quorum's minimum, the choices' labels and
-the title, all shown whole: an input whose summary does not fit the
+or advisory, the window, the quorum's minimum, the rule, the choices'
+labels, whether removed members may vote, and the title, all shown whole: an input whose summary does not fit the
 context is refused, never
 cut, so a title that equals the motion can't hide the rest of it. For an extension it is the proposal (its title, from
 the service's copy, and its id), the new close, the outage and its source.
+
+(0.14.0.) The creation summary reads
+`BINDING, opens 2026-11-18 14:00Z, closes 11-25 14:00Z, quorum 10, rule >1/2 cast, choices "Approve"/"Reject", removed votes, title "…"`:
+- **The close is shown without its year:** it is at most 7 days after
+  the opening, which is shown with it. An input whose window doesn't
+  close after it opens, within 7 days, is refused before any summary is
+  built, so the text is true on its own.
+- **The rule** shows its comparison, its fraction and its base:
+  `rule >1/2 cast`, `rule >=2/3 voted`, `rule >=9/10 elig`, or
+  `rule most` for a plurality.
+- **`removed votes`** is shown when `removed_may_vote` is true, and
+  nothing when it is false.
 
 **Every field of the executed proposal is shown, set by the service, or
 refused:**
@@ -337,7 +350,8 @@ refused:**
 | `choices` | shown: the labels, in order, each at most 24 characters, printable ASCII and Latin-1 letters only, distinct (also ignoring case) and none `Abstain`; an `id` is refused | the service assigns `c1`, `c2`, … in that order (matching §3.1's id grammar) and adds `abstain` (label `Abstain`) last, always |
 | `binding`, `removed_may_vote` | shown | as approved |
 | `opens_at`, `closes_at` | shown | as approved |
-| `quorum.min_ballots` | shown | as approved |
+| `decision` | shown (`rule …`) | as approved; any other decision than §3.5 allows is refused |
+| `quorum.min_ballots` | shown; at most 100,000 | as approved; refused `quorum_unreachable` when it is more than the eligible members at the moment of use, before the approval is used (and when the approval is requested) |
 | `quorum.text` | refused unless empty | empty |
 | `text` | refused unless empty or equal to `title` (the motion is the title) | as approved |
 | `outage_rule` | refused unless empty or the rule of §10.2 ("Extended by a relay outage over 1 hour, 24 h at most.") | always that rule |
@@ -351,9 +365,14 @@ character set waits for a check for confusables. An extension's summary
 shows the stored title whole too, in the same character set. So that
 every vote can be extended, a title is accepted at creation only if it
 fits whole in the longest extension summary (the longest source, the
-widest times): **at most 35 bytes** (`MaxTitleBytes`, computed from the
-same summary builder), and with the choices' labels it must fit the
-creation summary too.
+widest times), and so that a two-choice motion can always be approved,
+in the widest creation summary of one: advisory, `"Approve"`/`"Reject"`,
+`removed votes`, a quorum of 100,000, the longest rule and the widest
+times. Both are counted on the title as quoted (`"` and `\` take two
+bytes). That makes **at most 31 bytes** (0.14.0, owner decision
+2026-11-18; `MaxTitleBytes`, computed from the same summary builders and
+tested at its worst case). With other labels the creation summary must
+still fit whole.
 
 A refused field makes the approval request fail (`field_not_shown`, or
 `invalid_payload`), and the proposal request fail with nothing made and
@@ -361,6 +380,38 @@ the approval unused. A longer motion, a quorum text or another outage
 rule can be put to the admins only once approval challenges carry the
 full document; until then the service refuses them. **(chosen; not in
 the spec.)**
+
+### 3.5 How a vote is decided
+
+(0.14.0; owner decision 2026-11-18.) Every proposal, binding or
+advisory, states in `decision` how it is decided. Its results state the
+outcome (§7.1), which anyone can recompute from the signed proposal and
+the signed tally.
+
+| Field | Meaning |
+|---|---|
+| `rule` | `majority`: a real choice with more than half of the base is decided. `threshold`: a real choice with at least `num/den` of the base is decided. `plurality`: the real choice with the most ballots is decided, and a top count held by more than one choice is `tied`. |
+| `base` | What a majority or a threshold is of. `cast`: the ballots for a real choice (abstain left out). `voted`: every ballot, abstain included, so abstaining weighs like voting against. `elig`: the proposal's `eligible`, so not voting weighs like voting against. `null` for `plurality`, which has no base. |
+| `threshold` | `{num, den}` for `threshold` and `null` for the other rules: integers with 1 ≤ `den` ≤ 10, `num` ≤ `den`, 2·`num` > `den` (above one half), in lowest terms (so 2/3 and 4/6 can't both exist). For example 2/3, 3/4, 4/5, 9/10 or 1/1; not 55% or 67%. |
+
+- **Only the real choices** (`c1` … `cN`) can be decided or tied.
+  `abstain` is never decided, never part of a tie, and never tested
+  against the rule. It counts only in the base `voted` and toward the
+  quorum. With a majority, or a threshold above one half, at most one
+  real choice can qualify under any base: the real choices' counts sum
+  to at most the base.
+- **`elig` only with `removed_may_vote: true`.** With removed members
+  barred, suspending likely supporters who haven't voted yet would make
+  them certain "against". What remains is in §9.2.
+- **Three or more choices:** `majority` or `threshold` often decides
+  nothing (`not_decided`). The protocol has no runoff.
+- **Required.** The service fills in no decision (§3.4: the payload is
+  the full form). An admin form may pre-fill `majority` of `cast`.
+- **Checked on arrival.** A proposal with any other `decision` is refused
+  by the service before signing, by the site's upload, and by a member's
+  vault when it receives it (VAULT-MESSAGING §10.19.4 step 2), so a
+  malformed rule is never found only at the close. The apps show the
+  rule before the member votes.
 
 ## 4. Messages
 
@@ -635,12 +686,50 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
     root over the row leaves, §8.2), the tally per choice, and the
     counts: `eligible`, `ballots`, `removed` (members removed or
     suspended after `record_at`), and `unhandled` (messages of the
-    window the count went ahead without, above).
+    window the count went ahead without, above); and the `outcome`
+    (§7.1).
 - **Signature:** `results_sig = Sign(service IK, "vettid/vote/1/results\x00", proposal_hash ‖ H(results_bytes))`.
 - **Published** on votes.vettid.org, both parts, with `results.json`
   anchored (§3.3); announced in `vote.closed`.
 - Receipt times are not published: with outside knowledge of when a
   member was active, they could narrow down whose row is whose.
+
+### 7.1 The outcome
+
+(0.14.0.) `outcome` is `{quorum_met, status, choice}`, computed from the
+proposal and the tally in this order:
+1. **Quorum.** If `counts.ballots` is less than `quorum.min_ballots`, the
+   status is `no_quorum` and `quorum_met` false, whatever the tally.
+   Otherwise `quorum_met` is true.
+2. **Plurality.** The real choice with the top count, if that count is
+   above 0 and that choice alone holds it, is `decided`. A top count
+   above 0 held by several is `tied`. Every real choice at 0 is
+   `not_decided`.
+3. **Majority and threshold.**
+   - The base is the sum of the tally over the real choices (`cast`),
+     `counts.ballots` (`voted`), or the proposal's `eligible` (`elig`).
+   - A base of 0 is `not_decided`. This comes first, because at base 0
+     the threshold's formula would pass every choice.
+   - Then the real choice with 2·count > base (`majority`) or
+     count·`den` ≥ base·`num` (`threshold`) is `decided`; if none,
+     `not_decided`.
+4. `choice` is the decided choice's id, and `null` for every other
+   status.
+
+The arithmetic is on integers only; counts are at most 100,000 and `den`
+at most 10, so nothing overflows. The tally names exactly the proposal's
+choices, every count is at least 0, and the sum over every choice,
+abstain included, is `counts.ballots`, at most `counts.eligible`, which
+is the proposal's `eligible`.
+
+- **Not weighed:** `counts.removed` and `counts.unhandled` are the
+  service's own figures, which no observer can recompute, and never
+  enter the outcome. The apps and the site show `counts.unhandled`
+  beside the outcome whenever it is above 0 (owner decision 2026-11-18):
+  a narrow result with unhandled messages is for readers to weigh.
+- **The service** computes the outcome when it counts, and checks the
+  results as an observer does (§8.4, the outcome included) before they
+  are kept for anchoring; results that don't pass are not published.
 
 ## 8. Verification
 
@@ -691,7 +780,12 @@ publishes its results has every member's check settle by itself.
    early or unverifiable bundle is kept, with an alarm, and not uploaded
    again. The vault also checks that the proposal
    and extensions in `results.json` are the ones it received; and its
-   row's proof.
+   row's proof. (0.14.0) From `results.json` alone it checks the tally
+   and the outcome: the tally names exactly the proposal's choices,
+   every count is at least 0, the tally's sum is `counts.ballots`, at
+   most `counts.eligible`, which is the proposal's `eligible`, and
+   `outcome` is consistent (§8.5) and recomputes (§7.1). Otherwise it is
+   a failure, with the evidence (step 4).
 3. **Its row:**
    - it holds a receipt: the row carries exactly that ballot;
    - it never cast: the row is empty;
@@ -716,7 +810,8 @@ From votes.vettid.org alone:
 3. every ballot's `ballot_sig` verifies under its `vk` for
    `ballot_msg(proposal_hash, tag, choice_id)`, and its choice is one of
    the proposal's;
-4. the tally and `ballots` recompute;
+4. the tally and `ballots` recompute, and (0.14.0) so does `outcome`
+   (§7.1);
 5. each extension is timestamped (by its bundle) before the `closes_at`
    it extends, and they total at most 24 h;
 6. (0.13.11) the results are timestamped (by their bundle) at or after
@@ -729,7 +824,7 @@ standard base64; `hash` the `b64` of 32 bytes; `sig` the `b64` of 64
 bytes; `time` a JSON integer of Unix seconds; `spki` the `b64` of a DER
 SubjectPublicKeyInfo; `?` marks a field present only where stated.
 
-- **Proposal:** `{v: 1, proposal_id, service: b64, title, text, choices: [{id, label}], quorum: {text, min_ballots: int}, binding: boolean, removed_may_vote: boolean, record_at: time, opens_at: time, closes_at: time, eligible: int, record_root: hash, outage_rule: string}`.
+- **Proposal:** `{v: 1, proposal_id, service: b64, title, text, choices: [{id, label}], decision: {rule, base: string|null, threshold: {num: int, den: int}|null}, quorum: {text, min_ballots: int}, binding: boolean, removed_may_vote: boolean, record_at: time, opens_at: time, closes_at: time, eligible: int, record_root: hash, outage_rule: string}`.
 - **Extension:** `{v: 1, proposal_id, n: int (≥ 1), closes_at: time, outage: {from: time, to: time, source: string}}`;
   signature `Sign(IK, "vettid/vote/1/extended\x00", proposal_hash ‖ H(bytes))`.
   `outage.from` is before `outage.to`, `source` is 1–1,024 bytes of
@@ -739,8 +834,16 @@ SubjectPublicKeyInfo; `?` marks a field present only where stated.
   to the hour (§10.2) are checked by the service before it signs.
 - **Rows:** `{v: 1, proposal_id, rows: [{record_tag: hash, ballot: {vk: b64, choice_id: string, ballot_sig: sig} | null}]}`,
   `rows` sorted by `record_tag`.
-- **Results:** `{v: 1, proposal_id, proposal: {doc: b64, sig: sig}, extensions: [{doc: b64, sig: sig}], rows_hash: hash, rows_root: hash, tally: {<choice id>: int}, counts: {eligible: int, ballots: int, removed: int, unhandled: int}}`,
+- **Results:** `{v: 1, proposal_id, proposal: {doc: b64, sig: sig}, extensions: [{doc: b64, sig: sig}], rows_hash: hash, rows_root: hash, tally: {<choice id>: int}, counts: {eligible: int, ballots: int, removed: int, unhandled: int}, outcome: {quorum_met: boolean, status, choice: string|null}}`,
   `tally` naming every choice.
+- **Decision and outcome** (0.14.0): `decision` as §3.5 bounds it, with
+  `base` and `threshold` present as `null` where they don't apply.
+  `outcome.status` is one of `decided`, `not_decided`, `tied` and
+  `no_quorum`; `quorum_met` is false exactly when the status is
+  `no_quorum`; `choice` is a real choice's id exactly when the status is
+  `decided`, and `null` otherwise; `tied` occurs only under `plurality`.
+  The `tally`'s values and the `counts` are at least 0. A verifier
+  refuses an outcome that breaks any of these, whatever else holds.
 - **`record_proof`, row proofs:** `{index: int, tree_size: int, path: [hash]}`,
   the audit path from the leaf up.
 - **Service list:** `{v: 1, version: int, previous: hash, services: [{service_id: string, name: string, iks: [b64], anchor_keys: [{key: spki, anchor_cert: sig, ik: b64}]}]}`,
@@ -822,6 +925,18 @@ SubjectPublicKeyInfo; `?` marks a field present only where stated.
   could show different readers different results. Each reader's own
   checks still hold for what they were shown.
 - **The site alone** can withhold a document, not alter one.
+- **The `elig` base and the roster** (0.14.0): under `elig` a member who
+  doesn't vote weighs as "against". So the eligible members who never
+  sign in (their vaults refuse to vote until they do, §3.2), and the
+  moment the operator picks for `record_at`, shape the outcome. `elig` is
+  allowed only with `removed_may_vote: true` (§3.5), so suspending a
+  supporter can't bar their vote.
+- **A quorum made unreachable later:** `quorum_unreachable` is judged at
+  creation. With `removed_may_vote: false`, removals after it can still
+  leave fewer members able to vote than the quorum needs.
+- **Unhandled messages:** a `decided` outcome can be narrower than
+  `counts.unhandled`; those messages may have held ballots. It is shown
+  beside the outcome (§7.1), not weighed in it.
 
 ## 10. Availability
 
@@ -945,10 +1060,35 @@ item.
    anchor bundle can't be made from fixed seeds, so its vector
    (`vote/testdata/anchor-vector.json`) is a proposal captured from the
    staging site with its bundle, its anchor key and certificate, and the
-   Sigstore staging trusted root it verifies under.
+   Sigstore staging trusted root it verifies under. (0.14.0) That
+   captured proposal is from before `decision`: it is checked as bytes
+   (its canonical form, its signature and its bundle), not as a
+   proposal, until a 0.14.0 proposal is captured from staging once the
+   rollout allows one.
 4. Ed25519: every §2 rule: small-order keys and `R`, including
    non-canonical encodings; mixed-order keys; `y ≥ p`; `x = 0` with the
    sign bit set; a non-canonical `S`; valid signatures.
+5. (0.14.0) **Outcomes** (`outcomes`):
+   - each rule with each allowed base;
+   - base 0, and every ballot abstaining under `cast`;
+   - abstain holding a majority under `voted`;
+   - the exact threshold boundary, both sides;
+   - exactly half under `majority`;
+   - three choices with none over half;
+   - a three-way plurality tie, a tie below the top, and every real
+     choice at 0;
+   - zero ballots with `min_ballots` 0, and with `min_ballots` 1
+     (`no_quorum` comes before base 0);
+   - every ballot abstaining below the quorum;
+   - the quorum met exactly, and one ballot short;
+   - `no_quorum` over a majority and over a tie;
+   - tallies refused: a wrong sum, a negative count, a missing or extra
+     choice, more ballots than eligible.
+
+   Also **decisions** (`decisions`), valid and refused, each judged as
+   a proposal's member (an absent or unknown member is refused); **outcome
+   objects** (`outcome_shapes`), consistent and not; and a second set of
+   documents (`documents_decided`) whose outcome is `decided`.
 
 ## 12. Decisions for the owner
 
@@ -979,7 +1119,48 @@ item.
 12. **Accepted ballots are also kept outside the table,** write-once
     (§6).
 
+**Decided 2026-11-18** (the outcome rule):
+
+13. **Every vote states a `decision`** (§3.5): `majority`, `threshold`
+    or `plurality`, of `cast`, `voted` or `elig`. Ties are `tied`; the
+    outcome's wording is generic (§7.1); the service fills in no
+    default.
+14. **The approval summary** shows the rule, the close without its year
+    and `removed votes`; titles are at most 31 bytes (§3.4).
+15. **`elig` only with `removed_may_vote: true`** (§3.5).
+16. **`counts.unhandled` is shown beside the outcome,** never weighed in
+    it (§7.1).
+
 ## Changes
+
+- **0.14.0 (2026-11-18):** (owner decision 2026-11-18, GC #1367) How a
+  vote is decided.
+  - **§3.5 (new):** every proposal states a `decision`: `majority`,
+    `threshold` (above one half, `den` ≤ 10, lowest terms) or
+    `plurality`, of `cast`, `voted` or `elig` (`elig` only with
+    `removed_may_vote: true`).
+  - **§7.1 (new):** the results carry an `outcome`, computed in a fixed
+    order from the proposal and the tally; abstain is never decided.
+    `counts.removed` and `counts.unhandled` are never weighed;
+    `unhandled` is shown beside it.
+  - **§3.1, §3.4:** `quorum.min_ballots` is at most `eligible`
+    (`quorum_unreachable`, before the approval is used) and at most
+    100,000. The summary shows the rule and `removed votes`, the close
+    without its year; titles are at most 31 bytes, counted as quoted.
+  - **§8.3, §8.4, §8.5:** the vault and observers check the tally and
+    recompute the outcome; the schemas gain `decision` and `outcome`.
+  - **§9.2:** what the `elig` base, the roster and unhandled messages
+    still allow.
+  - **§11:** item 5 (outcome, decision and outcome-object vectors); the
+    proposal and results vectors change; the anchor vector's proposal is
+    from before 0.14.0 and is checked as bytes.
+  - **Rollout (Rule 3):** no compatibility with older proposals. A vault
+    from before 0.14.0 refuses a proposal with `decision`, and one from
+    0.14.0 requires it. It ships when no staging vote is open,
+    unpublished or inside a member's check window (close + 2 h + 7 days,
+    §8.3), or after a staging votes reset with the owner's OK: the site,
+    then the member vaults and apps, then the service, with no proposal
+    at all created between the first release and the last.
 
 - **0.13.13 (2026-11-12):** (GC #1343, Ballot P1) §3.3: the service
   checks a proposal's and an extension's bundle with the vaults'

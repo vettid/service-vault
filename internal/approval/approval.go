@@ -233,8 +233,8 @@ type Manager struct {
 	BoundConnection func(ctx context.Context, emailKey string) (string, bool, error)
 	// EligibleCount returns how many members a proposal made now would
 	// have, so a proposal.create approval the ballot manager would refuse
-	// (ballot.MaxEligible) is refused before the admins are asked; nil
-	// skips the check.
+	// (ballot.MaxEligible, or a quorum over the eligible members) is
+	// refused before the admins are asked; nil skips the check.
 	EligibleCount func(ctx context.Context) (int, error)
 	// Rate limits Create per action (SV_APPROVAL_LIMITS); nil: no limit.
 	Rate *RateLimit
@@ -776,6 +776,10 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 		}
 		if n > ballot.MaxEligible {
 			return nil, errCode(CodeTooManyEligible)
+		}
+		// An invalid payload is refused by its summary below.
+		if q, err := ballot.ProposalMinBallots(payload); err == nil && q > int64(n) {
+			return nil, errCode(CodeQuorumUnreachable)
 		}
 	}
 	if req.Action == ActionVoteExtend {

@@ -119,7 +119,8 @@ func runProposalApproval(t *testing.T, ctx context.Context, st peer.Store, pager
 
 	opens := time.Now().Add(time.Hour).Unix()
 	in := ballot.ProposalInput{Title: "Adopt the 2027 budget", Choices: []ballot.ChoiceInput{{Label: "Yes"}, {Label: "No"}},
-		Quorum: vote.Quorum{MinBallots: 1}, Binding: true, OpensAt: opens, ClosesAt: opens + 86400, OutageRule: ballot.DefaultOutageRule}
+		Decision: vote.Decision{Rule: vote.RuleMajority, Base: vote.BaseOf(vote.BaseCast)},
+		Quorum:   vote.Quorum{MinBallots: 1}, Binding: true, OpensAt: opens, ClosesAt: opens + 86400, OutageRule: ballot.DefaultOutageRule}
 	payload, err := ballot.CanonicalProposal(in)
 	if err != nil {
 		t.Fatal(err)

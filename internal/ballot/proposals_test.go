@@ -240,8 +240,9 @@ func newManager(t *testing.T) (*Manager, *fakeSender, *fakePublisher) {
 
 func input() ProposalInput {
 	return ProposalInput{Title: "Adopt the 2027 budget", Text: "",
-		Choices: []ChoiceInput{{Label: "Yes"}, {Label: "No"}},
-		Quorum:  vote.Quorum{MinBallots: 1}, OpensAt: 1793520000, ClosesAt: 1793520000 + 86400,
+		Choices:  []ChoiceInput{{Label: "Yes"}, {Label: "No"}},
+		Decision: vote.Decision{Rule: vote.RuleMajority, Base: vote.BaseOf(vote.BaseCast)},
+		Quorum:   vote.Quorum{MinBallots: 1}, OpensAt: 1793520000, ClosesAt: 1793520000 + 86400,
 		OutageRule: DefaultOutageRule}
 }
 

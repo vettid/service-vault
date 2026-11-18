@@ -116,6 +116,11 @@ const ResendCover = 70 * time.Minute
 // MaxEligible eligible members, before its approval is used.
 var ErrTooManyEligible = fmt.Errorf("ballot: this service supports at most %d eligible members per vote", MaxEligible)
 
+// ErrQuorumUnreachable refuses a proposal whose quorum's min_ballots is
+// more than the roster's eligible members (§3.4), before the approval is
+// used.
+var ErrQuorumUnreachable = errors.New("ballot: the quorum is more than the eligible members")
+
 // Manager creates and publishes proposals.
 type Manager struct {
 	Store     *RecordStore
@@ -236,13 +241,15 @@ type ChoiceInput struct {
 
 // ProposalInput is what the application asks for (§3.1, §3.4); the rest
 // of the proposal is the service's. Of its fields the admins are shown
-// the title, the labels, binding, removed_may_vote, the times and the
-// quorum's min_ballots; text must be empty or the title, quorum.text must
-// be empty, and outage_rule must be empty or DefaultOutageRule.
+// the title, the labels, binding, removed_may_vote, the times, the
+// quorum's min_ballots and the decision; text must be empty or the title,
+// quorum.text must be empty, and outage_rule must be empty or
+// DefaultOutageRule.
 type ProposalInput struct {
 	Title          string        `json:"title"`
 	Text           string        `json:"text"`
 	Choices        []ChoiceInput `json:"choices"`
+	Decision       vote.Decision `json:"decision"`
 	Quorum         vote.Quorum   `json:"quorum"`
 	Binding        bool          `json:"binding"`
 	RemovedMayVote bool          `json:"removed_may_vote"`
@@ -319,6 +326,9 @@ func (m *Manager) Create(ctx context.Context, approvalID string, in ProposalInpu
 	if len(conns) > m.maxEligible() {
 		return nil, fmt.Errorf("%w: the roster has %d", ErrTooManyEligible, len(conns))
 	}
+	if in.Quorum.MinBallots > int64(len(conns)) {
+		return nil, fmt.Errorf("%w: %d eligible, quorum %d", ErrQuorumUnreachable, len(conns), in.Quorum.MinBallots)
+	}
 	sort.Strings(conns)
 	members := map[string]Member{}
 	tags := make([][]byte, 0, len(conns))
@@ -336,7 +346,7 @@ func (m *Manager) Create(ctx context.Context, approvalID string, in ProposalInpu
 	}
 	sortTags(tags)
 	p := &vote.Proposal{V: 1, ProposalID: id, Service: m.IK, Title: in.Title, Text: in.Text, Choices: choices,
-		Quorum: vote.Quorum{MinBallots: in.Quorum.MinBallots}, Binding: in.Binding, RemovedMayVote: in.RemovedMayVote,
+		Decision: in.Decision, Quorum: vote.Quorum{MinBallots: in.Quorum.MinBallots}, Binding: in.Binding, RemovedMayVote: in.RemovedMayVote,
 		RecordAt: now.Unix(), OpensAt: in.OpensAt, ClosesAt: in.ClosesAt,
 		Eligible: int64(len(tags)), RecordRoot: vote.Root(tags), OutageRule: DefaultOutageRule}
 	doc, err := vote.EncodeProposal(p)

@@ -297,7 +297,7 @@ func TestProposalSummaryFromPayload(t *testing.T) {
 	}
 	opens, _ := when(in.OpensAt)
 	closes, _ := when(in.ClosesAt)
-	for _, want := range []string{"BINDING", "opens " + opens, "closes " + closes, `"Yes"/"No"`, "quorum 1", `"Adopt the 2027 budget"`} {
+	for _, want := range []string{"BINDING", "opens " + opens, "closes " + closes[5:] + ",", `"Yes"/"No"`, "quorum 1, rule >1/2 cast,", `"Adopt the 2027 budget"`} {
 		if !strings.Contains(s, want) {
 			t.Errorf("%q lacks %q", s, want)
 		}

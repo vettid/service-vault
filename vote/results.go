@@ -88,10 +88,15 @@ func (c *Count) Build() (rowsBytes, resultsBytes []byte, err error) {
 	if exts == nil {
 		exts = []Signed{}
 	}
+	outcome, err := Decide(p, tally, n)
+	if err != nil {
+		return nil, nil, err
+	}
 	resultsBytes, err = EncodeResults(&Results{
 		V: 1, ProposalID: p.ProposalID, Proposal: c.Proposal, Extensions: exts,
 		RowsHash: sum(rowsBytes), RowsRoot: Root(leaves), Tally: tally,
-		Counts: Counts{Eligible: int64(len(c.Tags)), Ballots: n, Removed: c.Removed, Unhandled: c.Unhandled},
+		Counts:  Counts{Eligible: int64(len(c.Tags)), Ballots: n, Removed: c.Removed, Unhandled: c.Unhandled},
+		Outcome: outcome,
 	})
 	return rowsBytes, resultsBytes, err
 }
@@ -216,5 +221,19 @@ func Check(serviceIK, resultsBytes, resultsSig, rowsBytes []byte) (*Proposal, *R
 			return nil, nil, fail("tally for %q", k)
 		}
 	}
+	// 4. (0.14.0) The outcome recomputes from the decision and the tally (§7.1).
+	want, err := Decide(p, res.Tally, res.Counts.Ballots)
+	if err != nil {
+		return nil, nil, fail("outcome: %v", err)
+	}
+	if !sameOutcome(want, res.Outcome) {
+		return nil, nil, fail("outcome")
+	}
 	return p, res, nil
+}
+
+// sameOutcome reports whether two outcomes are equal.
+func sameOutcome(a, b Outcome) bool {
+	return a.QuorumMet == b.QuorumMet && a.Status == b.Status &&
+		(a.Choice == nil) == (b.Choice == nil) && (a.Choice == nil || *a.Choice == *b.Choice)
 }

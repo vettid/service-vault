@@ -213,7 +213,7 @@ MEMBER-SERVICE-PLAN §4.5 and §5.2; the operator's view is in the README,
   summary built from a payload is shown whole or refused, never cut. Request, record and audit entry are written together.
   For `proposal.create` and `vote.extend` the application gives no
   summary: the service builds it from the payload (binding or advisory,
-  window, quorum, choices and title; for an extension the proposal and
+  window, quorum, rule, choices and title; for an extension the proposal and
   the new close), and refuses a payload that is not the canonical full
   form of the input or whose text it cannot show whole.
 - **Using an approval** (`Manager.Consume`; `internal/ballot` calls it).

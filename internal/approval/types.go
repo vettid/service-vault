@@ -235,6 +235,10 @@ const (
 	CodeOutageNotOver     = "outage_not_over"   // Create vote.extend: the outage's to is after now (BALLOT-PROTOCOL §10.2)
 	CodeRateLimited       = "rate_limited"      // Create: the limit of the action's group (RateLimit) is reached
 
+	// Create proposal.create: the quorum's min_ballots is more than the
+	// eligible members (BALLOT-PROTOCOL §3.4).
+	CodeQuorumUnreachable = "quorum_unreachable"
+
 	// Using an approval (Consume).
 	CodeApprovalRequired    = "approval_required"     // no approval id
 	CodeApprovalNotFound    = "approval_not_found"    // no such approval
