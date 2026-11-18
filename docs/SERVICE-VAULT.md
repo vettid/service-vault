@@ -67,6 +67,32 @@ never answers challenges and never rotates its identity.
   The member's `connection.approved` activates the connection; the
   member's vault then gets `profile.update` with the service's names and
   identity key (§10.8), and the application `connection.added`.
+- **Contract** (§10.8, 0.90.10; VAULT-SERVICE-CONTRACT §1). Every
+  `profile.update` the service sends carries `contract: "1.0"`, the
+  contract version this release implements. The service keeps the value
+  it last sent to each connection. Under a release whose value differs
+  (or that never sent one), each connection gets an update with its next
+  `version` at the first housekeeping that finds it active and able to
+  send: at the start, or later (after a reconnect, a demoted epoch, a
+  wait for a token, or while its outbox is full). That version is one more
+  than the last sent and at least the clock's Unix seconds, so one sent
+  after a rollback or a restore set the record back is still higher than
+  any the member's vault applied, unless the clock was ahead when an
+  earlier update, since lost from the record, was sent. Once queued it
+  counts as sent: if the outbox later gives it up (the window passed, the
+  connection ended or went stale), it is not sent again until the value
+  changes, as with the update at activation. That is enough while
+  `contract` is informational; a later contract version that holds
+  connections by it must revisit it.
+  From a member's `profile.update` it keeps the contract claimed
+  (a string of the §10.8 form; any other value counts as none and is
+  logged `profile_member_malformed` with `member=contract`, and the
+  update is still applied; a malformed `features` is logged the same
+  way with `member=features`).
+  The value is informational: nothing selects behavior or holds a
+  connection by it. `vote` and `approval_document` are judged from the
+  last `profile.update` applied only, never from a message's inner
+  `features`.
 - **Sessions** use the vault-to-vault policy (24 h or 10,000 messages,
   §6.5). The peer answers the member vault's rekeys and starts its own
   when its epoch reaches the limit; crossing rekeys are settled by `th1`.
@@ -187,7 +213,7 @@ MEMBER-SERVICE-PLAN §4.5 and §5.2; the operator's view is in the README,
   summary built from a payload is shown whole or refused, never cut. Request, record and audit entry are written together.
   For `proposal.create` and `vote.extend` the application gives no
   summary: the service builds it from the payload (binding or advisory,
-  window, quorum, choices and title; for an extension the proposal and
+  window, quorum, rule, choices and title; for an extension the proposal and
   the new close), and refuses a payload that is not the canonical full
   form of the input or whose text it cannot show whole.
 - **Using an approval** (`Manager.Consume`; `internal/ballot` calls it).
@@ -226,7 +252,13 @@ MEMBER-SERVICE-PLAN §4.5 and §5.2; the operator's view is in the README,
   (ids only), queues the `approval.challenge_expired` webhook with the
   save, and the approval's status lists the admin in `remind_needed`
   (admins asked, not answered, holding no live challenge) until a
-  reminder sends a new one. An admin at the ask limit (approval
+  reminder sends a new one. A challenge accepted for a connection that
+  cannot take deposits now (its reconnect is open, say) waits in the
+  outbox and is not sent: the status lists its admin in `queued`, not in
+  `remind_needed`, a reminder leaves them out (a new challenge would wait
+  the same way), and the audit entry marks it `queued: true`. It goes
+  once the connection can take it; if it leaves the outbox undelivered,
+  the admin moves to `remind_needed` and a reminder replaces it. An admin at the ask limit (approval
   challenges still counting, against the member vault's ask gate of 5
   per 24 hours) is skipped by every send and
   shows in `remind_needed`, and in an optional `ask_budget` list

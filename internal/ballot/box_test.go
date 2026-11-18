@@ -101,6 +101,22 @@ func (f *boxFixture) castBody(conn, choice string) (map[string]string, []byte) {
 
 func (f *boxFixture) send(conn, typ string, body any, ms uint64, active bool) peer.VoteAnswer {
 	f.t.Helper()
+	var left uint64
+	if !active {
+		left = 1 // left long before
+	}
+	return f.sendLeft(conn, typ, body, ms, left)
+}
+
+// sendLeft sends as a member whose connection left at leftAtMS (0: hasn't).
+func (f *boxFixture) sendLeft(conn, typ string, body any, ms, leftAtMS uint64) peer.VoteAnswer {
+	f.t.Helper()
+	return f.sendLeftKind(conn, typ, body, ms, leftAtMS, "")
+}
+
+// sendLeftKind is sendLeft with the leave's kind.
+func (f *boxFixture) sendLeftKind(conn, typ string, body any, ms, leftAtMS uint64, kind string) peer.VoteAnswer {
+	f.t.Helper()
 	j, _ := json.Marshal(body)
 	var cred []byte
 	if k, ok := f.creds[conn]; ok {
@@ -108,7 +124,7 @@ func (f *boxFixture) send(conn, typ string, body any, ms uint64, active bool) pe
 	}
 	a, err := f.box.Vote(context.Background(), &peer.VoteRequest{ConnectionID: conn,
 		PeerIK:        ed25519.NewKeyFromSeed(digest("peer " + conn)).Public().(ed25519.PublicKey),
-		CredentialKey: cred, Active: active, Type: typ, Body: j, MsgMS: ms})
+		CredentialKey: cred, LeftAtMS: leftAtMS, Left: kind, Type: typ, Body: j, MsgMS: ms})
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -132,6 +148,9 @@ type answer struct {
 	RecordProof recordProof     `json:"record_proof"`
 	StatusSig   []byte          `json:"status_sig"`
 	Bundle      json.RawMessage `json:"bundle"`
+	// 0.15.0
+	ProposalHash []byte `json:"proposal_hash"`
+	StatusMsgMS  uint64 `json:"status_msg_ms"`
 }
 
 func parseAnswer(t *testing.T, a peer.VoteAnswer) answer {
@@ -155,7 +174,10 @@ func (f *boxFixture) checkRefusal(a peer.VoteAnswer, conn, code string, tag, req
 	if !bytes.Equal(x.Connection, c[:]) || !bytes.Equal(x.RecordTag, tag) {
 		f.t.Fatalf("%s: refusal names another connection or tag", code)
 	}
-	msg, _ := vote.RefusalMsg(f.p.ProposalID, c[:], tag, TypeCast, code, x.MsgMS, reqHash)
+	msg, _ := vote.RefusalMsg(f.v.ph, f.p.ProposalID, c[:], tag, TypeCast, code, x.MsgMS, reqHash)
+	if !bytes.Equal(x.ProposalHash, f.v.ph) {
+		f.t.Fatalf("%s: refusal names another proposal hash", code)
+	}
 	if vote.Verify(f.ik(), vote.LabelRefusal, msg, x.RefusalSig) != nil {
 		f.t.Fatalf("%s: refusal signature", code)
 	}
@@ -237,12 +259,19 @@ func TestCastExtensionAndRemoval(t *testing.T) {
 	if a := f.send("c0", TypeCast, body, uint64(f.p.ClosesAt)*1000+1000, true); a.Code != "" {
 		t.Fatalf("a cast inside the extension refused: %s", a.Code)
 	}
-	// removed_may_vote lets an inactive connection vote.
-	f.p.RemovedMayVote = true
-	f.open.p = f.p
+	// Membership at the relay's time (0.14.2): a cast the relay received
+	// before the member left counts; one at the leave or after doesn't.
 	b1, _ := f.castBody("c1", "yes")
-	if a := f.send("c1", TypeCast, b1, f.during(), false); a.Code != "" {
-		t.Fatalf("removed member refused: %s", a.Code)
+	ms := f.during()
+	if a := f.sendLeft("c1", TypeCast, b1, ms, ms); a.Code != CodeNotActive {
+		t.Fatalf("a cast at the leave: %q", a.Code)
+	}
+	// A leave with no time is refused (fail closed).
+	if a := f.sendLeftKind("c1", TypeCast, b1, ms, 0, peer.LeftRemovedOut); a.Code != CodeNotActive {
+		t.Fatalf("a leave without a time: %q", a.Code)
+	}
+	if a := f.sendLeft("c1", TypeCast, b1, ms, ms+1); a.Code != "" {
+		t.Fatalf("a cast before the leave refused: %s", a.Code)
 	}
 }
 
@@ -255,7 +284,7 @@ func TestCastNeedsSignIn(t *testing.T) {
 	body["credential_key"] = base64.StdEncoding.EncodeToString(f.creds["c0"].Public().(ed25519.PublicKey))
 	j, _ := json.Marshal(body)
 	a, err := f.box.Vote(context.Background(), &peer.VoteRequest{ConnectionID: "c0",
-		PeerIK: ed25519.NewKeyFromSeed(digest("peer c0")).Public().(ed25519.PublicKey), Active: true, Type: TypeCast, Body: j, MsgMS: f.during()})
+		PeerIK: ed25519.NewKeyFromSeed(digest("peer c0")).Public().(ed25519.PublicKey), Type: TypeCast, Body: j, MsgMS: f.during()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +339,11 @@ func TestStatus(t *testing.T) {
 		} else if x.Ballot != nil || x.MsgMS != 0 || x.ReceiptSig != nil {
 			t.Fatal("a ballot or receipt before any cast")
 		}
-		smsg, _ := vote.StatusMsg(f.p.ProposalID, m.Tag, leaf)
+		c := sha256.Sum256(ed25519.NewKeyFromSeed(digest("peer c0")).Public().(ed25519.PublicKey))
+		if !bytes.Equal(x.Connection, c[:]) || x.StatusMsgMS != f.during() {
+			t.Fatalf("status names another connection or time: %x %d", x.Connection, x.StatusMsgMS)
+		}
+		smsg, _ := vote.StatusMsg(f.v.ph, c[:], m.Tag, leaf, x.StatusMsgMS)
 		if vote.Verify(f.ik(), vote.LabelStatus, smsg, x.StatusSig) != nil {
 			t.Fatal("status signature")
 		}
@@ -343,7 +376,7 @@ func TestUnpublishedProposal(t *testing.T) {
 	// never a final refusal, and an alarm for the operator.
 	for typ, b := range map[string]any{TypeCast: body, TypeStatus: q} {
 		j, _ := json.Marshal(b)
-		if _, err := f.box.Vote(context.Background(), &peer.VoteRequest{ConnectionID: "c0", Active: true, Type: typ, Body: j, MsgMS: f.during()}); !errors.Is(err, ErrUnpublished) {
+		if _, err := f.box.Vote(context.Background(), &peer.VoteRequest{ConnectionID: "c0", Type: typ, Body: j, MsgMS: f.during()}); !errors.Is(err, ErrUnpublished) {
 			t.Fatalf("%s: %v", typ, err)
 		}
 	}
@@ -429,7 +462,7 @@ func TestBallotAnswersHaveOneSize(t *testing.T) {
 		if x.Ballot == nil || x.Ballot.ChoiceID != choice || len(x.Ballot.Pad) != 32-n || strings.Trim(x.Ballot.Pad, "0") != "" {
 			t.Fatalf("n=%d: ballot %+v", n, x.Ballot)
 		}
-		smsg, _ := vote.StatusMsg(f.p.ProposalID, m.Tag, leaf)
+		smsg, _ := vote.StatusMsg(f.v.ph, x.Connection, m.Tag, leaf, x.StatusMsgMS)
 		if vote.Verify(f.ik(), vote.LabelStatus, smsg, x.StatusSig) != nil {
 			t.Fatalf("n=%d: status signature", n)
 		}

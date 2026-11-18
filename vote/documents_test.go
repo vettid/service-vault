@@ -47,9 +47,10 @@ func testProposal(t *testing.T, ik ed25519.PublicKey, tags [][]byte) *Proposal {
 	return &Proposal{
 		V: 1, ProposalID: "01JBQZ0000000000000000000A", Service: ik,
 		Title: "Adopt the 2027 budget", Text: "The budget as circulated on 1 November.",
-		Choices: []Choice{{ID: "yes", Label: "Yes"}, {ID: "no", Label: "No"}, {ID: AbstainID, Label: "Abstain"}},
-		Quorum:  Quorum{Text: "A third of the members", MinBallots: 1},
-		Binding: false, RecordAt: 1793500000, OpensAt: 1793520000, ClosesAt: 1793520000 + 3*86400,
+		Choices:  []Choice{{ID: "yes", Label: "Yes"}, {ID: "no", Label: "No"}, {ID: AbstainID, Label: "Abstain"}},
+		Decision: Decision{Rule: RuleMajority, Base: BaseOf(BaseCast)},
+		Quorum:   Quorum{Text: "A third of the members", MinBallots: 1},
+		Binding:  false, RecordAt: 1793500000, OpensAt: 1793520000, ClosesAt: 1793520000 + 3*86400,
 		Eligible: int64(len(tags)), RecordRoot: Root(tags), OutageRule: "Extended by a relay outage over 1 hour, 24 h at most.",
 	}
 }

@@ -1,0 +1,72 @@
+[
+  {
+    "release": "staging/25",
+    "path": "vms/strictjson/strictjson.go",
+    "sha256": "52085e536add91d02982a8901d9ec1bdf0fcd08ac8e28b6961778ce47256ae92",
+    "pinned_sha256": "f61d053942d7cf29cf935020d00cd26533d0ff89cff8f3c6a691a3e145f2c54f",
+    "reason": "before vettid-vault f6bfca1: the pinned file only adds the check refusing an unpaired surrogate escape, so this release's parser accepts a superset: more lenient, the service refuses first (fail-safe); reviewed in GC #10243"
+  },
+  {
+    "release": "staging/26",
+    "path": "vms/strictjson/strictjson.go",
+    "sha256": "52085e536add91d02982a8901d9ec1bdf0fcd08ac8e28b6961778ce47256ae92",
+    "pinned_sha256": "f61d053942d7cf29cf935020d00cd26533d0ff89cff8f3c6a691a3e145f2c54f",
+    "reason": "before vettid-vault f6bfca1: the pinned file only adds the check refusing an unpaired surrogate escape, so this release's parser accepts a superset: more lenient, the service refuses first (fail-safe); reviewed in GC #10243"
+  },
+  {
+    "release": "staging/25",
+    "path": "vms/votewire/votewire.go",
+    "sha256": "59c7ac68651de9fd620ccecc2f92ec97ab8136bd77ed373ead84aa3d114af10b",
+    "pinned_sha256": "d462a30e7bca9b216c7606954c7bf48fad6b33a341626e3822437b24719d2860",
+    "reason": "the pinned file only adds the constant MaxEligible and the function RowLeaf, which no bundle or root check uses (MaxBundle, H, HashLen and eq are unchanged); reviewed in GC #10243"
+  },
+  {
+    "release": "staging/26",
+    "path": "vms/votewire/votewire.go",
+    "sha256": "59c7ac68651de9fd620ccecc2f92ec97ab8136bd77ed373ead84aa3d114af10b",
+    "pinned_sha256": "d462a30e7bca9b216c7606954c7bf48fad6b33a341626e3822437b24719d2860",
+    "reason": "the pinned file only adds the constant MaxEligible and the function RowLeaf, which no bundle or root check uses (MaxBundle, H, HashLen and eq are unchanged); reviewed in GC #10243"
+  },
+  {
+    "release": "staging/30",
+    "path": "vms/suite/suite.go",
+    "sha256": "72d7ca44fe495acf356903cf1ac4b7ef7c7bacab9dece5505e04be17d98ce4c8",
+    "pinned_sha256": "8b4c62cd9ebaee91d2aeeb2521accbf94e3a7fa31c200a861fe328b22978f5c2",
+    "reason": "this release only adds the constant LabelRelayRotate (and realigns its const block); bundle.go and trust.go use no suite function, and suite.Verify (sign.go, reached through verify.go) is unchanged; reviewed in GC #10243"
+  },
+  {
+    "release": "staging/25",
+    "path": "vms/votewire/body.go",
+    "sha256": "ccc98f4ab4a0f99461cb1a67dd3d2cf7537072672a7015832078daa0fe2329eb",
+    "pinned_sha256": "aa83aac14f495f82846ce5501dda0452c532fc04704e4a112081e5607539ab78",
+    "reason": "the pinned file only adds Pad (the pad member beside a vote's choice_id, VAULT-MESSAGING 0.83.6 §10.19.5, which no signature covers and receivers ignore), its use in the cast body, and the strings import; no init, no package-level variable, nothing a bundle or root check uses; the strictjson import differs only by its old place; see GC #11068"
+  },
+  {
+    "release": "staging/25",
+    "path": "vms/votewire/documents.go",
+    "sha256": "4badd3b7f7f8b5743d9b4ceadaf7520c3ddacdb73511b6c744ec2982289e0a3e",
+    "pinned_sha256": "7571a9347499e2d267fe615e72b599d5a524e649eefb9d9cd2de60a5a4c7fe79",
+    "reason": "the pinned file adds two refusals to proposal validation, eligible at most MaxEligible and choice labels distinct and non-empty once folded (FoldLabel, golang.org/x/text/unicode/norm; VAULT-MESSAGING 0.88.12 §10.19.4): this release accepts a superset (fail-safe); the service doesn't run the pinned Validate on its own proposals but refuses the same itself: eligible above vote.MaxEligible in vote.Proposal.Validate (vote.EncodeProposal and ParseProposal; ballot.MaxEligible is lower still), and a choice label that is empty, repeated or Abstain in ballot.checkInput's choice-label loop (internal/ballot/approved.go), so no label folds to empty (the pinned k == \"\" refusal); its strings.ToLower key groups labels as the fold does only while latin() admits no more than printable ASCII and the Latin-1 letters (it leaves out ª, µ and º too), so widening latin() needs a real fold check there: beyond that set the two part ways on long s (U+017F), format characters (the soft hyphen U+00AD is in Latin-1), sequences NFC changes, and classes such as µ/μ and σ/ς; no init, no package-level variable written, nothing a bundle or root check uses; see GC #11068"
+  },
+  {
+    "release": "staging/26",
+    "path": "vms/votewire/body.go",
+    "sha256": "ccc98f4ab4a0f99461cb1a67dd3d2cf7537072672a7015832078daa0fe2329eb",
+    "pinned_sha256": "aa83aac14f495f82846ce5501dda0452c532fc04704e4a112081e5607539ab78",
+    "reason": "the pinned file only adds Pad (the pad member beside a vote's choice_id, VAULT-MESSAGING 0.83.6 §10.19.5, which no signature covers and receivers ignore), its use in the cast body, and the strings import; no init, no package-level variable, nothing a bundle or root check uses; the strictjson import differs only by its old place; see GC #11068"
+  },
+  {
+    "release": "staging/26",
+    "path": "vms/votewire/documents.go",
+    "sha256": "4badd3b7f7f8b5743d9b4ceadaf7520c3ddacdb73511b6c744ec2982289e0a3e",
+    "pinned_sha256": "7571a9347499e2d267fe615e72b599d5a524e649eefb9d9cd2de60a5a4c7fe79",
+    "reason": "the pinned file adds two refusals to proposal validation, eligible at most MaxEligible and choice labels distinct and non-empty once folded (FoldLabel, golang.org/x/text/unicode/norm; VAULT-MESSAGING 0.88.12 §10.19.4): this release accepts a superset (fail-safe); the service doesn't run the pinned Validate on its own proposals but refuses the same itself: eligible above vote.MaxEligible in vote.Proposal.Validate (vote.EncodeProposal and ParseProposal; ballot.MaxEligible is lower still), and a choice label that is empty, repeated or Abstain in ballot.checkInput's choice-label loop (internal/ballot/approved.go), so no label folds to empty (the pinned k == \"\" refusal); its strings.ToLower key groups labels as the fold does only while latin() admits no more than printable ASCII and the Latin-1 letters (it leaves out ª, µ and º too), so widening latin() needs a real fold check there: beyond that set the two part ways on long s (U+017F), format characters (the soft hyphen U+00AD is in Latin-1), sequences NFC changes, and classes such as µ/μ and σ/ς; no init, no package-level variable written, nothing a bundle or root check uses; see GC #11068"
+  },
+  {
+    "release": "staging/27",
+    "path": "vms/votewire/documents.go",
+    "sha256": "450ecccb42a792e46039b0522bd10a29ceadc99146750839ed0031b59e5645c7",
+    "pinned_sha256": "7571a9347499e2d267fe615e72b599d5a524e649eefb9d9cd2de60a5a4c7fe79",
+    "reason": "the pinned file adds one refusal to proposal validation, choice labels distinct and non-empty once folded (FoldLabel, golang.org/x/text/unicode/norm; VAULT-MESSAGING 0.88.12 §10.19.4): this release accepts a superset (fail-safe); the service doesn't run the pinned Validate on its own proposals but refuses the same itself: a choice label that is empty, repeated or Abstain in ballot.checkInput's choice-label loop (internal/ballot/approved.go), so no label folds to empty (the pinned k == \"\" refusal); its strings.ToLower key groups labels as the fold does only while latin() admits no more than printable ASCII and the Latin-1 letters (it leaves out ª, µ and º too), so widening latin() needs a real fold check there: beyond that set the two part ways on long s (U+017F), format characters (the soft hyphen U+00AD is in Latin-1), sequences NFC changes, and classes such as µ/μ and σ/ς; no init, no package-level variable written, nothing a bundle or root check uses; see GC #11068"
+  }
+]

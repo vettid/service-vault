@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.13.11 (2026-11-11)
+**Status:** 0.15.0 (2026-11-18)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -24,7 +24,7 @@ key made for that proposal only, and also signs it with the member's
 credential key, so the ballot is provably theirs. It goes over the
 member's ordinary connection, and the service answers with a signed
 receipt. At the close the service publishes every tag with its ballot
-or none, and the tally. Anyone can check the signatures, one ballot per
+or none, the tally, and the outcome that the proposal's rule gives. Anyone can check the signatures, one ballot per
 tag and the tally; each member's vault checks its own row. The public
 sees tags and per-proposal keys, never names, emails or connections.
 The service knows who voted how, and keeps that record, with the
@@ -51,7 +51,8 @@ members' signatures, for the organisation.
   labels (VAULT-MESSAGING §4.1), but unlike them **each ends in a `0x00`
   byte** and contains no other, for example `"vettid/vote/1/ballot\x00"`
   (0.13.11: VMS labels have no terminator, so this is a difference, not
-  the VMS convention). The terminator makes the vote labels prefix-free
+  the VMS convention). The version number is per message: `status` and
+  `refusal` are at `/2/` (0.15.0), the others at `/1/`. The terminator makes the vote labels prefix-free
   among themselves (no label is the start of another, whatever follows
   it), and the `vettid/vote/` prefix keeps them apart from every VMS
   label as long as no VMS label begins with `vettid/vote/` or is a prefix
@@ -106,9 +107,10 @@ The proposal is a document (§8.5).
 | `service` | The service identity key that signs it. |
 | `title`, `text` | UTF-8; `title` 1–200 bytes, `text` at most 16,384 bytes. |
 | `choices` | 3–17 entries `{id, label}`, in display order, with `id` matching `[a-z0-9-]{1,32}` and unique and `label` UTF-8 of 1–200 bytes: at least two real choices (16 at most), and `abstain`, reserved and always present, for a member who wants to be counted without choosing. The service vault assigns the ids itself (`c1`, `c2`, …, §3.4) and always adds `abstain`; a member's vault checks this grammar and (0.13.11) that **no two labels are the same once folded**: the format characters (Unicode Cf, the bidirectional marks and isolates among them) removed, NFC, then **simple** Unicode case folding (not full folding: `ß` is not `ss`); `abstain`'s label counts, so a real choice can't read as it (VAULT-MESSAGING 0.88.12 §10.19.4 step 2). The service's own rule (§3.4: distinct under `strings.ToLower`, printable ASCII and the Latin-1 letters U+00C0–U+00FF only, `×` and `÷` excluded) agrees with simple folding in that range, and a label empty once folded is refused too, so it never signs what a vault refuses. |
-| `quorum` | The quorum rule, as text (UTF-8, at most 1,024 bytes, may be empty), and the number of ballots it needs (`min_ballots`, at least 0). `abstain` counts toward it. |
+| `decision` | How the vote is decided: a rule, its base and its threshold (§3.5; 0.14.0). |
+| `quorum` | The quorum rule, as text (UTF-8, at most 1,024 bytes, may be empty), and the number of ballots it needs (`min_ballots`, at least 0 and, from 0.14.0, at most `eligible`). `abstain` counts toward it. |
 | `binding` | Whether the organisation treats the result as binding. The protocol is the same either way. |
-| `removed_may_vote` | Whether a member removed or suspended after `record_at` may still vote. |
+| `removed_may_vote` | Always `false` (0.14.1; owner decision 2026-11-18): a member removed or suspended after `record_at` can't vote after leaving. The service refuses `true` before signing (§3.4), and every verifier refuses a proposal with `true`: a member's vault on arrival (VAULT-MESSAGING §10.19.4 step 2), the site's upload, and an observer (§8.4). |
 | `record_at` | The roster snapshot, at or before creation (§3.2) and at or before `opens_at`. |
 | `opens_at`, `closes_at` | The voting window, `opens_at` before `closes_at`: a ballot counts if the relay received it in `[opens_at, closes_at)` (§6). At most 7 days (owner decision). |
 | `eligible`, `record_root` | The number of eligible members, at least 1, and the Merkle root of their tags (§3.2). |
@@ -192,6 +194,18 @@ design: vettid/votes, docs/VOTES-SITE.md).
   signature over the document under its anchor key. The Sigstore bundle
   goes up with the document and with the message that carries it to
   vaults (§8.5 "Rekor profile").
+- **Checked before it is sent** (0.13.13): before a proposal or an
+  extension is sent to any member, the service verifies its bundle with
+  the vaults' verifier (VAULT-MESSAGING §10.19.4 step 6, without the
+  service-list lookup), under its current anchor key, against the trusted roots
+  of **every supported vault release** of its Sigstore instance: a
+  release that registers the `vote` feature and is listed `active` or
+  `deprecated` in that channel's signed manifest, or is a `candidate`
+  (VAULT-RELEASES: tagged, not yet signed into a manifest). A bundle that
+  fails any of them is not pushed (alarm `proposal_bundle_unverified`);
+  an extension already published stays in effect. A vault that asks
+  (`vote.status`) or reads the site is still given the document and its
+  bundle, and checks it itself as always. (chosen; not in the spec)
 - **The site checks** the service is listed, the signatures, the exact
   JCS bytes, the bundle under a listed anchor key, and the order above.
 - **Write-once:** each document has one path; the site accepts the same
@@ -310,11 +324,23 @@ and the same approval can be used again.
 The label `New vote:` is the service's, put before every summary of this
 action (and `Extend vote:` before an extension's); the application
 writes no text of either. The summary is built from the payload: binding
-or advisory, the window, the quorum's minimum, the choices' labels and
-the title, all shown whole: an input whose summary does not fit the
+or advisory, the window, the quorum's minimum, the rule, the choices'
+labels and the title, all shown whole: an input whose summary does not fit the
 context is refused, never
 cut, so a title that equals the motion can't hide the rest of it. For an extension it is the proposal (its title, from
 the service's copy, and its id), the new close, the outage and its source.
+
+(0.14.0.) The creation summary reads
+`BINDING, opens 2026-11-18 14:00Z, closes 11-25 14:00Z, quorum 10, rule >1/2 cast, choices "Approve"/"Reject", title "…"`:
+- **The close is shown without its year:** it is at most 7 days after
+  the opening, which is shown with it. An input whose window doesn't
+  close after it opens, within 7 days, is refused before any summary is
+  built, so the text is true on its own.
+- **The rule** shows its comparison, its fraction and its base:
+  `rule >1/2 cast`, `rule >=2/3 voted`, `rule >=9/10 elig`, or
+  `rule most` for a plurality.
+- (0.14.1) Nothing is shown for `removed_may_vote`: it is always
+  false. (0.14.0 showed `removed votes` when it was true.)
 
 **Every field of the executed proposal is shown, set by the service, or
 refused:**
@@ -323,9 +349,11 @@ refused:**
 |---|---|---|
 | `title` | shown whole; printable ASCII and Latin-1 letters only | as approved |
 | `choices` | shown: the labels, in order, each at most 24 characters, printable ASCII and Latin-1 letters only, distinct (also ignoring case) and none `Abstain`; an `id` is refused | the service assigns `c1`, `c2`, … in that order (matching §3.1's id grammar) and adds `abstain` (label `Abstain`) last, always |
-| `binding`, `removed_may_vote` | shown | as approved |
+| `binding` | shown | as approved |
+| `removed_may_vote` | refused unless `false` (0.14.1) | `false` |
 | `opens_at`, `closes_at` | shown | as approved |
-| `quorum.min_ballots` | shown | as approved |
+| `decision` | shown (`rule …`) | as approved; any other decision than §3.5 allows is refused |
+| `quorum.min_ballots` | shown; at most 100,000 | as approved; refused `quorum_unreachable` when it is more than the eligible members at the moment of use, before the approval is used (and when the approval is requested) |
 | `quorum.text` | refused unless empty | empty |
 | `text` | refused unless empty or equal to `title` (the motion is the title) | as approved |
 | `outage_rule` | refused unless empty or the rule of §10.2 ("Extended by a relay outage over 1 hour, 24 h at most.") | always that rule |
@@ -339,9 +367,16 @@ character set waits for a check for confusables. An extension's summary
 shows the stored title whole too, in the same character set. So that
 every vote can be extended, a title is accepted at creation only if it
 fits whole in the longest extension summary (the longest source, the
-widest times): **at most 35 bytes** (`MaxTitleBytes`, computed from the
-same summary builder), and with the choices' labels it must fit the
-creation summary too.
+widest times), and so that a two-choice motion can always be approved,
+in the widest creation summary of one: advisory, `"Approve"`/`"Reject"`,
+a quorum of 100,000, the longest rule and the widest times. Both are
+counted on the title as quoted (`"` and `\` take two bytes). That makes
+**at most 35 bytes** (`MaxTitleBytes`, computed from the same summary
+builders and tested at its worst case; the owner's rule of 2026-11-18 is
+that the limit is derived from the final strings). In 0.14.1 the
+extension summary sets it; with `removed votes` in the summary, 0.14.0's
+was 31. With other labels the creation summary must
+still fit whole.
 
 A refused field makes the approval request fail (`field_not_shown`, or
 `invalid_payload`), and the proposal request fail with nothing made and
@@ -349,6 +384,38 @@ the approval unused. A longer motion, a quorum text or another outage
 rule can be put to the admins only once approval challenges carry the
 full document; until then the service refuses them. **(chosen; not in
 the spec.)**
+
+### 3.5 How a vote is decided
+
+(0.14.0; owner decision 2026-11-18.) Every proposal, binding or
+advisory, states in `decision` how it is decided. Its results state the
+outcome (§7.1), which anyone can recompute from the signed proposal and
+the signed tally.
+
+| Field | Meaning |
+|---|---|
+| `rule` | `majority`: a real choice with more than half of the base is decided. `threshold`: a real choice with at least `num/den` of the base is decided. `plurality`: the real choice with the most ballots is decided, and a top count held by more than one choice is `tied`. |
+| `base` | What a majority or a threshold is of. `cast`: the ballots for a real choice (abstain left out). `voted`: every ballot, abstain included, so abstaining weighs like voting against. `elig`: the proposal's `eligible`, so not voting weighs like voting against. `null` for `plurality`, which has no base. |
+| `threshold` | `{num, den}` for `threshold` and `null` for the other rules: integers with 1 ≤ `den` ≤ 10, `num` ≤ `den`, 2·`num` > `den` (above one half), in lowest terms (so 2/3 and 4/6 can't both exist). For example 2/3, 3/4, 4/5, 9/10 or 1/1; not 55% or 67%. |
+
+- **Only the real choices** (`c1` … `cN`) can be decided or tied.
+  `abstain` is never decided, never part of a tie, and never tested
+  against the rule. It counts only in the base `voted` and toward the
+  quorum. With a majority, or a threshold above one half, at most one
+  real choice can qualify under any base: the real choices' counts sum
+  to at most the base.
+- **`elig` has no condition** (0.14.1, owner decision 2026-11-18; in
+  0.14.0 it needed `removed_may_vote: true`). A member who leaves before
+  voting weighs as "against" under `elig`, so removals shape it; §9.2.
+- **Three or more choices:** `majority` or `threshold` often decides
+  nothing (`not_decided`). The protocol has no runoff.
+- **Required.** The service fills in no decision (§3.4: the payload is
+  the full form). An admin form may pre-fill `majority` of `cast`.
+- **Checked on arrival.** A proposal with any other `decision` is refused
+  by the service before signing, by the site's upload, and by a member's
+  vault when it receives it (VAULT-MESSAGING §10.19.4 step 2), so a
+  malformed rule is never found only at the close. The apps show the
+  rule before the member votes.
 
 ## 4. Messages
 
@@ -379,7 +446,7 @@ listed anchor key. A second, different proposal under the same
 | Type | Body | Answer |
 |---|---|---|
 | `vote.cast` | `{proposal_id, record_tag, vk, choice_id, ballot_sig, cast_sig, pad?}` (§5) | `{proposal_id, msg_ms, receipt_sig}`, or a refusal |
-| `vote.status` | `{proposal_id}` | `{proposal_id, proposal, proposal_sig, bundle, record_secret, record_proof, ballot?, msg_ms?, receipt_sig?, status_sig}`, or a refusal |
+| `vote.status` | `{proposal_id}` | `{proposal_id, connection, status_msg_ms, proposal, proposal_sig, bundle, record_secret, record_proof, ballot?, msg_ms?, receipt_sig?, status_sig}`, or a refusal |
 
 Every JSON object above that carries a member's `choice_id` (the
 `vote.cast` body, the `ballot` of the `vote.status` answer and the
@@ -427,29 +494,64 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
   over and inside the window (here, from the loss to the publication), a
   request more than a minute before the close and at most 24 h in all,
   so a publication lost within the last hour or so before the close
-  cannot be covered: those casts may be left out, which is accepted. The answer is signed:
-  `status_sig = Sign(service IK, "vettid/vote/1/status\x00", lp(proposal_id) ‖ lp(record_tag) ‖ H(ballot_leaf))`,
-  where with no ballot `H` is taken of the empty string.
+  cannot be covered: those casts may be left out, which is accepted. The answer is signed
+  (0.15.0):
+  `status_sig = Sign(service IK, "vettid/vote/2/status\x00", proposal_hash ‖ lp(connection) ‖ lp(record_tag) ‖ H(ballot_leaf) ‖ u64(status_msg_ms))`,
+  where `proposal_hash` is H(the `proposal` bytes in that answer),
+  `connection` is `H(the connection's peer identity key)` and
+  `status_msg_ms` the relay's time of the `vote.status` request, both
+  also members of the answer (`msg_ms` there stays the ballot's receipt
+  time), and with no ballot `H` is taken of the empty string. The
+  bindings describe the answer: which signed proposal, which member, and
+  when it was asked, so an exported answer stands on its own.
   A vault asks it for a proposal on the site's index that it doesn't
   hold, after a restore (§5), and when a cast has had no answer for 24
   hours.
-- **Refusals** are signed, so a member can show them:
-  `refusal_sig = Sign(service IK, "vettid/vote/1/refusal\x00", lp(proposal_id) ‖ lp(connection) ‖ lp(record_tag) ‖ lp(type) ‖ lp(code) ‖ u64(msg_ms) ‖ request_hash)`,
-  in the error body as `{refusal_sig, msg_ms, connection, record_tag}`,
-  where `connection` is `H(the connection's peer identity key)`,
+- **Refusals** are signed, so a member can show them (0.15.0):
+  `refusal_sig = Sign(service IK, "vettid/vote/2/refusal\x00", proposal_hash ‖ lp(proposal_id) ‖ lp(connection) ‖ lp(record_tag) ‖ lp(type) ‖ lp(code) ‖ u64(msg_ms) ‖ request_hash)`,
+  in the error body as `{refusal_sig, proposal_hash, msg_ms, connection, record_tag}`,
+  where `proposal_id` is the id the request named, `proposal_hash` is
+  the hash of the published proposal under it, or 32 zero bytes when the
+  service holds none published under it (accepted only with
+  `unknown_proposal` or `not_eligible`),
+  `connection` is `H(the connection's peer identity key)`,
   `record_tag` is empty when the connection has none, `msg_ms` is the
   relay's time of the request (§6), and `request_hash` is
-  `H(ballot_leaf)` for `vote.cast` and `H(proposal_id)` for
-  `vote.status`, or `H(the request body)` when the body is too malformed
-  to form them. A request that names no valid `proposal_id` gets an
-  unsigned refusal, whose `refusal_sig` is `null`. A vault treats an
-  unsigned refusal as no answer.
+  `H(ballot_leaf)` for `vote.cast`, whenever the body forms a leaf (it
+  needs no proposal, so also for a proposal not held), and
+  `H(proposal_id)` for `vote.status`, or `H(the request body)` when the
+  body is too malformed to form them. A request that names no valid
+  `proposal_id` gets an unsigned refusal, whose `refusal_sig` is `null`
+  and which carries no `proposal_hash`. A vault treats an unsigned refusal
+  as no answer.
+  - **Tying a refusal to its id:** the signed `proposal_id` does, for
+    every refusal, the zero-hash ones included. (A cast's H(ballot_leaf)
+    could not: a member's valid ballot of one proposal, sent naming
+    another, is refused under the other's hash.) The member's vault also
+    pairs each answer with its request by `re`.
+- **What a verifier checks** (0.15.0; the member's vault, VAULT-MESSAGING):
+  - `connection` and a non-empty `record_tag` are exactly 32 bytes;
+    `connection` is H of the vault's current or any earlier identity key
+    on that connection (the key may have rotated);
+  - `status_msg_ms`, and a refusal's `msg_ms`, equal the time of a
+    `msg_id` the relay returned for one of the vault's own deposits of
+    that request (all kept across retries). A mismatch, or a request
+    whose deposit answer was lost, makes the answer invalid: no answer,
+    and the vault asks again with a new request, keeping a local
+    diagnostic only, never evidence (the relay's answers are unsigned).
+    A final refusal of a cast whose deposit answer was lost is discarded
+    likewise; sending the cast again is idempotent and harmless (§6
+    step 1);
+  - a zero `proposal_hash` for a proposal the vault holds signed is kept
+    and shown, not evidence: an honest service gives it when it doesn't
+    hold, or hasn't published, a proposal under that id, for example in
+    an older state after a restore of its table.
 
 | Code | For | Meaning |
 |---|---|---|
 | `not_eligible` | both | The connection has no tag for this proposal. |
 | `not_open`, `closed` | `vote.cast` | The relay's time is outside the window. |
-| `not_active` | `vote.cast` | Removed or suspended, and `removed_may_vote` is false. |
+| `not_active` | `vote.cast` | The member had left (removed, replaced or suspended) at the cast's relay time (0.14.2, §6 "Leaving"). |
 | `not_signed_in` | `vote.cast` | The member has never signed in, so no credential key is pinned (§5). |
 | `already_voted` | `vote.cast` | A different ballot is already recorded for this tag; the body also carries that ballot as `ballot` `{vk, choice_id, ballot_sig, pad}`, with its `ballot_msg_ms` and `receipt_sig`. |
 | `bad_ballot` | `vote.cast` | The tag isn't the connection's, the choice isn't the proposal's, or a signature fails. After a credential-key rotation (`connection.authenticate.rotated`, VAULT-MESSAGING §10.4) the vault may sign `cast_sig` again under its current key and send the same ballot once more; the service checks `cast_sig` under the key pinned when the cast arrives. |
@@ -516,7 +618,8 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
      `[opens_at, closes_at)`, as extended (§10.2). A ballot queued at
      the relay during an outage still counts.
   3. **Eligibility:** the connection is eligible, `record_tag` is its
-     tag, and it is active or `removed_may_vote` is true.
+     tag, and the member hadn't left at the cast's `msg_ms` (0.14.2,
+     "Leaving" below; `removed_may_vote` is always false, 0.14.1).
   4. **Ballot:** `choice_id` is the proposal's, `ballot_sig` verifies
      under `vk`, and `cast_sig` verifies under the connection's pinned
      credential key (§2); with no key pinned, `not_signed_in`.
@@ -541,6 +644,51 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
   and its `msg_ms` is inside the window; one that fails isn't counted.
   `counts.unhandled` and `counts.removed` are fixed when collection
   ends, in the same save as `published`, and a retried count uses them.
+- **Leaving** (0.14.2; owner decision 2026-11-18, GC #1374). A member
+  leaves when their connection is removed (by their vault, or by the
+  service), replaced (a new connection with the same identity or relay
+  key, §7.4 of VAULT-MESSAGING), or suspended (fork evidence, a rotation
+  conflict, an unlinked relay move).
+  - **When:** `left_at` is the relay's time (`msg_ms`) of the message
+    that caused the leave: a vault's `connection.removed`, the evidence,
+    or the replacing connection's activating handshake. Those are the
+    casts' clock, delivered in `msg_id` order, so a copy's cast after the
+    leave can't count. A rotation conflict found while handling another
+    message takes that message's `msg_ms`. A leave no message caused (an
+    operator removal, a replacement activated by the operator's approval,
+    a suspension found at start) takes the service's time. A connection
+    suspended before 0.14.2 recorded times gets the time of the first
+    start that loads it. A suspension's time stays first through a later
+    removal or replacement, and `left_at` is never changed.
+  - **The rule:** a cast counts only if its `msg_ms` is before the
+    member's `left_at`. A cast the relay received before the leave
+    counts even when the service handles it after (an outage backlog). A
+    `stale` connection (a relay refusal, or any reconnect in progress)
+    hasn't left.
+  - **Kept receive keys:** when a connection is removed or replaced, the
+    service keeps a receive-only record of it, for every removed
+    connection: its relay key, its standing tokens' ids and its
+    credential key, frozen at the removal, and the receive keys of the
+    epochs the live connection would still accept, without their send
+    keys or rekey secrets: an epoch destroyed by rule E, demoted or
+    abandoned is left out, and a superseded epoch keeps its own earlier
+    end, never extended. Through it only a
+    `vote.cast` deposited under one of those tokens passes (and one the
+    service can't judge yet, its proposal not published, is left at the
+    relay to come again: until the proposal is published, or the keys'
+    bound passes and it is dropped, it is an unacked message to every
+    count, so it can hold up another vote's count for its 24 hours, or
+    add to that vote's `counts.unhandled`). Nothing else
+    is accepted (no evidence, no rekey, no response, no identity change),
+    and nothing is answered: the member gets no receipt, and no
+    `vote.closed`. The record is never the live connection, so a member
+    who connects again is unaffected. A suspended connection keeps no
+    keys: nothing is accepted once suspended (VAULT-MESSAGING §3.4).
+  - **Bounds:** the keys are destroyed 15 days after the removal: the
+    7-day window, 24 h of extensions, the 24 h wait for an unacked
+    message and 6 days' slack for a delayed count, below the 16 days an
+    inner `ts` may be old. The leave itself (connection, `left_at`, kind)
+    is kept for 60 days, for `counts.removed`.
 - **The record** of each connection's tag, ballot, `cast_sig` and
   `msg_ms` is kept for the organisation's records (owner decision
   2026-10-29), sealed like the service vault's other records. It is not
@@ -558,6 +706,53 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
   whose `msg_ms` is at least `closes_at` + 1 min, with no earlier one
   still leased, it has every ballot of the window. A `vote.cast` handled
   after that gets `late`.
+- **The count waits for the timestamp authority's time** (0.13.12, owner
+  decision 2026-11-11). The service's clock (at or past `closes_at` +
+  1 min, `CollectMargin`) alone never starts the count: a clock running
+  fast would count, and refuse casts as `late`, before the real close.
+  Just before counting, after the reconcile of the extensions (§10.2),
+  the service asks the timestamp authority of its pinned Sigstore trusted
+  root (§8.5 "Rekor profile") for an RFC 3161 timestamp whose message
+  imprint is SHA-256 of 32 fresh random bytes (they only pair answer and
+  request): a stamp only, with no transparency-log entry. It checks the
+  imprint and the token's chain, usage and `validFor` as for an anchor
+  (§10.2), and reads its `genTime`. It counts only once that time is at
+  or after the `closes_at` the reconcile left in force; if that
+  `closes_at` moves later, the close is still collecting and probes
+  again. Until then nothing is counted, `published` and the counts are
+  not fixed (§6), and no cast is refused `late` for it.
+  - **The evidence that every ballot is in** can't lean on the service's
+    clock either: it is a handled message whose relay time (`msg_ms`) is
+    at least `closes_at` + 1 min (above), or an empty collect that started
+    at or after the passing probe plus 1 min, both timed on the service
+    process's monotonic clock, which a step of its wall clock doesn't move
+    (an empty collect before the probe may be before the real close).
+  - A probe that fails (the authority unreachable, a stamp that doesn't
+    verify) counts nothing either; the service never falls back to its
+    own clock. The caller retries the close with backoff, as any failed
+    close; the service probes again no sooner than 10 s after a failure.
+  - Probes are rationed. A passing probe holds for that `closes_at` (the
+    authority's time only moves forward); a `closes_at` moved later by an
+    extension is probed again. After a stamp whose `genTime` is before the
+    close, the next probe is made no sooner than the service's clock at
+    that probe plus (`closes_at` − `genTime`), but never later than
+    5 minutes after it. These waits are timed on the service process's
+    monotonic clock, so a step of its wall clock neither lengthens nor
+    cuts them, and a corrected clock never starves the close. A wait
+    judged from a stamp kept across a restart (the publisher's, below)
+    is on the wall clock: it is void if that clock has gone back since,
+    and bounded by the same 5 minutes. A probe has its own timeout
+    (5 s), apart from the caller's request, so a hung authority is a
+    failure (alarmed), and a request its caller drops still gets the
+    probe's answer.
+  - A re-anchor of early results (§8.3 step 2) waits on a fresh probe:
+    none is made until a probe's time is at or after the close (a probe
+    makes no transparency-log entry; a re-anchor does), and those probes
+    are at least 10 s apart. A service with no probe wired judges from
+    the early stamp instead, with the same 5-minute bound and void.
+  - An authority that is unreachable or behind delays the count but
+    can't make it early; the service raises an alarm while a close waits
+    on it, as when Rekor is down (§10.1).
 - **A message left unacked** (one the service couldn't handle yet, and
   the relay hands out again) holds the count at most 24 hours from when
   it was first left (owner decision 2026-10-30), however often it comes
@@ -574,14 +769,58 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
   - **`results.json`:** the proposal and any extensions with their
     signatures, `rows_hash = H(rows bytes)`, `rows_root` (the Merkle
     root over the row leaves, §8.2), the tally per choice, and the
-    counts: `eligible`, `ballots`, `removed` (members removed or
-    suspended after `record_at`), and `unhandled` (messages of the
-    window the count went ahead without, above).
+    counts: `eligible`, `ballots`, `removed` (0.14.2: the members whose
+    `left_at` is in [`record_at`, `closes_at` in force), a leave before
+    `record_at` counting as at it; a stale member hasn't left; a member
+    whose leave is no longer on record, because it predates 0.14.2 or
+    because the count runs more than 60 days after it, is counted, with
+    an alarm: that overcounts a member who left after `closes_at` and
+    whose record has gone, and the alarm can be noise when `record_at` is
+    long before the opening), and `unhandled` (messages of the
+    window the count went ahead without, above); and the `outcome`
+    (§7.1).
 - **Signature:** `results_sig = Sign(service IK, "vettid/vote/1/results\x00", proposal_hash ‖ H(results_bytes))`.
 - **Published** on votes.vettid.org, both parts, with `results.json`
   anchored (§3.3); announced in `vote.closed`.
 - Receipt times are not published: with outside knowledge of when a
   member was active, they could narrow down whose row is whose.
+
+### 7.1 The outcome
+
+(0.14.0.) `outcome` is `{quorum_met, status, choice}`, computed from the
+proposal and the tally in this order:
+1. **Quorum.** If `counts.ballots` is less than `quorum.min_ballots`, the
+   status is `no_quorum` and `quorum_met` false, whatever the tally.
+   Otherwise `quorum_met` is true.
+2. **Plurality.** The real choice with the top count, if that count is
+   above 0 and that choice alone holds it, is `decided`. A top count
+   above 0 held by several is `tied`. Every real choice at 0 is
+   `not_decided`.
+3. **Majority and threshold.**
+   - The base is the sum of the tally over the real choices (`cast`),
+     `counts.ballots` (`voted`), or the proposal's `eligible` (`elig`).
+   - A base of 0 is `not_decided`. This comes first, because at base 0
+     the threshold's formula would pass every choice.
+   - Then the real choice with 2·count > base (`majority`) or
+     count·`den` ≥ base·`num` (`threshold`) is `decided`; if none,
+     `not_decided`.
+4. `choice` is the decided choice's id, and `null` for every other
+   status.
+
+The arithmetic is on integers only; counts are at most 100,000 and `den`
+at most 10, so nothing overflows. The tally names exactly the proposal's
+choices, every count is at least 0, and the sum over every choice,
+abstain included, is `counts.ballots`, at most `counts.eligible`, which
+is the proposal's `eligible`.
+
+- **Not weighed:** `counts.removed` and `counts.unhandled` are the
+  service's own figures, which no observer can recompute, and never
+  enter the outcome. The apps and the site show `counts.unhandled`
+  beside the outcome whenever it is above 0 (owner decision 2026-11-18):
+  a narrow result with unhandled messages is for readers to weigh.
+- **The service** computes the outcome when it counts, and checks the
+  results as an observer does (§8.4, the outcome included) before they
+  are kept for anchoring; results that don't pass are not published.
 
 ## 8. Verification
 
@@ -615,32 +854,61 @@ publishes its results has every member's check settle by itself.
 2. **The vault** checks `results_sig` and the bundle, whose timestamp
    must be **at or after the `closes_at` in force** (0.13.11; with the
    extensions in `results.json`): the service counts and anchors only
-   once its clock is at or past that `closes_at` + 1 min (`CollectMargin`),
-   and the 1-minute margin also serves as the allowance for the timestamp
-   authority's clock, so a vault requires the close itself and an earlier timestamp is a failure
-   (results made before every ballot could be in). **The service checks
-   the timestamp too:** before it uploads the results it compares the
-   bundle's time with that `closes_at` and, if it is earlier (its clock
-   and the timestamp authority's differ by more than a minute), anchors
-   them again rather than
-   publish results every vault would fail (service-vault follow-up: the
-   bundle cache keyed by hash must not hand back the early bundle, and the
-   new anchor needs a fresh anchor signature, the ECDSA one, since the
-   transparency log refuses an identical entry and `results_sig` is
-   deterministic); that
-   the proposal
+   once its clock is at or past that `closes_at` + 1 min (`CollectMargin`)
+   and (0.13.12) the timestamp authority's time is at or past that
+   `closes_at` (§7), so a vault requires the close itself and an earlier
+   timestamp is a failure (results made before every ballot could be in).
+   **The service checks the bundle's timestamp too,** as the backstop for
+   an authority whose stamps disagree with each other: before it uploads
+   the results it compares the bundle's time with that `closes_at` and,
+   if it is earlier, anchors them again rather than publish results
+   every vault would fail. The early bundle is never handed back by the
+   bundle cache keyed by hash, and the new anchor needs a fresh anchor
+   signature, the ECDSA one (`results_sig` is deterministic, and the same
+   anchor signature would only find the transparency log's existing
+   entry); a re-anchor waits for a probe at or after the close (§7). When
+   the site already holds the results (their index to be redone), an
+   early or unverifiable bundle is kept, with an alarm, and not uploaded
+   again. The vault also checks that the proposal
    and extensions in `results.json` are the ones it received; and its
-   row's proof.
+   row's proof. (0.14.1) It refuses a proposal with `removed_may_vote`
+   true, on arrival and here. (0.14.0) From `results.json` alone it checks the tally
+   and the outcome: the tally names exactly the proposal's choices,
+   every count is at least 0, the tally's sum is `counts.ballots`, at
+   most `counts.eligible`, which is the proposal's `eligible`, and
+   `outcome` is consistent (§8.5) and recomputes (§7.1). Otherwise it is
+   a failure, with the evidence (step 4).
 3. **Its row:**
    - it holds a receipt: the row carries exactly that ballot;
    - it never cast: the row is empty;
    - it cast but has neither receipt nor refusal: the row may carry its
      ballot or be empty; either is shown as "unconfirmed", not as a
-     failure.
+     failure. (0.14.2) A member who left gets no receipt for a cast the
+     service judged after the leave and no `vote.closed`: their vault's
+     check, if it runs, can only show "unconfirmed".
 4. **Outcome:** a failure is shown to the member with the evidence: the
    signed proposal, the receipt or signed refusals, and the results. The
    app can export it. A receipt for a ballot the results lack or change
-   proves the service at fault. A ballot under the tag of a member who
+   proves the service at fault. (0.15.0; owner decision 2026-11-18, GC
+   #1375) **No status answer about the ballot, or its absence, is
+   evidence by itself:** a signed "no ballot" never proves fault,
+   whenever it was asked, because the service
+   need not handle a connection's messages in relay order (an unacked
+   message, a failed batch, §7's 24 h wait). These are evidence, whatever
+   the times:
+   - a status naming a different ballot than the member's receipt, when
+     the status carries a ballot (the leaf hash it signs is not H of the
+     empty string), `receipt_sig` and `status_sig` verify under the same
+     identity key,
+     the receipt's `proposal_hash` equals the status's, the receipt's
+     `ballot_leaf` is shown and its `record_tag` (first 32 bytes) equals
+     the status's, and H(that leaf) differs from the H(ballot_leaf) the
+     status signs (one ballot per tag);
+   - a status whose `proposal_hash` differs from a signed proposal the
+     vault holds under that id: two signed proposals under one id;
+   - a refusal whose signed `proposal_id` is that id and whose
+     `proposal_hash` (not zero) differs from it: a refusal signed for
+     another version under that id. A ballot under the tag of a member who
    says they never voted is settled by the organisation's record: the
    service holds the member's `cast_sig` for it, or it doesn't.
 
@@ -648,14 +916,15 @@ publishes its results has every member's check settle by itself.
 
 From votes.vettid.org alone:
 1. `results_sig` and every document's signature hold under the service's
-   identity key; every bundle verifies under a listed anchor key; the
+   identity key, and (0.14.1) the proposal's `removed_may_vote` is false; every bundle verifies under a listed anchor key; the
    service list verifies;
 2. `H(rows bytes)` is `rows_hash`; the tags are unique, number
    `eligible` and reach `record_root`; the rows reach `rows_root`;
 3. every ballot's `ballot_sig` verifies under its `vk` for
    `ballot_msg(proposal_hash, tag, choice_id)`, and its choice is one of
    the proposal's;
-4. the tally and `ballots` recompute;
+4. the tally and `ballots` recompute, and (0.14.0) so does `outcome`
+   (§7.1);
 5. each extension is timestamped (by its bundle) before the `closes_at`
    it extends, and they total at most 24 h;
 6. (0.13.11) the results are timestamped (by their bundle) at or after
@@ -668,7 +937,7 @@ standard base64; `hash` the `b64` of 32 bytes; `sig` the `b64` of 64
 bytes; `time` a JSON integer of Unix seconds; `spki` the `b64` of a DER
 SubjectPublicKeyInfo; `?` marks a field present only where stated.
 
-- **Proposal:** `{v: 1, proposal_id, service: b64, title, text, choices: [{id, label}], quorum: {text, min_ballots: int}, binding: boolean, removed_may_vote: boolean, record_at: time, opens_at: time, closes_at: time, eligible: int, record_root: hash, outage_rule: string}`.
+- **Proposal:** `{v: 1, proposal_id, service: b64, title, text, choices: [{id, label}], decision: {rule, base: string|null, threshold: {num: int, den: int}|null}, quorum: {text, min_ballots: int}, binding: boolean, removed_may_vote: boolean, record_at: time, opens_at: time, closes_at: time, eligible: int, record_root: hash, outage_rule: string}`.
 - **Extension:** `{v: 1, proposal_id, n: int (≥ 1), closes_at: time, outage: {from: time, to: time, source: string}}`;
   signature `Sign(IK, "vettid/vote/1/extended\x00", proposal_hash ‖ H(bytes))`.
   `outage.from` is before `outage.to`, `source` is 1–1,024 bytes of
@@ -678,8 +947,16 @@ SubjectPublicKeyInfo; `?` marks a field present only where stated.
   to the hour (§10.2) are checked by the service before it signs.
 - **Rows:** `{v: 1, proposal_id, rows: [{record_tag: hash, ballot: {vk: b64, choice_id: string, ballot_sig: sig} | null}]}`,
   `rows` sorted by `record_tag`.
-- **Results:** `{v: 1, proposal_id, proposal: {doc: b64, sig: sig}, extensions: [{doc: b64, sig: sig}], rows_hash: hash, rows_root: hash, tally: {<choice id>: int}, counts: {eligible: int, ballots: int, removed: int, unhandled: int}}`,
+- **Results:** `{v: 1, proposal_id, proposal: {doc: b64, sig: sig}, extensions: [{doc: b64, sig: sig}], rows_hash: hash, rows_root: hash, tally: {<choice id>: int}, counts: {eligible: int, ballots: int, removed: int, unhandled: int}, outcome: {quorum_met: boolean, status, choice: string|null}}`,
   `tally` naming every choice.
+- **Decision and outcome** (0.14.0): `decision` as §3.5 bounds it, with
+  `base` and `threshold` present as `null` where they don't apply.
+  `outcome.status` is one of `decided`, `not_decided`, `tied` and
+  `no_quorum`; `quorum_met` is false exactly when the status is
+  `no_quorum`; `choice` is a real choice's id exactly when the status is
+  `decided`, and `null` otherwise; `tied` occurs only under `plurality`.
+  The `tally`'s values and the `counts` are at least 0. A verifier
+  refuses an outcome that breaks any of these, whatever else holds.
 - **`record_proof`, row proofs:** `{index: int, tree_size: int, path: [hash]}`,
   the audit path from the leaf up.
 - **Service list:** `{v: 1, version: int, previous: hash, services: [{service_id: string, name: string, iks: [b64], anchor_keys: [{key: spki, anchor_cert: sig, ik: b64}]}]}`,
@@ -688,8 +965,9 @@ SubjectPublicKeyInfo; `?` marks a field present only where stated.
   `services.json` and `services.json.sig`.
 - **Message bodies** are as §4 gives them, with these types: `proposal`,
   `extension` `b64`; `*_sig` `sig`; `record_secret`, `results_hash`,
-  `record_tag` `hash`; `vk` `b64`; `msg_ms` a JSON integer; `bundle` a
-  Sigstore bundle as JSON.
+  `record_tag`, `connection`, `proposal_hash` `hash`; `vk` `b64`;
+  `msg_ms`, `status_msg_ms` (0.15.0) JSON integers; `bundle` a Sigstore
+  bundle as JSON.
 - **Rekor profile:** a `hashedrekord` entry (digest SHA-256 of the
   document bytes; key the anchor key as PKIX DER; ASN.1 DER ECDSA
   signature) in a Rekor log named in the Sigstore trusted root pinned in
@@ -736,7 +1014,8 @@ SubjectPublicKeyInfo; `?` marks a field present only where stated.
   `record_at`. Only `eligible` and outside knowledge of the membership
   show them. Equally, a member left off the roster at `record_at` is
   shown only by that member asking (`vote.status` answers
-  `not_eligible`, signed).
+  `not_eligible`, signed under the proposal's hash; a zero hash is not
+  evidence, §4.2).
 - **Voting for members who don't vote:** the service can put a ballot
   under such a member's tag. The member's vault sees it (§8.3), and the
   organisation's record shows the service holds no `cast_sig` for it; a
@@ -754,13 +1033,44 @@ SubjectPublicKeyInfo; `?` marks a field present only where stated.
   held ballot still counts; a dropped one is retried.
 - **Withholding the results, or extending after reading the running
   tally:** visible to everyone (no results; an extension with its
-  stated outage), not prevented.
+  stated outage), not prevented. (0.15.0) With results withheld
+  entirely, nothing proves a dropped ballot either (no status answer is
+  evidence, §8.3): the withholding itself is what shows.
 - **A split view:** the site refuses a second document at one path, and
   every vault checks its own proposal and row against the site, but
   Rekor proves only existence and time, so a site and service colluding
   could show different readers different results. Each reader's own
   checks still hold for what they were shown.
 - **The site alone** can withhold a document, not alter one.
+- **The `elig` base and the roster** (0.14.0; 0.14.1): under `elig` a
+  member who doesn't vote weighs as "against". So the eligible members
+  who never sign in (their vaults refuse to vote until they do, §3.2),
+  the moment the operator picks for `record_at`, and every removal or
+  suspension during the vote shape the outcome. An operator removal bars
+  a member who hasn't voted yet at once and, under `elig`, makes them a
+  certain "against".
+  It shows only in `counts.removed`, a count the service reports, which
+  can be checked only against the organisation's audit record and by the
+  removed members themselves.
+- **An operator removal bars at once** (0.14.2): from its `left_at`, a
+  removed member's cast is refused (`not_active`), whatever the vote's
+  base; only a cast the relay received earlier counts.
+- **A forced suspension** (0.14.2): anyone holding an old copy of a
+  member's vault can cause fork evidence and so suspend the connection.
+  That ends the member's voting in every open vote, even after they
+  connect again (a replacement is a leave, and the new connection isn't
+  a member of votes already open).
+- **Clocks** (0.14.2): an operator removal's `left_at` is the service's
+  time, compared with the relay's `msg_ms`. A skew S between them moves
+  by up to S which casts made just around the removal are refused; that
+  is accepted. A relay that lies about times could backdate a copy's
+  cast: the same trust as the window (§6).
+- **A quorum made unreachable later:** `quorum_unreachable` is judged at
+  creation. Removals after it can still leave fewer members able to vote
+  than the quorum needs.
+- **Unhandled messages:** a `decided` outcome can be narrower than
+  `counts.unhandled`; those messages may have held ballots. It is shown
+  beside the outcome (§7.1), not weighed in it.
 
 ## 10. Availability
 
@@ -768,12 +1078,13 @@ SubjectPublicKeyInfo; `?` marks a field present only where stated.
 
 | Failure | What happens |
 |---|---|
-| The service doesn't send the proposal | The vault sees it on the site's index and asks `vote.status`. A signed `not_eligible` is evidence the member can show the organisation. |
+| The service doesn't send the proposal | The vault sees it on the site's index and asks `vote.status`. A signed `not_eligible` under the proposal's hash (a zero hash is not evidence, §4.2) is evidence the member can show the organisation. |
 | The service refuses or ignores a ballot | The vault retries the same bytes, then asks `vote.status`. A wrong signed refusal is evidence. |
 | The service vault is down | Messages wait in the relay (14 days) and count by the relay's time (§6). |
 | The relay is down | Members can't send. Beyond §10.2's bound, the vote is extended. |
 | votes.vettid.org is down | The vault checks the proposal from the bundle its message carried, and the site again when it can. |
 | Rekor is down | The service can't publish or extend; it publishes when Rekor is back. |
+| The timestamp authority is down or behind | Nothing is counted; the vote is still collecting (§7, 0.13.12); it counts once a probe's time is at or after the close. |
 | The member's vault is locked | Voting needs the app, so an unlocked vault. The app reminds the member a day before `closes_at`. |
 | Clock skew | The relay's time decides (§6); the app stops two minutes early, and `not_open` is retried. |
 | A restore of the member's vault | §5. |
@@ -875,7 +1186,12 @@ Produced by the reference implementation (item 5.4) and copied by
 vettid-vault; a copied vector that stops matching is a stop-and-report
 item.
 1. `record_tag`, `ballot_msg`, `ballot_sig`, `ballot_leaf`, `cast_sig`,
-   a receipt, a status answer and a refusal, from fixed keys.
+   a receipt, a status answer and a refusal, from fixed keys. (0.15.0)
+   The status and refusal are v2, with the refusal signing its
+   `proposal_id`; `refusal_not_held` is a cast's refusal for a proposal
+   not held (the zero hash and H(ballot_leaf)), and
+   `refusal_status_unknown` a `vote.status` refused `unknown_proposal`
+   (the zero hash and H(proposal_id)).
 2. Merkle: trees of 0, 1, 2, 3, 5 and 8 leaves, and an inclusion proof
    for every leaf of the 5-leaf tree.
 3. Documents: a proposal, an extension, rows and results, with their
@@ -883,10 +1199,36 @@ item.
    anchor bundle can't be made from fixed seeds, so its vector
    (`vote/testdata/anchor-vector.json`) is a proposal captured from the
    staging site with its bundle, its anchor key and certificate, and the
-   Sigstore staging trusted root it verifies under.
+   Sigstore staging trusted root it verifies under. (0.14.0) That
+   captured proposal is from before `decision`: it is checked as bytes
+   (its canonical form, its signature and its bundle), not as a
+   proposal, until a 0.14.0 proposal is captured from staging once the
+   rollout allows one.
 4. Ed25519: every §2 rule: small-order keys and `R`, including
    non-canonical encodings; mixed-order keys; `y ≥ p`; `x = 0` with the
    sign bit set; a non-canonical `S`; valid signatures.
+5. (0.14.0) **Outcomes** (`outcomes`):
+   - each rule with each allowed base;
+   - base 0, and every ballot abstaining under `cast`;
+   - abstain holding a majority under `voted`;
+   - the exact threshold boundary, both sides;
+   - exactly half under `majority`;
+   - three choices with none over half;
+   - a three-way plurality tie, a tie below the top, and every real
+     choice at 0;
+   - zero ballots with `min_ballots` 0, and with `min_ballots` 1
+     (`no_quorum` comes before base 0);
+   - every ballot abstaining below the quorum;
+   - the quorum met exactly, and one ballot short;
+   - `no_quorum` over a majority and over a tie;
+   - tallies refused: a wrong sum, a negative count, a missing or extra
+     choice, more ballots than eligible.
+
+   Also **decisions** (`decisions`), valid and refused, each judged as
+   a proposal's member (an absent or unknown member is refused); **outcome
+   objects** (`outcome_shapes`), consistent and not; and a second set of
+   documents (`documents_decided`) whose outcome is `decided`. (0.14.1)
+   `proposal_removed_may_vote_true`: a proposal every verifier refuses.
 
 ## 12. Decisions for the owner
 
@@ -902,7 +1244,8 @@ item.
 
 **Choices this document makes:**
 
-5. **Labels:** `vettid/vote/1/...\x00`, the VMS convention (§2).
+5. **Labels:** `vettid/vote/N/...\x00`, the VMS convention (§2), the
+   version per message (`status` and `refusal` at 2 from 0.15.0).
 6. **Ballots go over the member's connection,** signed by a
    per-proposal key and by the member's credential key, with a signed
    receipt (§5).
@@ -917,8 +1260,136 @@ item.
 12. **Accepted ballots are also kept outside the table,** write-once
     (§6).
 
+**Decided 2026-11-18** (the outcome rule):
+
+13. **Every vote states a `decision`** (§3.5): `majority`, `threshold`
+    or `plurality`, of `cast`, `voted` or `elig`. Ties are `tied`; the
+    outcome's wording is generic (§7.1); the service fills in no
+    default.
+14. **The approval summary** shows the rule and the close without its
+    year; the title limit is derived from the final strings (§3.4).
+15. **`removed_may_vote` is always `false`,** and `elig` has no condition
+    (0.14.1; GC #1374; in 0.14.0 `elig` needed `removed_may_vote: true`).
+16. **`counts.unhandled` is shown beside the outcome,** never weighed in
+    it (§7.1).
+17. **A leave ends voting at its relay time,** and a cast before it
+    counts (§6 "Leaving", 0.14.2; GC #1374). Stale is active; nothing is
+    accepted once suspended; a replacement is a leave.
+18. **A signed "no ballot" is never proof of fault** (§8.3, 0.15.0; GC
+    #1375, owner's (c)): receipt against results stays the check.
+
 ## Changes
 
+- **0.15.0 (2026-11-18):** (owner decision 2026-11-18, GC #1375: (c))
+  Status answers and refusals bind the proposal's hash.
+  - **§4.2:** `status_sig` (label `/2/status`) binds `proposal_hash`,
+    `connection` and `status_msg_ms`, both new members of the answer.
+    `refusal_sig` (label `/2/refusal`) binds `proposal_hash` as well as
+    `lp(proposal_id)`, with 32 zero bytes for no published proposal, and
+    carries the hash in the body. A cast's refusal signs H(ballot_leaf)
+    whenever the body forms one, also for a proposal not held (the
+    service signed H(body) there before). What a verifier checks, and how
+    a refusal is tied to its id.
+  - **§8.3, §9.2, §10.1:** no status answer about the ballot or its
+    absence is evidence by itself; a different ballot (the status
+    carrying one), a second signed proposal and a refusal for another
+    version still are; a signed `not_eligible` is evidence under the
+    proposal's hash, not a zero one. With results withheld, the withholding is what shows.
+  - **§2, §8.5, §11, §12:** the label version per message, the new
+    fields, the vectors (v2 status and refusal, `refusal_not_held`).
+  - **Rollout (Rule 3):** no v1 support. The service deploys first, only
+    once the current vault release treats a status or refusal failing
+    verification as no answer (al-cal confirmed, GC #13902), with no
+    staging vote open at the deploy and none opened until the vault
+    release that verifies v2. Stored v1 answers stay in `vote.evidence`,
+    marked "unverifiable (v1)".
+
+- **0.14.2 (2026-11-18):** (owner decision 2026-11-18, GC #1374: D2-c,
+  R-a) When a leave ends voting.
+  - **§6 "Leaving" (new), step 3, §5 `not_active`:** a cast counts if
+    the relay received it before the member's `left_at`. `left_at` is
+    the relay's time of the message that caused the leave, else the
+    service's. Stale is active. A removed or replaced connection's
+    receive-only record (bounded at 15 days, holding only the epochs the
+    live connection would accept, never extended) lets a backlog
+    `vote.cast` through and nothing else. Nothing is accepted once
+    suspended.
+  - **§7:** `counts.removed` from the recorded leave times; a leave no
+    longer on record is counted, with an alarm.
+  - **§8.3, §9.2:** a member who left gets no receipt and no
+    `vote.closed`; a forced suspension; the clocks.
+  - **§11:** names `proposal_removed_may_vote_true`.
+  - **No change** to the messages, the documents or the vectors.
+
+- **0.14.1 (2026-11-18):** (owner decision 2026-11-18, GC #1374: D1-c′,
+  E-a′)
+  - **§3.1, §3.4:** `removed_may_vote` stays in the proposal, always
+    `false`. The service refuses `true` (`field_not_shown`), and
+    summaries no longer show `removed votes`. The title limit, still
+    derived from the summary builders, becomes 35 bytes.
+  - **§3.5:** `elig` no longer needs `removed_may_vote: true`.
+  - **§5, §6, §8.3, §8.4:** every verifier refuses a proposal with
+    `removed_may_vote: true`, a value check (fail closed); `not_active`
+    and step 3 no longer read as if the flag operates.
+  - **§9.2:** what removals do to `elig`, plainly, and the gap until
+    0.14.2.
+  - **§11:** one decision vector changes (`elig` with `removed_may_vote`
+    false is valid), the decisions with `elig` are judged with the flag
+    false, and `proposal_removed_may_vote_true` is a refused proposal.
+  - **§12:** item 15.
+  - **No schema change.** The 0.14.0 vault, site and app cards build
+    against 0.14.1, and owe the refusal of `true`.
+  - When a leave ends a member's voting (the relay's time) is 0.14.2.
+
+- **0.14.0 (2026-11-18):** (owner decision 2026-11-18, GC #1367) How a
+  vote is decided.
+  - **§3.5 (new):** every proposal states a `decision`: `majority`,
+    `threshold` (above one half, `den` ≤ 10, lowest terms) or
+    `plurality`, of `cast`, `voted` or `elig` (`elig` only with
+    `removed_may_vote: true`).
+  - **§7.1 (new):** the results carry an `outcome`, computed in a fixed
+    order from the proposal and the tally; abstain is never decided.
+    `counts.removed` and `counts.unhandled` are never weighed;
+    `unhandled` is shown beside it.
+  - **§3.1, §3.4:** `quorum.min_ballots` is at most `eligible`
+    (`quorum_unreachable`, before the approval is used) and at most
+    100,000. The summary shows the rule and `removed votes`, the close
+    without its year; titles are at most 31 bytes, counted as quoted.
+  - **§8.3, §8.4, §8.5:** the vault and observers check the tally and
+    recompute the outcome; the schemas gain `decision` and `outcome`.
+  - **§9.2:** what the `elig` base, the roster and unhandled messages
+    still allow.
+  - **§11:** item 5 (outcome, decision and outcome-object vectors); the
+    proposal and results vectors change; the anchor vector's proposal is
+    from before 0.14.0 and is checked as bytes.
+  - **Rollout (Rule 3):** no compatibility with older proposals. A vault
+    from before 0.14.0 refuses a proposal with `decision`, and one from
+    0.14.0 requires it. It ships when no staging vote is open,
+    unpublished or inside a member's check window (close + 2 h + 7 days,
+    §8.3), or after a staging votes reset with the owner's OK: the site,
+    then the member vaults and apps, then the service, with no proposal
+    at all created between the first release and the last.
+
+- **0.13.13 (2026-11-12):** (GC #1343, Ballot P1) §3.3: the service
+  checks a proposal's and an extension's bundle with the vaults'
+  verifier, against the pinned roots of every supported vault release
+  (defined there) before sending it, and pushes nothing on a failure (a
+  vault that asks or reads the site still gets it and checks it). No
+  change to the messages, the documents, the vectors or what a member's
+  vault checks.
+- **0.13.12 (2026-11-11):** (owner decision 2026-11-11; service-vault
+  #137) §7: the count waits for the timestamp authority's time. Just
+  before counting, after the reconcile of the extensions, the service
+  gets a stamp (no transparency-log entry) and counts only once its time
+  is at or after the `closes_at` in force; until then, and when the probe
+  fails, the vote is still collecting and no cast is refused `late` for
+  it. The evidence that every ballot is in is relay time, or an empty
+  collect after the passing probe. Probes are rationed (a pass held, a
+  wait void when the clock goes back and at most 5 minutes, 10 s after a
+  failure); a re-anchor waits for a probe at or after the close. §8.3
+  step 2: the re-anchor of early results stays, as the backstop. §10.1:
+  the authority down or behind. No change to the messages, the
+  documents, the vectors or what a member's vault checks.
 - **0.13.11 (2026-11-11):** (GC #1344, Ballot P1; VAULT-MESSAGING 0.88.12)
   §2: vote labels end in `0x00`, unlike VMS labels; why they are
   prefix-free and apart from VMS. §3.1: a member's vault also refuses

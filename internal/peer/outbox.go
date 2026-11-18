@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"slices"
@@ -17,10 +18,38 @@ const (
 	codeMailboxUnknown = "mailbox_unknown"
 	codeClaimUnknown   = "claim_unknown"
 	codeQuotaExceeded  = "quota_exceeded"
+	codeReplayDetected = "replay_detected"
+	codeTimestampStale = "timestamp_stale"
 )
 
+// OneDepositAttempt wraps a relay client so that each deposit and each
+// registration is one attempt, its other calls keeping the client's
+// retries (§8.3, a deposit is one client attempt; RELEASE-29 §13). A
+// registration retried inside the client could hide a 201 behind the
+// next attempt's 200 (mailbox.go).
+func OneDepositAttempt(c *relayclient.Client) Relay {
+	d := *c
+	d.MaxAttempts = 1
+	return oneDeposit{Client: c, dep: &d}
+}
+
+type oneDeposit struct {
+	*relayclient.Client
+	dep *relayclient.Client
+}
+
+func (o oneDeposit) Deposit(ctx context.Context, mailboxID, token string, payload []byte) (string, error) {
+	return o.dep.Deposit(ctx, mailboxID, token, payload)
+}
+
+func (o oneDeposit) Register(ctx context.Context) (relayclient.Registration, error) {
+	return o.dep.Register(ctx)
+}
+
 // outboxMaxBackoff caps the outbox retry backoff (§8.6: 0.25 s × 2ⁿ,
-// capped at 30 s; relayclient retries within one attempt).
+// capped at 30 s). A deposit is one client attempt (OneDepositAttempt),
+// so that the tried mark covers every copy that can reach the relay
+// (§8.3; RELEASE-29 §13).
 const outboxMaxBackoff = 30 * time.Second
 
 func (p *Peer) queue(e *outboxEntry, now time.Time) {
@@ -60,11 +89,32 @@ func (p *Peer) dropOutbox(drop func(*outboxEntry) bool) {
 		if drop(e) {
 			e.dropped = true
 			p.markDirty(kindOutbox, e.ID)
+			p.challengeLeft(e)
+			p.withdrawLeft(e, p.now())
+			p.sendLeft(e)
 			continue
 		}
 		kept = append(kept, e)
 	}
 	p.outbox = kept
+}
+
+// challengeLeft notes that e left the outbox: the challenge it carries
+// was deposited, or, if not, is Undelivered (ChallengeDelivery). One that
+// may have reached the relay without an answer (Tried) and was then
+// dropped counts as undelivered too: its admin may be reminded. One never
+// tried is Unsent as well: it holds no place at the member vault.
+func (p *Peer) challengeLeft(e *outboxEntry) {
+	if e.Challenge == "" {
+		return
+	}
+	ch := p.challenges[e.Challenge]
+	if ch == nil || ch.Entry != e.ID {
+		return
+	}
+	ch.Entry, ch.Undelivered = "", !e.deposited
+	ch.Unsent = !e.deposited && !e.Tried
+	p.markDirty(kindAuth, ch.ID)
 }
 
 // retryConn makes a connection's waiting entries eligible again (after a
@@ -88,6 +138,7 @@ func (p *Peer) drainOutbox(ctx context.Context) {
 	now := p.now()
 	blocked := map[string]bool{}
 	awaiting := map[string]bool{}
+	restamping := map[string]bool{}
 	done := map[*outboxEntry]bool{}
 	// A deposit can change the outbox (a failed one ends a handshake,
 	// which may start a reconnect): the drain runs over a copy, skips what
@@ -99,15 +150,41 @@ func (p *Peer) drainOutbox(ctx context.Context) {
 		if e.dropped {
 			continue
 		}
-		if e.Op == opDeposit && (blocked[e.Mailbox] || awaiting[e.Mailbox] && e.Token == "") {
+		if e.Op == opDeposit && restamping[e.Mailbox] {
+			// The mailbox waits for a write; what else comes due to it is
+			// re-stamped in this pass too, and goes after that write.
+			if !now.Before(e.NotBefore) && p.checkAtDeposit(e, now) == atDepositDrop {
+				done[e] = true
+			}
 			continue
 		}
-		if c := p.conns[e.ConnID]; e.Op == opDeposit && e.Token == "" && c != nil && c.Reconnecting {
-			continue // nothing in the session while a reconnect is open (§6.6)
+		if e.Op == opDeposit && (blocked[e.Mailbox] || awaiting[e.Mailbox] && e.Token == "" && !e.Refresh) {
+			continue // a refresh passes the deposits awaiting a token (§8.4)
+		}
+		if c := p.conns[e.ConnID]; e.Op == opDeposit && !e.Handshake && c != nil &&
+			(e.Token == "" && (c.Reconnecting || c.State == StateStale) || c.currentDemoted()) {
+			// Nothing but the handshake while a reconnect is open (RELEASE-29
+			// §3); a stale connection's entries wait for a new epoch, which
+			// seals them again (§3.4.1: stale is not final). A held entry
+			// still ends at its exp or past its window (§8.3 cases 1, 2).
+			if !e.NotAfter.IsZero() && !now.Before(e.NotAfter) || p.heldDrop(e, now) {
+				done[e] = true
+			}
+			continue
 		}
 		if !e.NotAfter.IsZero() && !now.Before(e.NotAfter) {
 			done[e] = true
 			continue
+		}
+		if e.Op == opDeposit && !now.Before(e.NotBefore) {
+			switch p.checkAtDeposit(e, now) {
+			case atDepositDrop:
+				done[e] = true
+				continue
+			case atDepositWait:
+				restamping[e.Mailbox] = true // re-sealed: deposited once written, in order
+				continue
+			}
 		}
 		if now.Before(e.NotBefore) {
 			if e.Op == opDeposit && e.AwaitToken {
@@ -122,6 +199,11 @@ func (p *Peer) drainOutbox(ctx context.Context) {
 		switch e.Op {
 		case opDeposit:
 			finished, err = p.deposit(ctx, e, now)
+			e.deposited = err == nil && !finished
+			// A refusal for good is about the message, not the connection's
+			// state: owed again, it would be refused again until its exp.
+			// mailbox_unknown is the connection's state (it goes stale).
+			e.refused = finished && err != nil && !relayclient.IsCode(err, codeMailboxUnknown)
 		case opRevoke:
 			err = p.cfg.Relay.Revoke(ctx, relayclient.Revocation{Kind: "jti", Value: e.Value})
 		case opDeleteClaim:
@@ -144,8 +226,12 @@ func (p *Peer) drainOutbox(ctx context.Context) {
 			continue
 		}
 		e.Attempts++
-		d := time.Duration(250*(1<<min(e.Attempts, 7))) * time.Millisecond
-		e.NotBefore = now.Add(min(d, outboxMaxBackoff))
+		d := min(time.Duration(250*(1<<min(e.Attempts, 7)))*time.Millisecond, outboxMaxBackoff)
+		var re *relayclient.Error
+		if errors.As(err, &re) && re.Status == 429 && re.RetryAfter > 0 {
+			d = max(d, time.Duration(re.RetryAfter)*time.Second) // §8.6: not before a 429's retry_after
+		}
+		e.NotBefore = now.Add(d)
 		p.log().Warn("deposit retry", "op", e.Op, "connection_id", e.ConnID, "attempts", e.Attempts, "err", errCode(err))
 	}
 	if len(done) > 0 {
@@ -162,10 +248,19 @@ func (p *Peer) deposit(ctx context.Context, e *outboxEntry, now time.Time) (fini
 		return finished, err
 	}
 	if c := p.conns[e.ConnID]; c != nil && c.Reconnecting && e.Token == c.Reconnect.Token {
-		// Our hs.init, refused for good: dropping it ends the reconnect
-		// (dropOutgoing: reconnect_failed, the connection stale), as the
-		// reconnect token is spent and a new try on it cannot succeed.
+		// Our hs.init, refused for good (token_revoked: a failed try at
+		// once; quota_exceeded; a token or mailbox the relay no longer
+		// knows): no try can be deposited on that token, so the reconnect
+		// ends, the connection stale (§3.4.1 "The reconnect bound").
+		if relayclient.IsCode(err, codeTokenRevoked) || relayclient.IsCode(err, "token_invalid") {
+			if relayclient.IsCode(err, codeTokenRevoked) {
+				p.recordRevokedHeld(c, e.Token, now)
+			}
+			c.Reconnect = HeldToken{} // dropped: a bad token cannot pin
+			p.markDirty(kindConn, c.ID)
+		}
 		p.dropConnOutgoing(c)
+		p.reconnectFailed(c)
 	}
 	// The hs.resp to a member's reconnect, on the token its hs.init
 	// brought: that reconnect cannot complete.
@@ -181,8 +276,14 @@ func (p *Peer) depositOnce(ctx context.Context, e *outboxEntry, now time.Time) (
 	tok := e.Token
 	c := p.conns[e.ConnID]
 	if tok == "" {
-		if c == nil || c.Standing.Token == "" {
+		if c == nil {
 			return true, nil // the connection is gone (§7.4: its entries are deleted)
+		}
+		if c.Standing.Token == "" {
+			// No standing token held (one was revoked): the entry waits
+			// for a valid one (§8.6), which a reconnect brings.
+			e.NotBefore, e.AwaitToken = now.Add(time.Hour), true
+			return false, errNoStanding
 		}
 		tok = c.Standing.Token
 	}
@@ -192,53 +293,139 @@ func (p *Peer) depositOnce(ctx context.Context, e *outboxEntry, now time.Time) (
 	}
 	var re *relayclient.Error
 	if !errors.As(err, &re) {
-		return false, err // transport, after relayclient's own retries
+		e.Tried = true // no answer: it may have reached the relay
+		return false, err
+	}
+	if re.Status >= 500 || re.Code == codeReplayDetected {
+		e.Tried = true // §8.3: possibly stored
+	}
+	if re.Code == codeTimestampStale {
+		// About the attempt, not the message: retried. A third refusal
+		// is logged once, so that a stuck clock shows (§8.3 case 8).
+		if e.StaleTS++; e.StaleTS == 3 {
+			p.log().Warn("relay refuses our timestamps", "reason", "relay_clock_stale", "connection_id", e.ConnID)
+		}
 	}
 	switch re.Code {
 	case codeTokenExpired:
 		if c != nil && e.Token == "" {
-			// §7.2: ask for a fresh standing token; the entry waits for it.
-			// (A reconnect, §6.6, is the member vault's to start: it holds
-			// our reconnect token.)
-			p.refreshHeld(c, now, true)
+			// The entry waits for a fresh standing token. Expired on our
+			// clock too, no refresh could be deposited: the service
+			// reconnects (§7.2, §8.6; RELEASE-29 §3 item 2), which abandons
+			// a pending rekey. Otherwise it asks for a fresh token (§7.2).
 			e.NotBefore = now.Add(time.Hour)
 			e.AwaitToken = true
 			e.Attempts++
+			if !now.Before(c.Standing.Exp) {
+				p.noTokenReconnect(c, now)
+			} else {
+				p.refreshHeld(c, now, true)
+			}
 			return false, err
 		}
 		return true, err
-	case codeTokenRevoked, codeMailboxUnknown:
+	case codeTokenRevoked:
+		if c != nil && e.Token == "" {
+			// §8.6 (0.88.2; RELEASE-29 §3 item 4): the held standing token
+			// is revoked. That token ends, not the connection: this entry
+			// and the others wait for a valid one, which the reconnect the
+			// service starts brings. Its pending epoch's hs.fin refused so
+			// shows that the member dropped its answer: that epoch is
+			// abandoned, and the reconnect starts at once (§6.3.1 "A
+			// carried token refused").
+			if c.Standing.Token == tok {
+				p.recordRevokedHeld(c, tok, now)
+				c.Standing, c.RefreshID = HeldToken{}, ""
+				p.markDirty(kindConn, c.ID)
+			}
+			p.audit("standing_token_revoked", c.ID)
+			e.NotBefore = now.Add(time.Hour)
+			e.AwaitToken = true
+			e.Attempts++
+			if c.Pending != nil && bytes.Equal(e.FinEpoch, c.Pending.ID) {
+				p.abandonPending(c, "fin_revoked", true, now)
+			} else {
+				p.noTokenReconnect(c, now)
+			}
+			return false, err
+		}
+		if c != nil && e.CarriedTok && !(c.Pending != nil && bytes.Equal(e.FinEpoch, c.Pending.ID)) {
+			// An hs.confirm or hs.resp on a member's carried token: that
+			// handshake was abandoned there (§6.3.1 "A carried token
+			// refused"); for an hs.resp, deposit drops our answer.
+			p.carriedRevoked(c, e.Token, now)
+		}
+		if c != nil && c.Pending != nil && len(e.FinEpoch) > 0 && bytes.Equal(e.FinEpoch, c.Pending.ID) {
+			// A reconnect's hs.fin on the hs.resp's carried token, refused:
+			// the member dropped its answer. The epoch is abandoned (its
+			// carried tokens with it) and a new try goes on the held
+			// reconnect token, not counted as failed (§6.3.1 "A carried
+			// token refused").
+			p.recordRevokedHeld(c, e.Token, now)
+			p.abandonPending(c, "fin_revoked", true, now)
+		}
+		return true, err
+	case codeMailboxUnknown:
 		// Terminal: stop sending to that mailbox (§8.6).
 		if c != nil && e.Token == "" && c.State == StateActive {
 			c.State = StateStale
 			p.markDirty(kindConn, c.ID)
 			p.audit("peer_stale", c.ID)
-			p.dropOutbox(func(o *outboxEntry) bool { return o != e && o.ConnID == c.ID })
+			p.dropUndelivered(c, "undelivered_mailbox_unknown", e)
+			p.auditRefused(e, "undelivered_mailbox_unknown")
 		}
 		return true, err
 	case codeQuotaExceeded:
+		if c != nil && e.Token != "" && c.Reconnecting && e.Token == c.Reconnect.Token {
+			return true, err // a try's hs.init refused for quota: the bound ends the reconnect (§3.4.1)
+		}
 		// §8.6: a quota_exceeded without its quota member (an older relay)
 		// is taken for the token's.
 		if c != nil && e.Token == "" && (re.Quota == relayclient.QuotaToken || re.Quota == "") {
-			// §8.6: the standing token's quota is spent; a fresh token
-			// cures it. Other quotas are the member mailbox's: retry later.
-			p.refreshHeld(c, now, true)
+			// §8.6 (0.88.6): the standing token's quota is spent. Before its
+			// exp a fresh token cures it: the entry waits and a refresh is
+			// asked. The refresh itself refused for the quota is not sent
+			// again, and the service reconnects at once, as it does for a
+			// deposit refused after the exp (RELEASE-29 §3 item 5); before
+			// the exp, not without a valid reconnect token (the reconnect
+			// could not start: it goes on asking). Other quotas are the
+			// member mailbox's: retry later.
+			past := !now.Before(c.Standing.Exp)
+			if e.Refresh && (past || c.reconnectValid(now)) {
+				c.RefreshID = ""
+				p.markDirty(kindConn, c.ID)
+				p.noTokenReconnect(c, now)
+				return true, err
+			}
 			e.NotBefore = now.Add(time.Hour)
 			e.AwaitToken = true
 			e.Attempts++
+			if past {
+				p.noTokenReconnect(c, now)
+			} else if !e.Refresh {
+				p.refreshHeld(c, now, true)
+			}
 			return false, err
 		}
 		return false, err
 	case codeTokenUsed:
 		p.audit("open_token_used", e.ConnID)
 		return true, err
+	case codeTimestampStale, codeReplayDetected:
+		// About the attempt, not the message (§8.3 case 8): retried
+		// with the backoff, freshly signed, never ended.
+		return false, err
 	}
 	if re.Status < 500 && re.Status != 429 {
-		p.audit("deposit_refused", e.ConnID)
+		// §8.3 case 8: not delivered, audited.
+		p.auditRefused(e, "undelivered_refused")
 		return true, err
 	}
 	return false, err
 }
+
+// errNoStanding: a deposit on the standing token waits, none being held.
+var errNoStanding = errors.New("peer: no standing token held")
 
 // kickEvents wakes the event loop.
 func (p *Peer) kickEvents() {
@@ -268,8 +455,18 @@ func (p *Peer) DeliverEvents(ctx context.Context) {
 	if p.cfg.Events == nil {
 		return
 	}
+	p.mu.Lock()
+	started := p.started
+	p.mu.Unlock()
+	if !started {
+		return // the start may still be waiting (mailbox.go) before its housekeeping
+	}
 	for ctx.Err() == nil {
 		p.mu.Lock()
+		if p.stopped {
+			p.mu.Unlock()
+			return // from a memory that left the store: the restart emits what was stored
+		}
 		var e *Event
 		if len(p.events) > 0 {
 			c := *p.events[0]

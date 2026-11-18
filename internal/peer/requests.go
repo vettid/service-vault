@@ -61,7 +61,7 @@ func (p *Peer) approveRequest(r *request, now time.Time) {
 		return
 	}
 	raw, err := r.ep.Seal(&envelope.Inner{ID: p.newID(now), Type: peerwire.TypeConnectionApproved, TS: now,
-		Body: peerwire.ConnectionApprovedBody(tok, rt)})
+		Body: peerwire.ConnectionApprovedBody(tok, rt), Features: features()})
 	if err != nil {
 		return
 	}
@@ -170,8 +170,8 @@ func (p *Peer) peerApproved(r *request, in *envelope.Inner, now time.Time) {
 		p.audit("bad_connection_approved", r.ID)
 		return
 	}
-	st, err1 := p.heldToken(tok, &r.Peer)
-	rt, err2 := p.heldToken(rtok, &r.Peer)
+	st, err1 := p.heldToken(tok, &r.Peer, tokStanding)
+	rt, err2 := p.heldToken(rtok, &r.Peer, tokReconnect)
 	if err1 != nil || err2 != nil {
 		p.audit("bad_connection_approved", r.ID)
 		return
@@ -200,8 +200,12 @@ func (p *Peer) activateRequest(r *request, now time.Time) {
 	p.replaceOlderConnections(c, now)
 	p.conns[c.ID] = c
 	p.installEpoch(c, r.ep, now)
-	p.sendTo(c, peerwire.TypeProfileUpdate, peerwire.ProfileUpdateBody(1, p.cfg.Profile.FirstName, p.cfg.Profile.LastName,
-		p.cfg.Keys.IKPublic(), nil), now)
+	// The member's connection.approved, which activates it, opened under
+	// this epoch (§6.3.1 "The received flag").
+	if e := c.epochMeta(c.LastEpochID); e != nil {
+		e.Received = true
+	}
+	p.sendProfile(c, 1, now)
 	p.endInvite(r.InviteID, InviteConnected, now)
 	p.emit(&Event{Type: EventConnectionAdded, ConnectionID: c.ID, InviteID: c.InviteID, Name: c.Name(), Tag: c.Tag}, now)
 }
@@ -267,9 +271,6 @@ func (p *Peer) expireRequests(now time.Time) {
 		p.endInvite(r.InviteID, InviteExpired, now)
 		p.emit(&Event{Type: EventConnectionExpired, ConnectionID: r.ID, InviteID: r.InviteID}, now)
 	}
-	for id, og := range p.outgoing {
-		if now.Sub(og.Created) > HandshakeTTL {
-			p.dropOutgoing(id)
-		}
-	}
+	// Our handshakes awaiting hs.resp expire in housekeeping, each by its
+	// own lifetime.
 }

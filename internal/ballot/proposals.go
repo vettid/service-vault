@@ -7,12 +7,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/vettid/service-vault/vote"
 	"log/slog"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/vettid/service-vault/internal/peer"
+	"github.com/vettid/service-vault/vote"
 )
 
 // Proposals (BALLOT-PROTOCOL §3, §4.1): creating a proposal from the
@@ -27,14 +30,39 @@ type Roster interface {
 	// pinned: their vault refuses a vote until the member has signed in
 	// on the connection (VAULT-MESSAGING §10.19.5).
 	EligibleUnsigned() []string
-	// Active lists the active ones, whether or not their vault takes
-	// votes: a member not among them is removed or suspended (§10.1).
-	Active() []string
+	// Left reports, for each of ids that has left (removed, replaced or
+	// suspended), when (§7, 0.14.2): an active or stale connection isn't
+	// listed, and one with no record of its leave is listed not Known.
+	Left(ids []string) map[string]peer.Leave
 }
 
 // Sender sends a message to a member's vault over its connection.
 type Sender interface {
-	SendMessage(ctx context.Context, connID, typ string, body json.RawMessage) (string, error)
+	SendMessage(ctx context.Context, connID, typ string, body json.RawMessage, notAfter time.Time) (string, error)
+}
+
+// SendCounter is a Sender that counts each send's messages by where they
+// stand (*peer.Peer): accepted is not sent, since a message to a member
+// whose connection is mid-reconnect waits in the outbox, and may end there
+// undelivered. Without it, sends are counted as accepted only.
+type SendCounter interface {
+	SendMessageRef(ctx context.Context, connID, typ string, body json.RawMessage, notAfter time.Time, ref string) (string, error)
+	SendCounts(prefix string) []peer.SendCounts
+}
+
+// The peer is the SendCounter the service runs with.
+var _ SendCounter = (*peer.Peer)(nil)
+
+// SendStatus is where one send's messages stand: deposited with the relay
+// (Sent), waiting in the outbox (Queued), or ended there undelivered
+// (Dropped). They count messages, not members: a send run again (a
+// /publish) counts again. A dropped message is not sent again; its member
+// learns of the vote as BALLOT-PROTOCOL §4.2, §8.3 and §10 say.
+type SendStatus struct {
+	Send    string `json:"send"` // proposal, extended/<n> or closed
+	Sent    int    `json:"sent"`
+	Queued  int    `json:"queued"`
+	Dropped int    `json:"dropped"`
 }
 
 // Publisher anchors a proposal and publishes it on votes.vettid.org
@@ -51,14 +79,32 @@ var ErrNoPublisher = errors.New("ballot: proposals can't be published here")
 var ErrUnknownProposal = errors.New("ballot: unknown proposal")
 
 // MaxEligible is the most eligible members this service lets a proposal
-// have (chosen; not in the spec), below the protocol's vote.MaxEligible.
-// A proposal's members and its results' rows are stored in chunks
-// (KindChunk), so DynamoDB's 400 KB item no longer bounds them. It is a
-// chosen limit, kept until publishing (each member's proof built from
-// the whole tree, and the sends to every member, within the admin's
-// request) and the results' single upload to the votes site are scaled
-// for more.
+// have (chosen; not in the spec; BALLOT-PROTOCOL §3.2), below the
+// protocol's vote.MaxEligible (100,000). It stays 1,000 until a staging
+// run at PlannedMaxEligible passes (the owner's choice, GC #8336), then
+// is raised to it.
 const MaxEligible = 1000
+
+// PlannedMaxEligible is the cap this service is built and tested for:
+// verified to fit, and MaxEligible is raised to it after the staging run.
+// The stored values' bounds (chunk.go) already allow it. At 15,000
+// (#6946, TestMaxEligibleFitsOneItem):
+//   - the members (about 140 bytes each, 2.1 MB) and the results' rows
+//     (about 251 bytes each, 3.8 MB) are stored in chunks (KindChunk) of
+//     ChunkSize, 8 and 13 of them, so DynamoDB's 400 KB item doesn't
+//     bound them;
+//   - every member's record proof comes from one tree (about 14 ms);
+//   - the sends go out in the background (sends.go), not in the request;
+//   - the rows, 5.0 MB as base64, fit the results' single upload to the
+//     votes site (6,225,920 bytes, less at most 512 KB of results as
+//     base64 and a 64 KB bundle: SiteRowsUpload), and so would rows of
+//     maxRowBytes;
+//   - create answers in tens of milliseconds and close in about 1.5 s
+//     of the API's 30 s, with fakes for the site and the peer.
+//
+// The upload is the binding bound: past about 16,000 members the rows no
+// longer fit it, and the results would need to go up in parts.
+const PlannedMaxEligible = 15000
 
 // ResendCover is how long before its close a held proposal must be
 // published for every member's vault to send its cast again in time: the
@@ -70,6 +116,11 @@ const ResendCover = 70 * time.Minute
 // ErrTooManyEligible refuses a proposal whose roster has more than
 // MaxEligible eligible members, before its approval is used.
 var ErrTooManyEligible = fmt.Errorf("ballot: this service supports at most %d eligible members per vote", MaxEligible)
+
+// ErrQuorumUnreachable refuses a proposal whose quorum's min_ballots is
+// more than the roster's eligible members (§3.4), before the approval is
+// used.
+var ErrQuorumUnreachable = errors.New("ballot: the quorum is more than the eligible members")
 
 // Manager creates and publishes proposals.
 type Manager struct {
@@ -88,20 +139,80 @@ type Manager struct {
 	// (anchor.TimestampTime). It decides whether an extension came before
 	// the close it extends; nil decides nothing in effect (fail closed).
 	Timestamp func(bundle json.RawMessage, doc []byte) (int64, error)
-	NewID     func(time.Time) (string, error)
-	Now       func() time.Time
-	Log       *slog.Logger
+	// AuthorityTime asks the timestamp authority for the time, verified
+	// (anchor.AuthorityTime): a vote is counted only once it is at or
+	// after the close in force (BALLOT-PROTOCOL §7, 0.13.12). Nil counts
+	// nothing (fail closed).
+	AuthorityTime func(ctx context.Context) (int64, error)
+	// CheckBundle checks a proposal's or an extension's Sigstore bundle with
+	// the member vaults' verifier (not the service list; README), against
+	// the trusted roots every supported vault
+	// release pins (internal/vaultroots), before members are sent it, with
+	// the latest time the bundle's stamp may have (zero: the vaults' limit
+	// for a message sent now). Nil sends nothing (fail closed), and Create
+	// refuses before the approval is used.
+	CheckBundle func(doc []byte, bundle json.RawMessage, notAfter time.Time) error
+	NewID       func(time.Time) (string, error)
+	Now         func() time.Time
+	Log         *slog.Logger
+	// Background is the context member sends run under, after the request
+	// that started them (sends.go); they stop when it ends. The daemon's
+	// lasts until its shutdown has waited for them. Nil:
+	// context.Background().
+	Background context.Context
 
 	// locks holds a proposal's lock (a chan struct{} of one) while it is
 	// read, published and saved: Publish, Extend and Close each replace
 	// the whole record, so one mustn't save a copy read before another's
 	// save. One task runs the service vault, so a process lock suffices.
 	locks sync.Map
+	// probes holds, by proposal, an authority time before the close
+	// (probeWait): no probe until the authority's time can have reached it.
+	probes sync.Map
+	sends  sends
+	// eligibleCap, when set (tests, at most PlannedMaxEligible), is the cap
+	// in place of MaxEligible.
+	eligibleCap int
+}
+
+// maxEligible is the cap Create applies.
+func (m *Manager) maxEligible() int {
+	if m.eligibleCap > 0 {
+		return min(m.eligibleCap, PlannedMaxEligible)
+	}
+	return MaxEligible
 }
 
 // ErrNoTimestamps is a service vault with no way to verify the time of an
 // anchor bundle: it applies no extension.
 var ErrNoTimestamps = errors.New("ballot: anchor timestamps can't be verified here")
+
+// ErrBundleUnverified is a bundle a member vault would not accept: its
+// proposal or extension is not sent (the alarm proposal_bundle_unverified).
+var ErrBundleUnverified = errors.New("ballot: the anchor bundle does not verify against the vaults' pinned roots")
+
+// ErrNoBundleCheck is a service vault with no bundle check (no vault
+// release of its Sigstore instance pins vote trust roots): Create refuses
+// before the approval is used, since nothing it published could be sent.
+var ErrNoBundleCheck = fmt.Errorf("%w: no bundle check configured", ErrBundleUnverified)
+
+// checkBundle checks doc's bundle before members are sent it (CheckBundle),
+// and raises proposal_bundle_unverified when it fails.
+func (m *Manager) checkBundle(what, id string, doc []byte, bundle json.RawMessage, notAfter time.Time) error {
+	err := ErrNoBundleCheck
+	if m.CheckBundle != nil {
+		err = m.CheckBundle(doc, bundle, notAfter)
+	}
+	if err == nil {
+		return nil
+	}
+	m.log().Error("an anchor bundle a member vault would refuse: nothing is sent", "alarm", "proposal_bundle_unverified",
+		"proposal_id", id, "document", what, "err", err.Error())
+	if errors.Is(err, ErrBundleUnverified) {
+		return fmt.Errorf("%s of %s: %w", what, id, err) // ErrNoBundleCheck: already says so
+	}
+	return fmt.Errorf("%w: %s of %s: %w", ErrBundleUnverified, what, id, err)
+}
 
 func (m *Manager) tsaTime(bundle json.RawMessage, doc []byte) (int64, error) {
 	if m.Timestamp == nil {
@@ -131,13 +242,15 @@ type ChoiceInput struct {
 
 // ProposalInput is what the application asks for (§3.1, §3.4); the rest
 // of the proposal is the service's. Of its fields the admins are shown
-// the title, the labels, binding, removed_may_vote, the times and the
-// quorum's min_ballots; text must be empty or the title, quorum.text must
-// be empty, and outage_rule must be empty or DefaultOutageRule.
+// the title, the labels, binding, the times, the quorum's min_ballots and
+// the decision; text must be empty or the title, quorum.text must be
+// empty, outage_rule must be empty or DefaultOutageRule, and
+// removed_may_vote must be false.
 type ProposalInput struct {
 	Title          string        `json:"title"`
 	Text           string        `json:"text"`
 	Choices        []ChoiceInput `json:"choices"`
+	Decision       vote.Decision `json:"decision"`
 	Quorum         vote.Quorum   `json:"quorum"`
 	Binding        bool          `json:"binding"`
 	RemovedMayVote bool          `json:"removed_may_vote"`
@@ -155,7 +268,9 @@ type Created struct {
 	// credential key at creation: their vaults refuse a vote
 	// (not_signed_in) until the member signs in.
 	Unsigned int `json:"unsigned"`
-	Sent     int `json:"sent"`
+	// Sending is how many members vote.proposal is being sent to, in the
+	// background (sends.go).
+	Sending int `json:"sending"`
 }
 
 // ErrInput is a proposal the application asked for that isn't valid.
@@ -179,6 +294,10 @@ func (e *ErrInput) Unwrap() error { return e.Err }
 func (m *Manager) Create(ctx context.Context, approvalID string, in ProposalInput) (*Created, error) {
 	if m.Publisher == nil {
 		return nil, ErrNoPublisher
+	}
+	if m.CheckBundle == nil {
+		m.log().Error("no bundle check: proposals are refused", "alarm", "proposal_bundle_unverified")
+		return nil, ErrNoBundleCheck
 	}
 	if err := checkInput(&in); err != nil {
 		return nil, &ErrInput{err}
@@ -205,8 +324,11 @@ func (m *Manager) Create(ctx context.Context, approvalID string, in ProposalInpu
 		// (§3.1), and none would get it.
 		return nil, &ErrInput{errors.New("ballot: no eligible members")}
 	}
-	if len(conns) > MaxEligible {
+	if len(conns) > m.maxEligible() {
 		return nil, fmt.Errorf("%w: the roster has %d", ErrTooManyEligible, len(conns))
+	}
+	if in.Quorum.MinBallots > int64(len(conns)) {
+		return nil, fmt.Errorf("%w: %d eligible, quorum %d", ErrQuorumUnreachable, len(conns), in.Quorum.MinBallots)
 	}
 	sort.Strings(conns)
 	members := map[string]Member{}
@@ -225,7 +347,7 @@ func (m *Manager) Create(ctx context.Context, approvalID string, in ProposalInpu
 	}
 	sortTags(tags)
 	p := &vote.Proposal{V: 1, ProposalID: id, Service: m.IK, Title: in.Title, Text: in.Text, Choices: choices,
-		Quorum: vote.Quorum{MinBallots: in.Quorum.MinBallots}, Binding: in.Binding, RemovedMayVote: in.RemovedMayVote,
+		Decision: in.Decision, Quorum: vote.Quorum{MinBallots: in.Quorum.MinBallots}, Binding: in.Binding, RemovedMayVote: in.RemovedMayVote,
 		RecordAt: now.Unix(), OpensAt: in.OpensAt, ClosesAt: in.ClosesAt,
 		Eligible: int64(len(tags)), RecordRoot: vote.Root(tags), OutageRule: DefaultOutageRule}
 	doc, err := vote.EncodeProposal(p)
@@ -244,7 +366,7 @@ func (m *Manager) Create(ctx context.Context, approvalID string, in ProposalInpu
 		return nil, err
 	}
 	c := &Created{ProposalID: id, ProposalHash: sum(doc), Eligible: len(tags), Unsigned: countIn(conns, m.Roster.EligibleUnsigned())}
-	if c.Sent, err = m.Publish(ctx, id); err != nil {
+	if c.Sending, err = m.Publish(ctx, id); err != nil {
 		return c, &ErrNotPublished{ProposalID: id, Err: err}
 	}
 	return c, nil
@@ -260,9 +382,11 @@ type ErrNotPublished struct {
 func (e *ErrNotPublished) Error() string { return e.Err.Error() }
 func (e *ErrNotPublished) Unwrap() error { return e.Err }
 
-// Publish publishes a stored proposal if it isn't yet, then sends
-// vote.proposal to every eligible member, and returns how many it sent.
-// A member it couldn't reach asks later (vote.status, §4.2).
+// Publish publishes a stored proposal if it isn't yet, then starts
+// sending vote.proposal to every eligible member in the background
+// (sends.go), and returns how many it is sending to. A member it can't
+// reach asks later (vote.status, §4.2). Called again while its sends run,
+// it doesn't start them twice.
 func (m *Manager) Publish(ctx context.Context, id string) (int, error) {
 	if m.Publisher == nil {
 		return 0, ErrNoPublisher
@@ -272,12 +396,21 @@ func (m *Manager) Publish(ctx context.Context, id string) (int, error) {
 		return 0, err
 	}
 	defer unlock()
-	o, err := m.Store.OpenProposal(ctx, id)
+	o, err := m.Store.OpenProposalFresh(ctx, id)
 	if err != nil {
 		return 0, err
 	}
 	if o == nil {
 		return 0, ErrUnknownProposal
+	}
+	// Once the vote is counted (the results record is kept at the count,
+	// before the upload), members are sent vote.closed: a vote.proposal
+	// sent after it would only tell them of a vote that is over.
+	if _, done, err := m.Store.Records.Get(ctx, KindResults, id); err != nil {
+		return 0, err
+	} else if done {
+		m.log().Info("vote.proposal not sent: the vote is counted", "proposal_id", id)
+		return 0, nil
 	}
 	if o.Bundle == nil {
 		// Published late (members' requests went unanswered meanwhile):
@@ -293,36 +426,39 @@ func (m *Manager) Publish(ctx context.Context, id string) (int, error) {
 			return 0, err
 		}
 	}
+	// Before any member is sent it, whether just published or published
+	// before: a vault refuses what this refuses, so sending it would
+	// only leave members unable to vote.
+	if err := m.checkBundle("proposal", id, o.Doc, o.Bundle, time.Time{}); err != nil {
+		return 0, err
+	}
 	p, err := o.Parsed()
 	if err != nil {
 		return 0, err
 	}
-	tags := o.Tags()
-	conns := make([]string, 0, len(o.Members))
-	for c := range o.Members {
-		conns = append(conns, c)
-	}
-	sort.Strings(conns)
-	sent := 0
-	for _, c := range conns {
+	conns := sortedConns(o.Members)
+	body := func(c string) (json.RawMessage, error) {
 		mem := o.Members[c]
-		proof, err := o.proofOf(tags, mem.Tag)
+		proof, err := o.proofOf(mem.Tag)
 		if err != nil {
-			return sent, err
+			return nil, err
 		}
-		body, err := json.Marshal(proposalBody{Proposal: o.Doc, ProposalSig: o.Sig, Bundle: o.Bundle, RecordSecret: mem.Secret,
+		return json.Marshal(proposalBody{Proposal: o.Doc, ProposalSig: o.Sig, Bundle: o.Bundle, RecordSecret: mem.Secret,
 			RecordProof: proof})
-		if err != nil {
-			return sent, err
-		}
-		if _, err := m.Sender.SendMessage(ctx, c, TypeProposal, body); err != nil {
-			m.log().Warn("vote.proposal not sent", "proposal_id", id, "connection_id", c, "err", err.Error())
-			continue
-		}
-		sent++
 	}
-	m.log().Info("proposal published", "proposal_id", id, "eligible", p.Eligible, "sent", sent)
-	return sent, nil
+	// The first member's body is built here, so that a broken record tree
+	// fails the request rather than every send after it has answered.
+	if len(conns) > 0 {
+		if _, err := body(conns[0]); err != nil {
+			return 0, fmt.Errorf("ballot: publish %s: a member's body: %w", id, err)
+		}
+	}
+	sending := 0
+	if m.sendInBackground(id, "proposal/"+id, TypeProposal, conns, voteSendUntil(o.ClosesAt), body) {
+		sending = len(conns)
+	}
+	m.log().Info("proposal published", "proposal_id", id, "eligible", p.Eligible, "sending", sending)
+	return sending, nil
 }
 
 // proposalBody is vote.proposal's body (§4.1).
@@ -358,6 +494,10 @@ type ProposalStatus struct {
 	OpensAt      int64  `json:"opens_at"`
 	ClosesAt     int64  `json:"closes_at"` // as extended
 	Published    bool   `json:"published"`
+	// Sends: what became of the messages sent to members about it, while
+	// the peer keeps their counts (peer.SendTallyRetention past the last
+	// one's notAfter).
+	Sends []SendStatus `json:"sends,omitempty"`
 }
 
 // Status reports a proposal, or nil for an unknown id.
@@ -371,8 +511,31 @@ func (m *Manager) Status(ctx context.Context, id string) (*ProposalStatus, error
 		return nil, err
 	}
 	return &ProposalStatus{ProposalID: id, Proposal: string(o.Doc), ProposalHash: sum(o.Doc), Eligible: p.Eligible,
-		OpensAt: p.OpensAt, ClosesAt: o.ClosesAt, Published: o.Bundle != nil}, nil
+		OpensAt: p.OpensAt, ClosesAt: o.ClosesAt, Published: o.Bundle != nil, Sends: m.sendStatus(id)}, nil
 }
+
+// sendStatus is where the messages of proposal id's sends stand, or nil
+// when the Sender doesn't count them.
+func (m *Manager) sendStatus(id string) []SendStatus {
+	sc, ok := m.Sender.(SendCounter)
+	if !ok {
+		return nil
+	}
+	var out []SendStatus
+	for _, c := range sc.SendCounts(sendRef(id, "")) {
+		// A ref is <proposal id>/<key>, the key <type>/<proposal id>[/<n>].
+		typ, rest, _ := strings.Cut(strings.TrimPrefix(c.Ref, sendRef(id, "")), "/")
+		send := typ
+		if n, ok := strings.CutPrefix(rest, id+"/"); ok {
+			send += "/" + n
+		}
+		out = append(out, SendStatus{Send: send, Sent: c.Sent, Queued: c.Queued, Dropped: c.Dropped})
+	}
+	return out
+}
+
+// sendRef is the ref a send's messages are counted under at the peer.
+func sendRef(proposalID, key string) string { return proposalID + "/" + key }
 
 // countIn counts the ids of some that are in all.
 func countIn(all, some []string) int {

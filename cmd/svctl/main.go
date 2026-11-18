@@ -32,6 +32,8 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -99,7 +101,9 @@ commands:
                                    the same for an extension of the proposal's close
   proposal status|publish|close|results ID
                                    a proposal's status; retry its publication; count and
-                                   publish its results; print them
+                                   publish its results (collecting, timestamp_unavailable,
+                                   stamped_early: retry later; the last two say to check
+                                   the clocks or the timestamp authority); print them
   health                           check GET /health
 
 environment:
@@ -533,13 +537,16 @@ func (c *cli) approveAndFollow(ctx context.Context, req servicevault.ApprovalReq
 	}
 	c.printf("action_hash_check: ok\n")
 	c.printf("%s", askBudgetLines(ap.AskBudget))
-	var told string // the remind-needed line last printed
+	var told string     // the remind-needed line last printed
+	var queued []string // the admins whose challenge was queued at the last poll
 	err = c.follow(ctx, wait, func(ctx context.Context) (bool, error) {
 		st, err := c.c.Approval(ctx, ap.ID)
 		if err != nil {
 			return false, err
 		}
 		if st.Status == servicevault.ApprovalStatusPending {
+			c.printf("%s", unqueuedLine(queued, st))
+			queued = st.Queued
 			if line := remindLine(st); line != told {
 				told = line
 				if line != "" {
@@ -604,17 +611,45 @@ func (c *cli) requireApproved(ctx context.Context, id string) error {
 // now is the clock (replaced in tests).
 var now = time.Now
 
-// remindLine is the line that tells the operator which admins hold no
-// live challenge and have not answered; "" when there are none.
+// remindLine tells the operator, while the approval is pending, which
+// admins' challenges are queued, not sent yet, and which admins hold no
+// live challenge and have not answered (remind needed, with the command
+// and any ask budget); "" when there are neither.
 func remindLine(st *servicevault.Approval) string {
-	if st.Status != servicevault.ApprovalStatusPending || len(st.RemindNeeded) == 0 {
+	if st.Status != servicevault.ApprovalStatusPending {
 		return ""
+	}
+	out := ""
+	if len(st.Queued) > 0 {
+		out = fmt.Sprintf("queued, not sent yet: %s\n", strings.Join(st.Queued, ","))
+	}
+	if len(st.RemindNeeded) == 0 {
+		return out
 	}
 	cmd := "svctl remind " + st.ID
 	if st.RemindAfter != nil && now().Before(*st.RemindAfter) {
 		cmd += " after " + st.RemindAfter.UTC().Format("15:04:05Z")
 	}
-	return fmt.Sprintf("remind needed: %s (%s)\n", strings.Join(st.RemindNeeded, ","), cmd) + askBudgetLines(st.AskBudget)
+	return out + fmt.Sprintf("remind needed: %s (%s)\n", strings.Join(st.RemindNeeded, ","), cmd) + askBudgetLines(st.AskBudget)
+}
+
+// unqueuedLine names the admins of was (queued at the last poll) whose
+// challenge has left the outbox since: no longer queued, and not in
+// remind_needed (where one that left it undelivered goes); "" when there
+// are none. Not "sent": the service also shows an admin in neither list
+// when their challenge ran out in the outbox and that is not handled yet,
+// or the peer has not loaded its state.
+func unqueuedLine(was []string, st *servicevault.Approval) string {
+	var gone []string
+	for _, a := range was {
+		if !slices.Contains(st.Queued, a) && !slices.Contains(st.RemindNeeded, a) {
+			gone = append(gone, a)
+		}
+	}
+	if len(gone) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("no longer queued: %s\n", strings.Join(gone, ","))
 }
 
 // askBudgetLines says which admins were left out for the ask budget and
@@ -846,6 +881,20 @@ func (c *cli) proposal(ctx context.Context, args []string) error {
 		b, err = c.c.ExtendProposal(ctx, pid, id, body)
 		if err != nil {
 			fmt.Fprintf(c.err, "approval %s may be used up whatever the outcome (a refusal of the input itself, such as an outage not over, leaves it unused): a new vote.extend needs a new approval\n", id)
+		}
+		var ex struct {
+			Sending *int   `json:"sending"`
+			Reason  string `json:"reason"`
+		}
+		if err == nil && json.Unmarshal(b, &ex) == nil && ex.Sending != nil && *ex.Sending == 0 {
+			why := map[string]string{
+				ballot.ReasonBundleUnverified: "its bundle is one a member vault would refuse (alarm proposal_bundle_unverified)",
+				ballot.ReasonStopping:         "the service was stopping",
+			}[ex.Reason]
+			if why == "" {
+				why = "reason " + strconv.Quote(ex.Reason)
+			}
+			fmt.Fprintf(c.err, "the extension is in effect (the site holds it) but was not sent to the members: %s; members learn of it from the site\n", why)
 		}
 	case "status", "publish", "close", "results":
 		if err := c.flags(flag.NewFlagSet("proposal "+sub, flag.ContinueOnError), args, 1); err != nil {

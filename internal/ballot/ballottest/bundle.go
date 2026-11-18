@@ -7,6 +7,7 @@ package ballottest
 import (
 	"encoding/json"
 	"errors"
+	"time"
 )
 
 // Bundle returns a test bundle with timestamp time tsa and Rekor entry
@@ -14,6 +15,15 @@ import (
 func Bundle(tsa, integrated int64) json.RawMessage {
 	b, _ := json.Marshal(map[string]int64{"test_tsa": tsa, "test_integrated": integrated})
 	return b
+}
+
+// Check accepts any test bundle and refuses a missing one
+// (Manager.CheckBundle in tests). The real check is vaultroots.Check.
+func Check(_ []byte, bundle json.RawMessage, _ time.Time) error {
+	if len(bundle) == 0 {
+		return errors.New("ballottest: no bundle")
+	}
+	return nil
 }
 
 // Time reads a test bundle's timestamp (Manager.Timestamp in tests).

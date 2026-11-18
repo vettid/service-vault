@@ -46,6 +46,8 @@ func (p *approvalPeer) Authenticate(_ context.Context, conn, _, _ string, _ time
 
 func (p *approvalPeer) CancelChallenge(context.Context, string) (bool, error) { return true, nil }
 
+func (p *approvalPeer) ChallengeDeliveries([]string) map[string]peer.Delivery { return nil }
+
 func (p *approvalPeer) PinGov(_ context.Context, id string, key []byte, onlyIfEmpty bool) (bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

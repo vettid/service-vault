@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/vettid/service-vault/internal/peer"
+	"github.com/vettid/service-vault/internal/signin"
 	"github.com/vettid/service-vault/internal/webhook"
 	"github.com/vettid/service-vault/sdk/go/servicevault"
 )
@@ -39,6 +40,38 @@ type fakePeer struct {
 	// credential key (pinned); present and empty: none pinned.
 	gov       map[string][]byte
 	changedAt map[string]time.Time // connection id -> AuthKeyChangedAt
+	// notStarted: RepinGov answers as a peer whose start hasn't finished.
+	notStarted bool
+	// delivery: request id -> where it stands (absent: sent).
+	delivery map[string]peer.Delivery
+	// cancelFail: CancelChallenge fails for these request ids.
+	cancelFail map[string]error
+	// queue: connection id -> its challenges are queued when sent (its
+	// reconnect is open).
+	queue map[string]bool
+}
+
+func (p *fakePeer) ChallengeDeliveries(reqs []string) map[string]peer.Delivery {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := map[string]peer.Delivery{}
+	for _, req := range reqs {
+		out[req] = peer.DeliverySent
+		if d, ok := p.delivery[req]; ok {
+			out[req] = d
+		}
+	}
+	return out
+}
+
+// deliver sets where request req stands.
+func (p *fakePeer) deliver(req string, d peer.Delivery) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.delivery == nil {
+		p.delivery = map[string]peer.Delivery{}
+	}
+	p.delivery[req] = d
 }
 
 func (p *fakePeer) authKey(id string) []byte {
@@ -70,6 +103,9 @@ func (p *fakePeer) PinGov(_ context.Context, id string, key []byte, onlyIfEmpty 
 func (p *fakePeer) RepinGov(_ context.Context, id string, key []byte) (bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.notStarted {
+		return false, fmt.Errorf("%w (%w)", peer.ErrNotStarted, peer.ErrNotFound)
+	}
 	if !p.active[id] && p.states[id] == "" {
 		return false, peer.ErrNotFound
 	}
@@ -149,12 +185,21 @@ func (p *fakePeer) Authenticate(_ context.Context, conn, ctxt, purpose string, t
 		}
 	}
 	p.sent = append(p.sent, sent{conn, req, ctxt, now, ttl})
+	if p.queue[conn] {
+		if p.delivery == nil {
+			p.delivery = map[string]peer.Delivery{}
+		}
+		p.delivery[req] = peer.DeliveryQueued
+	}
 	return req, nil
 }
 
 func (p *fakePeer) CancelChallenge(_ context.Context, req string) (bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if err := p.cancelFail[req]; err != nil {
+		return false, err
+	}
 	p.cancelled = append(p.cancelled, req)
 	return true, nil
 }
@@ -304,6 +349,14 @@ func (p *fakePeer) first(conn string) sent {
 
 func (f *fixture) answerTo(s sent, how string) *peer.Event {
 	f.t.Helper()
+	e := f.answerEvent(s, how)
+	f.deliver(e)
+	return e
+}
+
+// answerEvent is the event of conn's answer to s, not delivered.
+func (f *fixture) answerEvent(s sent, how string) *peer.Event {
+	f.t.Helper()
 	conn := s.conn
 	if s.req == "" {
 		f.t.Fatalf("no challenge to %s", conn)
@@ -337,7 +390,6 @@ func (f *fixture) answerTo(s sent, how string) *peer.Event {
 		e.Type = peer.EventSignInExpired
 		e.Exp = s.at.Add(s.ttl)
 	}
-	f.deliver(e)
 	return e
 }
 
@@ -688,9 +740,21 @@ func TestBootstrapAtStart(t *testing.T) {
 	if err := f.confirm("c1"); err != nil {
 		t.Fatal(err)
 	}
+	// The tick that makes the admin reads the set again: the "back" line
+	// comes in that tick, and no admins_short after it.
+	f.clk.Advance(ShortAlarmEvery)
 	f.tick()
 	if a := f.admins(); len(a) != 1 || a[0] != "c1" {
 		t.Fatalf("admins %v", a)
+	}
+	if !strings.Contains(f.logs.String(), "admin set back at the threshold") {
+		t.Fatalf("no back line in the bootstrapping tick\n%s", f.logs)
+	}
+	short := strings.Count(f.logs.String(), "alarm=admins_short")
+	f.clk.Advance(ShortAlarmEvery)
+	f.tick()
+	if n := strings.Count(f.logs.String(), "alarm=admins_short"); n != short {
+		t.Fatalf("admins_short %d -> %d after the bootstrap tick\n%s", short, n, f.logs)
 	}
 }
 
@@ -949,6 +1013,42 @@ func TestCreateRefuses(t *testing.T) {
 		}
 	}
 	f.create(ActionContractTemplateChange, "Tâche ✓ — d’accord", `{}`) // plain Unicode text is fine
+}
+
+// A payload whose document a member's vault would drop (a number other
+// than an integer from 0 to 2^53 - 1, or more than 16 levels) is refused
+// at once, naming where; nothing is sent. Numbers are judged in their
+// canonical form.
+func TestCreateRefusesDocument(t *testing.T) {
+	f := newFixture(t, 1, "c1")
+	// A refused document does not count toward the limit (2 an hour).
+	f.m.Rate = &RateLimit{Counters: &signin.MemCounters{}, Limits: DefaultCreateLimits}
+	for _, c := range []struct{ payload, reason, field string }{
+		{`{"change":{"amount":-1}}`, "number", "/payload/change/amount"},
+		{`{"push":[0.5]}`, "number", "/payload/push/0"},
+		{`{"n":9007199254740992}`, "number", "/payload/n"},
+		{`{"n":1e21}`, "number", "/payload/n"},
+		{strings.Repeat(`{"a":`, 15) + `[]` + strings.Repeat(`}`, 15), "depth", "/payload" + strings.Repeat("/a", 15)},
+	} {
+		_, err := f.m.Create(context.Background(), Request{Action: ActionContractTemplateChange, Summary: "x", Payload: json.RawMessage(c.payload)})
+		var e *Error
+		if !errors.As(err, &e) || e.Code != CodeInvalidPayload || e.Reason != c.reason || e.Field != c.field {
+			t.Errorf("%.40s: %v, want %s at %s", c.payload, err, c.reason, c.field)
+		}
+	}
+	// Out of the double range: no canonical form, no reason.
+	_, err := f.m.Create(context.Background(), Request{Action: ActionContractTemplateChange, Summary: "x", Payload: json.RawMessage(`{"n":1E400}`)})
+	if e := (*Error)(nil); !errors.As(err, &e) || e.Code != CodeInvalidPayload || e.Reason != "" || e.Field != "" {
+		t.Fatalf("1E400: %v", err)
+	}
+	if len(f.p.sent) != 0 {
+		t.Fatalf("%d challenges sent", len(f.p.sent))
+	}
+	f.create(ActionContractTemplateChange, "x", `{"a":1.0,"b":1e3,"c":-0,"d":9007199254740991}`)
+	f.create(ActionContractTemplateChange, "y", strings.Repeat(`{"a":`, 14)+`[]`+strings.Repeat(`}`, 14))
+	if len(f.p.sent) != 2 {
+		t.Fatalf("%d challenges sent", len(f.p.sent))
+	}
 }
 
 func TestChallengeContext(t *testing.T) {

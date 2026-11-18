@@ -129,7 +129,7 @@ const (
 	// Admin approvals.
 	CodeInvalidAction     = "invalid_action"     // not one of the Action constants (400)
 	CodeInvalidSummary    = "invalid_summary"    // empty, over 120 bytes, or control or bidi characters (400)
-	CodeInvalidPayload    = "invalid_payload"    // not a JSON object of at most 16 KiB canonical, or a bad admin_set payload (400)
+	CodeInvalidPayload    = "invalid_payload"    // not a JSON object of at most 16 KiB canonical, a bad admin_set payload, or (with Reason and Field) a document a member's vault would drop (400)
 	CodeInvalidConnection = "invalid_connection" // admin_set.*: not an active connection, not an admin, or already one (422)
 	CodeUnreachable       = "unreachable"        // the threshold is more than the admins there are, or would be (422)
 	CodeLastAdmin         = "last_admin"         // admin_set.remove of the only admin (422)
@@ -142,6 +142,7 @@ const (
 	CodeAskBudget         = "ask_budget"         // create or remind: too few admins can be asked, each at the ask limit: 4 approval challenges still counting, or 5 for a repair action (409)
 	CodeOutageNotOver     = "outage_not_over"    // create vote.extend: the outage hasn't ended (422)
 	CodeTooManyEligible   = "too_many_eligible"  // create a proposal: the roster has more eligible members than the service supports (400, with max_eligible)
+	CodeQuorumUnreachable = "quorum_unreachable" // create a proposal or its approval: the quorum's min_ballots is more than the eligible members (400)
 	CodeRateLimited       = "rate_limited"       // create: the limit of the action's group is reached (SV_APPROVAL_LIMITS; 429)
 )
 
@@ -152,6 +153,11 @@ type APIError struct {
 	// ProposalID is the body's "proposal_id": a proposal kept but not
 	// published (503 not_published), for PublishProposal to retry.
 	ProposalID string
+	// Reason is the body's "reason". For invalid_payload it is a
+	// DocumentError reason (DocumentDepth, DocumentNumber, DocumentSize)
+	// and Field, the body's "field", says where in the document
+	// (DocumentError.Field).
+	Reason, Field string
 }
 
 func (e *APIError) Error() string {
@@ -355,6 +361,11 @@ type Approval struct {
 	// hold no live challenge (it ran out after 10 minutes, or could not
 	// be sent); RemindApproval challenges them again.
 	RemindNeeded []string `json:"remind_needed"`
+	// Queued, while pending: the admins who have not answered whose
+	// challenge waits in the service's outbox, not sent yet (their
+	// connection cannot take deposits now). It goes once it can; a
+	// reminder leaves them out.
+	Queued []string `json:"queued,omitempty"`
 	// AskBudget, while pending: those of RemindNeeded at the ask budget.
 	AskBudget []AskBudget `json:"ask_budget,omitempty"`
 	// RemindAfter, with RemindNeeded: the earliest RemindApproval is
@@ -384,13 +395,17 @@ type Admins struct {
 type AuditChallenge struct {
 	ConnectionID string `json:"connection_id"`
 	RequestID    string `json:"request_id"`
+	// Queued: when the entry was written, the challenge had not been
+	// deposited: it waited in the outbox (Approval.Queued), or had left it
+	// undelivered.
+	Queued bool `json:"queued,omitempty"`
 }
 
 // AuditEntry is one entry of the audit log (README "Admin approvals").
 type AuditEntry struct {
 	ID           string           `json:"id"`
 	At           time.Time        `json:"at"`
-	Type         string           `json:"type"` // approval.requested | approval.response | approval.reminded | approval.approved | approval.denied | approval.expired | admin_set.changed | admin_set.bootstrap_armed
+	Type         string           `json:"type"` // approval.requested | approval.response | approval.reminded | approval.replaced | approval.approved | approval.denied | approval.expired | admin_set.changed | admin_set.bootstrap_armed
 	ApprovalID   string           `json:"approval_id,omitempty"`
 	Action       string           `json:"action,omitempty"`
 	Summary      string           `json:"summary,omitempty"`
@@ -689,9 +704,11 @@ func (c *Client) once(ctx context.Context, method, path string, body []byte, aut
 		var e struct {
 			Error      string `json:"error"`
 			ProposalID string `json:"proposal_id"`
+			Reason     string `json:"reason"`
+			Field      string `json:"field"`
 		}
 		if json.Unmarshal(b, &e) == nil {
-			ae.Code, ae.ProposalID = e.Error, e.ProposalID
+			ae.Code, ae.ProposalID, ae.Reason, ae.Field = e.Error, e.ProposalID, e.Reason, e.Field
 		}
 		return resp.StatusCode >= 500, ae
 	}
@@ -735,7 +752,11 @@ func (c *Client) CreateProposal(ctx context.Context, approvalID string, in json.
 // the id of the admins' approval of it. The approval is an
 // ActionVoteExtend approval whose payload is {"proposal_id", "closes_at",
 // "outage"} in canonical form (no summary); it is used up by this call.
-// It is not retried.
+// It is not retried. The answer is the extension, with `sending` (how
+// many members vote.extended is queued to: queued, not delivered) and,
+// when it is 0, `reason`: "bundle_unverified" (its bundle failed the
+// check) or "stopping" (the service is stopping). The extension is in
+// effect all the same.
 func (c *Client) ExtendProposal(ctx context.Context, id, approvalID string, in json.RawMessage) (json.RawMessage, error) {
 	if id == "" {
 		return nil, errors.New("servicevault: empty proposal id")
@@ -782,7 +803,11 @@ func (c *Client) PublishProposal(ctx context.Context, id string) (json.RawMessag
 
 // CloseProposal counts, publishes and announces a proposal's results,
 // once it has closed and the relay's messages are in (else an *APIError:
-// not_closed, collecting).
+// not_closed; collecting, also while the timestamp authority's time is
+// before the close; timestamp_unavailable when that time can't be had;
+// or stamped_early when the results' timestamp is before the close: the
+// service's clock is off, and a later call anchors them again). Retry
+// each with backoff: none is final.
 func (c *Client) CloseProposal(ctx context.Context, id string) (json.RawMessage, error) {
 	return c.proposalCall(ctx, http.MethodPost, id, "/close")
 }

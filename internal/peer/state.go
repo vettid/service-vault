@@ -1,15 +1,18 @@
 package peer
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
 	"time"
 
 	"github.com/vettid/vettid-vault/vms/handshake"
+	"github.com/vettid/vettid-vault/vms/suite"
 )
 
 // Record kinds in the Store.
@@ -28,13 +31,15 @@ const (
 	kindResp     = "resp"     // cached responses (§8.2)
 	kindLease    = "lease"    // the latest collect that leased messages, by process (Caught)
 	kindUnacked  = "unacked"  // a message left unacked, by msg_id: its times only (Caught)
+	kindOnce     = "once"     // a one-shot operator action that ran (EndAllConnections)
+	// kindSend (sendtally.go): a send's tally of its messages.
 )
 
 // Kinds lists every record kind the peer stores, for a migration that
 // must touch them all (internal/sealstore).
 func Kinds() []string {
 	return []string{kindConn, kindInvite, kindAwait, kindRequest, kindOutgoing, kindToken, kindOutbox, kindAuth, kindEvent,
-		kindMsg, kindInner, kindResp, kindLease, kindUnacked}
+		kindMsg, kindInner, kindResp, kindLease, kindUnacked, kindOnce, kindIdentity, kindRelayReg, kindSend, kindKept}
 }
 
 // Retention (VAULT-MESSAGING §8.2, §6.4).
@@ -62,6 +67,9 @@ type RelayRef struct {
 
 // HeldToken is a token a peer issued to us.
 type HeldToken struct {
+	// JTI is the token's jti, kept to refuse it if offered again after the
+	// relay revoked it (RevokedHeld); empty on older records.
+	JTI   string    `json:"jti,omitempty"`
 	Token string    `json:"token,omitempty"`
 	Exp   time.Time `json:"exp,omitzero"`
 }
@@ -89,33 +97,109 @@ type Connection struct {
 	// Features are the optional features the member's vault advertised in
 	// that profile.update (§10.8, 0.81.0), such as "vote".
 	Features []string `json:"features,omitempty"`
+	// PeerContract is the contract the member's vault last claimed: the
+	// `contract` of the last profile.update kept, "" when it had none or
+	// one of another form (§10.8, 0.90.10). Informational only; it may be
+	// stale after the vault's rollback.
+	PeerContract string `json:"peer_contract,omitempty"`
+	// SentProfileVersion and SentContract are the version and the contract
+	// of the last profile.update the service queued to the member (§10.8
+	// "Sending"); zero on records from before contract, which were sent
+	// version 1 at activation.
+	SentProfileVersion uint64 `json:"sent_profile_version,omitempty"`
+	SentContract       string `json:"sent_contract,omitempty"`
+	// MailboxRemint is the lost-mailbox re-mint this connection's tokens
+	// were minted again for (mailbox.go, relayReg.RemintAfter).
+	MailboxRemint time.Time `json:"mailbox_remint,omitzero"`
 
 	Standing  HeldToken `json:"standing"`
 	Reconnect HeldToken `json:"reconnect"`
 
+	// SuspendedAtMS is when the connection was suspended, in Unix
+	// milliseconds (kept.go, leaveMS); 0 when it isn't, or was suspended
+	// before the time was recorded.
+	SuspendedAtMS uint64 `json:"suspended_at_ms,omitempty"`
+
 	Keyring     handshake.KeyringState `json:"keyring"`
 	LastEpochID []byte                 `json:"last_epoch_id,omitempty"`
-	// Reconnecting is set while a reconnect we started awaits its hs.resp:
-	// the session is the restored one, which the member may no longer
-	// hold, so nothing is sent in it. ReconnectTries counts the attempts
-	// (each spends one of the member's reconnect token's 4 messages).
+	// Reconnecting is set while a reconnect we started is open, from its
+	// first hs.init until its epoch is confirmed or it ends: nothing but
+	// the handshake is sent (RELEASE-29 §3). ReconnectTries counts the
+	// tries (each spends one of the member's reconnect token's 4
+	// deposits).
 	Reconnecting   bool `json:"reconnecting,omitempty"`
 	ReconnectTries int  `json:"reconnect_tries,omitempty"`
-	// ReconnectSince is when the restore's first reconnect started;
+	// ReconnectTriesFor is the epoch ReconnectTries counts tries for: a
+	// reconnect naming another epoch starts its count afresh (§3.4.1 "The
+	// reconnect bound": the third failed try for one named epoch).
+	ReconnectTriesFor []byte `json:"reconnect_tries_for,omitempty"`
+	// ReconnectSince is when the reconnect's first try started;
 	// ReconnectSlow is set once the reconnect_slow alarm was raised.
 	ReconnectSince time.Time `json:"reconnect_since,omitzero"`
 	ReconnectSlow  bool      `json:"reconnect_slow,omitempty"`
+	// ReconnectRestore marks a restore's reconnect: each try waits
+	// ReconnectTimeout for its hs.resp instead of HandshakeTTL
+	// (RELEASE-29 §4).
+	ReconnectRestore bool `json:"reconnect_restore,omitempty"`
+	// ReconnectRestartIK is the member's ik a restarted reconnect last
+	// spent a deposit for (§3.4.1 H5: at most once per change).
+	ReconnectRestartIK ed25519.PublicKey `json:"reconnect_restart_ik,omitempty"`
+	// Pending is the service's own rekey or reconnect epoch awaiting
+	// confirmation (§6.3.1 Initiator; initiator.go).
+	Pending *PendingEpoch `json:"pending,omitempty"`
+	// Abandoned are the ids of pending epochs of ours abandoned since the
+	// last confirmation: a member's reconnect may name one (§6.6).
+	Abandoned [][]byte `json:"abandoned,omitempty"`
+	// AbandonedMeta records every pending epoch of ours abandoned, while
+	// its receive keys are kept (16 days): what §3.4.1 judges a message
+	// under it by (K2, K9).
+	AbandonedMeta []AbandonedEpoch `json:"abandoned_meta,omitempty"`
+	// ReconnectNamed is the epoch the open reconnect of ours names when it
+	// is not the current one (strict F1's E, R29-K7); see reconnectTarget.
+	ReconnectNamed []byte `json:"reconnect_named,omitempty"`
+	// Carried are the tokens a member's reconnect carried, kept with the
+	// epoch it established until the confirmed epoch reaches it
+	// (carried.go).
+	Carried []CarriedTokens `json:"carried,omitempty"`
+	// RekeyFailures counts the rekeys of ours that ended without an
+	// epoch since the last epoch installed; none starts before
+	// RekeyNotBefore (rekeyFailed).
+	RekeyFailures  int       `json:"rekey_failures,omitempty"`
+	RekeyNotBefore time.Time `json:"rekey_not_before,omitzero"`
+	// Epochs are the connection's epochs in the order they became
+	// current, pruned; Confirmed is the confirmed epoch, and ConfirmAt
+	// when the last hs.confirm was queued (§6.3.1 Responder; confirm.go).
+	Epochs    []EpochMeta `json:"epochs,omitempty"`
+	Confirmed []byte      `json:"confirmed,omitempty"`
+	// MessagingRelease is the marker every connection record is written
+	// with (RELEASE-29 §11): a record without it, or with a value below
+	// MessagingRelease, is ended at the next start (endPre29).
+	MessagingRelease int       `json:"messaging_release,omitempty"`
+	ConfirmAt        time.Time `json:"confirm_at,omitzero"`
 
 	Created   time.Time `json:"created"`
 	Activated time.Time `json:"activated"`
 
 	// Chain is the member's identity.rotate links followed (§3.4), for
-	// "one successor per key"; the last MaxRotations are kept.
+	// "one successor per key"; every link is kept.
 	Chain []json.RawMessage `json:"chain,omitempty"`
-	// PrevRelayPK is the member's relay key before its last
-	// relay.address.update, still recognized until PrevRelayUntil.
-	PrevRelayPK    ed25519.PublicKey `json:"prev_relay_pk,omitempty"`
-	PrevRelayUntil time.Time         `json:"prev_relay_until,omitzero"`
+	// Seen are the member's valid identity links that passed rule C but
+	// were not followed (one in an identity.rotate then refused, in a
+	// handshake that did not complete; a rekey's only once it passed
+	// rekeyPrecheck): at most one per old key, only from the current key,
+	// an ancestor or a key a seen link reaches, and at most MaxSeen
+	// (§3.4.1 rule C, R29-K8). A later different successor of that key is
+	// a second successor.
+	Seen []json.RawMessage `json:"seen_links,omitempty"`
+	// RevokedHeld are the jtis of tokens we held that the relay answered
+	// token_revoked, each kept until its exp: one offered again is refused
+	// (as vettid-vault #244).
+	RevokedHeld []RevokedJTI `json:"revoked_held,omitempty"`
+	// LegacyPrevRelayPK is read only to find a connection a
+	// relay.address.update moved before the update was refused: no honest
+	// member sent one, so such a connection is marked stale at load
+	// (legacyRelayMove).
+	LegacyPrevRelayPK ed25519.PublicKey `json:"prev_relay_pk,omitempty"`
 
 	// The member's credential key pinned at the first signed
 	// connection.authenticate.response (§10.4).
@@ -184,12 +268,15 @@ type InviteRecord struct {
 
 // awaiting is a handshake we answered with hs.resp, awaiting hs.fin.
 type awaiting struct {
-	ID       string            `json:"id"`
-	ConnID   string            `json:"conn_id"` // the connection it is for (new or existing)
-	New      *peerInfo         `json:"new,omitempty"`
-	Purpose  handshake.Purpose `json:"purpose"`
-	InviteID string            `json:"invite_id,omitempty"`
-	Held     HeldToken         `json:"held"` // the peer's token from hs.init
+	ID string `json:"id"`
+	// MessagingRelease: the marker (RELEASE-29 §11), as on a connection: a
+	// first contact's awaiting without it is ended at start.
+	MessagingRelease int               `json:"messaging_release,omitempty"`
+	ConnID           string            `json:"conn_id"` // the connection it is for (new or existing)
+	New              *peerInfo         `json:"new,omitempty"`
+	Purpose          handshake.Purpose `json:"purpose"`
+	InviteID         string            `json:"invite_id,omitempty"`
+	Held             HeldToken         `json:"held"` // the peer's token from hs.init
 	// Th1 identifies the hs.init answered, so that a copy of it (an
 	// outbox retry re-deposits the same bytes) is not answered twice.
 	Th1     []byte                   `json:"th1,omitempty"`
@@ -199,6 +286,22 @@ type awaiting struct {
 	// A member's reconnect changes nothing until sig_I verifies at hs.fin
 	// (VAULT-MESSAGING §6.6, 0.72.0): what it brings waits here.
 	Reconnect *pendingReconnect `json:"reconnect,omitempty"`
+	// Follow is what a member's rekey named (S8): its signer and links,
+	// checked again and followed at its hs.fin (checkSigner).
+	Follow *pendingFollow `json:"follow,omitempty"`
+	// RespEntry is the outbox entry of a rekey answer's hs.resp, dropped
+	// with the answer if not yet deposited.
+	RespEntry string `json:"resp_entry,omitempty"`
+	// NamedConf: its hs.init named the confirmed epoch while not current
+	// (rule E at hs.fin); ForkEp: it named an older epoch that is fork
+	// evidence (suspend at hs.fin); InitTS: the hs.init's inner ts.
+	NamedConf bool      `json:"named_conf,omitempty"`
+	ForkEp    bool      `json:"fork_ep,omitempty"`
+	InitTS    time.Time `json:"init_ts,omitzero"`
+	// InitEpoch is the epoch a rekey's hs.init traveled under: strict F1's
+	// E for the links applied at its hs.fin (VAULT-MESSAGING 0.90.4). An
+	// answer recorded before change 4b has none and runs no strict F1.
+	InitEpoch []byte `json:"init_epoch,omitempty"`
 
 	r *handshake.Responder
 }
@@ -214,23 +317,60 @@ type pendingReconnect struct {
 	KEM       []byte            `json:"kem,omitempty"`
 	Links     []json.RawMessage `json:"links,omitempty"`
 	Issued    []string          `json:"issued,omitempty"`
+	// Signer is the hs.init's signer and whole chain, checked again at
+	// hs.fin (checkSigner); IK, KEM and Links are kept for a record from
+	// before it.
+	Signer *pendingFollow `json:"signer,omitempty"`
+	// Named is the epoch its ctx named.
+	Named []byte `json:"named,omitempty"`
+}
+
+// pendingFollow is what a member's rekey or reconnect hs.init named: the
+// key it was signed with (from.ik) and its kem, and every identity link
+// it carried, checked again and followed at its hs.fin (checkSigner).
+type pendingFollow struct {
+	IK    ed25519.PublicKey `json:"ik"`
+	KEM   []byte            `json:"kem"`
+	Links []json.RawMessage `json:"links"`
+}
+
+func (f *pendingFollow) parse() (ed25519.PublicKey, *suite.PublicKey, []*handshake.Rotation, error) {
+	kem, err := suite.ParsePublicKey(f.KEM)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	var links []*handshake.Rotation
+	for _, raw := range f.Links {
+		r, err := handshake.ParseRotation(raw)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		links = append(links, r)
+	}
+	if len(f.IK) != ed25519.PublicKeySize {
+		return nil, nil, nil, errors.New("peer: bad pending follow")
+	}
+	return f.IK, kem, links, nil
 }
 
 // request is a first-contact connection after hs.fin, before activation
 // (§6.4, 0.10.3).
 type request struct {
-	ID           string               `json:"id"` // the connection's id
-	InviteID     string               `json:"invite_id"`
-	Peer         peerInfo             `json:"peer"`
-	SAS          string               `json:"sas"`
-	Epoch        handshake.EpochState `json:"epoch"`
-	Approved     bool                 `json:"approved"`
-	PeerApproved bool                 `json:"peer_approved"`
-	HeldRequest  HeldToken            `json:"held_request"`
-	Standing     HeldToken            `json:"standing"`
-	Reconnect    HeldToken            `json:"reconnect"`
-	Created      time.Time            `json:"created"`
-	Expires      time.Time            `json:"expires"`
+	ID string `json:"id"` // the connection's id
+	// MessagingRelease: the marker (RELEASE-29 §11), as on a connection: a
+	// request without it is ended at start.
+	MessagingRelease int                  `json:"messaging_release,omitempty"`
+	InviteID         string               `json:"invite_id"`
+	Peer             peerInfo             `json:"peer"`
+	SAS              string               `json:"sas"`
+	Epoch            handshake.EpochState `json:"epoch"`
+	Approved         bool                 `json:"approved"`
+	PeerApproved     bool                 `json:"peer_approved"`
+	HeldRequest      HeldToken            `json:"held_request"`
+	Standing         HeldToken            `json:"standing"`
+	Reconnect        HeldToken            `json:"reconnect"`
+	Created          time.Time            `json:"created"`
+	Expires          time.Time            `json:"expires"`
 
 	ep *handshake.Epoch
 }
@@ -246,6 +386,11 @@ type outgoing struct {
 	// Issued are the jtis of the tokens a reconnect's hs.init carries,
 	// revoked if it is abandoned.
 	Issued []string `json:"issued,omitempty"`
+	// Named is the epoch a reconnect's ctx names.
+	Named []byte `json:"named,omitempty"`
+	// InitEntry is the outbox entry of its hs.init, dropped unsent when
+	// the handshake is abandoned.
+	InitEntry string `json:"init_entry,omitempty"`
 
 	ini *handshake.Initiator
 }
@@ -258,6 +403,12 @@ const (
 	tokOpen      = "open"
 )
 
+// RevokedJTI is a held token's jti the relay revoked, until its exp.
+type RevokedJTI struct {
+	JTI string    `json:"jti"`
+	Exp time.Time `json:"exp"`
+}
+
 // IssuedToken is a token the service issued, recorded by jti (§6.6).
 type IssuedToken struct {
 	JTI    string    `json:"jti"`
@@ -265,7 +416,21 @@ type IssuedToken struct {
 	Sub    string    `json:"sub"`
 	ConnID string    `json:"conn_id,omitempty"`
 	Exp    time.Time `json:"exp"`
+	// Iat is the token's iat (whole seconds); zero on a record from before
+	// it was kept, which counts as older than any relay tombstone
+	// (mailbox.go).
+	Iat    time.Time `json:"iat,omitzero"`
 	Denied bool      `json:"denied,omitempty"`
+	// Carried: minted for a reconnect's hs.init or hs.resp, and that
+	// reconnect activated (markCarried). Prompt:
+	// re-minted at our reconnect's confirmation ("The prompt to adopt").
+	// A refresh after quota_exceeded keeps the newest of each (§6.3.1
+	// "Revocation by the issuer"; RELEASE-29 §12).
+	Carried bool `json:"carried,omitempty"`
+	Prompt  bool `json:"prompt,omitempty"`
+	// Seq orders tokens by minting (the outbox's sequence): two minted
+	// in one millisecond have jtis in no particular order.
+	Seq uint64 `json:"seq,omitempty"`
 }
 
 // Outbox operations.
@@ -291,8 +456,52 @@ type outboxEntry struct {
 	Attempts   int       `json:"attempts,omitempty"`
 	AwaitToken bool      `json:"await_token,omitempty"`
 	BestEffort bool      `json:"best_effort,omitempty"`
+	// Confirm marks an hs.confirm (§6.3.1): at most one waits per
+	// connection, exempt from MaxOutboxPerConn.
+	Confirm bool `json:"confirm,omitempty"`
+	// Tried: an attempt to deposit it may have reached the relay (§8.3;
+	// RELEASE-29 §13). Every waiting deposit is marked at load.
+	Tried bool `json:"tried,omitempty"`
+	// Late: the entry was noted as deposited more than RestampAfter after
+	// its ts (unconfirmed_late), once.
+	Late bool `json:"late,omitempty"`
+	// Handshake marks a handshake message (hs.init, hs.resp, hs.fin):
+	// never sealed again, exempt from MaxOutboxPerConn, and sent while a
+	// reconnect is open.
+	Handshake bool `json:"handshake,omitempty"`
+	// FinEpoch marks the service's hs.fin for its pending epoch with that
+	// epoch's id: dropped unsent when the epoch is abandoned (§6.3.1).
+	FinEpoch []byte `json:"fin_epoch,omitempty"`
+	// Refresh marks our relay.token.refresh: it passes the deposits that
+	// wait for a fresh standing token (§8.4, §8.6).
+	Refresh bool `json:"refresh,omitempty"`
+	// CarriedTok: Token is a handshake's carried token (an hs.resp or an
+	// hs.confirm), whose token_revoked ends that handshake's tokens.
+	CarriedTok bool `json:"carried_tok,omitempty"`
+	// StaleTS counts the relay's timestamp_stale refusals of it.
+	StaleTS int `json:"stale_ts,omitempty"`
+	// Vote is a deposit SendMessage queued: only these count toward
+	// MaxSendOutbox and MaxSendOutboxBytes.
+	Vote bool `json:"vote,omitempty"`
+	// Challenge is the request id of the connection.authenticate.challenge
+	// the entry carries, or "" (challenge.Entry).
+	Challenge string `json:"challenge,omitempty"`
+	// Ref is the send a SendMessageRef message is counted under, or "".
+	Ref string `json:"ref,omitempty"`
+	// Withdraw is the request id of the challenge whose
+	// connection.authenticate.withdraw the entry carries, or "", and
+	// WithdrawExp that challenge's exp: dropped before the relay took it,
+	// the withdraw is owed again until then (withdrawLeft).
+	Withdraw    string    `json:"withdraw,omitempty"`
+	WithdrawExp time.Time `json:"withdraw_exp,omitzero"`
+	// WithdrawPurpose is that challenge's purpose, so a record made again
+	// counts as it did (a sign-in in HasPendingSignIn, an approval in
+	// longLived).
+	WithdrawPurpose string `json:"withdraw_purpose,omitempty"`
 
-	dropped bool // removed by dropOutbox: a drain in progress skips it
+	dropped   bool // removed by dropOutbox: a drain in progress skips it
+	refused   bool // the relay refused it for good (not for a mailbox it lost): a withdraw isn't owed again
+	deposited bool // the relay took it: it leaves the outbox delivered
 }
 
 // challenge is a connection.authenticate.challenge we sent (§10.4).
@@ -313,6 +522,23 @@ type challenge struct {
 	// vault: forgotten for every purpose but that count, until Exp plus
 	// ClockSkew.
 	Gone bool `json:"gone,omitempty"`
+	// WithdrawOwed: cancelled before its exp, but no withdraw could be
+	// queued (the connection not active, or its outbox full). Housekeeping
+	// (about once a minute) queues it once it can, until Exp
+	// (expireChallenges); after that the
+	// member's vault closes the ask itself. Removing the connection drops
+	// it with the record.
+	WithdrawOwed bool `json:"withdraw_owed,omitempty"`
+	// Entry is the id of the outbox entry carrying the challenge while it
+	// waits there (behind an open reconnect, a stale connection, a missing
+	// token or the relay's refusals); "" once it has left the outbox, and
+	// on a record from before this field. Undelivered: it left without
+	// being deposited (ChallengeDelivery); Unsent: it left never tried,
+	// so it never reached the relay and holds no place at the member
+	// vault (holds).
+	Entry       string `json:"entry,omitempty"`
+	Undelivered bool   `json:"undelivered,omitempty"`
+	Unsent      bool   `json:"unsent,omitempty"`
 }
 
 type cachedResponse struct {
@@ -360,6 +586,7 @@ func (p *Peer) recordData(k key) ([]byte, time.Time, error) {
 		if c.kr != nil {
 			c.Keyring = c.kr.Export()
 		}
+		c.MessagingRelease = MessagingRelease // on every connection record written (RELEASE-29 §11)
 		v = c
 	case kindInvite:
 		inv := p.invites[k.id]
@@ -379,6 +606,7 @@ func (p *Peer) recordData(k key) ([]byte, time.Time, error) {
 			}
 			aw.Resp = s
 		}
+		aw.MessagingRelease = MessagingRelease // RELEASE-29 §11
 		v = aw
 	case kindRequest:
 		r := p.requests[k.id]
@@ -388,6 +616,7 @@ func (p *Peer) recordData(k key) ([]byte, time.Time, error) {
 		if r.ep != nil {
 			r.Epoch = r.ep.Export()
 		}
+		r.MessagingRelease = MessagingRelease // RELEASE-29 §11
 		v = r
 	case kindOutgoing:
 		og := p.outgoing[k.id]
@@ -419,6 +648,22 @@ func (p *Peer) recordData(k key) ([]byte, time.Time, error) {
 			return nil, exp, nil
 		}
 		v = e
+	case kindSend:
+		t := p.sends[k.id]
+		if t == nil {
+			return nil, exp, nil
+		}
+		v, exp = t, t.Until.Add(SendTallyRetention+storeMargin)
+	case kindKept:
+		kc := p.kept[k.id]
+		if kc == nil {
+			return nil, exp, nil
+		}
+		if kc.kr != nil {
+			st := kc.kr.Export()
+			kc.Keyring = &st
+		}
+		v, exp = kc, kc.At.Add(KeptRecordFor+storeMargin)
 	default:
 		return nil, exp, fmt.Errorf("peer: unknown record kind %q", k.kind)
 	}
@@ -444,6 +689,9 @@ const tokenRetention = 30 * 24 * time.Hour
 // written on the version it was read at, so that a second writer on the
 // same table is detected rather than overwritten.
 func (p *Peer) flush(ctx context.Context) error {
+	if p.stopped {
+		return errDiscarded // nothing more from a memory that left the store
+	}
 	if len(p.dirty) == 0 && len(p.extra) == 0 {
 		return nil
 	}
@@ -452,6 +700,11 @@ func (p *Peer) flush(ctx context.Context) error {
 		keys = append(keys, k)
 	}
 	sort.Slice(keys, func(i, j int) bool {
+		// A removed connection's kept record goes first: a flush split
+		// across store batches then never ends the connection without it.
+		if (keys[i].kind == kindKept) != (keys[j].kind == kindKept) {
+			return keys[i].kind == kindKept
+		}
 		if keys[i].kind != keys[j].kind {
 			return keys[i].kind < keys[j].kind
 		}
@@ -471,6 +724,15 @@ func (p *Peer) flush(ctx context.Context) error {
 		changes = append(changes, c)
 	}
 	changes = append(changes, p.extra...)
+	counted := false
+	for k := range p.dirty {
+		counted = counted || k.kind == kindOutbox || k.kind == kindSend
+	}
+	if counted {
+		// Made even if the write fails: the records stay dirty, written at
+		// the next flush, and the send that wrote them reports them now.
+		defer p.viewSends()
+	}
 	if err := p.cfg.Store.Apply(ctx, changes); err != nil {
 		return fmt.Errorf("peer: flush: %w", err)
 	}
@@ -491,7 +753,32 @@ func (p *Peer) flush(ctx context.Context) error {
 }
 
 // load reads every record into memory at start.
+// legacyRelayMove suspends a connection that a relay.address.update moved
+// before the update was refused (#152). No honest member ever sent one,
+// so the move came from whoever held the session's keys: the stored
+// relay address may be that copy's. It is not honored: the connection is
+// suspended (nothing is sent or accepted, and no reconnect revives it),
+// with an alarm; the member connects again from a new invitation.
+func (p *Peer) legacyRelayMove(c *Connection) {
+	c.LegacyPrevRelayPK = nil
+	p.markDirty(kindConn, c.ID)
+	// Suspended, not stale: a stale connection comes back at its next
+	// epoch, which whoever holds the moved address could establish.
+	p.suspendFor(c, SuspendRelayMoved, p.now())
+}
+
+// orphan is a pending epoch whose record and keys were not stored together.
+type orphan struct {
+	c      *Connection
+	id     []byte
+	issued []string
+	why    string // "ik": made under another identity key; "load": stored incompletely
+}
+
 func (p *Peer) load(ctx context.Context) error {
+	var stale []*outgoing
+	var orphans []orphan
+	var moved []*Connection
 	type target struct {
 		kind string
 		put  func([]byte) (string, error)
@@ -507,6 +794,35 @@ func (p *Peer) load(ctx context.Context) error {
 				return "", err
 			}
 			c.kr = kr
+			c.initEpochs()
+			if c.State == StateSuspended && c.SuspendedAtMS == 0 {
+				// Suspended before its time was recorded (0.14.2): the load's
+				// time marks it, so a later removal keeps a tombstone only.
+				c.SuspendedAtMS = uint64(p.now().UnixMilli())
+				p.markDirty(kindConn, c.ID)
+			}
+			if len(c.LegacyPrevRelayPK) > 0 {
+				moved = append(moved, c)
+			}
+			// The pending epoch's record and its keys are written together;
+			// one without the other is abandoned, after the load
+			// (orphanPending), with its hs.fin and tokens.
+			if c.Pending != nil && len(c.Pending.OwnIK) > 0 && !bytes.Equal(c.Pending.OwnIK, p.cfg.Keys.IKPublic()) {
+				// Made under another identity key than the service's: never
+				// confirmable (R29-I7, RELEASE-29 §1).
+				p.log().Error("a stored pending epoch names another identity key than this service's: abandoned; check the service's keys and secrets",
+					"alarm", "outgoing_identity_changed", "connection_id", c.ID)
+				orphans = append(orphans, orphan{c, c.Pending.ID, c.Pending.Issued, "ik"})
+				c.Pending = nil
+				kr.AbandonPending(p.now())
+			} else if c.Pending != nil && kr.Pending() == nil {
+				orphans = append(orphans, orphan{c, c.Pending.ID, c.Pending.Issued, "load"})
+				c.Pending = nil
+			} else if c.Pending == nil && kr.Pending() != nil {
+				id := kr.Pending().ID()
+				orphans = append(orphans, orphan{c, bytes.Clone(id[:]), nil, "load"})
+				kr.AbandonPending(p.now())
+			}
 			p.conns[c.ID] = c
 			return c.ID, nil
 		}},
@@ -550,6 +866,13 @@ func (p *Peer) load(ctx context.Context) error {
 				return "", err
 			}
 			ini, err := handshake.RestoreInitiator(og.Init, p.cfg.Keys.IK)
+			if errors.Is(err, handshake.ErrIdentity) {
+				// Its hs.init names another identity key than this
+				// service's: it can never finish. Dropped after the load
+				// (dropStale), not a reason to refuse to start.
+				stale = append(stale, og)
+				return og.ID, nil
+			}
 			if err != nil {
 				return "", err
 			}
@@ -572,6 +895,29 @@ func (p *Peer) load(ctx context.Context) error {
 			}
 			p.outbox = append(p.outbox, e)
 			return e.ID, nil
+		}},
+		{kindSend, func(b []byte) (string, error) {
+			t := &sendTally{}
+			if err := json.Unmarshal(b, t); err != nil {
+				return "", err
+			}
+			p.sends[t.Ref] = t
+			return t.Ref, nil
+		}},
+		{kindKept, func(b []byte) (string, error) {
+			k := &keptConn{}
+			if err := json.Unmarshal(b, k); err != nil {
+				return "", err
+			}
+			if k.Keyring != nil {
+				kr, err := handshake.ImportKeyring(*k.Keyring)
+				if err != nil {
+					return "", err
+				}
+				k.kr = kr
+			}
+			p.kept[k.ID] = k
+			return k.ID, nil
 		}},
 		{kindAuth, func(b []byte) (string, error) {
 			c := &challenge{}
@@ -604,6 +950,31 @@ func (p *Peer) load(ctx context.Context) error {
 		}
 	}
 	sort.Slice(p.outbox, func(i, j int) bool { return p.outbox[i].Seq < p.outbox[j].Seq })
+	for _, e := range p.outbox {
+		// A service has no clean end (§8.3 "A clean end"): a write that
+		// would have stored the mark after an accepted deposit may be lost.
+		if e.Op == opDeposit {
+			e.Tried = true
+		}
+		// A flush split across writes (auth before outbox) may have stored a
+		// challenge as having left the outbox while its entry stayed: the
+		// entry goes out, so the challenge waits with it again, and may
+		// reach the member (counted, withdrawn at a cancel).
+		if ch := p.challenges[e.Challenge]; e.Challenge != "" && ch != nil && ch.Entry != e.ID {
+			ch.Entry, ch.Undelivered, ch.Unsent = e.ID, false, false
+			p.markDirty(kindAuth, ch.ID)
+		}
+		// A flush split across writes (outbox before send) may have stored a
+		// counted message without its send's tally, or without the tally's
+		// longer Until: the tally is made again (counted from here; what
+		// left the outbox before is lost from the counts: short, never
+		// double) and kept until the latest notAfter of its messages. A
+		// message with no notAfter recreates, at each start, a tally pruned
+		// SendTallyRetention after its send (ballot sends always give one).
+		if e.Ref != "" {
+			p.tally(e.Ref, tallyUntil(e.NotAfter, p.now()))
+		}
+	}
 	sort.Slice(p.events, func(i, j int) bool { return p.events[i].Seq < p.events[j].Seq })
 	for _, e := range p.outbox {
 		p.seq = max(p.seq, e.Seq)
@@ -611,5 +982,61 @@ func (p *Peer) load(ctx context.Context) error {
 	for _, e := range p.events {
 		p.seq = max(p.seq, e.Seq)
 	}
+	for _, t := range p.issued {
+		p.seq = max(p.seq, t.Seq)
+	}
+	p.dropStale(stale)
+	// RELEASE-29 §11, before anything else uses the connections: records
+	// from before release 29's rules were complete are ended.
+	if err := p.endPre29(ctx, p.now()); err != nil {
+		return err
+	}
+	for _, c := range moved {
+		if p.conns[c.ID] != c {
+			continue // ended above
+		}
+		p.legacyRelayMove(c)
+	}
+	for _, o := range orphans {
+		if p.conns[o.c.ID] != o.c {
+			continue // ended above
+		}
+		p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == o.c.ID && bytes.Equal(e.FinEpoch, o.id) })
+		for _, j := range o.issued {
+			p.denyJTI(j, p.now())
+		}
+		p.markDirty(kindConn, o.c.ID)
+		p.audit("pending_abandoned_"+o.why, o.c.ID)
+		if o.why == "load" {
+			p.log().Warn("a pending epoch stored incompletely was abandoned", "connection_id", o.c.ID)
+		}
+	}
+
+	p.viewSends()
 	return nil
+}
+
+// dropStale drops, once everything is loaded, the outgoing handshakes
+// whose hs.init names another identity key than this service's. A wrong
+// configured key never gets here (Start's CheckIdentity holds it first),
+// so this is a table holding records made under two keys, one copied in
+// from another table: an alarm, not an audit. The tokens the hs.init
+// carries are revoked and its outbox entry dropped, as dropOutgoing does,
+// but a reconnect is not ended: the connection stays reconnecting, so
+// resumeReconnects starts a fresh try at this start, under the table's
+// key.
+func (p *Peer) dropStale(stale []*outgoing) {
+	for _, og := range stale {
+		p.log().Error("a stored hs.init names another identity key than this service's: dropped; check the service's keys and secrets",
+			"alarm", "outgoing_identity_changed", "connection_id", og.ConnID, "purpose", string(og.Init.Purpose))
+		for _, j := range og.Issued {
+			p.denyJTI(j, p.now())
+		}
+		// Its hs.init, if still waiting, is not deposited later (as
+		// dropOutgoing; reconnect and rekey alike).
+		if og.InitEntry != "" {
+			p.dropOutbox(func(e *outboxEntry) bool { return e.ID == og.InitEntry })
+		}
+		p.markDirty(kindOutgoing, og.ID)
+	}
 }

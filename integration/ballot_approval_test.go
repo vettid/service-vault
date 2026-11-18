@@ -27,11 +27,13 @@ type roster []string
 
 func (r roster) Eligible() []string         { return append([]string{}, r...) }
 func (r roster) EligibleUnsigned() []string { return nil }
-func (r roster) Active() []string           { return append([]string{}, r...) }
+
+// Left: nobody leaves.
+func (r roster) Left([]string) map[string]peer.Leave { return nil }
 
 type sink struct{}
 
-func (sink) SendMessage(context.Context, string, string, json.RawMessage) (string, error) {
+func (sink) SendMessage(context.Context, string, string, json.RawMessage, time.Time) (string, error) {
 	return "id", nil
 }
 
@@ -92,7 +94,8 @@ func runProposalApproval(t *testing.T, ctx context.Context, st peer.Store, pager
 	ik := ed25519.NewKeyFromSeed(sha256Bytes("service ik"))
 	bm := &ballot.Manager{Store: &ballot.RecordStore{Records: st, Copy: &ballot.MemCopy{}}, IK: ik.Public().(ed25519.PublicKey),
 		Sign:   func(label string, msg []byte) ([]byte, error) { return suite.Sign(ik, label, msg) },
-		Roster: roster{"c1", "c2", "c3"}, Sender: sink{}, Publisher: site{}, Approvals: m, NewID: envelope.NewULID, Now: time.Now, Timestamp: ballottest.Time}
+		Roster: roster{"c1", "c2", "c3"}, Sender: sink{}, Publisher: site{}, Approvals: m, NewID: envelope.NewULID, Now: time.Now, Timestamp: ballottest.Time,
+		CheckBundle: ballottest.Check}
 	m.ProposalTitle = func(ctx context.Context, id string) (string, bool, error) {
 		o, err := bm.Store.OpenProposal(ctx, id)
 		if err != nil || o == nil {
@@ -118,7 +121,8 @@ func runProposalApproval(t *testing.T, ctx context.Context, st peer.Store, pager
 
 	opens := time.Now().Add(time.Hour).Unix()
 	in := ballot.ProposalInput{Title: "Adopt the 2027 budget", Choices: []ballot.ChoiceInput{{Label: "Yes"}, {Label: "No"}},
-		Quorum: vote.Quorum{MinBallots: 1}, Binding: true, OpensAt: opens, ClosesAt: opens + 86400, OutageRule: ballot.DefaultOutageRule}
+		Decision: vote.Decision{Rule: vote.RuleMajority, Base: vote.BaseOf(vote.BaseCast)},
+		Quorum:   vote.Quorum{MinBallots: 1}, Binding: true, OpensAt: opens, ClosesAt: opens + 86400, OutageRule: ballot.DefaultOutageRule}
 	payload, err := ballot.CanonicalProposal(in)
 	if err != nil {
 		t.Fatal(err)

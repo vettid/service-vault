@@ -18,17 +18,45 @@ import (
 // dispatch handles a decrypted session-mode message from an active
 // connection (§8.2, §8.3, §8.4, §7.3).
 func (p *Peer) dispatch(ctx context.Context, c *Connection, in *envelope.Inner, ep *handshake.Epoch, raw []byte, sender ed25519.PublicKey, msgID string, now time.Time) (disposition, error) {
-	p.markDirty(kindConn, c.ID)     // the epoch's receive count moved
-	if !c.relayKeyIs(sender, now) { // §6.3, or the key before a relay.address.update
+	// First, before any store read: it makes every later store error in
+	// this message a discard that drops something (Step's dropped guard
+	// relies on it), so the peer stops rather than carry on.
+	p.markDirty(kindConn, c.ID)                      // the epoch's receive count moved
+	if !suite.EqualPublic(sender, c.Peer.Relay.PK) { // §6.3
 		p.audit("sender_mismatch", c.ID)
 		return ackAfterFlush, nil
 	}
-	p.noteSender(c, sender, now)
 	if c.State == StateSuspended {
 		p.audit("connection_suspended", c.ID) // §3.4: nothing is accepted
 		return ackAfterFlush, nil
 	}
+	if in.Type == handshake.TypeFin {
+		// An hs.fin whose answer is gone (a duplicate, or one for an
+		// answer dropped or expired) opening under an epoch we hold: acked
+		// and ignored. It moves no confirmed epoch and sets no flag
+		// (R29-T3; RELEASE-29 §5).
+		return ackAfterFlush, nil
+	}
+	// §3.4.1 acceptFrom step 3 (R29-K8): rule C on every link the message
+	// carries, before anything may refuse it.
+	if p.evidenceFirst(c, in, now) {
+		return ackAfterFlush, nil
+	}
+	// §6.3.1 before anything else is done with the message (the rate
+	// limit, the ts window, dedupe, its handler): the received flag and
+	// the confirmed epoch (RELEASE-29 §13, change 1).
+	if p.noteFromMember(c, ep, in, now) {
+		return ackAfterFlush, nil
+	}
 	if in.Type == handshake.TypeInit {
+		_, seen, err := p.cfg.Store.Get(ctx, kindInner, rekeyKey(handshake.Th1(raw)))
+		if err != nil {
+			return 0, err
+		}
+		if seen {
+			p.audit("rekey_init_replayed", c.ID) // answered once (R29-T3, §6.5)
+			return ackAfterFlush, nil
+		}
 		return p.handleRekeyInit(c, in, ep, raw, sender, now), nil
 	}
 	if err := in.CheckTime(now, true); err != nil {
@@ -85,13 +113,28 @@ func (p *Peer) dispatch(ctx context.Context, c *Connection, in *envelope.Inner, 
 	case peerwire.TypeConnAuthRotated:
 		p.connAuthRotated(c, in.Body)
 	case TypeIdentityRotate:
-		p.identityRotate(c, in.Body, now)
+		eid := ep.ID()
+		p.identityRotate(c, in.Body, eid[:], now)
 	case TypeRelayAddressUpdate:
-		p.relayAddressUpdate(c, sender, in.Body, now)
+		// Refused from every member, as vettid-vault #241 makes the member
+		// vault do (the audit names differ: a service has no drop.peer_key
+		// record). It moved the connection's mailbox and tokens on the
+		// session's authentication alone, with no signed relay links and
+		// none of rule U's checks (VAULT-MESSAGING §3.4.1), so an old copy
+		// of a member's vault holding the session's keys could redirect
+		// our deposits. Release 29 rotates no relay key (§3.4.1 A5);
+		// §3.4.2's rules replace this (GC #9442). Acked, dropped, nothing
+		// changes.
+		p.audit("address_update_refused", c.ID)
 	case peerwire.TypeConnAuthChallenge:
 		// The service has no member credential to sign with (§10.4); a
 		// challenge to it is never answered (chosen; not in the spec).
 		p.audit("challenge_unsupported", c.ID)
+	case handshake.TypeConfirm:
+		// A member's vault confirms an epoch it activated as responder
+		// (§6.3.1, R29-R1): noteFromMember has moved the confirmed epoch,
+		// or confirmed the service's own pending epoch, already. Nothing
+		// more: acked, without audit, never answered.
 	default:
 		if isVoteType(in.Type) && p.cfg.Votes != nil {
 			if err := p.vote(ctx, c, in, ikey, msgID, now); errors.Is(err, ErrNoAnswer) {
@@ -134,9 +177,21 @@ func (p *Peer) profileUpdate(c *Connection, body []byte) {
 	// name out removes it.
 	var ok bool
 	if c.Features, ok = parseFeatures(u.Members["features"]); !ok {
-		p.audit("profile_features_malformed", c.ID)
+		p.memberIgnored(c.ID, "features")
+	}
+	// The contract it claims (0.90.10): an update without one, or with one
+	// of another type or form, clears it, and is applied all the same.
+	if c.PeerContract, ok = parseContract(u.Members["contract"]); !ok {
+		p.memberIgnored(c.ID, "contract")
 	}
 	p.markDirty(kindConn, c.ID)
+}
+
+// memberIgnored logs a profile.update member of the wrong form. The
+// member counts as absent and the update is applied (§10.8), so this is
+// not a drop.
+func (p *Peer) memberIgnored(connID, member string) {
+	p.log().Warn("profile member ignored", "reason", "profile_member_malformed", "member", member, "connection_id", connID)
 }
 
 // parseFeatures reads a profile.update's features (§10.8, 0.81.0): absent,
@@ -180,23 +235,38 @@ func (p *Peer) sendTo(c *Connection, typ string, body json.RawMessage, now time.
 	return p.sendInner(c, &envelope.Inner{ID: p.newID(now), Type: typ, TS: now, Body: body}, now)
 }
 
+// While a reconnect of the service's is open the message waits in the
+// outbox (RELEASE-29 §3), and is sealed again under the reconnect's epoch
+// at its confirmation.
 func (p *Peer) sendInner(c *Connection, in *envelope.Inner, now time.Time) string {
-	if c.kr == nil || c.kr.Current() == nil || c.State != StateActive || c.Reconnecting {
+	if p.sendEntry(c, in, now) == nil {
 		return ""
+	}
+	return in.ID
+}
+
+// sendEntry is sendInner, returning the outbox entry queued (nil: none).
+func (p *Peer) sendEntry(c *Connection, in *envelope.Inner, now time.Time) *outboxEntry {
+	if c.kr == nil || c.kr.Current() == nil || c.State != StateActive {
+		return nil
+	}
+	if in.Features == nil {
+		in.Features = features() // §10.8, §6.3.1 Capability
 	}
 	if p.outboxFor(c.ID) >= MaxOutboxPerConn {
 		// The member's mailbox has not taken our deposits for a while: what
 		// would pile up is dropped, not kept without bound.
 		p.audit("outbox_full", c.ID)
-		return ""
+		return nil
 	}
 	raw, err := c.kr.Current().Seal(in)
 	if err != nil {
-		return ""
+		return nil
 	}
 	p.markDirty(kindConn, c.ID) // the epoch's send count moved
-	p.queueDeposit(&outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: raw}, now)
-	return in.ID
+	e := &outboxEntry{ConnID: c.ID, Mailbox: c.Peer.Relay.Mailbox, Payload: raw}
+	p.queueDeposit(e, now)
+	return e
 }
 
 // MaxOutboxPerConn bounds the deposits waiting for one connection
@@ -207,7 +277,7 @@ const MaxOutboxPerConn = 256
 func (p *Peer) outboxFor(connID string) int {
 	n := 0
 	for _, e := range p.outbox {
-		if e.ConnID == connID && e.Op == opDeposit {
+		if e.ConnID == connID && e.Op == opDeposit && !e.Confirm && !e.Handshake { // exempt (RELEASE-29 §5)
 			n++
 		}
 	}
@@ -286,15 +356,27 @@ func (p *Peer) handleResponse(c *Connection, in *envelope.Inner, now time.Time) 
 // token issued to the member is denylisted by jti; the held tokens,
 // session keys and outbox entries are deleted.
 func (p *Peer) removeConnection(c *Connection, dir string, now time.Time) {
-	if dir == "out" && c.kr != nil && c.kr.Current() != nil && c.Standing.Token != "" && c.State == StateActive && !c.Reconnecting {
-		in := &envelope.Inner{ID: p.newID(now), Type: peerwire.TypeConnectionRemoved, TS: now, Body: peerwire.ConnectionRemovedBody()}
+	p.removeConnectionFor(c, dir, "", now)
+}
+
+// removeConnectionFor is removeConnection with the reason connection.removed
+// carries to the application ("": none; pre29, RELEASE-29 §11).
+func (p *Peer) removeConnectionFor(c *Connection, dir, reason string, now time.Time) {
+	p.removing = c.ID
+	defer func() { p.removing = "" }()
+	if dir == "out" && c.kr != nil && c.kr.Current() != nil && c.Standing.Token != "" && c.State == StateActive && !c.Reconnecting &&
+		!c.currentDemoted() && // nothing but handshake messages under a demoted epoch (§3.4.1 K5)
+		len(c.LegacyPrevRelayPK) == 0 { // nor to an address a relay.address.update may have moved (legacyRelayMove)
+		in := &envelope.Inner{ID: p.newID(now), Type: peerwire.TypeConnectionRemoved, TS: now, Body: peerwire.ConnectionRemovedBody(),
+			Features: features()}
 		if raw, err := c.kr.Current().Seal(in); err == nil {
-			p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == c.ID })
+			p.dropUndelivered(c, "undelivered_removed", nil)
 			p.queueDeposit(&outboxEntry{Mailbox: c.Peer.Relay.Mailbox, Token: c.Standing.Token, Payload: raw, BestEffort: true}, now)
 		}
 	} else {
-		p.dropOutbox(func(e *outboxEntry) bool { return e.ConnID == c.ID })
+		p.dropUndelivered(c, "undelivered_removed", nil)
 	}
+	p.keep(c, dir, now) // before its keys and tokens go (kept.go)
 	p.denyConnTokens(c.ID, now)
 	c.Reconnecting = false // ended, not failed
 	if c.kr != nil {
@@ -314,18 +396,22 @@ func (p *Peer) removeConnection(c *Connection, dir string, now time.Time) {
 	}
 	for id, ch := range p.challenges {
 		if ch.ConnID == c.ID {
+			if ch.WithdrawOwed {
+				p.log().Info("challenge withdraw dropped: connection removed", "connection_id", c.ID, "request_id", id)
+			}
 			delete(p.challenges, id)
 			p.markDirty(kindAuth, id)
 		}
 	}
 	delete(p.conns, c.ID)
 	delete(p.rates, c.ID)
+	delete(p.outboxFull, c.ID)
 	p.markDirty(kindConn, c.ID)
 	d := dir
 	if d == "replaced" {
 		d = "in"
 	}
-	p.emit(&Event{Type: EventConnectionRemoved, ConnectionID: c.ID, Direction: d, Tag: c.Tag}, now)
+	p.emit(&Event{Type: EventConnectionRemoved, ConnectionID: c.ID, Direction: d, Tag: c.Tag, Reason: reason}, now)
 }
 
 // ErrNotFound is an unknown or inactive connection or invitation.
@@ -335,11 +421,19 @@ var ErrNotFound = errors.New("peer: not found")
 // MaxOutboxPerConn of them are waiting.
 var ErrBusy = errors.New("peer: connection busy")
 
+// ErrOutboxFull is SendMessage refused because the whole outbox is at
+// MaxSendOutbox entries or MaxSendOutboxBytes of payload: the relay is
+// not taking deposits from this service (an outage), not one member.
+var ErrOutboxFull = errors.New("peer: outbox full")
+
 // Remove ends a connection from the service's side (§7.4): the member's
 // vault gets connection.removed, best effort.
 func (p *Peer) Remove(ctx context.Context, connID string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if !p.started {
+		return ErrNotStarted
+	}
 	c := p.conns[connID]
 	if c == nil {
 		return ErrNotFound
@@ -382,14 +476,23 @@ func (p *Peer) Connection(id string) (ConnectionInfo, bool) {
 		GovKey: append([]byte(nil), c.GovKey...), AuthKeyChangedAt: c.AuthKeyChangedAt}, true
 }
 
+// errPinNotStarted is PinGov's and RepinGov's answer before the peer has
+// started: ErrNotFound as before (their callers take it for a peer not
+// yet loaded), and ErrNotStarted.
+var errPinNotStarted = fmt.Errorf("%w (%w)", ErrNotStarted, ErrNotFound)
+
 // PinGov pins the connection's governance key: to key, or to its
 // credential key as it is now when key is empty. With onlyIfEmpty it does
 // so only when none is pinned. It reports whether it pinned, and
 // ErrNotFound for a connection it does not know (the peer may not have
-// loaded its state yet).
+// loaded its state yet). Before the peer has started it pins nothing, and
+// answers an error that is both ErrNotStarted and ErrNotFound.
 func (p *Peer) PinGov(ctx context.Context, connID string, key []byte, onlyIfEmpty bool) (bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if !p.started {
+		return false, errPinNotStarted
+	}
 	c := p.conns[connID]
 	if c == nil {
 		return false, ErrNotFound
@@ -407,10 +510,14 @@ func (p *Peer) PinGov(ctx context.Context, connID string, key []byte, onlyIfEmpt
 
 // RepinGov moves the connection's governance key to key, but only while
 // key is still its credential key; it reports whether it did, and
-// ErrNotFound for a connection it does not know.
+// ErrNotFound for a connection it does not know. Before the peer has
+// started it moves nothing, and answers as PinGov does.
 func (p *Peer) RepinGov(ctx context.Context, connID string, key []byte) (bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if !p.started {
+		return false, errPinNotStarted
+	}
 	c := p.conns[connID]
 	if c == nil {
 		return false, ErrNotFound
@@ -427,6 +534,14 @@ func (p *Peer) RepinGov(ctx context.Context, connID string, key []byte) (bool, e
 // requests and challenges past their expiry, rekeys due, tokens to
 // re-mint or refresh (§6.4, §6.5, §7.2, §7.4).
 func (p *Peer) housekeeping(now time.Time) {
+	// First, before any early return: Start runs it too, so a restore that
+	// brings back kept keys past their bound drops them before a message.
+	p.pruneKept(now)
+	if p.mintWait(now) {
+		// A lost mailbox's wait (mailbox.go): rekeys, reconnects and
+		// re-mints would mint tokens the relay refuses. A few minutes late.
+		return
+	}
 	for id, inv := range p.invites {
 		if !inv.Used && !inv.Withdrew && !now.Before(inv.Exp) {
 			p.withdrawInvite(inv, now)
@@ -439,12 +554,31 @@ func (p *Peer) housekeeping(now time.Time) {
 	}
 	p.expireRequests(now)
 	p.expireChallenges(now)
+	p.pruneSends(now)
 	for id, og := range p.outgoing {
-		if now.Sub(og.Created) >= HandshakeTTL {
-			p.dropOutgoing(id) // an hs.resp that never came (or can no longer be accepted)
+		c := p.conns[og.ConnID]
+		reconnect := og.ini != nil && og.ini.Purpose() == handshake.PurposeReconnect
+		life := HandshakeTTL
+		if reconnect && c != nil && c.ReconnectRestore {
+			life = ReconnectTimeout // a restore's try (RELEASE-29 §4)
+		}
+		if now.Sub(og.Created) < life {
+			continue
+		}
+		p.rekeyFailed(og, now)
+		p.dropOutgoing(id) // an hs.resp that never came (or can no longer be accepted)
+		if reconnect && c != nil {
+			// A failed try: the next one, or stale after the last (§3.4.1
+			// "The reconnect bound").
+			p.audit("reconnect_try_expired", c.ID) // checkReconnect starts the next
 		}
 	}
 	for _, c := range p.conns {
+		if c.kr != nil {
+			c.kr.Prune(now)
+		}
+		p.sweepCarried(c, now)
+		p.pruneAbandoned(c, now)
 		if c.Reconnecting {
 			p.checkReconnect(c, now)
 			continue
@@ -452,17 +586,37 @@ func (p *Peer) housekeeping(now time.Time) {
 		if c.State != StateActive {
 			continue
 		}
+		if p.remintOwed(c) {
+			// A lost mailbox's re-mint not yet done for this member: what
+			// would ask it for an answer (a rekey, a refresh) waits, since
+			// it could only answer on a token the relay refuses.
+			continue
+		}
+		if c.currentDemoted() {
+			p.tickDemoted(c, now) // §3.4.1 K5: only the reconnect goes
+			continue
+		}
+		if !c.standingValid(now) && p.standingWaiting(c) {
+			// tickPendings reconnects, after the batch, unless carried
+			// tokens wait; hs.confirm still goes again meanwhile.
+			p.tickConfirm(c, now)
+			continue
+		}
 		if c.kr != nil && c.kr.Current() != nil && c.kr.Current().NeedsRekey(now) {
 			p.startRekey(c, now)
 		}
+		p.tickConfirm(c, now)
+		p.sendContract(c, now) // §10.8 "Sending" (0.90.10)
 		if c.RefreshID != "" && !now.Before(c.RefreshAfter) {
 			c.RefreshID = "" // unanswered: ask again
 			p.markDirty(kindConn, c.ID)
 		}
-		p.refreshHeld(c, now, false)
-		if c.kr != nil {
-			c.kr.Prune(now)
-		}
+		force := p.refreshOwed[c.ID]
+		// Cleared before: a refresh held again marks it anew. (Not reached
+		// while held today: housekeeping stops while mintWait holds, and
+		// skips a member whose re-mint is owed.)
+		delete(p.refreshOwed, c.ID)
+		p.refreshHeld(c, now, force)
 	}
 	p.remintIssued(now)
 	p.pruneIssued(now)

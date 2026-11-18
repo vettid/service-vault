@@ -26,18 +26,33 @@ const ChunkSize = 300_000
 
 // The most bytes a member takes in a proposal's members, and a row in
 // the results' rows (chosen; not in the spec): measured at about 140 and
-// 251 at MaxEligible with the largest inputs (TestMaxEligibleFitsOneItem
-// checks they stay under these).
+// 251 at PlannedMaxEligible with the largest inputs (TestMaxEligibleFitsOneItem
+// checks they stay under these). maxRowBytes is also bounded by the
+// results' single upload to the votes site: PlannedMaxEligible rows of it, as
+// base64, fit SiteRowsUpload (TestChunkBounds).
 const (
 	maxMemberBytes = 200
-	maxRowBytes    = 300
+	maxRowBytes    = 270
 )
 
-// The most chunks each value may name, from MaxEligible: a list longer
-// than this is refused when read, and a longer value is not written.
+// SiteRowsUpload is the most rows, as base64, the results' upload to the
+// votes site can carry whatever the rest of it: the site takes 6,225,920
+// bytes (its MaxUpload, measured on staging, GC #7325; Lambda's 6 MB
+// request, less room), less the largest results (512 KB, sent as base64:
+// 699,052), the largest bundle (64 KB, sent as JSON as it is) and the
+// JSON around them (the publish package checks the whole body). The
+// bundle's 64 KB is the site's own check (maxBundle), on the bytes as
+// sent: this service doesn't bound the bundle it gets back from the
+// anchor, and json.Marshal may lengthen one (service-vault #141). The
+// site is another repository: a change to its limit has to change this.
+const SiteRowsUpload = 6_225_920 - 699_052 - 65_536 - 4_096
+
+// The most chunks each value may name, from PlannedMaxEligible (so that
+// raising MaxEligible to it needs nothing here): a list longer than this
+// is refused when read, and a longer value is not written.
 const (
-	maxMemberChunks = (MaxEligible*maxMemberBytes+ChunkSize-1)/ChunkSize + 1
-	maxRowChunks    = (MaxEligible*maxRowBytes+ChunkSize-1)/ChunkSize + 1
+	maxMemberChunks = (PlannedMaxEligible*maxMemberBytes+ChunkSize-1)/ChunkSize + 1
+	maxRowChunks    = (PlannedMaxEligible*maxRowBytes+ChunkSize-1)/ChunkSize + 1
 )
 
 // chunkRef names one chunk in the record that holds the value: its id,

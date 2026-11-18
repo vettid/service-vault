@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/vettid/service-vault/vote"
+	"strconv"
 	"time"
 )
 
@@ -35,6 +36,22 @@ type Receipt struct {
 // read only from such a bundle, never from one the site served.
 type BundleSource interface {
 	StoredBundle(ctx context.Context, doc []byte) (json.RawMessage, error)
+}
+
+// AttemptSource says whether a document was ever sent to be anchored,
+// even if no bundle came back: with the anchor signer (key protection,
+// GC #7406), a lost answer leaves a document the signer may have signed
+// and published, so it is asked again, never taken as never anchored.
+type AttemptSource interface {
+	Attempted(ctx context.Context, doc []byte) (bool, error)
+}
+
+// attempted is bs's Attempted, or false for a source without it.
+func attempted(ctx context.Context, bs BundleSource, doc []byte) (bool, error) {
+	if a, ok := bs.(AttemptSource); ok {
+		return a.Attempted(ctx, doc)
+	}
+	return false, nil
 }
 
 // ErrPublishRefused is the site refusing a document with a code it gave:
@@ -99,6 +116,41 @@ var ErrExtensionPending = errors.New("ballot: another extension is pending")
 // the bundle this service anchored for it (Manager.Timestamp), as the site decides:
 // before the close it extends, or it does not apply (ErrTooLate).
 func (m *Manager) Extend(ctx context.Context, id, approvalID string, in ExtensionInput) (*vote.Extension, error) {
+	x, err := m.ExtendSending(ctx, id, approvalID, in)
+	if x == nil {
+		return nil, err
+	}
+	return x.Extension, err
+}
+
+// Extended is an extension in effect, and whether it is being sent. Its
+// JSON is the extension's fields, then sending and reason: a MarshalJSON
+// on vote.Extension would be promoted and swallow those two (the API's
+// key-set test guards it).
+type Extended struct {
+	*vote.Extension
+	// Sending is how many members vote.extended is queued to, sent in the
+	// background (queued, not delivered: the proposal's sends show what
+	// became of them, and a shutdown may cut the send short); 0, with a
+	// Reason, when it is not sent. It is not sent again later: members
+	// learn of the extension from the site.
+	Sending int `json:"sending"`
+	// Reason, when it is not sent: ReasonBundleUnverified or
+	// ReasonStopping. The extension is in effect all the same: the site
+	// holds it.
+	Reason string `json:"reason,omitempty"`
+}
+
+// Extended.Reason values: an extension not sent because its bundle is one
+// a member vault would refuse (alarm proposal_bundle_unverified), or
+// because the service is stopping.
+const (
+	ReasonBundleUnverified = "bundle_unverified"
+	ReasonStopping         = "stopping"
+)
+
+// ExtendSending is Extend, and says whether the extension is being sent.
+func (m *Manager) ExtendSending(ctx context.Context, id, approvalID string, in ExtensionInput) (*Extended, error) {
 	unlock, err := m.lock(ctx, id)
 	if err != nil {
 		return nil, err
@@ -109,7 +161,13 @@ func (m *Manager) Extend(ctx context.Context, id, approvalID string, in Extensio
 	if m.Publisher == nil || !ok || !ok2 {
 		return nil, ErrNoPublisher
 	}
-	o, err := m.Store.OpenProposal(ctx, id)
+	// As Create: with no bundle check nothing published could be sent,
+	// so refuse before the approval is used or anything is published.
+	if m.CheckBundle == nil {
+		m.log().Error("no bundle check: extensions are refused", "alarm", "proposal_bundle_unverified", "proposal_id", id)
+		return nil, ErrNoBundleCheck
+	}
+	o, err := m.Store.OpenProposalFresh(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -234,11 +292,21 @@ func (m *Manager) Extend(ctx context.Context, id, approvalID string, in Extensio
 	if at >= o.ClosesAt {
 		return nil, ErrTooLate
 	}
+	prevClose := o.ClosesAt
 	o.Extensions = append(o.Extensions, vote.Signed{Doc: doc, Sig: sig})
 	o.ClosesAt = e.ClosesAt
 	o.Pending = nil
 	if err := m.Store.SaveProposal(ctx, o, false); err != nil {
 		return nil, err
+	}
+	// The extension is published and in effect: the site holds it, and
+	// members' vaults also learn it from there (and check its bundle
+	// themselves). Only the sending waits for a bundle their vaults
+	// accept; one that fails is never sent (README
+	// "proposal_bundle_unverified"). A vault takes an extension's stamp
+	// only before the close it extends (VAULT-MESSAGING §10.19.4).
+	if err := m.checkBundle("extension "+strconv.FormatInt(e.N, 10), id, doc, bundle, time.Unix(prevClose-1, 0)); err != nil {
+		return &Extended{Extension: e, Reason: ReasonBundleUnverified}, nil
 	}
 	body, _ := json.Marshal(struct {
 		ProposalID   string          `json:"proposal_id"`
@@ -246,13 +314,16 @@ func (m *Manager) Extend(ctx context.Context, id, approvalID string, in Extensio
 		ExtensionSig []byte          `json:"extension_sig"`
 		Bundle       json.RawMessage `json:"bundle"`
 	}{id, doc, sig, bundle})
-	for c := range o.Members {
-		if _, err := m.Sender.SendMessage(ctx, c, TypeExtended, body); err != nil {
-			m.log().Warn("vote.extended not sent", "proposal_id", id, "connection_id", c, "err", err.Error())
-		}
+	conns := sortedConns(o.Members)
+	x := &Extended{Extension: e, Reason: ReasonStopping}
+	// False only when the service is stopping: an extension's send key is
+	// its own, and it runs under the proposal's lock.
+	if m.sendInBackground(id, fmt.Sprintf("extended/%s/%d", id, e.N), TypeExtended, conns, voteSendUntil(o.ClosesAt),
+		func(string) (json.RawMessage, error) { return body, nil }) {
+		x.Sending, x.Reason = len(conns), ""
 	}
-	m.log().Info("vote extended", "proposal_id", id, "n", e.N, "closes_at", e.ClosesAt)
-	return e, nil
+	m.log().Info("vote extended", "proposal_id", id, "n", e.N, "closes_at", e.ClosesAt, "sending", x.Sending)
+	return x, nil
 }
 
 // RebuildAll puts back, for every proposal still running, the ballots the

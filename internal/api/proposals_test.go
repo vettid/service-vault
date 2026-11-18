@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 
@@ -25,7 +26,7 @@ func (f *fakeProposals) Create(_ context.Context, approvalID string, in ballot.P
 	if f.err != nil {
 		return nil, f.err
 	}
-	return &ballot.Created{ProposalID: "01JBQZ0000000000000000000A", ProposalHash: []byte{1}, Eligible: 3, Unsigned: 1, Sent: 3}, nil
+	return &ballot.Created{ProposalID: "01JBQZ0000000000000000000A", ProposalHash: []byte{1}, Eligible: 3, Unsigned: 1, Sending: 3}, nil
 }
 
 func (f *fakeProposals) Status(_ context.Context, id string) (*ballot.ProposalStatus, error) {
@@ -41,6 +42,12 @@ func (f *fakeProposals) Close(_ context.Context, id string) (*ballot.ResultsSumm
 		return nil, ballot.ErrNotClosed
 	case "busy":
 		return nil, ballot.ErrNotCaught
+	case "early":
+		return nil, ballot.ErrStampedEarly
+	case "tsa-early":
+		return nil, ballot.ErrAuthorityEarly
+	case "tsa-down":
+		return nil, ballot.ErrAuthorityTime
 	case "nope":
 		return nil, ballot.ErrUnknownProposal
 	}
@@ -55,13 +62,18 @@ func (f *fakeProposals) Results(_ context.Context, id string) (*ballot.Published
 }
 
 func (f *fakeProposals) Publish(_ context.Context, id string) (int, error) {
-	if id != "p1" {
-		return 0, ballot.ErrUnknownProposal
+	switch id {
+	case "p1":
+		return 3, nil
+	case "unverified":
+		return 0, fmt.Errorf("%w: proposal of unverified: not under the pinned roots", ballot.ErrBundleUnverified)
+	case "nocheck":
+		return 0, fmt.Errorf("proposal of nocheck: %w", ballot.ErrNoBundleCheck)
 	}
-	return 3, nil
+	return 0, ballot.ErrUnknownProposal
 }
 
-func (f *fakeProposals) Extend(_ context.Context, id, approvalID string, in ballot.ExtensionInput) (*vote.Extension, error) {
+func (f *fakeProposals) ExtendSending(_ context.Context, id, approvalID string, in ballot.ExtensionInput) (*ballot.Extended, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -72,8 +84,12 @@ func (f *fakeProposals) Extend(_ context.Context, id, approvalID string, in ball
 		return nil, ballot.ErrProposalChanged
 	case "bad":
 		return nil, &ballot.ErrInput{Err: errors.New("short")}
+	case "unverified":
+		return &ballot.Extended{Extension: &vote.Extension{V: 1, ProposalID: id, N: 1, ClosesAt: in.ClosesAt}, Reason: ballot.ReasonBundleUnverified}, nil
+	case "stopping":
+		return &ballot.Extended{Extension: &vote.Extension{V: 1, ProposalID: id, N: 1, ClosesAt: in.ClosesAt}, Reason: ballot.ReasonStopping}, nil
 	}
-	return &vote.Extension{V: 1, ProposalID: id, N: 1, ClosesAt: in.ClosesAt}, nil
+	return &ballot.Extended{Extension: &vote.Extension{V: 1, ProposalID: id, N: 1, ClosesAt: in.ClosesAt}, Sending: 3}, nil
 }
 
 func TestProposalRoutes(t *testing.T) {
@@ -87,7 +103,7 @@ func TestProposalRoutes(t *testing.T) {
 	if rec, _ := do(t, h, "POST", "/v1/proposals", "", `{}`); rec.Code != 401 {
 		t.Fatalf("unauthenticated: %d", rec.Code)
 	}
-	body := `{"approval_id":"A1","title":"T","text":"x","choices":[{"label":"Yes"},{"label":"No"}],"quorum":{"text":"q","min_ballots":1},"binding":false,"removed_may_vote":false,"opens_at":1,"closes_at":2,"outage_rule":"r"}`
+	body := `{"approval_id":"A1","title":"T","text":"x","choices":[{"label":"Yes"},{"label":"No"}],"decision":{"rule":"plurality","base":null,"threshold":null},"quorum":{"text":"q","min_ballots":1},"binding":false,"removed_may_vote":false,"opens_at":1,"closes_at":2,"outage_rule":"r"}`
 	rec, m := do(t, h, "POST", "/v1/proposals", apiKey, body)
 	if rec.Code != 201 || m["proposal_id"] != "01JBQZ0000000000000000000A" || m["eligible"] != float64(3) || m["unsigned"] != float64(1) || fp.last.Title != "T" || fp.lastAppr != "A1" || len(fp.last.Choices) != 2 {
 		t.Fatalf("%d %v", rec.Code, m)
@@ -128,6 +144,8 @@ func TestProposalRoutes(t *testing.T) {
 		errors.New("store down"):                 "unavailable",
 		&ballot.ErrNotPublished{ProposalID: "p1", Err: errors.New("rekor down")}: "not_published",
 		fmt.Errorf("%w: the roster has 1001", ballot.ErrTooManyEligible):         "too_many_eligible",
+		fmt.Errorf("%w: 3 eligible, quorum 4", ballot.ErrQuorumUnreachable):      "quorum_unreachable",
+		ballot.ErrNoBundleCheck: "bundle_check_not_configured",
 	} {
 		fp.err = err
 		if _, m := do(t, h, "POST", "/v1/proposals", apiKey, body); m["error"] != want {
@@ -139,11 +157,27 @@ func TestProposalRoutes(t *testing.T) {
 		t.Fatalf("too many eligible: %d %v", rec.Code, m)
 	}
 	fp.err = &ballot.ErrNotPublished{ProposalID: "p1", Err: errors.New("rekor down")}
-	if rec, m := do(t, h, "POST", "/v1/proposals", apiKey, body); rec.Code != 503 || m["proposal_id"] != "p1" {
+	if rec, m := do(t, h, "POST", "/v1/proposals", apiKey, body); rec.Code != 503 || m["proposal_id"] != "p1" || m["reason"] != nil {
 		t.Fatalf("not published: %d %v", rec.Code, m)
 	}
-	for id, want := range map[string]int{"p1": 200, "nope": 404} {
-		if rec, m := do(t, h, "POST", "/v1/proposals/"+id+"/publish", apiKey, ""); rec.Code != want || (want == 200 && m["sent"] != float64(3)) {
+	// Published, its bundle refused: still not_published (Publish
+	// retries), with the reason.
+	fp.err = &ballot.ErrNotPublished{ProposalID: "p1", Err: fmt.Errorf("%w: proposal of p1: x", ballot.ErrBundleUnverified)}
+	if rec, m := do(t, h, "POST", "/v1/proposals", apiKey, body); rec.Code != 503 || m["error"] != "not_published" ||
+		m["proposal_id"] != "p1" || m["reason"] != "bundle_unverified" {
+		t.Fatalf("not published, bundle unverified: %d %v", rec.Code, m)
+	}
+	fp.err = ballot.ErrNoBundleCheck
+	if rec, m := do(t, h, "POST", "/v1/proposals/ok/extend", apiKey, `{"approval_id":"A1","closes_at":9,"outage":{"from":1,"to":5000,"source":"s"}}`); rec.Code != 503 || m["error"] != "bundle_check_not_configured" {
+		t.Fatalf("extend without a check: %d %v", rec.Code, m)
+	}
+	fp.err = nil
+	for id, want := range map[string]struct {
+		code int
+		err  string
+	}{"p1": {200, ""}, "nope": {404, "not_found"}, "unverified": {503, "bundle_unverified"}, "nocheck": {503, "bundle_check_not_configured"}} {
+		rec, m := do(t, h, "POST", "/v1/proposals/"+id+"/publish", apiKey, "")
+		if rec.Code != want.code || (want.code == 200 && m["sending"] != float64(3)) || (want.err != "" && m["error"] != want.err) {
 			t.Errorf("publish %s: %d %v", id, rec.Code, m)
 		}
 	}
@@ -153,16 +187,39 @@ func TestProposalRoutes(t *testing.T) {
 	if rec, _ := do(t, h, "GET", "/v1/proposals/01JBQZ0000000000000000000B", apiKey, ""); rec.Code != 404 {
 		t.Fatalf("%d", rec.Code)
 	}
-	for id, want := range map[string]int{"done": 200, "open": 409, "busy": 503, "nope": 404} {
+	for id, want := range map[string]int{"done": 200, "open": 409, "busy": 503, "early": 503, "tsa-early": 503, "tsa-down": 503, "nope": 404} {
 		if rec, m := do(t, h, "POST", "/v1/proposals/"+id+"/close", apiKey, ""); rec.Code != want {
 			t.Errorf("close %s: %d %v", id, rec.Code, m)
+		} else if code := map[string]string{"early": "stamped_early", "busy": "collecting", "tsa-early": "collecting", "tsa-down": "timestamp_unavailable"}[id]; code != "" && m["error"] != code {
+			t.Errorf("close %s: %v, want %s", id, m, code)
 		}
 	}
 	fp.err = nil
 	ext := `{"approval_id":"A1","closes_at":9,"outage":{"from":1,"to":5000,"source":"https://status.vettid.org/"}}`
-	for id, want := range map[string]int{"ok": 200, "late": 409, "bad": 400, "changed": 409} {
+	for id, want := range map[string]int{"ok": 200, "late": 409, "bad": 400, "changed": 409, "unverified": 200} {
 		if rec, m := do(t, h, "POST", "/v1/proposals/"+id+"/extend", apiKey, ext); rec.Code != want {
 			t.Errorf("extend %s: %d %v", id, rec.Code, m)
+		}
+	}
+	// The extension, and whether it is being sent.
+	if rec, m := do(t, h, "POST", "/v1/proposals/ok/extend", apiKey, ext); m["sending"] != float64(3) || m["reason"] != nil || m["closes_at"] != float64(9) || m["n"] != float64(1) {
+		t.Errorf("extend ok: %d %v", rec.Code, m)
+	}
+	if rec, m := do(t, h, "POST", "/v1/proposals/unverified/extend", apiKey, ext); m["sending"] != float64(0) || m["reason"] != "bundle_unverified" || m["closes_at"] != float64(9) {
+		t.Errorf("extend unverified: %d %v", rec.Code, m)
+	}
+	// The extension's own fields and the two added, no more: a field of
+	// the extension named like one added would hide it.
+	for id, want := range map[string]string{"ok": "closes_at n outage proposal_id sending v", "unverified": "closes_at n outage proposal_id reason sending v",
+		"stopping": "closes_at n outage proposal_id reason sending v"} {
+		_, m := do(t, h, "POST", "/v1/proposals/"+id+"/extend", apiKey, ext)
+		keys := make([]string, 0, len(m))
+		for k := range m {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		if got := strings.Join(keys, " "); got != want {
+			t.Errorf("extend %s keys: %s, want %s", id, got, want)
 		}
 	}
 	if rec, m := do(t, h, "GET", "/v1/proposals/done/results", apiKey, ""); rec.Code != 200 || m["results"] != `{"v":1}` {

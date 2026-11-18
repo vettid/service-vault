@@ -80,6 +80,72 @@ func path(h [][]byte, m int) [][]byte {
 	return append(path(h[k:], m-k), rootOf(h[:k]))
 }
 
+// Tree is a Merkle tree over its leaves with every node hashed once, so
+// each audit path costs O(log n); Proof hashes every leaf on each call.
+// A proposal's record tree gives each member's record_proof from one
+// Tree (§8.5).
+type Tree struct {
+	n     int
+	nodes map[[2]int][]byte // the subtree over leaves [lo, hi) -> its hash
+}
+
+// NewTree builds the tree over the leaves, in order.
+func NewTree(leaves [][]byte) *Tree {
+	t := &Tree{n: len(leaves), nodes: make(map[[2]int][]byte, 2*len(leaves))}
+	if t.n > 0 {
+		t.build(leaves, 0, t.n)
+	}
+	return t
+}
+
+func (t *Tree) build(leaves [][]byte, lo, hi int) []byte {
+	var h []byte
+	if hi-lo == 1 {
+		h = LeafHash(leaves[lo])
+	} else {
+		k := split(hi - lo)
+		h = nodeHash(t.build(leaves, lo, lo+k), t.build(leaves, lo+k, hi))
+	}
+	t.nodes[[2]int{lo, hi}] = h
+	return h
+}
+
+// Size is the number of leaves.
+func (t *Tree) Size() int { return t.n }
+
+// Root is the tree head (Root of the same leaves), a copy.
+func (t *Tree) Root() []byte {
+	if t.n == 0 {
+		s := sha256.Sum256(nil)
+		return s[:]
+	}
+	return bytes.Clone(t.nodes[[2]int{0, t.n}])
+}
+
+// Proof is the audit path of leaf index m, nearest sibling first (Proof
+// of the same leaves), in copies: a caller may change it.
+func (t *Tree) Proof(m int) ([][]byte, error) {
+	if m < 0 || m >= t.n {
+		return nil, errors.New("ballot: leaf index out of range")
+	}
+	var out [][]byte
+	lo, hi := 0, t.n
+	for hi-lo > 1 {
+		k := split(hi - lo)
+		if m < lo+k {
+			out = append(out, bytes.Clone(t.nodes[[2]int{lo + k, hi}]))
+			hi = lo + k
+		} else {
+			out = append(out, bytes.Clone(t.nodes[[2]int{lo, lo + k}]))
+			lo += k
+		}
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, nil
+}
+
 // VerifyProof checks that leaf is at index m of a tree of n leaves with
 // the given root (RFC 9162 §2.1.3.2, the RFC 6962 audit path check).
 func VerifyProof(root, leaf []byte, m, n int, proof [][]byte) bool {

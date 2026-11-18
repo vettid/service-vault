@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"log/slog"
 	"sync"
 	"testing"
@@ -55,11 +56,34 @@ type fixture struct {
 	afterRestore func(context.Context) error
 	// votes, when set, is the next start's Config.Votes.
 	votes Votes
+	// endAll is Config.EndAllConnections at the next start.
+	endAll string
 	// failDeposit, when set, decides a deposit's relay error (nil: the
 	// deposit goes through); revokes counts the revocations by value.
 	failDeposit func(mailbox, token string) error
-	revokes     map[string]int
-	logs        lockedBuffer
+	// failCollect, when set, is the error of the service's collects.
+	failCollect error
+	// failRegister, when set, is the error of the service's registrations;
+	// regDeadline is the time left on the last registration's context
+	// (zero: none).
+	failRegister error
+	regDeadline  time.Duration
+	// slept is how long the service's starts waited (Config.Sleep);
+	// stopSleep makes the next wait end as a cancelled context does.
+	slept     time.Duration
+	stopSleep bool
+	// storeWrap, when set, is the next starts' store (wrapping f.store).
+	storeWrap Store
+	revokes   map[string]int
+	logs      lockedBuffer
+	// reportTomb makes the relay's registration answers report tombstones
+	// (RELAY-PROTOCOL 0.12.0 §6.1), with tombNB as tokens_not_before
+	// (zero: none held).
+	reportTomb bool
+	tombNB     time.Time
+	// loseRegAnswer makes the next registration reach the relay (and make
+	// the mailbox) but its answer be lost (a 503).
+	loseRegAnswer bool
 }
 
 // lockedBuffer collects the service's log lines.
@@ -96,6 +120,35 @@ func (r testRelay) Deposit(ctx context.Context, mailboxID, token string, payload
 	return r.View.Deposit(ctx, mailboxID, token, payload)
 }
 
+func (r testRelay) Register(ctx context.Context) (relayclient.Registration, error) {
+	r.f.regDeadline = 0
+	if d, ok := ctx.Deadline(); ok {
+		r.f.regDeadline = time.Until(d)
+	}
+	if r.f.failRegister != nil {
+		return relayclient.Registration{}, r.f.failRegister
+	}
+	reg, err := r.View.Register(ctx)
+	if err == nil && r.f.loseRegAnswer {
+		r.f.loseRegAnswer = false
+		return relayclient.Registration{}, &relayclient.Error{Status: 503, Code: "unavailable"}
+	}
+	if err == nil && r.f.reportTomb {
+		reg.Limits.ReportsTombstones = json.RawMessage(`true`)
+		if !r.f.tombNB.IsZero() {
+			reg.TokensNotBefore = json.RawMessage(`"` + r.f.tombNB.UTC().Format(time.RFC3339) + `"`)
+		}
+	}
+	return reg, err
+}
+
+func (r testRelay) Collect(ctx context.Context, wait time.Duration, max int) ([]relayclient.Message, error) {
+	if r.f.failCollect != nil {
+		return nil, r.f.failCollect
+	}
+	return r.View.Collect(ctx, wait, max)
+}
+
 func (r testRelay) Revoke(ctx context.Context, es ...relayclient.Revocation) error {
 	for _, e := range es {
 		r.f.revokes[e.Value]++
@@ -117,15 +170,34 @@ func newFixture(t *testing.T) *fixture {
 // start (re)creates the peer from the store, as a restart does.
 func (f *fixture) start() {
 	f.t.Helper()
-	p, err := New(Config{Log: slog.New(slog.NewTextHandler(&f.logs, nil)), Keys: f.keys, Relay: testRelay{f.sv, f}, RelayURL: peertest.RelayURL, Store: f.store, Events: f.ev, Now: f.clk.Now,
-		Profile: Profile{FirstName: "VettID", LastName: "Member Service"}, AfterRestore: f.afterRestore, Votes: f.votes})
+	if err := f.startErr(); err != nil {
+		f.t.Fatalf("Start: %v", err)
+	}
+}
+
+// startErr is start, returning Start's error (f.p is then the peer that
+// failed to start).
+func (f *fixture) startErr() error {
+	f.t.Helper()
+	var st Store = f.store
+	if f.storeWrap != nil {
+		st = f.storeWrap
+	}
+	p, err := New(Config{Log: slog.New(slog.NewTextHandler(&f.logs, nil)), Keys: f.keys, Relay: testRelay{f.sv, f}, RelayURL: peertest.RelayURL, Store: st, Events: f.ev, Now: f.clk.Now,
+		Profile: Profile{FirstName: "VettID", LastName: "Member Service"}, AfterRestore: f.afterRestore, Votes: f.votes, EndAllConnections: f.endAll,
+		Sleep: func(_ context.Context, d time.Duration) bool {
+			if f.stopSleep {
+				return false
+			}
+			f.slept += d
+			f.clk.Advance(d)
+			return true
+		}})
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	if err := p.Start(context.Background()); err != nil {
-		f.t.Fatalf("Start: %v", err)
-	}
 	f.p = p
+	return p.Start(context.Background())
 }
 
 func (f *fixture) member(seed byte) *peertest.Member {

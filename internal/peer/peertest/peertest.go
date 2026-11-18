@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -54,8 +55,21 @@ type World struct {
 	claims    map[string][]byte
 	denied    map[string]bool
 	usedOpen  map[string]bool
-	nextID    int
-	limits    relayclient.Limits
+	// tombs is when each deleted mailbox was deleted: a mailbox made again
+	// at that id refuses tokens issued before then plus 90 s
+	// (RELAY-PROTOCOL §6.10).
+	tombs  map[string]time.Time
+	nextID int
+	limits relayclient.Limits
+}
+
+// DeleteMailbox deletes a mailbox, as the relay losing it or its key's
+// holder deleting it would: its messages go, and it leaves a tombstone.
+func (w *World) DeleteMailbox(id string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	delete(w.mailboxes, id)
+	w.tombs[id] = w.clk.Now()
 }
 
 type mailbox struct {
@@ -74,7 +88,7 @@ func NewClock(t time.Time) *Clock { return &Clock{t: t} }
 // NewWorld returns an empty relay on clk.
 func NewWorld(clk *Clock) *World {
 	return &World{clk: clk, mailboxes: map[string]*mailbox{}, claims: map[string][]byte{}, denied: map[string]bool{},
-		usedOpen: map[string]bool{},
+		usedOpen: map[string]bool{}, tombs: map[string]time.Time{},
 		limits: relayclient.Limits{MaxTokenLifetimeSeconds: 365 * 24 * 3600, OpenTokenMaxLifetimeSeconds: 600,
 			ClaimTTLSeconds: 600}}
 }
@@ -140,16 +154,21 @@ func relayErr(status int, code string) error { return &relayclient.Error{Status:
 func (v *View) Register(context.Context) (relayclient.Registration, error) {
 	v.w.mu.Lock()
 	defer v.w.mu.Unlock()
+	created := false
 	if v.w.mailboxes[v.mb] == nil {
 		v.w.mailboxes[v.mb] = &mailbox{pk: v.c.PublicKey()}
+		created = true
 	}
-	return relayclient.Registration{MailboxID: v.mb, Limits: v.w.limits}, nil
+	return relayclient.Registration{MailboxID: v.mb, Limits: v.w.limits, Created: created}, nil
 }
 
 func (v *View) Collect(_ context.Context, _ time.Duration, max int) ([]relayclient.Message, error) {
 	v.w.mu.Lock()
 	defer v.w.mu.Unlock()
 	now := v.w.clk.Now()
+	if v.w.mailboxes[v.mb] == nil {
+		return nil, relayErr(404, "mailbox_unknown")
+	}
 	var out []relayclient.Message
 	for _, s := range v.w.mailboxes[v.mb].msgs {
 		if len(out) == max {
@@ -191,6 +210,9 @@ func (v *View) Deposit(_ context.Context, mailboxID, token string, payload []byt
 	if v.w.denied[cl.Jti] {
 		return "", relayErr(401, "token_revoked")
 	}
+	if t, ok := v.w.tombs[mailboxID]; ok && cl.Iat.Before(t.Add(90*time.Second)) {
+		return "", relayErr(401, "token_revoked") // issued before the mailbox was deleted (§5.3 step 6)
+	}
 	if !v.w.clk.Now().Before(cl.Exp) {
 		return "", relayErr(401, "token_expired")
 	}
@@ -209,7 +231,7 @@ func (v *View) Deposit(_ context.Context, mailboxID, token string, payload []byt
 	}
 	id := v.w.id()
 	mb.msgs = append(mb.msgs, &storedMsg{m: relayclient.Message{MsgID: id, Sender: v.c.PublicKeyB64(), JTI: cl.Jti,
-		Payload: append([]byte(nil), payload...)}})
+		DepositedAt: v.w.clk.Now().UTC().Format(time.RFC3339Nano), Payload: append([]byte(nil), payload...)}})
 	return id, nil
 }
 
@@ -292,6 +314,13 @@ type Member struct {
 	rekey    *handshake.Initiator
 	recon    *handshake.Initiator
 	awaitFin *handshake.Responder
+	// HSFeatures is the inner features list the Member's rekey hs.init,
+	// hs.resp and hs.fin carry (0.86.0, §5.3), as a release-29 vault sends
+	// it.
+	HSFeatures []string
+	// RespRotations are identity links the Member puts in its hs.resp to
+	// the service's rekey (0.87.0 S8).
+	RespRotations []*handshake.Rotation
 	// Rotations are the identity.rotate links since the session's epoch
 	// (for a reconnect, §6.6).
 	Rotations []*handshake.Rotation
@@ -303,6 +332,7 @@ type Member struct {
 	Reconnects int
 	retired    []*suite.PrivateKey // static KEM keys before a rotation (§6.6 "Retired keys")
 	lastRecon  []byte              // the last reconnect hs.init sent
+	lastRekey  []byte              // the last rekey hs.init sent
 	pendTokens [2]string           // a reconnect's tokens, taken at its hs.fin
 	// IgnoreRevoked lets a deposit fail (an answer on a token the service
 	// revoked when it replaced the handshake), as a vault's outbox does.
@@ -311,6 +341,16 @@ type Member struct {
 	// IgnoreStray drops a sealed message no handshake of ours matches
 	// (an hs.resp to a reconnect we replaced), as a vault does.
 	IgnoreStray bool
+
+	// NoConfirm stops the Member from sending hs.confirm when it activates
+	// the service's rekey or reconnect at its hs.fin (§6.3.1 Responder), as
+	// a release-29 vault does; Confirms counts those sent.
+	NoConfirm bool
+	Confirms  int
+
+	// IgnoreForeign drops a reconnect hs.init signed by another identity
+	// key than the service's, as a vault does.
+	IgnoreForeign bool
 
 	Got        []*envelope.Inner // messages received in the session
 	Challenges []*peerwire.ConnAuthChallenge
@@ -429,6 +469,10 @@ func (m *Member) handle(msg relayclient.Message) bool {
 			m.DepositTo(m.SvcReq, res.Fin)
 		case m.recon != nil && env.RecipientKid().Equal(m.recon.EphKid()):
 			res, err := m.recon.HandleResp(msg.Payload, sender, now)
+			if err != nil && m.IgnoreStray {
+				m.recon = nil // past its window: the reconnect ended, as a vault's does
+				return true
+			}
 			if err != nil {
 				m.t.Fatalf("Member: reconnect hs.resp: %v", err)
 			}
@@ -492,6 +536,10 @@ func (m *Member) handle(msg relayclient.Message) bool {
 					m.SvcStand, m.SvcRecon, m.pendTokens = m.pendTokens[0], m.pendTokens[1], [2]string{}
 				}
 				m.activate(fr.Epoch, now)
+				if !m.NoConfirm {
+					m.Confirms++
+					m.Send(handshake.TypeConfirm, []byte(`{}`))
+				}
 				return true
 			}
 		}
@@ -607,18 +655,99 @@ func (m *Member) SendInner(in *envelope.Inner) string {
 }
 
 // startRekey initiates a rekey (§6.5), as a Member vault does after 24 h.
-func (m *Member) StartRekey() {
+func (m *Member) StartRekey() { m.startRekey(nil) }
+
+// StartRekeyWithLinks initiates a rekey whose hs.init carries the
+// identity links in m.Rotations (VAULT-MESSAGING 0.87.0 S8), as a
+// release-29 vault does on every rekey once it has rotated.
+func (m *Member) StartRekeyWithLinks() { m.startRekey(m.Rotations) }
+
+func (m *Member) startRekey(links []*handshake.Rotation) {
 	m.t.Helper()
 	ini, err := handshake.NewInitiator(handshake.InitiatorConfig{
 		Purpose: handshake.PurposeRekey, Identity: m.IK, StaticKEM: m.kem.Public(), Relay: m.Addr,
 		ResponderIK: m.svc.IK, ResponderRelayKey: m.svc.Relay.PK, Current: m.KR.Current(),
-		Policy: handshake.PolicyVaultToVault, Now: m.clk.Now(),
+		Policy: handshake.PolicyVaultToVault, Rotations: links, Features: m.HSFeatures, Now: m.clk.Now(),
 	})
 	if err != nil {
 		m.t.Fatal(err)
 	}
-	m.rekey = ini
+	m.rekey, m.lastRekey = ini, ini.Envelope()
 	m.DepositTo(m.SvcStand, ini.Envelope())
+}
+
+// KEMPublic is the Member's static KEM public key.
+func (m *Member) KEMPublic() *suite.PublicKey { return m.kem.Public() }
+
+// SvcIK and SvcRelayPK are the service's identity and relay keys.
+func (m *Member) SvcIK() ed25519.PublicKey      { return m.svc.IK }
+func (m *Member) SvcRelayPK() ed25519.PublicKey { return m.svc.Relay.PK }
+
+// MintAt mints a deposit token for the service on the Member's mailbox
+// with the given iat and exp (an honest issuer sets exp = iat + ttl).
+func (m *Member) MintAt(iat, exp time.Time, jti string) string {
+	return m.MintAtAud(iat, exp, jti, RelayURL)
+}
+
+// MintAtAud is MintAt for a token whose audience is relay aud.
+func (m *Member) MintAtAud(iat, exp time.Time, jti, aud string) string {
+	m.t.Helper()
+	tok, err := relayauth.MintToken(m.rk, relayauth.Claims{Iss: m.Addr.Mailbox, Sub: relayauth.EncodeKey(m.svc.Relay.PK),
+		Aud: aud, Iat: iat, Exp: exp, Jti: jti})
+	if err != nil {
+		m.t.Fatal(err)
+	}
+	return tok
+}
+
+// SaveEpoch exports the Member's current epoch, keys included, as a copy
+// of the vault taken now would hold it.
+func (m *Member) SaveEpoch() handshake.EpochState { return m.KR.Current().Export() }
+
+// RekeyInitUnder deposits a rekey hs.init under a saved epoch, signed with
+// the Member's current keys (an old copy holding that epoch and the
+// current keys), and returns its initiator.
+func (m *Member) RekeyInitUnder(s handshake.EpochState) *handshake.Initiator {
+	m.t.Helper()
+	ep, err := handshake.ImportEpoch(s)
+	if err != nil {
+		m.t.Fatal(err)
+	}
+	ini, err := handshake.NewInitiator(handshake.InitiatorConfig{
+		Purpose: handshake.PurposeRekey, Identity: m.IK, StaticKEM: m.kem.Public(), Relay: m.Addr,
+		ResponderIK: m.svc.IK, ResponderRelayKey: m.svc.Relay.PK, Current: ep,
+		Policy: handshake.PolicyVaultToVault, Features: m.HSFeatures, Now: m.clk.Now(),
+	})
+	if err != nil {
+		m.t.Fatal(err)
+	}
+	m.DepositTo(m.SvcStand, ini.Envelope())
+	return ini
+}
+
+// FinishRekey takes the service's hs.resp to ini from the Member's mailbox
+// and deposits its hs.fin; it returns the new epoch (nil: no hs.resp).
+func (m *Member) FinishRekey(ini *handshake.Initiator) *handshake.Epoch {
+	m.t.Helper()
+	msgs, _ := m.R.Collect(context.Background(), 0, 32)
+	var ep *handshake.Epoch
+	for _, msg := range msgs {
+		env, err := envelope.Parse(msg.Payload)
+		if err == nil && ep == nil && env.Mode() == envelope.ModeSealed && env.RecipientKid().Equal(ini.EphKid()) {
+			sender, _ := relayauth.DecodeKey(msg.Sender)
+			res, err := ini.HandleResp(msg.Payload, sender, m.clk.Now())
+			if err != nil {
+				m.t.Fatalf("Member: hs.resp: %v", err)
+			}
+			m.DepositTo(m.SvcStand, res.Fin)
+			ep = res.Epoch
+			_ = m.R.Ack(context.Background(), msg.MsgID)
+			continue
+		}
+		_ = m.R.Ack(context.Background(), msg.MsgID)
+		m.R.w.Redeliver(m.R.mb, msg) // left for the Member's own handling
+	}
+	return ep
 }
 
 // answerRekey answers the service's rekey hs.init (§6.5).
@@ -630,7 +759,8 @@ func (m *Member) answerRekey(raw []byte, in *envelope.Inner, ep *handshake.Epoch
 		m.t.Fatalf("Member: accept rekey: %v", err)
 	}
 	resp, env, err := pi.Respond(handshake.ResponderConfig{Identity: m.IK, Policy: handshake.PolicyVaultToVault,
-		CollectSender: sender, RecordRelayKey: m.svc.Relay.PK, KnownInitiatorIK: m.svc.IK, Now: now})
+		CollectSender: sender, RecordRelayKey: m.svc.Relay.PK, KnownInitiatorIK: m.svc.IK, Features: m.HSFeatures,
+		Rotations: m.RespRotations, Now: now})
 	if err != nil {
 		m.t.Fatalf("Member: respond rekey: %v", err)
 	}
@@ -661,6 +791,9 @@ func (m *Member) answerReconnect(raw []byte, sender ed25519.PublicKey) {
 	m.t.Helper()
 	now := m.clk.Now()
 	pi, err := handshake.OpenInit(raw, m.ownKEM, now)
+	if err != nil && m.IgnoreStray {
+		return // an earlier try's hs.init, past its window: dropped, as a vault does
+	}
 	if err != nil {
 		m.t.Fatalf("Member: reconnect hs.init: %v", err)
 	}
@@ -676,6 +809,9 @@ func (m *Member) answerReconnect(raw []byte, sender ed25519.PublicKey) {
 	resp, env, err := pi.Respond(handshake.ResponderConfig{Identity: m.IK, Policy: handshake.PolicyVaultToVault,
 		CollectSender: sender, RecordRelayKey: m.svc.Relay.PK, KnownInitiatorIK: m.svc.IK, ExpectedCtx: body.Ctx,
 		Token: m.Mint(peerwire.StandingMax), ReconnectToken: m.Mint(300 * 24 * time.Hour), Rotations: m.Rotations, Now: now})
+	if err != nil && m.IgnoreForeign && errors.Is(err, handshake.ErrIdentity) {
+		return
+	}
 	if err != nil {
 		m.t.Fatalf("Member: respond reconnect: %v", err)
 	}
@@ -732,35 +868,22 @@ func (m *Member) SendRotation(r *handshake.Rotation) {
 	m.Send("identity.rotate", body)
 }
 
-// RotateRelay rotates the Member vault's relay key (§3.4): the new
-// mailbox and tokens for it go out as relay.address.update, deposited with
-// the old key; the service's tokens for the new key then arrive there.
-// The old view is returned (it can still deposit).
-func (m *Member) RotateRelay(w *World, seed byte) *View {
+// RotateBody is an identity.rotate body with the whole chain (S8):
+// `rotations` and, as `rotation`, last.
+func RotateBody(last *handshake.Rotation, links ...*handshake.Rotation) []byte {
+	arr := make([]json.RawMessage, len(links))
+	for i, r := range links {
+		arr[i] = r.Marshal()
+	}
+	ra, _ := json.Marshal(arr)
+	body, _ := json.Marshal(map[string]json.RawMessage{"rotation": last.Marshal(), "rotations": ra})
+	return body
+}
+
+// SendRotations sends one identity.rotate carrying the whole chain (S8).
+func (m *Member) SendRotations(links ...*handshake.Rotation) {
 	m.t.Helper()
-	old := m.R
-	rk := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed}, 32))
-	nv := w.View(rk)
-	if _, err := nv.Register(context.Background()); err != nil {
-		m.t.Fatal(err)
-	}
-	pk := rk.Public().(ed25519.PublicKey)
-	addr := handshake.RelayAddr{URL: RelayURL, Mailbox: relayauth.MailboxID(pk), PK: pk}
-	mint := func(ttl time.Duration) string {
-		tok, err := nv.MintToken(relayauth.EncodeKey(m.svc.Relay.PK), RelayURL, relayclient.TokenOptions{TTL: ttl})
-		if err != nil {
-			m.t.Fatal(err)
-		}
-		return tok
-	}
-	body, _ := json.Marshal(map[string]any{
-		"relay":           map[string]string{"url": addr.URL, "mailbox": addr.Mailbox, "pk": base64.StdEncoding.EncodeToString(pk)},
-		"token":           mint(peerwire.StandingMax),
-		"reconnect_token": mint(300 * 24 * time.Hour),
-	})
-	m.Send("relay.address.update", body) // with the old key
-	m.R, m.rk, m.Addr = nv, rk, addr
-	return old
+	m.Send("identity.rotate", RotateBody(links[len(links)-1], links...))
 }
 
 // Reconnect sends a reconnect hs.init (§6.6) on the service's reconnect
@@ -784,6 +907,10 @@ func (m *Member) ReconnectNaming(id [suite.EpochIDSize]byte) {
 	m.DepositTo(m.SvcRecon, ini.Envelope())
 }
 
+// LastRekeyInit is the last rekey hs.init the Member sent, to deliver
+// again.
+func (m *Member) LastRekeyInit() []byte { return m.lastRekey }
+
 // SvcMailbox is the service's mailbox.
 func (m *Member) SvcMailbox() string { return m.svc.Relay.Mailbox }
 
@@ -803,11 +930,29 @@ func (m *Member) SendAddressUpdate(w *World, seed byte, relayURL string) {
 	m.sendAddress(rk.Public().(ed25519.PublicKey), relayURL, tok)
 }
 
-// SendAddressUpdateTo sends relay.address.update naming a key the Member
-// does not hold (its token is not valid for it).
-func (m *Member) SendAddressUpdateTo(_ *World, pk ed25519.PublicKey, relayURL string) {
+// SendAddressUpdateWithReconnect is SendAddressUpdate with a reconnect
+// token for the new key too.
+func (m *Member) SendAddressUpdateWithReconnect(w *World, seed byte, relayURL string) {
 	m.t.Helper()
-	m.sendAddress(pk, relayURL, "not-a-token")
+	rk := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed}, 32))
+	v := w.View(rk)
+	if _, err := v.Register(context.Background()); err != nil {
+		m.t.Fatal(err)
+	}
+	mint := func(ttl time.Duration) string {
+		tok, err := v.MintToken(relayauth.EncodeKey(m.svc.Relay.PK), RelayURL, relayclient.TokenOptions{TTL: ttl})
+		if err != nil {
+			m.t.Fatal(err)
+		}
+		return tok
+	}
+	pk := rk.Public().(ed25519.PublicKey)
+	body, _ := json.Marshal(map[string]any{
+		"relay":           map[string]string{"url": relayURL, "mailbox": relayauth.MailboxID(pk), "pk": base64.StdEncoding.EncodeToString(pk)},
+		"token":           mint(peerwire.StandingMax),
+		"reconnect_token": mint(300 * 24 * time.Hour),
+	})
+	m.Send("relay.address.update", body)
 }
 
 func (m *Member) sendAddress(pk ed25519.PublicKey, relayURL, tok string) {

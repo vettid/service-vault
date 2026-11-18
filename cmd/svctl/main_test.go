@@ -620,7 +620,7 @@ func TestRenderQR(t *testing.T) {
 // proposalFile is a proposal input a file can hold; the extension file
 // is an extension of it.
 const (
-	proposalFile  = `{"title":"T","text":"","choices":[{"label":"Yes"},{"label":"No"}],"quorum":{"text":"","min_ballots":1},"binding":true,"opens_at":1793520000,"closes_at":1793606400,"outage_rule":""}`
+	proposalFile  = `{"title":"T","text":"","choices":[{"label":"Yes"},{"label":"No"}],"decision":{"rule":"threshold","base":"voted","threshold":{"num":2,"den":3}},"quorum":{"text":"","min_ballots":1},"binding":true,"opens_at":1793520000,"closes_at":1793606400,"outage_rule":""}`
 	extensionFile = `{"closes_at":1793613600,"outage":{"from":1793600000,"to":1793605400,"source":"https://status.vettid.org/"}}`
 )
 
@@ -632,6 +632,8 @@ type fakeProposals struct {
 	created   int
 	caught    bool
 	unsigned  int
+	// notSent: an extension in effect but not sent, for this reason.
+	notSent string
 }
 
 func (p *fakeProposals) Create(_ context.Context, approvalID string, in ballot.ProposalInput) (*ballot.Created, error) {
@@ -670,12 +672,16 @@ func (p *fakeProposals) Results(context.Context, string) (*ballot.PublishedResul
 	return nil, nil
 }
 
-func (p *fakeProposals) Extend(_ context.Context, id, approvalID string, in ballot.ExtensionInput) (*vote.Extension, error) {
+func (p *fakeProposals) ExtendSending(_ context.Context, id, approvalID string, in ballot.ExtensionInput) (*ballot.Extended, error) {
 	p.approvals = append(p.approvals, approvalID)
 	if approvalID != "a1" {
 		return nil, &approval.Error{Code: approval.CodeApprovalNotApproved}
 	}
-	return &vote.Extension{V: 1, ProposalID: id, N: 1, ClosesAt: in.ClosesAt, Outage: in.Outage}, nil
+	e := &ballot.Extended{Extension: &vote.Extension{V: 1, ProposalID: id, N: 1, ClosesAt: in.ClosesAt, Outage: in.Outage}, Sending: 3}
+	if p.notSent != "" {
+		e.Sending, e.Reason = 0, p.notSent
+	}
+	return e, nil
 }
 
 func (p *fakeProposals) Publish(context.Context, string) (int, error) { return 3, nil }
@@ -823,7 +829,8 @@ func TestProposalNeedsApproval(t *testing.T) {
 	}
 	// The payload is the input in canonical full form.
 	want, _ := ballot.CanonicalProposal(ballot.ProposalInput{Title: "T", Choices: []ballot.ChoiceInput{{Label: "Yes"}, {Label: "No"}},
-		Quorum: vote.Quorum{MinBallots: 1}, Binding: true, OpensAt: 1793520000, ClosesAt: 1793606400})
+		Decision: vote.Decision{Rule: vote.RuleThreshold, Base: vote.BaseOf(vote.BaseVoted), Threshold: &vote.Threshold{Num: 2, Den: 3}},
+		Quorum:   vote.Quorum{MinBallots: 1}, Binding: true, OpensAt: 1793520000, ClosesAt: 1793606400})
 	if string(f.apv.req.Payload) != string(want) {
 		t.Fatalf("payload %s", f.apv.req.Payload)
 	}
@@ -848,6 +855,18 @@ func TestProposalNeedsApproval(t *testing.T) {
 	if f.apv.req.Action != "vote.extend" {
 		t.Fatalf("approval request %+v", f.apv.req)
 	}
+	if !strings.Contains(out, `"sending": 3`) || strings.Contains(errOut, "not sent") {
+		t.Fatalf("extend, sent: %s\n%s", out, errOut)
+	}
+	// In effect but not sent: said on stderr, with why.
+	for reason, why := range map[string]string{ballot.ReasonBundleUnverified: "a member vault would refuse", ballot.ReasonStopping: "the service was stopping", "new": `reason "new"`} {
+		fp.notSent = reason
+		code, out, errOut = f.run(t, "proposal", "extend", "01JBQZ0000000000000000000A", "-in", ext, "-approval", "a1")
+		if code != exitOK || !strings.Contains(out, `"reason": "`+reason+`"`) || !strings.Contains(errOut, "was not sent to the members: ") || !strings.Contains(errOut, why) {
+			t.Fatalf("extend, not sent (%s): exit %d\n%s\n%s", reason, code, out, errOut)
+		}
+	}
+	fp.notSent = ""
 	// An existing approval of another action is not used.
 	if code, _, errOut := f.run(t, "proposal", "create", "-in", in, "-approval", "a1"); code != exitError || !strings.Contains(errOut, "not an approved proposal.create") {
 		t.Fatalf("exit %d %s", code, errOut)

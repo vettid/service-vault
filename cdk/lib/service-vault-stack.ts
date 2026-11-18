@@ -67,6 +67,13 @@ export { KEY_ADMIN_ACTIONS } from './kms-actions';
  */
 export const ssmPrefix = (envName: string) => `/vettid/service-vault/${envName}`;
 
+/**
+ * The marker that the anchor key has moved to the AnchorSigner (key
+ * protection, GC #7406 §7 step 1): created by the owner at the cutover,
+ * never by this stack; the task reads it.
+ */
+export const anchorMovedParameterName = (envName: string) => `${ssmPrefix(envName)}/anchor_key_moved`;
+
 /** The parameters published for the API client (besides tls-pin). */
 export const CLIENT_PARAMS = [
   'vpc-id',
@@ -79,12 +86,39 @@ export const CLIENT_PARAMS = [
   'webhook-secret-arn',
 ] as const;
 
+/** Whether v is a real calendar date, YYYY-MM-DD (as the service's time.Parse(time.DateOnly) reads it). */
+export function isCalendarDate(v: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+  const d = new Date(`${v}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v;
+}
+
 /** Log lines the daemon marks for an alarm (`"alarm": <name>`). */
 export const ALARMS = {
   /** A member's identity key got two successors; the connection is suspended (internal/peer/rotation.go). */
   rotate_conflict: 'A member identity rotation conflict suspended a connection (two vaults rotating, or a replayed copy; a member can also cause it on purpose, so it may be noise)',
+  /** Fork evidence about an epoch (rule E, fork by ctx; internal/peer/forks.go): a connection is suspended. */
+  fork_suspected: 'Fork evidence about a session epoch suspended a connection: a second or old copy of the member vault used it (README "fork_suspected")',
+  /** A connection a relay.address.update moved before the update was refused (internal/peer/state.go): suspended at start. */
+  relay_moved_unlinked: 'A connection that a relay.address.update moved before such updates were refused was suspended at start: the address may belong to a copy; the member must connect again (README "relay_moved_unlinked")',
+  /** Connections from before release 29 were ended at start (internal/peer/pre29.go): their members must connect again. */
+  pre29_ended: 'Connections made before release 29 were ended at start (one line with the count): their members must connect again from new invitations; expected once, at the first start of the release-29 version (README "pre29_ended")',
+  /** Every connection was ended by the one-shot SV_END_ALL_CONNECTIONS (internal/peer/pre29.go). */
+  connections_ended: 'Every connection was ended at start by SV_END_ALL_CONNECTIONS (the runbook step after a rollback across the release-29 marker): the members must connect again; unset it with the next deploy (README "Rolling back")',
+  /** SV_END_ALL_CONNECTIONS names a date that already ran (internal/peer/pre29.go): nothing was ended. */
+  end_all_reused: 'SV_END_ALL_CONNECTIONS names a date that already ran, so nothing was ended at this start: if the runbook step was meant, deploy again with a date not used before; otherwise unset it (README "Rolling back across release 29")',
   /** A webhook was given up after the outbox's MaxAge (internal/webhook/outbox.go): the application missed an event. */
   webhook_dropped: 'A webhook was dropped as undeliverable after 24 h: the application missed an event',
+  /** The configured identity key is not the table's (internal/peer/identity.go): nothing runs until it is. */
+  identity_key_mismatch: 'The service\'s identity key is not the one its table\'s records were made under: the keystore and the records don\'t belong together (a wrong or partial restore, or another service\'s table). Nothing is sent, answered or changed until the right keys are back (README "identity_key_mismatch")',
+  /** A stored outgoing hs.init names another identity key than the table's (internal/peer/state.go): dropped at start. */
+  outgoing_identity_changed: 'A stored handshake names another identity key than the table\'s: it was dropped at start. The table holds records made under two keys (README "outgoing_identity_changed")',
+  /** The service's relay mailbox was deleted and made again empty (internal/peer/mailbox.go). */
+  relay_mailbox_lost: 'The service\'s relay mailbox was lost and made again empty: what members deposited since the last collect is gone, and every member\'s tokens are minted again (README "relay_mailbox_lost")',
+  /** The relay's tokens_not_before is far ahead of the service's clock (internal/peer/mailbox.go): no token is minted until it passes. */
+  relay_tombstone_ahead: 'The relay reports a tokens_not_before far ahead of the service\'s clock (its clock or report is wrong, or the service\'s clock is behind): no token is minted until that time passes, so members get no new tokens or invitations (README "relay_mailbox_lost")',
+  /** A store error discarded a peer step (internal/peer/engine.go): the task stopped and restarted from the stored state. */
+  peer_discarded: 'A store error discarded a peer step; the task restarted from the stored state. Repeats mean the store is failing (README "peer_discarded")',
   /** A reconnect after a restore could not complete (internal/peer/reconnect.go): the member must connect again. */
   reconnect_failed: 'A reconnect after a table restore failed: that member must connect again from a new invitation (README "Restoring the table")',
   /** A reconnect after a restore unanswered for a day (internal/peer/reconnect.go): the member's vault may be locked. */
@@ -93,10 +127,34 @@ export const ALARMS = {
   ballots_off: 'Ballots are off: the ballot copy\'s key is missing or not the one its ballots are under; restore the keystore item ballot-copy-key from a backup of the table (README "Rotating the record key")',
   /** A vote request or a close for a proposal held but not published (internal/ballot/box.go, close.go): members get no answer and it can't close until it is published. */
   vote_unpublished: 'Members sent vote requests for a proposal the service holds but has not published (after a restore or a lost publication), or its close was refused: they get no answer until it is published (POST /v1/proposals/{id}/publish): publish at once, and extend the vote too if its close is less than about 70 minutes away (README "vote_unpublished")',
+  /** A proposal's stored member chunks are missing or not the ones its record names (internal/ballot/store.go): the vote can't go on. */
+  vote_chunk_missing: 'A proposal\'s stored members are missing or changed in the table: its casts, status, close, publication and extension all fail until the table is restored (README "vote_chunk_missing")',
+  /** The vote's close passed by the service's clock but not the timestamp authority's (internal/ballot/close.go): not counted yet. */
+  count_clock_ahead: 'A vote\'s close has passed by the service\'s clock but not by the timestamp authority\'s: the service\'s clock is ahead. The vote is not counted (still collecting) until the authority\'s time passes the close; check both clocks (README "count_clock_ahead")',
+  /** The timestamp authority's time couldn't be had or verified before a count (internal/ballot/close.go): the vote is not counted. */
+  tsa_unavailable: 'Before counting a vote, the service could not get or verify the timestamp authority\'s time: the vote is not counted until it can (README "count_clock_ahead"); look at the ERROR line for why',
+  /** The results' bundle was timestamped before the close (internal/publish/publish.go): not published; the clock is ahead of the timestamp authority's. */
+  results_stamped_early: 'A vote\'s results were timestamped before their close: the service\'s clock is more than a minute ahead of the timestamp authority\'s. They are not published; check both clocks (the task\'s and the authority\'s), then close again (POST /v1/proposals/{id}/close) (README "results_stamped_early")',
+  /** A proposal's or an extension's bundle that a member vault would refuse (internal/ballot, internal/vaultroots): members are not sent it. */
+  proposal_bundle_unverified: 'A proposal\'s or an extension\'s Sigstore bundle does not verify against the trusted roots a supported vault release pins: members are not sent it (a vault that asks for a proposal or reads the site still gets it and checks it itself; an extension stays in effect on the site and is never sent). Look at the ERROR line; if Sigstore rotated a key, the vault release with the new roots must ship first (README "proposal_bundle_unverified")',
+  /** The results' bundle failed its timestamp check (internal/publish/publish.go): not published. */
+  results_bundle_unverified: 'A vote\'s results bundle failed its timestamp check (TSA signature, trusted root or validity): the results are not published; look at the ERROR line, then close again (README "results_bundle_unverified")',
+  /** The anchor signer doesn't answer the background probe (cmd/service-vault anchorsource.go): documents wait, calls are retried. */
+  anchor_signer_unavailable: 'The anchor signer does not answer the service\'s probe: documents are not published until it does (calls fail and are retried); sign-ins and approvals go on. Check the signer (its account\'s alarms) and the invoke permission (README "anchor_signer_unavailable")',
+  /** The anchor signer answered under a key other than the one listed (internal/publish/signer.go): nothing is kept from that answer. */
+  anchor_key_changed: 'The anchor signer answered under another anchor key than the pinned one (SV_ANCHOR_KEY): nothing from that answer is used. Treat it as a security event: check the signer account and its key (README "anchor_key_changed")',
+  /** The signer returned a bundle not signed by the pinned key over the document (internal/publish/signer.go): not kept. */
+  signer_bundle_unverified: 'The anchor signer returned a bundle whose signature is not the pinned anchor key\'s over the document: it is not kept, and the document is not taken as published. Treat it as a security event (README "signer_bundle_unverified")',
   /** A stored ballot failed the count's re-check and was left out (internal/ballot/close.go): the results may differ from what members were told. */
   ballot_not_counted: 'A stored ballot was not counted: it failed the count\'s re-check (tag, credential signature or time); look at the ERROR line for the proposal and tag',
+  /** Members of a vote left with no record of when (internal/ballot/close.go): counted as removed; BALLOT-PROTOCOL §7, 0.14.2. */
+  removed_unknown: 'Members of a vote left with no record of when they left (removed before leave times were recorded, or counted more than 60 days after the removal): counts.removed counts them; look at the ERROR line for the proposal.',
+  /** A removed connection's receive keys could not be kept (internal/peer/kept.go): a cast it made before the removal and not yet handled is lost. */
+  kept_keys_failed: 'A removed connection\'s receive keys could not be kept: a vote it cast before the removal and not yet handled is lost; look at the ERROR line for the connection.',
+  /** An admin's governance key can't be pinned yet: the peer doesn't know the admin's connection (internal/approval/approval.go, a WARN, at most hourly per admin). Until it can, that admin's governance approvals don't count. */
+  gov_migration_waiting: 'An admin\'s governance key is not pinned yet because the service doesn\'t know that admin\'s connection: their governance approvals (admin set, re-pin, proposals, extensions, contract templates) don\'t count until it does (README "gov_migration_waiting")',
   /** A removed connection left fewer admins than the threshold (internal/approval/approval.go): no approval can pass. */
-  admins_short: 'An admin connection was removed and fewer admins than the threshold remain: no approval can pass until the operator recovers the set (README "Recovering admins")',
+  admins_short: 'Fewer admins than the threshold: no approval can pass. Logged every minute while the set is short (at start too), so it stays raised until the operator recovers the set (README "Recovering admins")',
 } as const;
 
 /**
@@ -166,6 +224,13 @@ export interface ServiceVaultStackProps extends cdk.StackProps {
    */
   readonly testSignIns?: boolean;
   /**
+   * A date (YYYY-MM-DD): the first start that sees it ends every connection
+   * and records that it ran (SV_END_ALL_CONNECTIONS; README "Rolling back",
+   * the runbook step after a rollback across the release-29 marker). Context
+   * is not remembered: the next deploy without it unsets it.
+   */
+  readonly endAllConnections?: string;
+  /**
    * Send an approval challenge with the approval's own expiry, at most 24
    * hours, and remind only admins holding no live challenge
    * (SV_LONG_APPROVAL_CHALLENGES; VAULT-MESSAGING 0.82.0 §10.4). Set it for a
@@ -214,6 +279,14 @@ export interface ServiceVaultStackProps extends cdk.StackProps {
    * wouldn't start. Default off.
    */
   readonly keystoreContextRequired?: boolean;
+  /**
+   * The anchor key, pinned: its SubjectPublicKeyInfo (DER) in standard
+   * base64 (SV_ANCHOR_KEY). Required with anchorSignerFunctionArn: the
+   * service certifies and lists only this key, and checks every answer
+   * and bundle of the signer against it. The owner takes it from the
+   * signer account (`aws kms get-public-key` on the key's alias).
+   */
+  readonly anchorKeySpki?: string;
 }
 
 /**
@@ -332,6 +405,12 @@ export class ServiceVaultStack extends cdk.Stack {
         throw new Error(`testSignIns is for the staging deployment only: members of a real service must sign in themselves (envName is "${envName}")`);
       }
       approvalEnv.SV_TEST_SIGNINS = 'true';
+    }
+    if (props.endAllConnections !== undefined) {
+      if (!isCalendarDate(props.endAllConnections)) {
+        throw new Error(`endAllConnections must be a date, YYYY-MM-DD (got "${props.endAllConnections}")`);
+      }
+      approvalEnv.SV_END_ALL_CONNECTIONS = props.endAllConnections;
     }
     const prefix = `vettid-service-vault-${envName}`;
     const exportPrefix = `ServiceVault-${envName}`;
@@ -532,10 +611,27 @@ export class ServiceVaultStack extends cdk.Stack {
       if (props.anchorSignerFunctionArn.split(':')[4] === this.account) {
         throw new Error('anchorSignerFunctionArn must be in the signer account, not in this one');
       }
+      if (!props.votesUrl) {
+        throw new Error('anchorSignerFunctionArn needs votesUrl: the signer publishes to the votes site');
+      }
+      if (!props.anchorKeySpki || !/^MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE[A-Za-z0-9+/]{86}==$/.test(props.anchorKeySpki)) {
+        throw new Error('anchorSignerFunctionArn needs anchorKeySpki: the P-256 anchor key\'s SPKI in standard base64 (the key is pinned, never learned from the signer)');
+      }
       taskDef.taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
         sid: 'InvokeAnchorSigner', actions: ['lambda:InvokeFunction'], resources: [props.anchorSignerFunctionArn],
       }));
     }
+    // The marker that the anchor key has moved to the signer
+    // (SV_ANCHOR_MOVED_PARAM; GC #7406 §7 step 1). The owner creates it at
+    // the cutover (the runbook); this stack never does, and the task may
+    // read it but never write or delete it. Once it exists, the daemon
+    // refuses to start without the signer.
+    const anchorMovedParam = anchorMovedParameterName(envName);
+    taskDef.taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
+      sid: 'ReadAnchorMovedMarker',
+      actions: ['ssm:GetParameter'],
+      resources: [cdk.Arn.format({ service: 'ssm', resource: 'parameter', resourceName: anchorMovedParam.slice(1) }, this)],
+    }));
     taskDef.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: 'PublishTlsPin',
@@ -580,6 +676,8 @@ export class ServiceVaultStack extends cdk.Stack {
         // (BALLOT-PROTOCOL §3.3; owner decision 2026-10-29).
         SV_SIGSTORE: envName === 'prod' ? 'production' : 'staging',
         ...(props.votesUrl ? { SV_VOTES_URL: props.votesUrl } : {}),
+        ...(props.anchorSignerFunctionArn ? { SV_ANCHOR_SIGNER: props.anchorSignerFunctionArn, SV_ANCHOR_KEY: props.anchorKeySpki! } : {}),
+        SV_ANCHOR_MOVED_PARAM: anchorMovedParam,
         SV_KMS_KEY_ID: this.key.keyArn,
         SV_LISTEN: `:${API_PORT}`,
         SV_WEBHOOK_URL: props.webhookUrl,

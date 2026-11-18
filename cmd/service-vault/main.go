@@ -17,10 +17,12 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -32,6 +34,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -42,6 +45,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
+	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
@@ -62,6 +66,7 @@ import (
 	"github.com/vettid/service-vault/internal/signin"
 	"github.com/vettid/service-vault/internal/store"
 	"github.com/vettid/service-vault/internal/tlsid"
+	"github.com/vettid/service-vault/internal/vaultroots"
 	"github.com/vettid/service-vault/internal/webhook"
 	sdkwebhook "github.com/vettid/service-vault/sdk/go/webhook"
 	"github.com/vettid/service-vault/vote"
@@ -141,10 +146,33 @@ type Config struct {
 	// TestSignIns serves POST /v1/signins/unsigned (SV_TEST_SIGNINS, default
 	// false): for test deployments only.
 	TestSignIns bool
+	// EndAllConnections (SV_END_ALL_CONNECTIONS, a date YYYY-MM-DD) ends
+	// every connection at the first start that sees that date (README
+	// "Rolling back"; docs/RELEASE-29.md section 11).
+	EndAllConnections string
 	// RecordKeyVersion is the lowest record key version to use
 	// (SV_RECORD_KEY_VERSION, default 1; README "Rotating the record key").
 	RecordKeyVersion uint32
+	// AnchorSigner is the AnchorSigner function's unqualified ARN, in the
+	// signer's own account (SV_ANCHOR_SIGNER; key protection, GC #7406):
+	// with it, documents are published through the signer and this service
+	// never holds the anchor key.
+	AnchorSigner string
+	// AnchorMovedParam is the SSM parameter that marks the anchor key as
+	// moved to the signer (SV_ANCHOR_MOVED_PARAM). Once it exists, the
+	// daemon refuses to start without AnchorSigner, and never reads the
+	// anchor-key blob. Required with ballots unless AnchorSigner is set.
+	AnchorMovedParam string
+	// AnchorKey pins the anchor key: its SubjectPublicKeyInfo, DER
+	// (SV_ANCHOR_KEY, standard base64, set by the owner). Required with
+	// AnchorSigner: only this key is certified and listed, and every
+	// answer and bundle of the signer is checked against it. Without the
+	// signer, if set, the stored key must be this one.
+	AnchorKey []byte
 }
+
+// anchorSignerARN is a Lambda function's unqualified ARN.
+var anchorSignerARN = regexp.MustCompile(`^arn:aws[a-z-]*:lambda:[a-z0-9-]+:[0-9]{12}:function:[A-Za-z0-9_-]+$`)
 
 // Bounds of the approval settings (chosen; not in the spec).
 const (
@@ -263,6 +291,12 @@ func configFromEnv(getenv func(string) string) (*Config, error) {
 	default:
 		return nil, errors.New("SV_TEST_SIGNINS: true or false")
 	}
+	if v := strings.TrimSpace(getenv("SV_END_ALL_CONNECTIONS")); v != "" {
+		if _, err := time.Parse(time.DateOnly, v); err != nil {
+			return nil, errors.New("SV_END_ALL_CONNECTIONS: a date, YYYY-MM-DD")
+		}
+		c.EndAllConnections = v
+	}
 	c.RecordKeyVersion = 1
 	if v := strings.TrimSpace(getenv("SV_RECORD_KEY_VERSION")); v != "" {
 		n, err := strconv.ParseUint(v, 10, 32)
@@ -273,6 +307,29 @@ func configFromEnv(getenv func(string) string) (*Config, error) {
 	}
 	if err := approval.CheckServiceName(c.ServiceName); err != nil {
 		return nil, fmt.Errorf("SV_SERVICE_NAME: %w", err)
+	}
+	c.AnchorSigner = strings.TrimSpace(getenv("SV_ANCHOR_SIGNER"))
+	c.AnchorMovedParam = strings.TrimSpace(getenv("SV_ANCHOR_MOVED_PARAM"))
+	if c.AnchorSigner != "" && (c.VotesURL == "" || !anchorSignerARN.MatchString(c.AnchorSigner)) {
+		return nil, errors.New("SV_ANCHOR_SIGNER: a Lambda function's unqualified ARN, with SV_VOTES_URL")
+	}
+	if v := strings.TrimSpace(getenv("SV_ANCHOR_KEY")); v != "" {
+		spki, err := base64.StdEncoding.DecodeString(v)
+		if err != nil {
+			return nil, errors.New("SV_ANCHOR_KEY: not standard base64")
+		}
+		if _, err := p256(spki); err != nil {
+			return nil, fmt.Errorf("SV_ANCHOR_KEY: %w", err)
+		}
+		c.AnchorKey = spki
+	}
+	if c.AnchorSigner != "" && c.AnchorKey == nil {
+		return nil, errors.New("SV_ANCHOR_KEY is required with SV_ANCHOR_SIGNER: the anchor key is pinned, never learned from the signer")
+	}
+	if c.BallotsTable != "" && c.AnchorSigner == "" && c.AnchorMovedParam == "" {
+		// Without the marker's name, a moved key couldn't be told from one
+		// never moved: fail closed.
+		return nil, errors.New("SV_ANCHOR_MOVED_PARAM is required with SV_BALLOTS_TABLE unless SV_ANCHOR_SIGNER is set")
 	}
 	return c, nil
 }
@@ -365,8 +422,13 @@ func serve(args []string) error {
 			Type: ssmtypes.ParameterTypeString, Overwrite: aws.Bool(true)})
 		return err
 	}
-	if err := publishPin(ctx); err != nil {
-		return fmt.Errorf("publish TLS pin: %w", err)
+	// The table's identity key (GC #9109), before anything that reads the
+	// records, signs, sends, answers or publishes this keystore's TLS pin:
+	// under another key the service stays up, held (owner a, #10417).
+	if m, err := identityThenPin(ctx, records, keys.IK, publishPin); err != nil {
+		return err
+	} else if m != nil {
+		return runHeld(ctx, stop, cfg.Listen, tlsid.ServerConfig(cert), tbl, log, m)
 	}
 	// Published again every hour: a stack update that touches the
 	// parameter puts back its "unset", and the API's client would then
@@ -412,8 +474,8 @@ func serve(args []string) error {
 		return fmt.Errorf("approvals: %w", err)
 	}
 	svc.Approvals = approvals
-	pc := peer.Config{Keys: keys, Relay: rc, RelayURL: cfg.RelayURL, Profile: cfg.Profile, Store: records,
-		Events: svc, Log: log}
+	pc := peer.Config{Keys: keys, Relay: peer.OneDepositAttempt(rc), RelayURL: cfg.RelayURL, Profile: cfg.Profile, Store: records,
+		Events: svc, Log: log, EndAllConnections: cfg.EndAllConnections}
 	var ballots *ballot.RecordStore
 	signIK := func(label string, msg []byte) ([]byte, error) { return suite.Sign(keys.IK, label, msg) }
 	if cfg.BallotsTable != "" {
@@ -427,7 +489,7 @@ func serve(args []string) error {
 		case err != nil:
 			return err
 		default:
-			ballots = &ballot.RecordStore{Records: records, Copy: &ballot.SealedCopy{Inner: raw, Seal: cs.Seal, Open: cs.Open}}
+			ballots = &ballot.RecordStore{Records: records, Copy: &ballot.SealedCopy{Inner: raw, Seal: cs.Seal, Open: cs.Open}, Log: log}
 			pc.Votes = &ballot.Box{Store: ballots, Sign: signIK, Log: log}
 		}
 	}
@@ -447,50 +509,64 @@ func serve(args []string) error {
 	svc.Peer = p
 	var proposals api.Proposals
 	var anchorInfo *api.AnchorKey
+	// Member sends run under their own context: they go on through the
+	// HTTP drain at shutdown, which then waits for them (bounded).
+	sendsCtx, stopSends := context.WithCancel(context.Background())
+	defer stopSends()
+	waitSends := func() {}
+	stopQueueing := func() {}
 	if ballots != nil {
 		// Publishing (BALLOT-PROTOCOL §3.3) needs SV_VOTES_URL; without it,
 		// creating a proposal answers publication_not_configured.
-		ak, err := keystore.LoadOrCreate(ctx, &keystore.AWSKMS{Client: ac.kms}, cfg.KMSKeyID, tbl.Blobs(), keystore.AnchorKeyName, keystore.NewAnchorKey)
-		if err != nil {
-			return fmt.Errorf("anchor key: %w", err)
-		}
-		akPriv, err := ak.Private()
+		ls := &publish.LambdaSigner{Client: ac.lambda, FunctionARN: cfg.AnchorSigner}
+		as, err := setupAnchor(ctx, cfg, ls, ac.ssm, &keystore.AWSKMS{Client: ac.kms}, tbl.Blobs())
 		if err != nil {
 			return err
 		}
-		spki, err := x509.MarshalPKIXPublicKey(&akPriv.PublicKey)
-		if err != nil {
-			return err
+		if as.signer != nil {
+			go watchSigner(ctx, ls, as.spki, log)
 		}
-		h := sha256.Sum256(spki)
+		// Only the pinned key (or the stored one, before the signer) is
+		// certified.
+		h := sha256.Sum256(as.spki)
 		cert, err := signIK(vote.LabelAnchorKey, h[:])
 		if err != nil {
 			return err
 		}
-		anchorInfo = &api.AnchorKey{Key: spki, Cert: cert, IK: keys.IKPublic(), Sigstore: cfg.Sigstore}
-		mgr := &ballot.Manager{Store: ballots, Sign: signIK, IK: keys.IKPublic(), Roster: p, Sender: p,
+		anchorInfo = &api.AnchorKey{Key: as.spki, Cert: cert, IK: keys.IKPublic(), Sigstore: cfg.Sigstore}
+		mgr := &ballot.Manager{Store: ballots, Sign: signIK, IK: keys.IKPublic(), Roster: p, Sender: p, Background: sendsCtx,
 			Catcher: p, Approvals: approvals, NewID: envelope.NewULID, Now: time.Now, Log: log}
+		waitSends, stopQueueing = mgr.Wait, mgr.StopSends
 		approvals.EligibleCount = func(context.Context) (int, error) { return len(p.Eligible()), nil }
 		approvals.ProposalTitle = func(ctx context.Context, id string) (string, bool, error) {
-			o, err := ballots.OpenProposal(ctx, id)
-			if err != nil || o == nil {
-				return "", false, err
-			}
-			pr, err := o.Parsed()
-			if err != nil {
+			// The document alone: the members aren't read for a title.
+			pr, err := ballots.ProposalDocument(ctx, id)
+			if err != nil || pr == nil {
 				return "", false, err
 			}
 			return pr.Title, true, nil
 		}
 		if cfg.VotesURL != "" {
-			anc, err := anchor.New(cfg.Sigstore, akPriv)
-			if err != nil {
-				return err
-			}
 			mgr.Timestamp = func(bundle json.RawMessage, doc []byte) (int64, error) {
 				return anchor.TimestampTime(cfg.Sigstore, bundle, doc)
 			}
-			mgr.Publisher = &publish.Publisher{URL: cfg.VotesURL, Anchor: anc, Client: anchor.Client(time.Minute), Records: records, Log: log}
+			mgr.AuthorityTime = authorityTime(as.anc, cfg.Sigstore)
+			// What members are sent is checked with their vaults'
+			// verifier: the current anchor key, every supported release's
+			// pinned roots (not the signed service list; README).
+			// With none pinned for this instance there is no check, and
+			// creating a proposal answers bundle_check_not_configured
+			// before its approval is used.
+			anchorKey := as.spki
+			if _, err := vaultroots.Sets(cfg.Sigstore); err != nil {
+				log.Error("no vault release pins vote trust roots for this Sigstore instance: proposals are refused",
+					"alarm", "proposal_bundle_unverified", "sigstore", cfg.Sigstore, "err", err.Error())
+			} else {
+				mgr.CheckBundle = func(doc []byte, bundle json.RawMessage, notAfter time.Time) error {
+					return vaultroots.Check(cfg.Sigstore, [][]byte{anchorKey}, doc, bundle, time.Now(), notAfter)
+				}
+			}
+			mgr.Publisher = votesPublisher(cfg.VotesURL, as, records, mgr, log)
 		}
 		if rebuild {
 			// The table was restored: ballots it lost are in the copy (§6).
@@ -557,16 +633,186 @@ func serve(args []string) error {
 	sctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(sctx)
+	// The member sends: nothing more is queued, and those running get at
+	// most sendsGrace, within the 20 seconds above, so that the heartbeat
+	// is still cleared below. Then they are stopped and given
+	// sendsStopWait to return, so that none still writes the peer's state
+	// after "stopped".
+	stopQueueing()
+	sendsDone := make(chan struct{})
+	go func() { waitSends(); close(sendsDone) }()
+	select {
+	case <-sendsDone:
+	case <-sctx.Done():
+	case <-time.After(sendsGrace):
+	}
+	stopSends()
+	select {
+	case <-sendsDone:
+	default:
+		returned := true
+		select {
+		case <-sendsDone:
+		case <-time.After(sendsStopWait):
+			returned = false
+		}
+		log.Warn("member sends stopped at shutdown: members not yet sent learn of them as BALLOT-PROTOCOL §4.2, §8.3 and §10 say",
+			"all_returned", returned)
+	}
 	if runErr == nil {
 		if err := <-peerErr; err != nil && !errors.Is(err, context.Canceled) {
 			runErr = fmt.Errorf("peer: %w", err)
 		}
 	}
-	if err := tbl.ClearHeartbeat(sctx); err != nil {
+	hctx, hcancel := context.WithTimeout(context.Background(), heartbeatWriteTimeout)
+	defer hcancel()
+	if err := tbl.ClearHeartbeat(hctx); err != nil {
 		log.Warn("clear heartbeat", "err", err.Error())
 	}
 	log.Info("stopped")
 	return runErr
+}
+
+// identityHeld checks the table's identity key (peer.CheckIdentity, with
+// the approvals' audit log as evidence for a table from before the
+// record): a mismatch is returned for runHeld, any other failure as an
+// error.
+func identityHeld(ctx context.Context, records interface {
+	peer.Store
+	peer.Pager
+}, ik ed25519.PrivateKey) (*peer.IdentityMismatch, error) {
+	err := peer.CheckIdentity(ctx, records, ik, peer.ServiceIKIn(records, approval.KindAudit))
+	var m *peer.IdentityMismatch
+	if errors.As(err, &m) {
+		return m, nil
+	}
+	return nil, err
+}
+
+// identityThenPin is serve's first step on the table: the identity check
+// and, only when it passes, the TLS pin's first publication. A mismatch
+// is returned for runHeld with the pin untouched, so the application's
+// client keeps the right one.
+func identityThenPin(ctx context.Context, records interface {
+	peer.Store
+	peer.Pager
+}, ik ed25519.PrivateKey, publishPin func(context.Context) error) (*peer.IdentityMismatch, error) {
+	m, err := identityHeld(ctx, records, ik)
+	if err != nil || m != nil {
+		return m, err
+	}
+	if err := publishPin(ctx); err != nil {
+		return nil, fmt.Errorf("publish TLS pin: %w", err)
+	}
+	return nil, nil
+}
+
+// runHeld runs the service held by an identity-key mismatch (GC #9109;
+// owner a, #10417): the keystore and the records don't belong together,
+// so nothing reads the records, signs, sends or answers a member. It
+// raises the alarm at once and again every heldAlarmEvery for as long as
+// it is held (owner a, #10446), keeps the heartbeat (a table restore must
+// see the service running), and serves heldHandler until it is stopped.
+// /health stays 200, so ECS doesn't replace the task in a loop: the alarm
+// is the signal. A start under the right key finds the table as it was.
+func runHeld(ctx context.Context, stop func(), listen string, tlsConfig *tls.Config, tbl *store.Table, log *slog.Logger, m *peer.IdentityMismatch) error {
+	raise := func() {
+		log.Error("the service's identity key is not the one its table's records were made under: held, nothing runs until the right keys are back",
+			"alarm", "identity_key_mismatch", "from", m.From, "err", m.Error())
+	}
+	raise()
+	alarmDone := startHeldAlarm(ctx, heldAlarmEvery, raise)
+	srv := &http.Server{
+		Addr:              listen,
+		Handler:           heldHandler(),
+		TLSConfig:         tlsConfig,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelWarn),
+	}
+	start, err := firstHeartbeat(ctx, tbl.Heartbeat, time.Now())
+	if err != nil {
+		return err
+	}
+	hbErr := make(chan error, 1)
+	go func() {
+		t := time.NewTicker(store.HeartbeatInterval)
+		defer t.Stop()
+		if err := heartbeat(ctx, tbl.Heartbeat, start, t.C, log); err != nil {
+			hbErr <- err
+		}
+	}()
+	srvErr := make(chan error, 1)
+	go func() { srvErr <- srv.ListenAndServeTLS("", "") }()
+	log.Info("serving held", "version", version, "listen", listen)
+	var runErr error
+	select {
+	case <-ctx.Done():
+	case err := <-srvErr:
+		runErr = fmt.Errorf("api: %w", err)
+	case runErr = <-hbErr:
+	}
+	stop()
+	<-alarmDone // nothing raises it after "stopped"
+	sctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(sctx)
+	hctx, hcancel := context.WithTimeout(context.Background(), heartbeatWriteTimeout)
+	defer hcancel()
+	if err := tbl.ClearHeartbeat(hctx); err != nil {
+		log.Warn("clear heartbeat", "err", err.Error())
+	}
+	log.Info("stopped")
+	return runErr
+}
+
+// heldAlarmEvery is how often runHeld raises its alarm again (owner a,
+// #10446). The stack's alarm sums the alarm lines over 5 minutes and
+// treats a period without one as OK; a line every minute puts about five
+// in every period, so it stays raised while held, a late evaluation of a
+// period's start included. CloudWatch notifies on the change to ALARM
+// only, so this sends one notification per hold.
+const heldAlarmEvery = time.Minute
+
+// startHeldAlarm raises the alarm every interval until ctx ends; the
+// channel closes once it has stopped.
+func startHeldAlarm(ctx context.Context, every time.Duration, raise func()) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if ctx.Err() != nil {
+					return
+				}
+				raise()
+			}
+		}
+	}()
+	return done
+}
+
+// heldHandler is the API while held (runHeld): GET /health answers 200
+// {"status":"held"}, and every other request 503 identity_key_mismatch.
+func heldHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		if r.Method == http.MethodGet && r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"held"}` + "\n"))
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"identity_key_mismatch"}` + "\n"))
+	})
 }
 
 // The heartbeat's limits. A restore takes the service for stopped once
@@ -574,11 +820,19 @@ func serve(args []string) error {
 // daemon must have stopped by then. It stops once heartbeatStopAfter has
 // passed since its last good write; each write gives up after
 // heartbeatWriteTimeout. At worst the stop starts at about 70 seconds
-// (a tick at 60 seconds plus a write timing out) and shutdown takes 20
-// more, well inside the 2 minutes, whatever DynamoDB does.
+// (a tick at 60 seconds plus a write timing out) and shutdown takes at
+// most 32 more (the HTTP drain and the member sends' grace within 20,
+// sendsStopWait, then the heartbeat's clear), inside the 2 minutes,
+// whatever DynamoDB does. (The wait for the peer to return is not bounded
+// here; it returns once ctx is done.)
 const (
 	heartbeatStopAfter    = store.HeartbeatStale / 2
 	heartbeatWriteTimeout = 10 * time.Second
+	// sendsGrace is how long a shutdown waits for member sends to end.
+	sendsGrace = 10 * time.Second
+	// sendsStopWait is how long it then waits for them to return, once
+	// stopped.
+	sendsStopWait = 2 * time.Second
 )
 
 // firstHeartbeat writes the first heartbeat, stamped now, under
@@ -627,9 +881,10 @@ func heartbeat(ctx context.Context, write func(context.Context, time.Time) error
 
 // awsClients are the AWS clients the daemon uses.
 type awsClients struct {
-	ddb *dynamodb.Client
-	kms *kms.Client
-	ssm *ssm.Client
+	ddb    *dynamodb.Client
+	kms    *kms.Client
+	ssm    *ssm.Client
+	lambda *lambda.Client // the anchor signer, in its own account
 }
 
 // newAWSClients loads the default AWS configuration; endpoint, when set,
@@ -648,6 +903,12 @@ func newAWSClients(ctx context.Context, endpoint string) (*awsClients, error) {
 		ddb: dynamodb.NewFromConfig(awsCfg, func(o *dynamodb.Options) { setEndpoint(&o.BaseEndpoint, ep) }),
 		kms: kms.NewFromConfig(awsCfg, func(o *kms.Options) { setEndpoint(&o.BaseEndpoint, ep) }),
 		ssm: ssm.NewFromConfig(awsCfg, func(o *ssm.Options) { setEndpoint(&o.BaseEndpoint, ep) }),
+		// The signer's retries are this service's (the claim makes them a
+		// resume), so the SDK makes one attempt.
+		lambda: lambda.NewFromConfig(awsCfg, func(o *lambda.Options) {
+			setEndpoint(&o.BaseEndpoint, ep)
+			o.RetryMaxAttempts = 1
+		}),
 	}, nil
 }
 
@@ -751,6 +1012,11 @@ func admin(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// Nothing is written into a table whose identity key isn't this
+	// keystore's (GC #9109): the daemon holds on it, and so does this.
+	if err := identityVerified(ctx, kc, cfg.KMSKeyID, tbl.Blobs(), records); err != nil {
+		return err
+	}
 	if *conn != "" {
 		return confirmBootstrap(ctx, records, *conn, *fprint, out)
 	}
@@ -843,6 +1109,29 @@ func confirmBootstrap(ctx context.Context, st peer.Store, conn, fp string, out i
 	return nil
 }
 
+// identityVerified checks, without writing, that the keystore's identity
+// key is the table's (peer.VerifyIdentity, the audit log as evidence),
+// for a command that writes the table outside the daemon.
+func identityVerified(ctx context.Context, kc keystore.KMS, keyID string, blobs keystore.Blobs, records interface {
+	peer.Store
+	peer.Pager
+}) error {
+	secrets, err := keystore.LoadOrCreate(ctx, kc, keyID, blobs, keystore.SecretsName,
+		func() (*keystore.Secrets, error) { return nil, errNoSecrets })
+	if err != nil {
+		return fmt.Errorf("keystore: %w", err)
+	}
+	keys, err := peer.KeysFromSeeds(secrets.Peer)
+	if err != nil {
+		return err
+	}
+	err = peer.VerifyIdentity(ctx, records, keys.IK, peer.ServiceIKIn(records, approval.KindAudit))
+	if errors.Is(err, peer.ErrIdentityMismatch) {
+		return fmt.Errorf("refused: the service is held (README \"identity_key_mismatch\"): %w", err)
+	}
+	return err
+}
+
 // armBootstrap computes the email's index key under the service vault's
 // pepper and arms the bootstrap for it.
 func armBootstrap(ctx context.Context, kc keystore.KMS, keyID string, blobs keystore.Blobs, st peer.Store, addr string, out io.Writer) error {
@@ -922,9 +1211,31 @@ func healthcheck(listen string) error {
 	return nil
 }
 
+// authorityTime is the ballot manager's and the publisher's AuthorityTime:
+// the timestamp authority's verified time (BALLOT-PROTOCOL §7, 0.13.12),
+// never this clock's.
+func authorityTime(anc *anchor.Anchorer, instance string) func(context.Context) (int64, error) {
+	return func(ctx context.Context) (int64, error) { return anchor.AuthorityTime(ctx, anc, instance) }
+}
+
+// votesPublisher is the ballot manager's publisher: its results checked by
+// the manager's Timestamp, its re-anchors waiting on its AuthorityTime.
+// With the signer, the signer anchors and uploads; this service keeps
+// the bundles and reads the site (its Client).
+func votesPublisher(url string, as *anchorSetup, records peer.Store, mgr *ballot.Manager, log *slog.Logger) *publish.Publisher {
+	p := &publish.Publisher{URL: url, Client: anchor.Client(time.Minute), Records: records,
+		Timestamp: mgr.Timestamp, AuthorityTime: mgr.AuthorityTime, Log: log}
+	if as.signer != nil {
+		p.Signer, p.AnchorKey = as.signer, as.spki
+	} else {
+		p.Anchor = as.anc
+	}
+	return p
+}
+
 // recordKinds is every kind the service vault stores.
 func recordKinds() []string {
-	return slices.Concat(peer.Kinds(), service.Kinds(), approval.Kinds(), ballot.Kinds(), []string{publish.KindBundle})
+	return slices.Concat(peer.Kinds(), service.Kinds(), approval.Kinds(), ballot.Kinds(), publish.Kinds())
 }
 
 // errKeysLost: a key is missing from a table that holds records. A new

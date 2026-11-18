@@ -2,8 +2,12 @@ package approval
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/vettid/service-vault/internal/peer"
 )
 
 // Only approvals of admins still in the set count toward m. With m = 2
@@ -56,5 +60,250 @@ func TestRemovedAdminBelowThresholdAlarms(t *testing.T) {
 	}
 	if !strings.Contains(f.logs.String(), "alarm=admins_short") {
 		t.Fatalf("no alarm with one admin left for m = 2:\n%s", f.logs)
+	}
+}
+
+// admins_short is logged while the set is short, at start and on ticks at
+// most every ShortAlarmEvery, across a restart, and stops with one line
+// once the set is back at the threshold (GC #11179).
+func TestAdminsShortHeldWhileShort(t *testing.T) {
+	f := newFixture(t, 1)
+	ctx := context.Background()
+	count := func() int { return strings.Count(f.logs.String(), "alarm=admins_short") }
+	if err := f.m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if count() != 1 {
+		t.Fatalf("start with no admins: %d lines\n%s", count(), f.logs)
+	}
+	for _, step := range []struct {
+		advance time.Duration
+		want    int
+	}{
+		{0, 1},                             // a tick at once: not again
+		{ShortAlarmEvery - time.Second, 1}, // within the minute
+		{time.Second, 2},                   // a minute on
+		{30 * time.Second, 2},
+		{30 * time.Second, 3},
+		{10 * ShortAlarmEvery, 4},
+	} {
+		f.clk.Advance(step.advance)
+		if err := f.m.Tick(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if count() != step.want {
+			t.Fatalf("after %s: %d lines, want %d\n%s", step.advance, count(), step.want, f.logs)
+		}
+	}
+	// A restart: a new manager on the same store logs it at start.
+	m2 := &Manager{Peer: f.p, Store: f.st, Pager: f.st, Hooks: f.hk.out, ServiceName: f.m.ServiceName, Threshold: 1, Now: f.clk.Now, Log: f.m.Log}
+	if err := m2.Start(ctx); err != nil || count() != 5 {
+		t.Fatalf("restart: %d lines, %v", count(), err)
+	}
+	// The set is filled: one "back" line, and no admins_short after.
+	b := m2.batch(f.clk.Now())
+	if err := b.setAdmins([]string{"c1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.apply(ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.p.active["c1"] = true
+	for i := 0; i < 3; i++ {
+		f.clk.Advance(ShortAlarmEvery)
+		if err := m2.Tick(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if count() != 5 || strings.Count(f.logs.String(), "admin set back at the threshold") != 1 {
+		t.Fatalf("after the set was filled: %d alarm lines\n%s", count(), f.logs)
+	}
+}
+
+// A removal's own admins_short line counts: the next tick within the
+// minute doesn't repeat it, the one after does. A set at the threshold
+// logs nothing.
+func TestAdminsShortAfterRemoval(t *testing.T) {
+	f := newFixture(t, 2, "c1", "c2")
+	ctx := context.Background()
+	count := func() int { return strings.Count(f.logs.String(), "alarm=admins_short") }
+	if err := f.m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.m.Tick(ctx); err != nil || count() != 0 || strings.Contains(f.logs.String(), "back at the threshold") {
+		t.Fatalf("at the threshold: %d lines, %v\n%s", count(), err, f.logs)
+	}
+	if err := f.m.ConnectionRemoved(ctx, "c1"); err != nil || count() != 1 {
+		t.Fatalf("removal: %d lines, %v", count(), err)
+	}
+	if err := f.m.Tick(ctx); err != nil || count() != 1 {
+		t.Fatalf("tick at once: %d lines, %v", count(), err)
+	}
+	f.clk.Advance(ShortAlarmEvery)
+	if err := f.m.Tick(ctx); err != nil || count() != 2 {
+		t.Fatalf("a minute on: %d lines, %v", count(), err)
+	}
+}
+
+// A tick that fails while the set is short still logs admins_short each
+// minute: the set isn't known to be mended (fail secure). Here an armed
+// bootstrap's bound-connection lookup fails on every tick.
+func TestAdminsShortHeldWhenTickFails(t *testing.T) {
+	f := newFixture(t, 1)
+	ctx := context.Background()
+	count := func() int { return strings.Count(f.logs.String(), "alarm=admins_short") }
+	f.m.BootstrapKey = "boot-key"
+	f.m.BoundConnection = func(context.Context, string) (string, bool, error) { return "", false, errors.New("store fault") }
+	if err := f.m.Start(ctx); err != nil || count() != 1 {
+		t.Fatalf("start: %d lines, %v", count(), err)
+	}
+	for i := 2; i <= 4; i++ {
+		f.clk.Advance(ShortAlarmEvery)
+		if err := f.m.Tick(ctx); err == nil {
+			t.Fatal("the tick didn't fail")
+		}
+		if count() != i {
+			t.Fatalf("failing tick %d: %d lines\n%s", i, count(), f.logs)
+		}
+	}
+	// A tick that fails within the minute adds nothing.
+	if err := f.m.Tick(ctx); err == nil || count() != 4 {
+		t.Fatalf("within the minute: %d lines, %v", count(), err)
+	}
+}
+
+// failGet fails every Get while fail is set, and the next once Gets of
+// the admin set: a store fault.
+type failGet struct {
+	peer.Store
+	fail bool
+	once int
+}
+
+func (s *failGet) Get(ctx context.Context, kind, id string) ([]byte, bool, error) {
+	if s.fail {
+		return nil, false, errors.New("store fault")
+	}
+	if kind == kindAdmins && s.once > 0 {
+		s.once--
+		return nil, false, errors.New("store fault")
+	}
+	return s.Store.Get(ctx, kind, id)
+}
+
+// A tick that can't read the admin set at all keeps a short set's alarm
+// raised, once a minute; one that never saw the set short logs nothing.
+func TestAdminsShortHeldWhenStateUnreadable(t *testing.T) {
+	f := newFixture(t, 1)
+	ctx := context.Background()
+	count := func() int { return strings.Count(f.logs.String(), "alarm=admins_short") }
+	st := &failGet{Store: f.st}
+	f.m.Store = st
+	if err := f.m.Start(ctx); err != nil || count() != 1 {
+		t.Fatalf("start: %d lines, %v", count(), err)
+	}
+	st.fail = true
+	for i := 2; i <= 3; i++ {
+		f.clk.Advance(ShortAlarmEvery)
+		if err := f.m.Tick(ctx); err == nil || count() != i {
+			t.Fatalf("unreadable tick %d: %d lines, %v", i, count(), err)
+		}
+	}
+	if err := f.m.Tick(ctx); err == nil || count() != 3 {
+		t.Fatalf("within the minute: %d lines, %v", count(), err)
+	}
+	// A manager that never saw the set short says nothing on a fault.
+	g := newFixture(t, 1, "c1")
+	gst := &failGet{Store: g.st}
+	g.m.Store = gst
+	if err := g.m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	gst.fail = true
+	g.clk.Advance(ShortAlarmEvery)
+	if err := g.m.Tick(ctx); err == nil || strings.Contains(g.logs.String(), "admins_short") {
+		t.Fatalf("not short: %v\n%s", err, g.logs)
+	}
+}
+
+// The alarm's own read of the admin set failing ends nothing else in the
+// tick: an approval past its expiry is still settled in that tick.
+func TestAdminsShortReadFailureDoesNotStopTick(t *testing.T) {
+	f := newFixture(t, 1, "c1")
+	ctx := context.Background()
+	c := f.create(ActionContractTemplateChange, "Open", `{}`)
+	st := &failGet{Store: f.st}
+	f.m.Store = st
+	f.clk.Advance(DefaultTTL + time.Minute)
+	st.once = 1 // the alarm's read, the first of the tick
+	if err := f.m.Tick(ctx); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if st.once != 0 {
+		t.Fatal("the alarm's read didn't fail")
+	}
+	if s := f.status(c.ID); s.Status != StatusExpired {
+		t.Fatalf("status %s: the tick stopped at the alarm's read", s.Status)
+	}
+	// While the set is short, that failed read still holds the alarm, in
+	// a tick that otherwise succeeds.
+	g := newFixture(t, 1)
+	gst := &failGet{Store: g.st}
+	g.m.Store = gst
+	count := func() int { return strings.Count(g.logs.String(), "alarm=admins_short") }
+	if err := g.m.Start(ctx); err != nil || count() != 1 {
+		t.Fatalf("start: %d lines, %v", count(), err)
+	}
+	g.clk.Advance(ShortAlarmEvery)
+	gst.once = 1
+	if err := g.m.Tick(ctx); err != nil || gst.once != 0 || count() != 2 {
+		t.Fatalf("short, the read failed once: %d lines, %v", count(), err)
+	}
+}
+
+// failFilledRead fails, once, the first read of the admin set that would
+// find it filled: the read right after a bootstrap.
+type failFilledRead struct {
+	peer.Store
+	failed bool
+}
+
+func (s *failFilledRead) Get(ctx context.Context, kind, id string) ([]byte, bool, error) {
+	data, ok, err := s.Store.Get(ctx, kind, id)
+	if err == nil && kind == kindAdmins && !s.failed && strings.Contains(string(data), "c1") {
+		s.failed = true
+		return nil, false, errors.New("store fault")
+	}
+	return data, ok, err
+}
+
+// The bootstrapping tick's read of the set it filled failing ends nothing:
+// the tick goes on and succeeds, and the next tick logs the set back.
+func TestBootstrapReReadFailureDoesNotEndTick(t *testing.T) {
+	f := newFixture(t, 1)
+	ctx := context.Background()
+	f.m.BootstrapKey = "boot-key"
+	f.m.BoundConnection = func(context.Context, string) (string, bool, error) { return "c1", true, nil }
+	f.p.active["c1"] = true
+	if err := f.m.Tick(ctx); err != nil { // waits for the confirmation
+		t.Fatal(err)
+	}
+	if err := f.confirm("c1"); err != nil {
+		t.Fatal(err)
+	}
+	st := &failFilledRead{Store: f.st}
+	f.m.Store = st
+	if err := f.m.Tick(ctx); err != nil {
+		t.Fatalf("the bootstrapping tick: %v", err)
+	}
+	if !st.failed {
+		t.Fatal("the read after the bootstrap didn't fail")
+	}
+	if a := f.admins(); len(a) != 1 || a[0] != "c1" {
+		t.Fatalf("admins %v", a)
+	}
+	f.clk.Advance(ShortAlarmEvery)
+	if err := f.m.Tick(ctx); err != nil || !strings.Contains(f.logs.String(), "admin set back at the threshold") {
+		t.Fatalf("next tick: %v", err)
 	}
 }

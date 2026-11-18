@@ -39,8 +39,16 @@ func TestAnchorVector(t *testing.T) {
 		t.Fatal(err)
 	}
 	doc := []byte(v.Proposal)
-	p, err := ParseProposal(doc)
-	if err != nil {
+	// The captured proposal is from before 0.14.0 (it has no decision):
+	// the bundle is over its bytes, so only its service key is read here,
+	// from its canonical form (§11 item 3).
+	if _, err := checkCanonical(doc); err != nil {
+		t.Fatalf("proposal: %v", err)
+	}
+	var p struct {
+		Service []byte `json:"service"`
+	}
+	if err := json.Unmarshal(doc, &p); err != nil {
 		t.Fatalf("proposal: %v", err)
 	}
 	if !bytes.Equal(p.Service, v.ServiceIK) || h(sum(doc)) != v.ProposalHash {

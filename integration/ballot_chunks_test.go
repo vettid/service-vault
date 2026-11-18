@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -21,9 +22,13 @@ import (
 
 type closingSite struct{ site }
 
-func (closingSite) PublishResults(context.Context, string, []byte, []byte, []byte) (ballot.Receipt, error) {
+func (closingSite) PublishResults(context.Context, string, []byte, []byte, []byte, int64) (ballot.Receipt, error) {
 	now := time.Now().Unix()
 	return ballot.Receipt{Bundle: ballottest.Bundle(now, now)}, nil
+}
+
+func (closingSite) RepublishResults(_ context.Context, _ string, _, _, _ []byte, bundle json.RawMessage, _ int64) (ballot.Receipt, error) {
+	return ballot.Receipt{Bundle: bundle}, nil
 }
 
 func (closingSite) Extension(context.Context, string, int64) (*ballot.SiteExtension, error) {
@@ -37,11 +42,11 @@ func (approveAll) Consume(context.Context, string, string, []byte, ballot.Use) e
 
 type caught struct{}
 
-func (caught) Caught(context.Context, time.Time, time.Time, time.Time) (bool, int64, error) {
+func (caught) Caught(context.Context, time.Time, time.Time, time.Time, time.Time) (bool, int64, error) {
 	return true, 0, nil
 }
 
-// At ballot.MaxEligible members, on DynamoDB with sealed records: the
+// At ballot.PlannedMaxEligible members, on DynamoDB with sealed records: the
 // proposal's members and the results' rows (a row per member, voted or
 // not) are stored in chunks, every item within DynamoDB's 400 KB, and
 // read back whole; with a chunk deleted, the proposal can't be read.
@@ -57,7 +62,7 @@ func TestBallotChunksAtCapOnDynamoDB(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := make(roster, ballot.MaxEligible)
+	r := make(roster, ballot.PlannedMaxEligible)
 	for i := range r {
 		r[i] = fmt.Sprintf("01JBQZ%020d", i) // a ULID's length
 	}
@@ -66,16 +71,19 @@ func TestBallotChunksAtCapOnDynamoDB(t *testing.T) {
 	m := &ballot.Manager{Store: &ballot.RecordStore{Records: st, Copy: &ballot.MemCopy{}}, IK: ik.Public().(ed25519.PublicKey),
 		Sign:   func(label string, msg []byte) ([]byte, error) { return suite.Sign(ik, label, msg) },
 		Roster: r, Sender: sink{}, Publisher: closingSite{}, Catcher: caught{}, Approvals: approveAll{}, NewID: envelope.NewULID,
-		Now: func() time.Time { return now }, Timestamp: ballottest.Time}
+		Now: func() time.Time { return now }, Timestamp: ballottest.Time, CheckBundle: ballottest.Check,
+		AuthorityTime: func(context.Context) (int64, error) { return now.Unix(), nil }}
+	m.SetEligibleCapForTest(ballot.PlannedMaxEligible)
 	opens := now.Add(time.Hour).Unix()
 	in := ballot.ProposalInput{Title: "Adopt the 2027 budget", Choices: []ballot.ChoiceInput{{Label: "Yes"}, {Label: "No"}},
-		Quorum: vote.Quorum{MinBallots: 0}, OpensAt: opens, ClosesAt: opens + 86400, OutageRule: ballot.DefaultOutageRule}
+		Decision: vote.Decision{Rule: vote.RulePlurality},
+		Quorum:   vote.Quorum{MinBallots: 0}, OpensAt: opens, ClosesAt: opens + 86400, OutageRule: ballot.DefaultOutageRule}
 	c, err := m.Create(ctx, "apv", in)
 	if err != nil {
 		t.Fatal(err)
 	}
 	o, err := m.Store.OpenProposal(ctx, c.ProposalID)
-	if err != nil || o == nil || len(o.Members) != ballot.MaxEligible || len(o.MemberChunks) == 0 {
+	if err != nil || o == nil || len(o.Members) != ballot.PlannedMaxEligible || len(o.MemberChunks) == 0 {
 		t.Fatalf("proposal: %v (%d members)", err, len(o.Members))
 	}
 
@@ -105,11 +113,18 @@ func TestBallotChunksAtCapOnDynamoDB(t *testing.T) {
 	t.Logf("%d members in %d chunks, %d bytes of rows in %d chunks", len(o.Members), len(o.MemberChunks), len(pr.Rows), len(pr.RowChunks))
 
 	// A chunk lost: the proposal is an error, never a proposal without
-	// members.
+	// members. A running process reads its cached proposal's chunks
+	// again within a minute, and fails then; a fresh one at once.
 	if err := tbl.Peer().Apply(ctx, []peer.Change{{Kind: ballot.KindChunk, ID: o.MemberChunks[0].ID}}); err != nil {
 		t.Fatal(err)
 	}
+	later := time.Now().Add(time.Minute)
+	m.Store.Now = func() time.Time { return later }
 	if o, err := m.Store.OpenProposal(ctx, c.ProposalID); o != nil || !errors.Is(err, ballot.ErrChunkMissing) {
+		t.Fatalf("a running process, with a chunk deleted: %v", err)
+	}
+	fresh := &ballot.RecordStore{Records: st, Copy: &ballot.MemCopy{}}
+	if o, err := fresh.OpenProposal(ctx, c.ProposalID); o != nil || !errors.Is(err, ballot.ErrChunkMissing) {
 		t.Fatalf("with a chunk deleted: %v", err)
 	}
 }

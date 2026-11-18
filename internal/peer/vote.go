@@ -26,10 +26,15 @@ type VoteRequest struct {
 	// CredentialKey is the member's credential key pinned at the first
 	// signed connection.authenticate.response, or nil.
 	CredentialKey []byte
-	// Active is false once the connection is no longer active.
-	Active bool
-	Type   string
-	Body   []byte
+	// LeftAtMS is when the connection left (kept.go), in Unix
+	// milliseconds: 0 while it hasn't. An active or stale connection hasn't
+	// left; a cast whose MsgMS is at or after LeftAtMS was made after the
+	// member left (BALLOT-PROTOCOL 0.14.2 §6).
+	LeftAtMS uint64
+	// Left is the kind of the leave (LeftRemovedIn, ...), "" while none.
+	Left string
+	Type string
+	Body []byte
 	// MsgMS is the relay's time of the message, from its msg_id
 	// (RELAY-PROTOCOL §6.2), in Unix milliseconds.
 	MsgMS uint64
@@ -43,7 +48,9 @@ type VoteAnswer struct {
 }
 
 // Votes answers vote.* requests. An error is a storage failure: the
-// batch is not acknowledged, and the relay delivers it again. An error
+// batch is not acknowledged, and the relay delivers it again; if the
+// step had changes the error discards, the peer stops and the task
+// restarts first (errDiscarded). An error
 // that wraps ErrNoAnswer acknowledges the request without answering it.
 type Votes interface {
 	Vote(ctx context.Context, r *VoteRequest) (VoteAnswer, error)
@@ -64,8 +71,10 @@ func (p *Peer) vote(ctx context.Context, c *Connection, in *envelope.Inner, ikey
 		p.audit("bad_msg_id", c.ID)
 		return nil
 	}
+	// A live connection reaching here is active or stale (a suspended one
+	// is dropped at dispatch): it hasn't left.
 	a, err := p.cfg.Votes.Vote(ctx, &VoteRequest{ConnectionID: c.ID, PeerIK: c.Peer.IK, CredentialKey: c.AuthKey,
-		Active: c.State == StateActive, Type: in.Type, Body: in.Body, MsgMS: ms})
+		Type: in.Type, Body: in.Body, MsgMS: ms})
 	if err != nil {
 		return err
 	}
@@ -120,7 +129,14 @@ func (p *Peer) activeIf(keep func(*Connection) bool) []string {
 
 // SendMessage sends a message the application asks for (a vote.proposal,
 // for one) to an active connection, and returns its inner id.
-func (p *Peer) SendMessage(ctx context.Context, connID, typ string, body json.RawMessage) (string, error) {
+//
+// notAfter, when set, is when the message stops being worth delivering:
+// a deposit not made by then is dropped from the outbox.
+func (p *Peer) SendMessage(ctx context.Context, connID, typ string, body json.RawMessage, notAfter time.Time) (string, error) {
+	return p.sendMessage(ctx, connID, typ, body, notAfter, "")
+}
+
+func (p *Peer) sendMessage(ctx context.Context, connID, typ string, body json.RawMessage, notAfter time.Time, ref string) (string, error) {
 	if !envelope.ValidType(typ) {
 		return "", errors.New("peer: invalid message type")
 	}
@@ -134,6 +150,15 @@ func (p *Peer) SendMessage(ctx context.Context, connID, typ string, body json.Ra
 		return "", ErrNotFound
 	}
 	now := p.now()
+	if p.awaitingToken(c.ID) {
+		// The relay refused this member's deposits (token_expired,
+		// quota_exceeded): nothing more is queued for them until a fresh
+		// token comes, so silent members don't fill the outbox.
+		return "", ErrBusy
+	}
+	if n, size := p.voteOutboxLoad(now); n >= sendOutboxLimit.n || size >= sendOutboxLimit.bytes {
+		return "", ErrOutboxFull
+	}
 	id := p.sendTo(c, typ, body, now)
 	if id == "" {
 		if p.outboxFor(c.ID) >= MaxOutboxPerConn {
@@ -141,10 +166,74 @@ func (p *Peer) SendMessage(ctx context.Context, connID, typ string, body json.Ra
 		}
 		return "", ErrNotFound
 	}
+	if e := p.outbox[len(p.outbox)-1]; e.ConnID == c.ID && e.Op == opDeposit {
+		e.Vote, e.NotAfter = true, notAfter
+		if ref != "" {
+			// Counted from here: the drain below may deposit it already.
+			p.tally(ref, tallyUntil(notAfter, now))
+			e.Ref = ref
+		}
+	}
 	if err := p.flushAndDrain(ctx); err != nil {
 		return "", err
 	}
 	return id, nil
+}
+
+// MaxSendOutbox and MaxSendOutboxBytes bound the outbox SendMessage adds
+// to (chosen; not in the spec). A relay that refuses deposits at once
+// doesn't fail a send: the message stays in the outbox, sealed, in
+// memory and in the store, and a restart loads it back. One vote's sends
+// to 15,000 members during an outage would otherwise hold about 200 MB
+// against the task's 512 MiB (#6946). Past either bound SendMessage
+// answers ErrOutboxFull, and the vote's send gives up after
+// ballot.MaxFailuresInARow of them; members not sent learn of the vote
+// as BALLOT-PROTOCOL §4.2 says.
+//
+// Only SendMessage's own deposits that are still due count: not one
+// parked until the member's next token (AwaitToken), nor one past its
+// notAfter (the drain drops it). So members whose vaults are gone can't
+// switch the sends off for everyone. Meanwhile a member awaiting a token
+// gets ErrBusy for later vote messages, and learns of the vote as
+// BALLOT-PROTOCOL §4.2 says (a trade-off: a gone member's are never
+// queued). Two cases still count until their notAfter, bounded by it:
+// vote deposits queued behind a parked one (only the head is parked),
+// and a member refused quota_exceeded for its own mailbox's quota. The other messages (responses, token refreshes,
+// sign-in and approval challenges) count neither, and are bounded per
+// connection only (MaxOutboxPerConn), so a vote's sends can't crowd them
+// out of the outbox. They can wait behind them, though: after an outage,
+// the first drain works through the queued vote deposits under the peer's
+// lock, and a challenge behind them may miss its request's deadline.
+const (
+	MaxSendOutbox      = 8192
+	MaxSendOutboxBytes = 64 << 20
+)
+
+// sendOutboxLimit is the bounds in force (tests lower them).
+var sendOutboxLimit = struct{ n, bytes int }{MaxSendOutbox, MaxSendOutboxBytes}
+
+// voteOutboxLoad is SendMessage's deposits still due at now, and their
+// payload bytes.
+func (p *Peer) voteOutboxLoad(now time.Time) (n, size int) {
+	for _, e := range p.outbox {
+		if !e.Vote || e.AwaitToken || !e.NotAfter.IsZero() && !now.Before(e.NotAfter) {
+			continue
+		}
+		n++
+		size += len(e.Payload)
+	}
+	return n, size
+}
+
+// awaitingToken reports whether a deposit to the connection waits for
+// the member's next token.
+func (p *Peer) awaitingToken(connID string) bool {
+	for _, e := range p.outbox {
+		if e.ConnID == connID && e.Op == opDeposit && e.AwaitToken {
+			return true
+		}
+	}
+	return false
 }
 
 // Caught reports whether every message the relay received before t has
@@ -162,13 +251,23 @@ func (p *Peer) SendMessage(ctx context.Context, connID, typ string, body json.Ra
 // lease marker) hold it false until one visibility timeout after it last
 // leased messages, and the evidence must come from a collect started
 // after.
-func (p *Peer) Caught(ctx context.Context, t, from, until time.Time) (caught bool, unhandled int64, err error) {
+//
+// t is in relay time for a handled message (its msg_ms), but an empty
+// collect is timed by this process's clock, which may run fast: that
+// evidence counts only from a collect that started at or after
+// emptyAfter, a time on this clock known to follow the real close (the
+// passing timestamp-authority probe plus the margin, BALLOT-PROTOCOL §7,
+// 0.13.12).
+func (p *Peer) Caught(ctx context.Context, t, emptyAfter, from, until time.Time) (caught bool, unhandled int64, err error) {
 	marks, err := p.cfg.Store.Load(ctx, kindLease)
 	if err != nil {
 		return false, 0, err
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if !p.started {
+		return false, 0, ErrNotStarted
+	}
 	// The stored set is every process's, across restarts (unacked.go).
 	p.writeUnacked(ctx)
 	if err := p.loadUnacked(ctx); err != nil {
@@ -183,6 +282,9 @@ func (p *Peer) Caught(ctx context.Context, t, from, until time.Time) (caught boo
 		if err := json.Unmarshal(r.Data, &mark); err != nil {
 			return false, 0, fmt.Errorf("peer: lease marker: %w", err)
 		}
+		// Another process's lease marker is compared by wall time: that
+		// relies on one task running at a time (the stack's desiredCount 1,
+		// maxHealthyPercent 100), so two tasks' clocks never meet here.
 		if end := mark.At.Add(p.visibility() + leaseMargin); end.After(since) {
 			since = end
 		}
@@ -232,7 +334,12 @@ func (p *Peer) Caught(ctx context.Context, t, from, until time.Time) (caught boo
 	if held {
 		return false, unhandled, nil
 	}
-	caught = p.lastMsgMS >= tms && !p.lastMsgAt.Before(since) || !p.emptyAt.Before(t) && !p.emptyAt.Before(since)
+	// These must stay time.Time Before comparisons: emptyAt (Step's start)
+	// and emptyAfter (the probe's time) carry this process's monotonic
+	// reading, which a wall-clock step doesn't move (BALLOT-PROTOCOL §7,
+	// 0.13.12). Never compare them by Unix time or after Round(0).
+	caught = p.lastMsgMS >= tms && !p.lastMsgAt.Before(since) ||
+		!p.emptyAt.Before(t) && !p.emptyAt.Before(emptyAfter) && !p.emptyAt.Before(since)
 	return caught, unhandled, nil
 }
 
@@ -257,8 +364,9 @@ func (p *Peer) HasPendingSignIn(connID string) bool {
 	defer p.mu.Unlock()
 	now := p.now()
 	for _, ch := range p.challenges {
-		// A Gone sign-in (cancelled without a withdraw, or just expired) still
-		// counts until exp plus the skew: the member vault may still hold it.
+		// A Gone sign-in (cancelled without a withdraw queued, one whose
+		// withdraw was dropped or refused, or just expired) still counts
+		// until exp plus the skew: the member vault may still hold it.
 		if ch.ConnID == connID && ch.Purpose == peerwire.PurposeSignIn && ch.holds(now) {
 			return true
 		}

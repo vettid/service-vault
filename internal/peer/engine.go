@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vettid/vettid-relay/relayauth"
@@ -60,10 +61,18 @@ type Config struct {
 	Log      *slog.Logger
 	// PollWait is the collect long-poll wait (default 25 s; at most 25 s).
 	PollWait time.Duration
+	// Sleep waits d, or until ctx ends (false then); the default sleeps.
+	// Start waits out a lost mailbox's FreshMailboxWait with it.
+	Sleep func(ctx context.Context, d time.Duration) bool
 	// AfterRestore is set when the store was restored from a backup: the
 	// first Start reconnects every connection (reconnect.go) and, once
 	// the reconnects are stored and sent, calls it (to clear the marker).
 	AfterRestore func(context.Context) error
+	// EndAllConnections, a date (YYYY-MM-DD), ends every connection at the
+	// first start that sees that date and records that it ran: a later
+	// start with the same date does nothing (endAllOnce; RELEASE-29 §11,
+	// the runbook step after a rollback across the marker). Empty: none.
+	EndAllConnections string
 	// Votes answers members' vote.* requests (vote.go); without it they
 	// are answered unsupported_type.
 	Votes Votes
@@ -79,11 +88,38 @@ type Config struct {
 // and reconnects only after a restore), never answers
 // challenges (it has no credential) and never rotates its identity.
 type Peer struct {
+	// reconfirm marks the connections the current batch owes an
+	// hs.confirm (§6.3.1 Responder; noteFromMember).
+	reconfirm map[string]bool
+	// stopped: a step's writes were discarded (errDiscarded), so memory
+	// no longer matches the store; flush refuses from then on, and the
+	// task restarts from the store.
+	stopped bool
+	// removing is the connection removeConnectionFor is ending: its
+	// dropped withdraws aren't owed again (withdrawLeft).
+	removing string
+	// msgJTI is the collect jti of the message being handled ("" when
+	// none): the token it was deposited under.
+	msgJTI string
+	// relayAt and msgID are the relay position (deposited_at, msg_id) of
+	// the message being handled (zero when none): §3.4.1 judges epochs by
+	// the position of the message that established them.
+	relayAt time.Time
+	msgID   string
+	// discardCheck marks the connections whose carried tokens a batch
+	// discarded at adoption: judged after the batch (tickPendings).
+	discardCheck map[string]bool
+	// drained is the start latch for B (RELEASE-29 §2): clear at every
+	// start and at a failed collect, set once a collect with fewer than
+	// MaxBatch messages has been processed and written.
+	drained bool
+
 	cfg    Config
 	limits relayclient.Limits
 
 	mu         sync.Mutex
 	conns      map[string]*Connection
+	kept       map[string]*keptConn // removed connections' receive-only records (kept.go)
 	invites    map[string]*InviteRecord
 	awaiting   map[string]*awaiting
 	requests   map[string]*request
@@ -91,6 +127,8 @@ type Peer struct {
 	issued     map[string]*IssuedToken
 	outbox     []*outboxEntry
 	challenges map[string]*challenge
+	sends      map[string]*sendTally        // by ref (sendtally.go)
+	sendView   atomic.Pointer[[]SendCounts] // what SendCounts reports (sendtally.go)
 	events     []*Event
 	// What Caught reads. lastMsgMS is the relay time of the latest message
 	// handled (lastMsgAt the start of its collect) and emptyAt the start
@@ -111,6 +149,26 @@ type Peer struct {
 	instance   string
 	seq        uint64
 	rates      map[string]*rateWindow
+	// remintAt is a lost mailbox's re-mint owed (mailbox.go), zero when
+	// none; registerOwed, a registration while running that got no answer.
+	remintAt time.Time
+	// mintFloor is the tokens-not-before a relay that reports tombstones
+	// gave at the last registration (mailbox.go), zero when none: no
+	// token is minted before it plus TombstoneSkew.
+	mintFloor time.Time
+	// lossProven: the registration running now follows a collect's
+	// mailbox_unknown (mailbox.go): a lost answer then hides a proven loss.
+	lossProven bool
+	// recheckAt, when set, is when to register again after a relay's
+	// tokens_not_before far ahead (mailbox.go), to judge it once it isn't.
+	recheckAt    time.Time
+	registerOwed bool
+	// outboxFull marks the connections whose contract update waits on a
+	// full outbox, its outbox_full already logged (sendContract).
+	outboxFull map[string]bool
+	// refreshOwed marks the connections whose forced token refresh
+	// (token_expired) waited out a lost mailbox's re-mint (refreshHeld).
+	refreshOwed map[string]bool
 
 	dirty    map[key]struct{}
 	extra    []Change
@@ -135,6 +193,9 @@ func New(cfg Config) (*Peer, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
+	if cfg.Sleep == nil {
+		cfg.Sleep = sleep
+	}
 	if cfg.PollWait <= 0 || cfg.PollWait > 25*time.Second {
 		cfg.PollWait = 25 * time.Second
 	}
@@ -143,9 +204,9 @@ func New(cfg Config) (*Peer, error) {
 		return nil, err
 	}
 	return &Peer{cfg: cfg, instance: hex.EncodeToString(inst),
-		conns: map[string]*Connection{}, invites: map[string]*InviteRecord{}, awaiting: map[string]*awaiting{},
+		conns: map[string]*Connection{}, kept: map[string]*keptConn{}, invites: map[string]*InviteRecord{}, awaiting: map[string]*awaiting{},
 		requests: map[string]*request{}, outgoing: map[string]*outgoing{}, issued: map[string]*IssuedToken{},
-		challenges: map[string]*challenge{}, rates: map[string]*rateWindow{},
+		challenges: map[string]*challenge{}, sends: map[string]*sendTally{}, rates: map[string]*rateWindow{}, outboxFull: map[string]bool{}, refreshOwed: map[string]bool{},
 		dirty: map[key]struct{}{}, versions: map[key]uint64{}, evWake: make(chan struct{}, 1)}, nil
 }
 
@@ -173,22 +234,59 @@ func (p *Peer) audit(event, connID string) {
 	p.log().Warn("drop", "reason", event, "connection_id", connID)
 }
 
-// Start registers the mailbox (RELAY-PROTOCOL §6.1), loads the state and
-// runs the start-up housekeeping (§7.2 "On unlock" steps 1–2) and the
-// outbox.
+// Start loads the state, registers the mailbox (RELAY-PROTOCOL §6.1;
+// mailbox.go tells a lost one) and runs the start-up housekeeping (§7.2
+// "On unlock" steps 1–2) and the outbox.
+//
+// Before anything else (the relay included) it checks the configured
+// identity key against the table's (CheckIdentity): on a mismatch it
+// returns an error wrapping ErrIdentityMismatch, having read nothing into
+// memory, changed nothing and sent nothing, so no handshake starts or is
+// answered and nothing is deposited. A later Start under the right key
+// finds everything as it was.
 func (p *Peer) Start(ctx context.Context) error {
-	reg, err := p.cfg.Relay.Register(ctx)
-	if err != nil {
-		return fmt.Errorf("peer: register: %w", err)
+	if !p.started {
+		if err := CheckIdentity(ctx, p.cfg.Store, p.cfg.Keys.IK); err != nil {
+			return err
+		}
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.limits = reg.Limits
-	// An earlier process, or this one before a restart, may have left
-	// messages leased.
-	p.leasedUntil(p.now())
+	p.drained = false // B waits for this start's first short collect (RELEASE-29 §2)
 	if !p.started {
 		if err := p.load(ctx); err != nil {
+			return err
+		}
+	}
+	// After the load, so that a lost mailbox is told from a first
+	// registration (mailbox.go, GC #10525).
+	if err := p.register(ctx); err != nil {
+		return err
+	}
+	p.registerOwed = false
+	// A lost mailbox: nothing that mints a token (the restore's
+	// reconnects, rekeys, answers) runs before the relay accepts tokens
+	// for it again. The lock is let go meanwhile; calls that would mint
+	// are refused (errMintWait, ErrNotStarted).
+	if p.mintWait(p.now()) {
+		// A longer wait (a relay's tokens_not_before far ahead) is left to
+		// mintWait, which refuses mints while the service runs.
+		d := min(p.mintWaitUntil().Sub(p.now()), maxStartWait)
+		p.mu.Unlock()
+		ok := p.cfg.Sleep(ctx, d)
+		p.mu.Lock()
+		if !ok {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return context.Canceled
+		}
+	}
+	// An earlier process, or this one before a restart, may have left
+	// messages leased: judged with the relay's limits, now known.
+	p.leasedUntil(p.now())
+	if !p.started {
+		if err := p.endAllOnce(ctx, p.now()); err != nil {
 			return err
 		}
 		if err := p.loadUnacked(ctx); err != nil {
@@ -203,8 +301,17 @@ func (p *Peer) Start(ctx context.Context) error {
 			p.resumeReconnects(p.now())
 		}
 	}
+	for _, c := range p.conns {
+		if c.State == StateActive && !c.standingValid(p.now()) {
+			p.noTokenReconnect(c, p.now()) // §7.2 "On unlock" step 3 (RELEASE-29 §3 item 2)
+		}
+	}
 	p.housekeeping(p.now())
+	p.tickPendings(p.now())
 	if err := p.flush(ctx); err != nil {
+		return err
+	}
+	if err := p.remintLost(ctx, p.now()); err != nil {
 		return err
 	}
 	p.drainOutbox(ctx)
@@ -234,6 +341,12 @@ func (p *Peer) Run(ctx context.Context) error {
 	}
 	var wg sync.WaitGroup
 	defer wg.Wait()
+	// The loops end with Run, not only with the caller's ctx: on a stop
+	// (ErrConflict, errDiscarded) Run must return at once, so the task
+	// exits and restarts, rather than wait while the tick loop goes on.
+	// (cancel runs before wg.Wait: defers run last-in first-out.)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	wg.Add(2)
 	go func() { defer wg.Done(); p.eventLoop(ctx) }()
 	go func() { defer wg.Done(); p.tickLoop(ctx) }()
@@ -241,6 +354,22 @@ func (p *Peer) Run(ctx context.Context) error {
 	fails := 0
 	for ctx.Err() == nil {
 		if _, err := p.Step(ctx, p.cfg.PollWait); err != nil {
+			if errors.Is(err, errDiscarded) && ctx.Err() != nil &&
+				(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+				// A shutdown cancelled the step's write: a routine stop, not
+				// a failing store. The next start reads the stored state.
+				p.log().Warn("peer: a shutdown cancelled a step's write; the next start reads the stored state")
+				return ctx.Err()
+			}
+			if errors.Is(err, errDiscarded) {
+				// Memory no longer matches the store: carrying on could act on
+				// changes that were never written (and do them again when the
+				// batch is redelivered). The task restarts from the store.
+				// Logged even during a shutdown, for a real store error.
+				p.log().Error("peer: a store error discarded a step; stopping so the task restarts from the stored state",
+					"alarm", "peer_discarded", "err", errCode(err), "store_err", storeCode(err))
+				return err
+			}
 			if ctx.Err() != nil {
 				break
 			}
@@ -269,6 +398,16 @@ func errCode(err error) string {
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return "canceled"
+	}
+	return "error"
+}
+
+// storeCode is the store error's code for a log (an AWS API error's,
+// such as ProvisionedThroughputExceededException), or "error".
+func storeCode(err error) string {
+	var ae interface{ ErrorCode() string }
+	if errors.As(err, &ae) {
+		return ae.ErrorCode()
 	}
 	return "error"
 }
@@ -305,6 +444,13 @@ func (p *Peer) Tick(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.housekeeping(p.now())
+	p.tickPendings(p.now())
+	if err := p.flush(ctx); err != nil {
+		return err
+	}
+	if err := p.remintLost(ctx, p.now()); err != nil {
+		return err
+	}
 	return p.flushAndDrain(ctx)
 }
 
@@ -326,12 +472,47 @@ const MaxBatch = 32
 // the outbox is drained after the batch. It returns the number of
 // messages collected.
 func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
+	p.mu.Lock()
+	if p.registerOwed {
+		// A registration after a lost mailbox got no answer: it may have
+		// made the mailbox afresh, so it is made again (mailbox.go) until
+		// one is recorded, whatever the collects meanwhile say.
+		p.lossProven = true
+		err := p.register(ctx)
+		p.lossProven = false
+		if err != nil {
+			p.mu.Unlock()
+			return 0, err
+		}
+		p.registerOwed = false
+	} else if !p.recheckAt.IsZero() && !p.now().Before(p.recheckAt) {
+		// A relay's tokens_not_before was far ahead: ask again (mailbox.go).
+		if err := p.register(ctx); err != nil {
+			p.mu.Unlock()
+			return 0, err
+		}
+	}
+	p.mu.Unlock()
 	started := p.now()
 	msgs, err := p.cfg.Relay.Collect(ctx, wait, MaxBatch)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if err != nil {
 		p.leasedUntil(p.now()) // the relay may have leased a batch we never saw
+		p.drained = false      // a failed collect clears the latch (RELEASE-29 §2)
+		var re *relayclient.Error
+		if errors.As(err, &re) && re.Code == codeMailboxUnknown {
+			// The mailbox was lost while running: register it again here,
+			// which raises relay_mailbox_lost and owes the re-mint
+			// (mailbox.go), rather than collecting from nothing.
+			p.lossProven = true
+			rerr := p.register(ctx)
+			p.lossProven = false
+			if rerr != nil {
+				p.registerOwed = true
+				return 0, rerr
+			}
+		}
 		return 0, err
 	}
 	if len(msgs) > 0 {
@@ -339,6 +520,7 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 			for _, m := range msgs {
 				p.leaveUnacked(m, p.now())
 			}
+			p.drained = false
 			return 0, err
 		}
 	}
@@ -348,6 +530,9 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 		if free && started.After(p.emptyAt) {
 			p.emptyAt = started
 		}
+		if free {
+			p.drained = true // a short collect, nothing still leased (RELEASE-29 §2)
+		}
 		if len(p.outbox) == 0 {
 			return 0, nil
 		}
@@ -355,19 +540,42 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 	}
 	now := p.now()
 	p.housekeeping(now)
+	// Housekeeping's changes are written before the batch: a store error
+	// while a message is handled discards the batch's dirty marks
+	// (discard), and would leave housekeeping's in-memory changes unstored
+	// while a later drain acts on them (a late withdraw sent while the
+	// store still owes it, sent again after a restart). On a failed write
+	// they stay dirty for the next flush, before any drain.
+	if err := p.flush(ctx); err != nil {
+		for _, m := range msgs {
+			p.leaveUnacked(m, now)
+		}
+		p.drained = false
+		return 0, err
+	}
 	var acks []string
 	// On a store error none of the batch is acked: all of it comes back.
 	failed := func(err error) (int, error) {
 		for _, m := range msgs {
 			p.leaveUnacked(m, now)
 		}
+		p.drained = false // the batch comes back: B waits for it (RELEASE-29 §2)
 		return 0, err
 	}
 	for _, m := range msgs {
 		d, err := p.handleMessage(ctx, m, now)
 		if err != nil {
+			// Memory and store part only if discard drops something: every
+			// change meant to be written (outbox entries included) is
+			// marked dirty. Then nothing is written from now on (flush
+			// refuses) and Run stops; otherwise a plain error, retried.
+			dropped := len(p.dirty) > 0 || len(p.extra) > 0
 			p.discard()
-			return failed(err)
+			if !dropped {
+				return failed(err)
+			}
+			p.stopped = true
+			return failed(fmt.Errorf("%w: %w", errDiscarded, err))
 		}
 		if d == ackAfterFlush {
 			p.mark(kindMsg, m.MsgID, []byte{1}, now.Add(DedupeRetention))
@@ -376,7 +584,16 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 			p.handledUnacked(m.MsgID)
 		}
 		if err := p.flush(ctx); err != nil {
-			return failed(err)
+			// The message was handled in memory (its response queued, its
+			// dedupe mark in extra) but nothing of it was written: a
+			// redelivery would handle it again, and the queued response
+			// would go twice. Stop, as for a discard. A conflict (another
+			// task writing) stops as ErrConflict, without this alarm.
+			p.stopped = true
+			if errors.Is(err, ErrConflict) {
+				return failed(err)
+			}
+			return failed(fmt.Errorf("%w: %w", errDiscarded, err))
 		}
 		if d == noAck {
 			p.leaveUnacked(m, now) // it comes back after its lease
@@ -386,6 +603,14 @@ func (p *Peer) Step(ctx context.Context, wait time.Duration) (int, error) {
 		if ms, err := ulidMS(m.MsgID); err == nil && free && ms > p.lastMsgMS {
 			p.lastMsgMS, p.lastMsgAt = ms, started
 		}
+	}
+	p.reconfirmAll(now)
+	p.tickPendings(now) // after the batch: a confirmation in it comes first
+	if err := p.flush(ctx); err != nil {
+		return len(msgs), err
+	}
+	if len(msgs) < MaxBatch && free {
+		p.drained = true // a short collect, processed and written (RELEASE-29 §2)
 	}
 	for _, id := range acks {
 		delete(p.unacked, id)
@@ -515,9 +740,12 @@ func (p *Peer) visibility() time.Duration {
 	return 60 * time.Second
 }
 
-// discard forgets unflushed changes after a store error; the process
-// restarts from the stored state.
+// discard forgets unflushed changes after a store error. It doesn't undo
+// the in-memory changes they recorded: when it drops any, Step sets
+// stopped (flush refuses, events aren't delivered) and returns
+// errDiscarded, and Run stops so the task restarts from the stored state.
 func (p *Peer) discard() {
+	p.reconfirm = nil
 	clear(p.dirty)
 	p.extra = p.extra[:0]
 }
@@ -551,7 +779,12 @@ func (p *Peer) handleMessage(ctx context.Context, m relayclient.Message, now tim
 		p.audit("bad_envelope", "")
 		return ackAfterFlush, nil
 	}
-	c := p.connByRelayKey(sender, now)
+	c := p.connByRelayKey(sender)
+	p.msgJTI, p.msgID, p.relayAt = m.JTI, m.MsgID, time.Time{}
+	if t, err := time.Parse(time.RFC3339Nano, m.DepositedAt); err == nil {
+		p.relayAt = t.UTC()
+	}
+	defer func() { p.msgJTI, p.msgID, p.relayAt = "", "", time.Time{} }()
 	// §7.1 (0.10.3): a request token covers only the rest of a handshake
 	// awaiting approval and connection.approved / declined.
 	if t := p.issued[m.JTI]; m.JTI != "" && t != nil && t.Kind == tokRequest {
@@ -590,6 +823,12 @@ func (p *Peer) handleMessage(ctx context.Context, m relayclient.Message, now tim
 			p.audit("decrypt_failed", c.ID)
 			return ackAfterFlush, nil
 		}
+	}
+	// A removed connection's kept receive keys (kept.go): a vote.cast
+	// queued before the removal is still judged, never as the live
+	// connection's (a re-added member shares the relay key).
+	if d, ok, err := p.keptMessage(ctx, env, m.MsgID, m.JTI, sender, now); ok || err != nil {
+		return d, err
 	}
 	// Not an active epoch: hs.fin for a handshake awaiting it, or a
 	// message under a request's epoch before activation (0.10.3).
@@ -639,16 +878,10 @@ func kidEqual(b []byte, k suite.Kid) bool {
 	return x.Equal(k)
 }
 
-// connByRelayKey finds a connection by its member's relay key, or the
-// previous one within PrevRelayGrace (rotation.go).
-func (p *Peer) connByRelayKey(pk ed25519.PublicKey, now time.Time) *Connection {
+// connByRelayKey finds a connection by its member's relay key.
+func (p *Peer) connByRelayKey(pk ed25519.PublicKey) *Connection {
 	for _, c := range p.conns {
 		if suite.EqualPublic(c.Peer.Relay.PK, pk) {
-			return c
-		}
-	}
-	for _, c := range p.conns {
-		if c.relayKeyIs(pk, now) {
 			return c
 		}
 	}

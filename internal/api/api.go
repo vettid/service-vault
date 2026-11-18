@@ -21,7 +21,6 @@ import (
 	"github.com/vettid/service-vault/internal/ballot"
 	"github.com/vettid/service-vault/internal/connect"
 	"github.com/vettid/service-vault/internal/signin"
-	"github.com/vettid/service-vault/vote"
 )
 
 // Invites makes connection invitations, remembering the email the member
@@ -176,9 +175,10 @@ type Proposals interface {
 	Close(ctx context.Context, id string) (*ballot.ResultsSummary, error)
 	// Results returns a vote's results once counted, or nil.
 	Results(ctx context.Context, id string) (*ballot.PublishedResults, error)
-	// Extend publishes an extension for a relay outage, as an approval
-	// (vote.extend) approved, and uses the approval up.
-	Extend(ctx context.Context, id, approvalID string, in ballot.ExtensionInput) (*vote.Extension, error)
+	// ExtendSending publishes an extension for a relay outage, as an
+	// approval (vote.extend) approved, uses the approval up, and says
+	// whether it is being sent.
+	ExtendSending(ctx context.Context, id, approvalID string, in ballot.ExtensionInput) (*ballot.Extended, error)
 	// Publish publishes a proposal if it isn't yet, sends it to every
 	// eligible member, and returns how many it sent.
 	Publish(ctx context.Context, id string) (int, error)
@@ -554,6 +554,7 @@ var approvalStatusCodes = map[string]int{
 	approval.CodeRateLimited:       http.StatusTooManyRequests,
 	approval.CodeOutageNotOver:     http.StatusUnprocessableEntity,
 	approval.CodeTooManyEligible:   http.StatusBadRequest,
+	approval.CodeQuorumUnreachable: http.StatusBadRequest,
 }
 
 func (s *Server) approvalError(w http.ResponseWriter, what string, err error) {
@@ -561,6 +562,9 @@ func (s *Server) approvalError(w http.ResponseWriter, what string, err error) {
 	switch {
 	case errors.Is(err, approval.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not_found")
+	case errors.As(err, &ae) && ae.Reason != "" && approvalStatusCodes[ae.Code] != 0:
+		// A document a member's vault would drop: why, and where.
+		writeJSON(w, approvalStatusCodes[ae.Code], map[string]string{"error": ae.Code, "reason": ae.Reason, "field": ae.Field})
 	case errors.As(err, &ae) && approvalStatusCodes[ae.Code] != 0:
 		writeError(w, approvalStatusCodes[ae.Code], ae.Code)
 	default:
@@ -639,10 +643,21 @@ func (s *Server) createProposal(w http.ResponseWriter, r *http.Request) {
 	case approvalProblem(w, err):
 	case errors.As(err, &np):
 		// Kept, but not published: POST /v1/proposals/{id}/publish retries.
+		// reason bundle_unverified: published, but its bundle is one a
+		// member vault would refuse, so it is not sent (README
+		// "proposal_bundle_unverified").
 		s.log().Error("create proposal: not published", "proposal_id", np.ProposalID, "err", err)
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "not_published", "proposal_id": np.ProposalID})
+		out := map[string]string{"error": "not_published", "proposal_id": np.ProposalID}
+		if errors.Is(err, ballot.ErrBundleUnverified) {
+			out["reason"] = "bundle_unverified"
+		}
+		writeJSON(w, http.StatusServiceUnavailable, out)
+	case errors.Is(err, ballot.ErrNoBundleCheck):
+		writeError(w, http.StatusServiceUnavailable, "bundle_check_not_configured")
 	case errors.Is(err, ballot.ErrTooManyEligible):
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "too_many_eligible", "max_eligible": ballot.MaxEligible})
+	case errors.Is(err, ballot.ErrQuorumUnreachable):
+		writeError(w, http.StatusBadRequest, approval.CodeQuorumUnreachable)
 	case errors.As(err, &ei):
 		writeError(w, http.StatusBadRequest, "invalid_proposal")
 	case errors.Is(err, ballot.ErrNoPublisher):
@@ -672,7 +687,8 @@ func (s *Server) proposalStatus(w http.ResponseWriter, r *http.Request) {
 
 // publishProposal serves POST /v1/proposals/{id}/publish: a proposal
 // whose publication failed is published, and it is sent again to every
-// eligible member (who asks with vote.status otherwise, §4.2).
+// eligible member in the background (who asks with vote.status
+// otherwise, §4.2).
 func (s *Server) publishProposal(w http.ResponseWriter, r *http.Request) {
 	n, err := s.Proposals.Publish(r.Context(), r.PathValue("id"))
 	switch {
@@ -682,11 +698,16 @@ func (s *Server) publishProposal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "publication_not_configured")
 	case errors.Is(err, ballot.ErrProposalChanged):
 		writeError(w, http.StatusConflict, "conflict") // another task saved it: retry
+	case errors.Is(err, ballot.ErrNoBundleCheck):
+		writeError(w, http.StatusServiceUnavailable, "bundle_check_not_configured")
+	case errors.Is(err, ballot.ErrBundleUnverified):
+		// Published, not sent: a member vault would refuse its bundle.
+		writeError(w, http.StatusServiceUnavailable, "bundle_unverified")
 	case err != nil:
 		s.log().Error("publish proposal", "err", err)
 		writeError(w, http.StatusServiceUnavailable, "unavailable")
 	default:
-		writeJSON(w, http.StatusOK, map[string]int{"sent": n})
+		writeJSON(w, http.StatusOK, map[string]int{"sending": n})
 	}
 }
 
@@ -703,7 +724,7 @@ func (s *Server) extendProposal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, approval.CodeApprovalRequired)
 		return
 	}
-	e, err := s.Proposals.Extend(r.Context(), r.PathValue("id"), b.ApprovalID, b.ExtensionInput)
+	e, err := s.Proposals.ExtendSending(r.Context(), r.PathValue("id"), b.ApprovalID, b.ExtensionInput)
 	var ei *ballot.ErrInput
 	switch {
 	case approvalProblem(w, err):
@@ -720,6 +741,8 @@ func (s *Server) extendProposal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "extension_pending")
 	case errors.Is(err, ballot.ErrNoPublisher):
 		writeError(w, http.StatusServiceUnavailable, "publication_not_configured")
+	case errors.Is(err, ballot.ErrNoBundleCheck):
+		writeError(w, http.StatusServiceUnavailable, "bundle_check_not_configured")
 	case errors.Is(err, ballot.ErrProposalChanged):
 		writeError(w, http.StatusConflict, "conflict") // another task saved it: retry
 	case err != nil:
@@ -740,8 +763,12 @@ func (s *Server) closeProposal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found")
 	case errors.Is(err, ballot.ErrNotClosed):
 		writeError(w, http.StatusConflict, "not_closed")
-	case errors.Is(err, ballot.ErrNotCaught):
+	case errors.Is(err, ballot.ErrNotCaught), errors.Is(err, ballot.ErrAuthorityEarly):
 		writeError(w, http.StatusServiceUnavailable, "collecting")
+	case errors.Is(err, ballot.ErrAuthorityTime):
+		writeError(w, http.StatusServiceUnavailable, "timestamp_unavailable") // retry
+	case errors.Is(err, ballot.ErrStampedEarly):
+		writeError(w, http.StatusServiceUnavailable, "stamped_early") // retry; the clock is off
 	case errors.Is(err, ballot.ErrUnpublished):
 		writeError(w, http.StatusConflict, "not_published")
 	case errors.Is(err, ballot.ErrSiteMismatch):

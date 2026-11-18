@@ -21,6 +21,69 @@ The first deployment is vettid.org's own member service
 ([vettid/member-service](https://github.com/vettid/member-service)), which
 integrates exactly as a third party would.
 
+**Release 29 (VAULT-MESSAGING §6.3.1) is not yet implemented in full.**
+[docs/RELEASE-29.md](docs/RELEASE-29.md) states how its rules read for a
+service vault, in four changes, deployed to staging together after the
+fourth. Done so far:
+- identity links on rekeys are followed both ways (0.87.0 S8);
+- **the responder** (change 1): the service activates a member's rekey
+  or reconnect at its verified `hs.fin` and sends `hs.confirm`; it keeps
+  a confirmed epoch per connection, which keeps its keys while not
+  current, and sends `hs.confirm` again for a batch holding a message
+  under it and every 12 days while the current epoch is unconfirmed; a
+  member's reconnect ends the service's open answers to that member's
+  rekeys; a rekey `hs.init` is answered once; it records the received
+  flag; it advertises `hs_confirm`; waiting messages are sealed again at
+  a key change, and checked at deposit (§8.3), each deposit being one
+  attempt;
+- **the initiator** (change 2): the service's own rekey or reconnect
+  epoch is pending until a message from the member opens under it, and
+  waiting messages are then sealed again under it; it is abandoned at
+  `B` (32 days, judged after the first short collect since the start),
+  for want of a standing token, at a crossing, at a change of the
+  member's `ik`, and when the member's handshake is activated; the
+  service reconnects after such an abandonment and whenever it holds no
+  valid standing token (rule J among those cases), sends nothing but the
+  handshake while a reconnect is open, gives each try its own lifetime
+  (7 days after a restore, 16 otherwise), and ends a reconnect `stale`
+  at the bounds of §3.4.1; `token_revoked` on its standing token ends
+  that token only, and the entries wait;
+- **forks and tokens** (change 3): a member's rekey or reconnect may name
+  the service's confirmed epoch while it is not current, and at its
+  `hs.fin` rule E destroys the epochs after it; a later message under a
+  destroyed epoch is fork evidence and suspends the connection (reason
+  `epoch`, alarm `fork_suspected`), as does a rekey or reconnect naming
+  an older epoch after the member's key moved on (fork by `ctx`; a rekey
+  is judged once it passes its own checks); a reconnect may
+  also name a pending epoch of the service's, or one it abandoned; a
+  member's reconnect's tokens are kept with its epoch and adopted when
+  the member sends under it, and no reconnect starts for want of a token
+  meanwhile; a refresh after `quota_exceeded` revokes only what the
+  issuer may; an answer to a reconnect the member has moved past ends at
+  its next message;
+- after a rekey of its own fails, it waits an hour before the next,
+  doubling to a day;
+- **`ik` links, first part** (change 4a): `identity.rotate` carries the
+  whole chain (S8, R29-K1), and links seen but not followed count for
+  "one successor per key" (rule C, R29-K8);
+- **`ik` links, second part** (change 4b): epochs a superseded key made
+  are demoted by relay position (R29-K4) and by strict F1 (K7, also for
+  links applied at an `hs.fin`); while the current epoch is demoted only
+  handshake messages go, what waits is held, and the service reconnects
+  naming the newest usable epoch (or strict F1's E); a message under a
+  demoted epoch is refused, or suspends when it could only be a copy's;
+  a pending epoch abandoned by a link is demoted from the start (K2), and
+  one abandoned otherwise is ended at the member's `identity.rotate` when
+  its key was superseded (K9); a reconnect refused while ours is pending
+  still has its links applied (X4);
+- **the marker** (change 4c): every connection record carries
+  `messaging_release: 29`, and each start ends records without it
+  (`pre29_ended`), with a one-shot setting to end every connection after
+  a rollback (`SV_END_ALL_CONNECTIONS`).
+
+Not yet: the relay-key rules of §3.4.2, after which it advertises
+`relay_follow`.
+
 This repository replaces
 [vettid/vettid-service-vault](https://github.com/vettid/vettid-service-vault),
 a NATS-based prototype that is retired; none of its code is reused.
@@ -61,9 +124,22 @@ npx cdk deploy \
   -c envName=prod \
   -c image=ghcr.io/vettid/service-vault@sha256:<digest> \
   -c webhookUrl=https://<application>/webhooks/service-vault \
-  -c apiClientSecurityGroupId=sg-<member API task> \
   -c alarmTopicArn=arn:aws:sns:<region>:<account>:<topic>
 ```
+
+**Who may reach the API port.** vettid.org's member service adds that
+rule itself: its stack (vettid/member-service, `ServiceVaultFromApi`)
+reads this stack's `security-group-id` parameter and adds an ingress rule
+on the API port from its task's security group. So for it, set neither
+`apiClientSecurityGroupId` nor `apiClientCidr`. Setting
+`apiClientSecurityGroupId` to the same group as well makes a second copy
+of that rule, and the deploy fails with a duplicate rule. The rule
+belongs to the member service's stack, so it is added and removed with
+that stack. If this stack's security group is ever replaced, the
+parameter changes and the member service's stack must be deployed again
+to put the rule on the new group; until then the member API cannot reach
+this service. `apiClientSecurityGroupId` is for a client whose own
+deploy doesn't add the rule.
 
 | Context | Required | Meaning |
 |---|---|---|
@@ -72,13 +148,14 @@ npx cdk deploy \
 | `envName` | no (`prod`) | Part of every name and export: stack `ServiceVault-<envName>`. |
 | `relayUrl` | no (`https://relay.vettid.org`) | The relay. |
 | `serviceName` | no (`VettID Member Service`) | The name members see. |
-| `apiClientSecurityGroupId` / `apiClientCidr` | no | Who may reach the API port. Neither: nobody until a rule is added. `apiClientCidr` is a private (RFC 1918) IPv4 range, /16 or narrower: the task has a public IP, so a public range would expose the API port. For an operator's direct access, one public address (`/32`) is allowed with `-c apiClientCidrPublic=true`, still behind the pinned TLS key and an API key. Drop it once the application is the only client. |
+| `apiClientSecurityGroupId` / `apiClientCidr` | no | Who may reach the API port, besides a rule the client's own stack adds (vettid.org's member service does: see above, and leave both unset for it). Neither, and no client rule: nobody. `apiClientCidr` is a private (RFC 1918) IPv4 range, /16 or narrower: the task has a public IP, so a public range would expose the API port. For an operator's direct access, one public address (`/32`) is allowed with `-c apiClientCidrPublic=true`, still behind the pinned TLS key and an API key. Drop it once the application is the only client. |
 | `vpcCidr` | no (`10.60.0.0/24`) | The VPC (two /26 public subnets). |
 | `adminBootstrapEmail` | no | `SV_ADMIN_BOOTSTRAP_EMAIL` (see "Admin approvals"). It is plain text in the task definition and stays in that definition's revisions after a redeploy without it: use an address you don't mind being kept there (a staging test member), or arm the bootstrap with `service-vault admin bootstrap` instead |
 | `adminThreshold` | no (1) | `SV_ADMIN_THRESHOLD` |
 | `approvalTtl` | no (`24h`; `1h` unless `envName` is `prod`) | `SV_APPROVAL_TTL`. The stack also sets `SV_CHANNEL`: `production` only when `envName` is `prod` (as for `SV_SIGSTORE`), `staging` for every other `envName`; and it refuses an `approvalTtl` above `1h` for `staging` |
 | `longApprovalChallenges` | no (off) | `true` sets `SV_LONG_APPROVAL_CHALLENGES` (see "Admin approvals", Timing). Set it for a channel only once that channel's member-vault release carries VAULT-MESSAGING 0.82.0 (staging: release 26). `-c longApprovalChallenges=true` or absent; the stack refuses it for `envName` `prod` (production waits for a production member-vault release with 0.82.0) |
 | `approvalAllowNoPurpose` | no | `true` sets `SV_APPROVAL_ALLOW_NO_PURPOSE` (see "Admin approvals"): only while an admin's vault predates purposes |
+| `endAllConnections` | no | A date, `YYYY-MM-DD`: sets `SV_END_ALL_CONNECTIONS`, which ends every connection at the first start that sees that date (see "Rolling back across release 29"). The date names one run: use one not used before (a used one ends nothing and raises `end_all_reused`). Context is not remembered: the next deploy without it unsets it |
 | `testSignIns` | no | `true` sets `SV_TEST_SIGNINS` (see `POST /v1/signins/unsigned`): testing only, so the stack refuses it unless `envName` is `staging`. Context is not remembered: a staging deploy without `-c testSignIns=true` turns the route off again |
 | `recordSealMigrate` | no | `true` only for the deploy that upgrades a deployment from before sealing (see "Records at rest") |
 | `recordKeyVersion` | no (1) | `SV_RECORD_KEY_VERSION`, the lowest record key version to use: set it one above the table's to rotate the record key (see "Rotating the record key"). Leaving it out later is fine |
@@ -88,14 +165,224 @@ npx cdk deploy \
 destination.
 - `rotate_conflict`: a member's identity key got two successors, so a
   connection is suspended (see "When a member moves phones").
+- `fork_suspected`: a message or handshake showed that a second or old
+  copy of a member's vault used a session epoch it should no longer hold
+  (VAULT-MESSAGING §6.3.1 rule E, §3.4.1 "Fork by `ctx`"), so the
+  connection is suspended (`connection.suspended`, reason `epoch`). The
+  member connects again from a new invitation.
+- `relay_moved_unlinked`: at start, a connection that a
+  `relay.address.update` moved before the service refused such updates
+  was suspended (reason `relay_moved_unlinked`): the address it holds may be a copy's. No honest
+  member sent one; that member connects again from a new invitation.
+- `pre29_ended`: at start, connections whose records come from before
+  release 29's rules were complete (no `messaging_release: 29`) were
+  ended, as docs/RELEASE-29.md section 11 says (with claims not yet
+  activated whose records lack it): each member is sent
+  `connection.removed`, the application gets `connection.removed` with
+  `reason: pre29` (`connection.expired` for a claim), and the member
+  connects again from a new invitation. A claim's member is sent nothing, as at an ordinary expiry, and a
+  first contact still awaiting its `hs.fin` raises no application
+  event; a member whose approval was in flight may briefly see the
+  connection as active until its own checks fail (its tokens are
+  revoked, so nothing goes through).
+  Expected once, at the first start of the release-29 version (on
+  staging: re-invite the test members; an empty admin set is recovered
+  as "Recovering an empty set" says). Again later only after a
+  rollback: see "Rolling back across release 29".
+- `connections_ended`: `SV_END_ALL_CONNECTIONS` ended every connection
+  at start (see "Rolling back across release 29"); unset it with the
+  next deploy.
+- `end_all_reused`: `SV_END_ALL_CONNECTIONS` names a date that already
+  ran, so nothing was ended: deploy again with a date not used before if
+  the runbook step was meant, otherwise unset it.
 - `webhook_dropped`: a webhook was given up after 24 hours, so the
   application missed an event.
-- `reconnect_failed`: after a table restore, a connection's reconnect
-  could not start or complete, so that member must connect again (see
-  "Restoring the table").
-- `reconnect_slow`: such a reconnect is unanswered after a day. It
-  stays open for 7 days, since a locked member vault answers when it is
-  unlocked.
+- `identity_key_mismatch`: at start, the service's identity key is not
+  the one its table's records were made under. The table says which key
+  that is in its identity record, written at the first start of a
+  release that has it. A table from before the record is judged by what
+  it stores that names the service's key: a pending epoch, a handshake
+  it started, a stored event, the approvals' audit log. If none names
+  another key, the record is written from the key the service has. If
+  the table holds none of these (only established connections), that
+  key is taken as it is: a wrong one then was already failing every
+  member's sign-in, and the record keeps it until the table is restored.
+  The service never rotates its identity key, so the keystore and the
+  records don't belong together: a wrong or partial restore, or another
+  service's table. A record the check needs that can't be opened (the
+  identity record, or in a table without it the records it reads) holds
+  too, with `from` `unreadable`: for example after a rollback to a
+  release without the record, then a record-key rotation, which leaves it
+  sealed under a retired key. One that opens but doesn't decode (a
+  connection, a stored handshake, an event or an audit entry) makes the
+  start fail instead, as loading it would. So does a start that also
+  rotates the record key (`SV_RECORD_KEY_VERSION` raised, or
+  `SV_RECORD_SEAL_MIGRATE=1`) over a record it can't open: that
+  rotation reseals every record before the identity check runs, and
+  fails on it. Start once without the rotation to see the hold.
+
+  The service stays up, held: it keeps the heartbeat and answers
+  `/health` 200, but every other request gets 503
+  `identity_key_mismatch`. It doesn't publish its TLS pin, so the
+  application keeps the right one and, while held, sees a TLS pin
+  failure if it calls the service. Nothing loads the records, signs,
+  sends or answers a member, so no reconnect try is spent and nothing is
+  deposited. (A record-key rotation or seal migration you asked for with
+  `SV_RECORD_KEY_VERSION` or `SV_RECORD_SEAL_MIGRATE` still runs first,
+  and reading records may reseal ones under an older version; their
+  contents don't change.) `admin bootstrap` refuses while the keys
+  differ; `admin reseal-blobs` refuses while the heartbeat shows the
+  service running, held or not. The alarm line is logged at once and
+  again every minute while held, so the alarm stays raised for as long
+  as the service is held: `/health` is 200, so ECS neither replaces the
+  task nor rolls back a held deploy, and the alarm is the only signal.
+  It notifies once, when it is raised; the end of the hold sends nothing.
+
+  The ways out:
+  - **The keys are wrong:** put the right keystore item or table back (or
+    restore both from one backup) and restart; the service goes on from
+    the table as it was.
+  - **The record is wrong** (it was written from a wrong key, at the
+    first start of this release over an old table that held no evidence):
+    stop the service, delete the item `pk = rec#identity`, `sk = ik`,
+    and start it under the right keys, which writes the record again.
+  - **The keys are right but an old table holds a stray handshake** from
+    another table (`from` `state`, naming that handshake's key): start the
+    previous release once under the right keys, which drops it
+    (`outgoing_identity_changed`), then roll forward; or restore the
+    table from a backup without it.
+- `peer_discarded`: a store error while the peer handled a message
+  discarded that step's unwritten changes, so its memory no longer
+  matches the store. The peer writes nothing more, stops, and the task
+  restarts from the stored state (the batch is redelivered and handled
+  again), so nothing that was never written is sent. One is harmless;
+  repeats mean the store is failing: check DynamoDB's errors and
+  throttling (the line's `store_err` names the code). A failed write
+  right after a message is handled, and a votes-store error after the
+  step changed state, stop the peer the same way. Each such stop also
+  shows as a stopped ECS task. A store conflict (another task writing
+  the table) raises it only when it discarded a step's changes; at any
+  other write, the message's included, it stops the peer without this
+  alarm. A shutdown that cancels a write logs a warning instead.
+- `relay_tombstone_ahead`: the relay's registration answer reports a
+  `tokens_not_before` more than 5 minutes ahead of the service's clock
+  (see `relay_mailbox_lost`): no token is minted until it passes. Check
+  the service's and the relay's clocks.
+- `relay_mailbox_lost`: the relay made the service's mailbox afresh: it
+  was deleted (the relay lost it, or someone holding the service's
+  relay key deleted it), seen at a start's registration, or while
+  running when a collect is answered `mailbox_unknown` and the service
+  registers it again at once. What
+  members deposited since the service's last collect is gone, with no
+  way to recover it here (relay-key rotation, GC #9442, is where it
+  would be). The relay now refuses every token the old mailbox issued,
+  and any minted in the next 241 seconds, so the service mints none
+  until then: a start waits that long before its reconnects and
+  housekeeping (the API refuses changes meanwhile, `ErrNotStarted`), and
+  while running, housekeeping pauses, a new invitation is refused and a
+  reconnect is held, not failed. A registration while running that got
+  no answer is made again before the next collect (each one is cut
+  short after 5 seconds), with the same pause until it is answered.
+  Then it mints every active member's standing
+  and reconnect tokens again and sends them (`relay.token.issued`), in
+  steps that each store a group of members' tokens before marking them
+  done; a member reconnecting or with a full outbox gets them at a later
+  minute, and the owed re-mint survives a restart (a start that finds
+  it owed with no member done yet raises the alarm again). A rekey or
+  token refresh with a member waits until that member's tokens are
+  re-minted, since it could only answer on a refused one. Until then members'
+  deposits to the service fail, and a member whose vault is offline gets
+  the tokens when it next collects. Not re-minted: stale and suspended
+  connections (they get fresh tokens when they reconnect), connections
+  still being made and invitations from before the loss (those members
+  connect again from a new invitation). A table from before this alarm
+  with no connections can't tell a loss from a first registration, so it
+  raises nothing, though its invitations stop working. If the relay's
+  `max_token_lifetime` is now shorter, a member may keep its refused
+  token where its exp is later than the new one's, until it refreshes.
+  With a relay that doesn't report tombstones (before RELAY-PROTOCOL
+  0.12.0), the alarm also fires when nothing was lost, whenever a registration got
+  no answer or a `5xx` and the next one a `200` (a timeout, a stop, a TLS
+  failure at a start), since that attempt may have made the mailbox
+  afresh unseen. Such a false alarm costs a 241-second delay (at a start,
+  before the service runs) and two messages to each member.
+  A relay that reports tombstones (`limits.reports_tombstones`, 0.12.0
+  §6.1) says at registration whether, and from when, it refuses older
+  tokens (`tokens_not_before`, T), and the service goes by that instead:
+  - **T, and a token the service still relies on is older** (its iat is
+    before T, or unknown: a token from before this version): the
+    mailbox was lost. The alarm is raised with `tokens_not_before`, and
+    the wait is until T + 90 s (the clock skew RELAY-PROTOCOL §4.1
+    allows), not 241 s from the answer: after a deletion while the
+    service was down, usually none.
+  - **T, and every token relied on is at or after it:** nothing; the
+    relay may report the same T for good (DynamoDB relays do), and the T
+    last judged is not judged again (any other is). Either way no token
+    is minted before T + 90 s, which a restart keeps (the T judged is
+    stored).
+  - **T more than 5 minutes ahead of the service's clock** (no honest
+    relay reports one: the relay's clock or report is wrong, or the
+    service's clock is behind): alarm `relay_tombstone_ahead`. It is not
+    judged or stored, so it can't hide a real T after it; no token is
+    minted until it passes, and a start waits at most about 9 minutes
+    for it before it runs (collecting and answering, minting nothing).
+    The service registers again every 5 minutes while it lasts: once the
+    relay reports a sane T (or none), that is judged and the wait lifts.
+    A relay without the flag doesn't lift it. After fixing the clocks,
+    nothing else is needed (a restart makes it sooner). A loss reported
+    with such a T says `tokens_kept=unknown`.
+  - **A registration whose answer was lost, then one with no `201`:**
+    at a start that may have been a lost `201`: the revocations in force
+    are sent again, with a warning (`relay_mailbox_maybe_lost`), no
+    alarm, and invitations are left alone. While running, after a
+    collect's `mailbox_unknown`, the loss is proven: it is a data loss
+    as below (alarm, invitations withdrawn).
+  - **No T:** no token is refused because of a deletion, whatever the
+    last registration's fate: no alarm, no wait.
+  - **A `201` for a mailbox registered before** (with a T already
+    judged, a T that refuses no token, or none): the relay holds no
+    record of the mailbox (its data was lost, or it was rebuilt). The
+    members' tokens still work, so nothing is re-minted for that, but
+    the messages since the last collect and the relay's denylist are
+    gone: the alarm is raised (`tokens_kept=true`) and every revocation
+    still in force is sent again, and every unexpired invitation token
+    is revoked (a one-shot token's use isn't always known): invitations
+    still waiting are withdrawn, so make new ones. That is recorded with
+    the registration, so a stop before the revocations are stored sends
+    them at the next one.
+  - A new T that refuses no token relied on is logged (`warn`): messages
+    deposited before it may be gone. A T more than a few minutes ahead of
+    the service's clock is waited for all the same, and logged.
+
+  A deleted mailbox may also
+  mean the relay key is exposed: look at the relay's logs, and consider
+  new keys and new invitations until the service can rotate its relay
+  key.
+- `outgoing_identity_changed`: at start, a stored handshake this
+  service started (a rekey or a reconnect) names another identity key
+  than the table's, although the table's identity record names the key
+  the service has (`identity_key_mismatch` covers a wrong key). So the
+  table holds records made under two keys: one was copied in from
+  another table. The handshake is dropped, the tokens it carried are
+  revoked and its `hs.init`, if still waiting, is not sent; a rekey
+  starts again later, and a reconnect stays open with a new try under
+  the table's key.
+- `reconnect_failed`: a connection's reconnect (after a table restore,
+  or one the service started for want of a standing token or after its
+  own new epoch went unconfirmed) could not start or complete, so that
+  member must connect again (see "Restoring the table").
+- `reconnect_slow`: such a reconnect is unanswered after a day. Each
+  try waits for an answer 7 days after a restore and 16 otherwise, and
+  its new epoch then up to 32 days for the member's confirmation, since
+  a locked member vault answers when it is unlocked.
+- `vote_chunk_missing`: a proposal's stored members (its member chunks
+  in the table) are missing, or not the ones its record names (at most
+  one line per proposal per 10 minutes). Every cast, status, close,
+  publication and extension of it fails. A running service checks a
+  proposal's chunks again at least once a minute, and before every
+  close, publication and extension, so the alarm follows a loss within
+  about a minute of the proposal's next use. Restore the table from a
+  backup ("Restoring the table"); nothing else brings the members back.
 - `vote_unpublished`: members sent vote requests for a proposal the
   service holds but has not published, or its close was refused (at most
   one line per proposal per 10 minutes). They get no answer, and the vote
@@ -115,9 +402,171 @@ destination.
   at any time, also after the close. A member vault restored meanwhile
   may show the vote as being checked until the member opens it again or
   checks it in the app.
+- `count_clock_ahead`: a vote's close has passed by the service's clock
+  but not by the timestamp authority's (BALLOT-PROTOCOL §7, 0.13.12:
+  just before counting, the service asks the authority for the time, a
+  stamp with no transparency-log entry). The vote is not counted yet:
+  the close answers 503 `collecting`, and no cast is refused `late` for
+  it. Probes are rationed: a passing one holds for that close; after one
+  before the close, none until the authority's time, judged from it, can
+  have reached the close, but never more than 5 minutes later. The waits
+  are timed on the process's monotonic clock, so stepping the task's
+  wall clock neither lengthens nor cuts them, and a corrected clock never
+  starves the close. Each probe has its own 5 s timeout. Check both clocks, as for
+  `results_stamped_early`. A probe that fails (the authority unreachable,
+  or a stamp that doesn't verify) counts nothing either: the close
+  answers 503 `timestamp_unavailable` and raises `tsa_unavailable`,
+  whose ERROR line says why; probes after a failure are at least 10 s
+  apart.
+- `results_stamped_early`: a vote's results came back from the timestamp
+  authority stamped before their close, so the service's clock is more
+  than a minute ahead of the authority's (BALLOT-PROTOCOL §8.3 step 2:
+  every member vault would fail them; `skew_seconds` on the line is the
+  difference seen). They are not published, and the close answers 503
+  `stamped_early`. Check both clocks: the task's (Fargate takes it from
+  the Amazon Time Sync Service; compare with `date -u` on a trusted host)
+  and the authority's (the stamp's time on the line). Then close again.
+  Each anchor is a permanent public entry in the transparency log, so
+  they are rationed: at most one per close, and none until a probe of the
+  authority's time (no log entry, at least 10 s apart) is at or after the
+  close (`rec#vote_stamp_wait` keeps the early stamp); a close before
+  then answers `stamped_early` at once. Member vaults keep checking for
+  7 days, so a late publication is still judged.
+- `proposal_bundle_unverified`: a proposal's or an extension's Sigstore
+  bundle does not verify, by vettid-vault's own verifier
+  (`vms/votewire`), under this service's anchor key against the trusted
+  roots that every supported member-vault release pins
+  (`internal/vaultroots`, BALLOT-PROTOCOL §3.3). A member's vault would
+  refuse it, so nothing is sent: a proposal is published but its
+  `vote.proposal` goes to no one (creating it answers `503
+  not_published` with `reason: bundle_unverified`; `POST
+  /v1/proposals/{id}/publish` answers `503 bundle_unverified` until the
+  bundle checks, then sends it). An extension stays in effect on the
+  site, but no `vote.extended` is sent, then or later (the extend call
+  still answers 200). A vault that asks `vote.status` or reads the site
+  still gets the document and its bundle, and checks the bundle itself,
+  as the vaults always do. Only the current anchor key is accepted here,
+  so a proposal anchored under an earlier key is refused even though
+  vaults accept any listed key (fail closed). With no roots pinned for
+  the service's Sigstore instance (`SV_SIGSTORE`), the alarm is raised
+  at start, and creating a proposal or an extension answers `503
+  bundle_check_not_configured` before its approval is used. The ERROR
+  line names the proposal and the error.
+
+  What this check does not cover:
+  - **One verifier for every release.** The service runs the `votewire`
+    of the vettid-vault version in `go.mod` against each release's
+    roots, not each release's own `votewire`. The daily `vault-roots`
+    check (`rootscheck`) compares each supported release's verifier code
+    with that version, byte for byte: every non-test Go file of
+    `votewire` (its message bodies, documents and JCS too: code there
+    runs in the same process, and no list of rules would cover all it
+    could do), and of the `strictjson` and `suite` packages it uses. It
+    fails on an import the pinned code doesn't have, on a file in those
+    packages that isn't Go, docs or testdata, and on a release built
+    differently from the service: `go.mod`'s `go`, `toolchain` and
+    `godebug` settings, and `//go:debug` directives (GODEBUG defaults
+    decide some of crypto/x509's and encoding/asn1's parsing). A
+    difference fails it, naming the release, unless
+    `internal/vaultroots/testdata/verifier_differences.json` lists it,
+    keyed by the sha256 of both files, with the reason it is safe: a
+    change on either side asks for a new review. Today it lists staging
+    25 and 26, whose `strictjson` and proposal validation are more
+    lenient than the service's (the service refuses first) and whose
+    `votewire.go` and `body.go` lack things no check uses; staging 27,
+    whose proposal validation is more lenient; and staging 30, whose
+    `suite.go` only adds a constant. The service doesn't run the pinned
+    proposal validation on its own proposals: it refuses an eligible
+    count above `vote.MaxEligible` in `vote.Proposal.Validate`, and an
+    empty, repeated or Abstain choice label in `ballot.checkInput`'s
+    choice-label loop (`internal/ballot/approved.go`). That loop compares
+    `strings.ToLower` keys, which group labels as the pinned `FoldLabel`
+    does only while `latin()` admits no more than printable ASCII and
+    the Latin-1 letters (it leaves out `ª`, `µ` and `º` too). Widening
+    `latin()` needs a real fold check there: beyond that set the two part
+    ways on long s (U+017F), format characters (the soft hyphen U+00AD
+    is in Latin-1), sequences NFC changes, and classes such as `µ`/`μ`
+    and `σ`/`ς`.
+    The check compares code, not verdicts, and
+    not the vault's call site (how a release passes the keys and the time
+    to the verifier): a difference it lets through is one a person has
+    judged. Comparing verdicts on shared bundle vectors is a possible
+    later step. It doesn't cover: `go.mod`'s dependency versions
+    (`golang.org/x/...` and the rest), `replace` lines, a `vendor/`
+    directory or a `go.work`; the vault's other packages, which run in
+    the same process and could change shared state (reassign an exported
+    sentinel, set `GODEBUG`, change standard-library state); how the
+    vault is built (its `Dockerfile.enclave`: Go image, build tags) and a
+    `GODEBUG` set in its environment; and the service's own build
+    toolchain, its Dockerfile's image, which the `toolchain` line only
+    stands for.
+  - **The signed service list.** The anchor key is not looked up in the
+    signed service list. A key missing from it passes here, and member
+    vaults then refuse the bundle (`service_list`). That fails closed at
+    the vault, but this check does not catch it.
+
+  A new
+  Sigstore key that no supported vault release pins yet means a vault
+  release with the new roots must ship first (the scheduled roots check
+  opens an issue when Sigstore's trusted root changes). Each new vault
+  release that registers `vote` needs its copy,
+  `internal/vaultroots/roots/<channel>/release-<n>.json` (its
+  `vote_trust_roots`, indented by two spaces); the daily `vault-roots`
+  workflow fails while a supported release has none, or a copy differs
+  or outlives its release.
+- `results_bundle_unverified`: a vote's results bundle failed its
+  timestamp check (the authority's signature, the pinned trusted root, or
+  its validity period); the results are not published. One anchored by
+  that close is dropped, so the next close anchors again; one kept from
+  an earlier close stays, as the site may hold it, and blocks the
+  results until it is dealt with. The ERROR line names the proposal and
+  the error. First check whether votes.vettid.org has the results
+  (`GET /v1/p/<proposal id>/results.json`): if it does, keep the bundle
+  and fix the check (often a release whose pinned trusted root is out of
+  date). If it doesn't, delete the kept bundle, item pk
+  `rec#vote_bundle`, sk the hex SHA-256 of the results document
+  (`aws dynamodb delete-item --table-name T --key
+  '{"pk":{"S":"rec#vote_bundle"},"sk":{"S":"<hex>"}}'`), and close
+  again.
+- `anchor_signer_unavailable`: the anchor signer (`SV_ANCHOR_SIGNER`)
+  doesn't answer the background probe (first a few seconds after the
+  start, then with backoff up to 15 minutes, until it answers once).
+  Publishing stays configured, but each call fails and is retried, so
+  documents wait; sign-ins and approvals go on. Check the signer's own
+  alarms (its account), the function's resource policy for this task
+  role, and the task role's `lambda:InvokeFunction`. It never falls back
+  to the `anchor-key` item.
+- `anchor_key_changed`: the anchor signer answered (a call or the
+  probe) under another key than the pinned one (`SV_ANCHOR_KEY`).
+  Nothing from that answer is kept, and the document is not taken as
+  published. A security event: check the signer account (its key alias,
+  function and alarms).
+- `signer_bundle_unverified`: the anchor signer returned a bundle whose
+  message signature is not the pinned key's over the document (or whose
+  digest isn't the document's). It is not kept, and the document is not
+  taken as published. A security event, as `anchor_key_changed`.
+- With the signer, a document whose answer was lost (a timeout, a crash)
+  is asked of the signer again, which resumes its claim; a vote
+  extension sent to it is never dropped as "never anchored"
+  (`rec#vote_signer_call` marks what was sent), and the bundle the
+  signer then returns is kept only if it verifies under the pinned key.
+  A call that takes longer than the API's 30 s write timeout answers
+  the client with an error, but goes on and keeps what it gets; the
+  next call finds it. Results come back
+  already on the site: `results_stamped_early` and
+  `results_bundle_unverified` then mean the site took them, so nothing
+  is retried; look at them as above.
 - `ballot_not_counted`: a stored ballot failed the count's re-check
   (tag, credential signature or time) and was left out; the ERROR line
   names the proposal and the tag.
+- `removed_unknown`: members of a vote left with no record of when
+  (removed before leave times were recorded, or the vote is counted more
+  than 60 days after a removal, when the record is forgotten). They are
+  counted in `counts.removed` (BALLOT-PROTOCOL §7, 0.14.2); the ERROR
+  line names the proposal.
+- `kept_keys_failed`: a removed connection's receive-only keys could not
+  be kept (BALLOT-PROTOCOL §6, 0.14.2): a vote it cast before the removal
+  and not yet handled is lost. The ERROR line names the connection.
 - `ballots_off`: the ballot copy's key (`ballot-copy-key`) is missing
   while proposals or copied ballots exist, or isn't the key the copy's
   ballots are under (the copy holds a key check). The daemon runs with
@@ -125,9 +574,24 @@ destination.
   from a backup of the table. After a table restore with votes off, the
   ballots the restore lost are put back from the copy at the first start
   with votes on (marker `run#ballots_rebuild`).
-- `admins_short`: an admin's connection was removed (severed, or
-  replaced by a new connection) and fewer admins than m remain, so no
-  approval can pass (see "Recovering admins" under "Admin approvals").
+- `gov_migration_waiting`: an admin's governance key (see "Governance
+  key" under "Admin approvals") can't be pinned yet, because the service
+  doesn't know that admin's connection (logged at most once an hour per
+  admin, `connection_id` on the line). Until it can, that admin's
+  governance approvals (`admin_set.*`, `admin.repin`, `proposal.create`,
+  `vote.extend`, `contract_template.change`) are recorded but don't count.
+  Check that the connection is active and reachable (a reconnect after a
+  restore, a suspended connection); if it is gone, repair the admin set.
+- `admins_short`: fewer admins than m, so no approval can pass (see
+  "Recovering admins" under "Admin approvals"); for example an admin's
+  connection was removed (severed, or replaced by a new connection), or
+  the service started with the set already short. It is logged every
+  minute while the set is short (also while the service can't read its
+  state), so the alarm stays raised until the set is mended; "admin set
+  back at the threshold" is logged once it is, unless the mend was a
+  restart with a lower m. A new deployment has no admin until its first
+  bootstrap is confirmed, so it raises this alarm until then: expected,
+  not an incident.
 - `key_change`: the keystore KMS key was changed (a grant, its
   policy, an alias, tags, rotation, disabled, or scheduled for
   deletion). CloudTrail's KMS management events reach EventBridge from
@@ -376,15 +840,19 @@ nothing is leaked). So the first start after `table restore` reconnects
 every active connection (§6.6): it names its last epoch, which the
 member's vault still keeps in its history, carries fresh tokens, and
 follows any identity rotation the member made since; it logs
-`restored: reconnects started` and `reconnected` per connection. A
+`restored: reconnects started`, and per connection `reconnected: epoch
+pending` and then `epoch confirmed`. A
 reconnect completes when the member's vault next collects, usually
-within minutes; until then nothing is sent on that connection (its
-sign-ins fail). A restart keeps it open as it was, resending an
+within minutes; until the member's vault confirms it nothing but the
+handshake is sent on that connection: messages and sign-in challenges
+wait, and go under the new epoch then (a sign-in may time out first). A
+restart keeps it open as it was, resending an
 unconfirmed deposit with the same bytes; a new one goes out only if that
 state was lost, at most 3 per restore (the member's reconnect token
 allows 4 messages). If the member's vault starts its own reconnect
-meanwhile, the service's yields to it. One that can't
-start, or isn't completed within 7 days, fails: the connection becomes
+meanwhile, the service's yields to it. Each try waits 7 days for its
+answer. One that can't start, whose third try goes unanswered, or whose
+new epoch is not confirmed within 32 days, fails: the connection becomes
 stale, `reconnect_failed` alarms, and the member connects again from a
 new invitation, which replaces the old connection (admins then also
 need "Recovering admins"). This is VAULT-MESSAGING 0.72.1 §6.6 "After a
@@ -447,8 +915,9 @@ cluster and the service share the name):
    high or too low. Note such a restore with the results.
 4. If the image changes too, deploy it now. Start the service:
    `aws ecs update-service --cluster T --service T --desired-count 1`.
-5. Check `/health`, the TLS pin, the `reconnected` lines and a member's
-   sign-in. Then delete `T-restore`.
+5. Check `/health`, the TLS pin, the `epoch confirmed` lines and a member's
+   sign-in (a member whose vault has not collected yet shows only
+   `reconnected: epoch pending` until it does). Then delete `T-restore`.
 
 The operator needs: `dynamodb:CreateBackup`, `ListBackups`,
 `DescribeContinuousBackups`, `RestoreTableFromBackup` or
@@ -463,7 +932,50 @@ Rolling the image back past the reconnect after a restore (to
 `53a8c41` or older) is safe only when no member's reconnect awaits its
 `hs.fin`: an older image would install the epoch without the tokens and
 rotation links the reconnect brought. Check the logs for
-`reconnected` / `epoch installed` lines settling every reconnect first.
+`epoch confirmed` / `epoch installed` lines settling every reconnect first.
+An image from before release 29's second change does not know a stored
+pending epoch: roll back to one only when every `reconnected: epoch
+pending` or `rekeyed: epoch pending` line has its `epoch confirmed`.
+
+**Rolling back across release 29.** From release 29's last change on,
+every connection record carries `messaging_release: 29`, and each start
+ends the ones that don't (alarm `pre29_ended`; docs/RELEASE-29.md
+section 11). An image from before it keeps the field on records it
+does not rewrite, yet may write a connection's handshakes, tokens and
+outbox under its older rules. So after any rollback to such an image,
+the circuit breaker's included (alarm `deploy_failed`), end every
+connection when deploying forward again:
+1. Deploy the release-29 image with `-c endAllConnections=<a date not
+   used before, YYYY-MM-DD>` (today's, usually). The date only names the
+   run: a past or future date runs at once, and one used before ends
+   nothing and raises `end_all_reused`. The first start that sees it ends
+   every connection and every claim not yet activated: each member is
+   sent `connection.removed`, the application gets `connection.removed`
+   (or `connection.expired` for a claim) with `reason: ended_all`, and
+   alarm `connections_ended` gives the count. The run is recorded once
+   all are ended, so a restart with the same date ends nothing more.
+   A claim's member is sent nothing, as at an ordinary expiry, and a
+   first contact still awaiting its `hs.fin` raises no application
+   event; a member whose approval was in flight may briefly see the
+   connection as active until its own checks fail (its tokens are
+   revoked, so nothing goes through).
+2. Check that the run completed: the `connections_ended` alarm for the
+   date, and no ERROR at that start. A start that fails partway ends the
+   rest at the next start, whose alarm counts only those; the counts of
+   both add up. If such a failed start is itself rolled back by the
+   circuit breaker, only the connections ended before the failure have
+   their tokens revoked; the rest stay usable under the older image,
+   whose housekeeping may mint new tokens for them. Deploy forward with
+   the same date again, which ends what is left.
+3. Deploy again without `endAllConnections` (context is not
+   remembered, so a plain deploy unsets it).
+4. Invite the members again. The admin connections are ended too, so
+   the admin set is empty (`admins_short`): recover it as "Recovering an
+   empty set" says (`service-vault admin bootstrap -email`). On staging,
+   the release-29 version's first
+   deploy ends every connection anyway (`pre29_ended`); it needs the
+   owner's go of its own, and the staging test members are re-invited
+   after it.
 
 The KMS key must be the one the backup was made under: the stack's key,
 which is retained and never deleted with the stack.
@@ -477,6 +989,9 @@ which is retained and never deleted with the stack.
 | `SV_BALLOTS_TABLE` | env | The write-once DynamoDB table of accepted ballots (BALLOT-PROTOCOL §6); without it, members' vote requests are answered `unsupported_type` |
 | `SV_SIGSTORE` | env | `staging` or `production`: the Sigstore instance votes are anchored in (BALLOT-PROTOCOL §3.3); required with `SV_BALLOTS_TABLE`. The CDK sets `production` for the `prod` stack and `staging` otherwise |
 | `SV_VOTES_URL` | env | votes.vettid.org (or staging's): where proposals, extensions and results are published, each anchored in Rekor first (BALLOT-PROTOCOL §3.3). Without it, creating a proposal answers `publication_not_configured`. The CDK sets it from the `votesUrl` context |
+| `SV_ANCHOR_SIGNER` | env | The anchor signer's unqualified Lambda function ARN, in the signer's own account (key protection; the CDK's `anchorSignerFunctionArn`). With it, every document is published through the signer, which holds the anchor key in KMS: this service never reads the `anchor-key` item and holds no grant on the key. Each call has a 150 s deadline and outlives the API request that started it. Needs `SV_VOTES_URL` and `SV_ANCHOR_KEY` |
+| `SV_ANCHOR_KEY` | env | The anchor key, pinned: its SubjectPublicKeyInfo (DER) in standard base64, a P-256 key (the CDK's `anchorKeySpki`; the owner takes it from the signer account with `aws kms get-public-key`). Required with `SV_ANCHOR_SIGNER`. Only this key is certified and served at `GET /v1/anchor-key`; every answer of the signer must name it, and every bundle it returns must be signed by it over the document, or nothing is kept. The signer is probed in the background (an empty call it refuses before any work, 15 s deadline, then backoff), never on the start's path. Without the signer, if set, the stored key must be this one or the daemon refuses to start |
+| `SV_ANCHOR_MOVED_PARAM` | env | The SSM parameter that marks the anchor key as moved to the signer (the CDK sets `/vettid/service-vault/<env>/anchor_key_moved`; the owner creates it at the cutover, never the stack, and the task may only read it). Once it exists, or if it can't be read, the daemon refuses to start without `SV_ANCHOR_SIGNER`. It is read at start only: the cutover sets `SV_ANCHOR_SIGNER` (with `SV_ANCHOR_KEY`) and creates the marker in the same step, then rolls the task. Cut over with no extension pending, so none signed under the old key is asked of the signer. Required with `SV_BALLOTS_TABLE` unless `SV_ANCHOR_SIGNER` is set. A release build never creates an anchor key: without the signer it opens the one stored, and refuses to start if there is none; only a `devsigner` build (local development and tests) makes one |
 | `SV_KMS_KEY_ID` | env | KMS key ARN for the keystore |
 | `SV_LISTEN` | env | API listen address (`:8080`) |
 | `SV_WEBHOOK_URL` | env | Webhook destination |
@@ -491,9 +1006,10 @@ which is retained and never deleted with the stack.
 | `SV_ADMIN_THRESHOLD` | env, optional | m: how many distinct admins must approve a governance action (default 1; 1–64) |
 | `SV_APPROVAL_LIMITS` | env, optional | Limits on creating approvals, counted per group of actions (the repair actions `admin.repin`, `admin_set.add` and `admin_set.remove` in one, every other action in the other), comma-separated `N/window` (default `2/1h,4/24h`; `none` for none) |
 | `SV_APPROVAL_TTL` | env, optional | How long an approval stays open (default `24h`; `10m` to `168h`; with `SV_CHANNEL=staging`, default `1h` and at most `1h`) |
-| `SV_LONG_APPROVAL_CHALLENGES` | env, optional | `true` sends an approval challenge with the approval's own expiry, at most 24 hours, and reminds only admins holding no live challenge (VAULT-MESSAGING 0.82.0 §10.4); default `false`: 10 minutes, and a reminder challenges every admin who has not answered. Turn it on for a channel only once that channel's member vaults carry 0.82.0 (staging: release 26): an older member vault cuts the challenge to 10 minutes without telling the service. Only `true` turns it on; any other value but `false` stops the start (chosen; not in the spec) |
+| `SV_LONG_APPROVAL_CHALLENGES` | env, optional | `true` sends an approval challenge with the approval's own expiry, at most 24 hours, and reminds only admins holding no live challenge (VAULT-MESSAGING 0.82.0 §10.4); default `false`: 10 minutes, and a reminder challenges every admin who has not answered (either way, not one whose challenge is `queued`). Turn it on for a channel only once that channel's member vaults carry 0.82.0 (staging: release 26): an older member vault cuts the challenge to 10 minutes without telling the service. Only `true` turns it on; any other value but `false` stops the start (chosen; not in the spec) |
 | `SV_CHANNEL` | env, optional | `staging` or `production` (default `production`); anything else stops the start. The default is production, so a staging run outside the CDK stack must set `SV_CHANNEL=staging` itself. On `staging` an approval lasts at most 1 hour (STAGING-TIME-SCALE N16; VAULT-MESSAGING 0.82.0 §10.4), and so does its challenge |
 | `SV_APPROVAL_ALLOW_NO_PURPOSE` | env, optional | `true` counts approvals signed without a purpose (vaults before VAULT-MESSAGING 0.65.0), marked `no_purpose`; default `false`, which audits them and doesn't count them (§10.4). For a transition only |
+| `SV_END_ALL_CONNECTIONS` | env, optional | A date, `YYYY-MM-DD`: the first start that sees it ends every connection (each member sent `connection.removed`, its tokens revoked, its waiting messages audited, `connection_ended_all` audited, `connection.removed` with `reason: ended_all`, alarm `connections_ended`) and records that it ran; any later start with the same date does nothing. Invitations stay. Set by the stack's `endAllConnections` context; a malformed value stops the start |
 | `SV_TEST_SIGNINS` | env, optional | `true` serves `POST /v1/signins/unsigned` (`svctl signin -unsigned`); default `false`, when it answers `403 test_only`. For testing only: it sends members a sign-in they did not start. A malformed value stops the start |
 | `SV_RECORD_KEY_VERSION` | env, optional | The lowest record key version to use (default 1; see "Rotating the record key") |
 
@@ -522,25 +1038,25 @@ billed.
 | `POST /v1/signins` `{email, source?}` | `202 {signin_id, match_code}`, the same way and after the same delay whether or not the email is known and whether or not a rate limit was reached; `source` (optional, at most 64 printable ASCII bytes) is the end user's address as the application sees it, e.g. an IP or its /64, used only for the per-source limit |
 | `GET /v1/signins/{id}` | `{signin_id, status, connection_id?, key_changed?}`; `status` is `pending`, `approved`, `denied` or `expired`; `connection_id` and `key_changed` come with `approved` |
 | `POST /v1/signins/unsigned` | For testing only: `403 {error: test_only}` and nothing sent unless `SV_TEST_SIGNINS=true`. Otherwise `200 {signins: [{connection_id, signin_id?, match_code?, skipped?}], more, stopped?}`: one sign-in challenge to each eligible connection (active, vault advertises the vote feature) that has no pinned credential key, i.e. whose member has never signed in on it, so that its vault does not refuse their vote with `not_signed_in` (VAULT-MESSAGING §10.19.5). A call goes through the connections in id order until it has sent 10 challenges or looked at 100 connections; a skipped connection counts only toward the 100, so connections skipped for long do not keep the call from the ones after them. `more` is the number not yet looked at (call again). Within the member vault's limits (§10.4.1): never a second challenge to a connection with a sign-in pending, none within an hour of a decline, at most 10 in 24 h (a challenge that expires unanswered counts; they live 5 minutes); a connection left out says `skipped`: `pending`, `declined`, `daily_limit`, `not_sent`, or `not_recorded` (sent, with its `match_code`, but no `signin_id` to read). An error or the call's 8-second deadline ends it early with `stopped` (`error` or `timeout`) and the entries done so far, still status 200; the call goes on server-side if the client gives up. Each `signin_id` is read at `GET /v1/signins/{id}`, and its outcome is a `signin.*` webhook: the application did not start these sign-ins, so it will see webhooks for ids it does not know. A member's app tells them to approve a sign-in only if they are signing in right now, and one they did not start teaches the opposite, so a real service must not use this: its members sign in themselves. For test connections (`svctl signin -unsigned`) |
-| `POST /v1/approvals` `{action, summary, payload}` | `201 {approval_id, action_hash, status: "pending", expires_at, ask_budget?}`, where `ask_budget: [{connection_id, next_ask_at}]` (omitted when empty) lists the admins left out because they have their ask limit of approval challenges still counting (4, or 5 for `admin.repin`, `admin_set.add` and `admin_set.remove`), `next_ask_at` being when their oldest counting challenge stops counting (its expiry plus 24 hours plus the clock skew); refused with `invalid_action`, `invalid_summary`, `invalid_payload` (400), `invalid_connection`, `unreachable`, `last_admin`, `sole_admin` (422); refused with `ask_budget` (409: fewer admins than the threshold can be asked, because the others are at their ask limit; nothing is sent or stored); refused with `rate_limited` (429) past `SV_APPROVAL_LIMITS` for the action's group, counted once the request passes every other check (one refused for being invalid or for `ask_budget` does not count; one refused with `rate_limited` does). Of each admin's 5 approval asks per 24 hours, every action but the repair ones stops at 4, reminders included: the fifth is kept for repairs, so a burst of ordinary approvals from a runaway or buggy application cannot leave the admins unaskable for a change to the admin set. It does not stop a holder of the API key who means harm: repair approvals of their own spend the fifth. A declined approval challenge starts no cooldown in a member vault from VAULT-MESSAGING 0.83.10 (an older one still starts a 7-day cooldown, §10.4.1) |
-| `GET /v1/approvals/{id}` | `{approval_id, action, summary, action_hash, payload (canonical; admin.repin's carries the new_key the service filled in), status, reason?, threshold, admins, approvals: [{connection_id, at, key_changed, counted}], denials: [{connection_id, at}], created_at, expires_at, remind_needed: [connection_id], remind_after?, applied?}`; `status` is `pending`, `approved`, `denied` or `expired`; `counted` is `false`, with `reason` `key_changed` or `not_repinned` (and `gov_key_changed: true`), for a governance action (`admin_set.add`, `admin_set.remove`, `admin.repin`, `proposal.create`, `vote.extend`, `contract_template.change`) signed with a key other than the admin's governance key (see *Governance key* below): it does not count toward the threshold, never applies an `admin_set.*` or `admin.repin` change and is audited with that reason; the admin stays in `remind_needed`; `assignment.push` counts it as before; `remind_needed`, while pending, lists the admins who have not answered and hold no live challenge (it ran out, or could not be sent); `remind_after` comes with it: the earliest a reminder is accepted |
-| `POST /v1/approvals/{id}/remind` | `{approval_id, reminded: [connection_id]}`: the challenge again to the admins who have not answered and hold no live challenge (the `remind_needed` ones); `too_soon` (429) within 10 minutes of the last, `not_pending` (409) once settled, `nothing_to_remind` (409) when every admin who has not answered still holds a live challenge. An optional body `{"force": [connection_id, ...]}` (chosen; not in the spec) challenges only the named admins again, each even with a live challenge (the old one is withdrawn first): `not_admin` (422) for one outside the approval's admins or the current set, `answered` (409) for one who has answered, `ask_budget` (409) for one at the approval's ask limit, from any approval (4 approval challenges that still count, or 5 for a repair action; each counts until its expiry plus 24 hours, since the member's vault may receive it as late as its expiry; a sixth would come back as a delayed denial); still `too_soon` within 10 minutes of the last. The answer carries the same `ask_budget` list (omitted when empty), and so does `GET /v1/approvals/{id}` for the `remind_needed` admins at the budget. Without a body, an admin at that budget is left out (and stays in `remind_needed`), and `ask_budget` (409) answers when that leaves nobody to challenge (an admin whose ask log cannot be read counts as at the budget), checked before `too_soon` and before anything is withdrawn. Each forced re-send spends one of that admin's 5 approval asks per 24 h (§10.4.1): use it only when the admin reports not seeing the request |
+| `POST /v1/approvals` `{action, summary, payload}` | `201 {approval_id, action_hash, status: "pending", expires_at, ask_budget?}`, where `ask_budget: [{connection_id, next_ask_at}]` (omitted when empty) lists the admins left out because they have their ask limit of approval challenges still counting (4, or 5 for `admin.repin`, `admin_set.add` and `admin_set.remove`), `next_ask_at` being when their oldest counting challenge stops counting (its expiry plus 24 hours plus the clock skew); refused with `invalid_action`, `invalid_summary`, `invalid_payload` (400; `{error: "invalid_payload", reason, field}` when the approval's document is one a member's vault would drop, see "Admin approvals", The action hash), `invalid_connection`, `unreachable`, `last_admin`, `sole_admin` (422); refused with `ask_budget` (409: fewer admins than the threshold can be asked, because the others are at their ask limit; nothing is sent or stored); refused with `rate_limited` (429) past `SV_APPROVAL_LIMITS` for the action's group, counted once the request passes every other check (one refused for being invalid or for `ask_budget` does not count; one refused with `rate_limited` does). Of each admin's 5 approval asks per 24 hours, every action but the repair ones stops at 4, reminders included: the fifth is kept for repairs, so a burst of ordinary approvals from a runaway or buggy application cannot leave the admins unaskable for a change to the admin set. It does not stop a holder of the API key who means harm: repair approvals of their own spend the fifth. A declined approval challenge starts no cooldown in a member vault from VAULT-MESSAGING 0.83.10 (an older one still starts a 7-day cooldown, §10.4.1) |
+| `GET /v1/approvals/{id}` | `{approval_id, action, summary, action_hash, payload (canonical; admin.repin's carries the new_key the service filled in), status, reason?, threshold, admins, approvals: [{connection_id, at, key_changed, counted}], denials: [{connection_id, at}], created_at, expires_at, remind_needed: [connection_id], queued?: [connection_id], remind_after?, applied?}`; `status` is `pending`, `approved`, `denied` or `expired`; `counted` is `false`, with `reason` `key_changed` or `not_repinned` (and `gov_key_changed: true`), for a governance action (`admin_set.add`, `admin_set.remove`, `admin.repin`, `proposal.create`, `vote.extend`, `contract_template.change`) signed with a key other than the admin's governance key (see *Governance key* below): it does not count toward the threshold, never applies an `admin_set.*` or `admin.repin` change and is audited with that reason; the admin stays in `remind_needed`; `assignment.push` counts it as before; `remind_needed`, while pending, lists the admins who have not answered and hold no live challenge (it ran out, could not be sent, or left the outbox undelivered); `queued` (omitted when empty) lists those whose challenge waits in the outbox, not sent yet (their connection cannot take deposits now: its reconnect is open, say): it goes once the connection can take it, and its admin moves to `remind_needed` if it leaves the outbox undelivered; `remind_after` comes with `remind_needed`: the earliest a reminder is accepted |
+| `POST /v1/approvals/{id}/remind` | `{approval_id, reminded: [connection_id]}`: the challenge again to the admins who have not answered and hold no live challenge (the `remind_needed` ones); `too_soon` (429) within 10 minutes of the last, `not_pending` (409) once settled, `nothing_to_remind` (409) when every admin who has not answered still holds a live challenge or has one in `queued`. An optional body `{"force": [connection_id, ...]}` (chosen; not in the spec) challenges only the named admins again, each even with a live challenge (the old one is withdrawn first): `not_admin` (422) for one outside the approval's admins or the current set, `answered` (409) for one who has answered, `ask_budget` (409) for one at the approval's ask limit, from any approval (4 approval challenges that still count, or 5 for a repair action; each counts until its expiry plus 24 hours, since the member's vault may receive it as late as its expiry; a sixth would come back as a delayed denial); still `too_soon` within 10 minutes of the last. The answer carries the same `ask_budget` list (omitted when empty), and so does `GET /v1/approvals/{id}` for the `remind_needed` admins at the budget. Without a body, an admin at that budget is left out (and stays in `remind_needed`), and `ask_budget` (409) answers when that leaves nobody to challenge (an admin whose ask log cannot be read counts as at the budget), checked before `too_soon` and before anything is withdrawn. Each forced re-send spends one of that admin's 5 approval asks per 24 h (§10.4.1): use it only when the admin reports not seeing the request. A force to an admin in `queued` replaces their challenge: the old one is dropped from the outbox, with no withdraw, if no deposit of it was tried, and is otherwise withdrawn like a live one (every challenge in the outbox counts as tried after a restart); the new one waits in the outbox the same way, and both count in the ask log |
 | `GET /v1/admins` | `{admins: [connection_id], threshold}` |
 | `GET /v1/audit?since=&limit=` | `{entries: [...], next?}`: the audit log after entry `since`, oldest first, `limit` 1–100 (default 100); pass `next` as `since` for the next page |
-| `POST /v1/proposals` `{approval_id, title, text, choices, quorum, binding, removed_may_vote, opens_at, closes_at, outage_rule}` | Needs `approval_id`: the admins' `proposal.create` approval of exactly this input (see "Admin approvals"); it is checked and used up once (`approval_required` 400 without one; `approval_not_found`, `approval_not_approved`, `approval_wrong_action`, `approval_mismatch`, `approval_expired` 403; `approval_used` 409). `201 {proposal_id, proposal_hash, eligible, unsigned, sent}`: the proposal is made from the active connections at this moment whose vault advertised the vote feature (BALLOT-PROTOCOL §3.2), published and sent to each (BALLOT-PROTOCOL §3); choices are `{label}` only: the service assigns the ids `c1`, `c2`, … and always adds `abstain`; `text` is empty or the title, `quorum.text` empty, `outage_rule` empty or the default (see "Admin approvals"). `unsigned` is how many of the `eligible` connections have no pinned credential key: their member has never signed in on the connection, and their vault refuses `vote.cast` with `not_signed_in` until they do (VAULT-MESSAGING §10.19.5); members sign in to the service themselves (on a test deployment only, `POST /v1/signins/unsigned`, `svctl signin -unsigned`). `invalid_proposal` (400) for one outside the bounds of BALLOT-PROTOCOL §3.1 (member vaults refuse those) or with no such connection; `too_many_eligible` (400, with `max_eligible`: 1000) when the roster has more than 1,000 eligible members, before the approval is used (requesting the `proposal.create` approval already answers `too_many_eligible` then, before the admins are asked) (a chosen limit, kept until publishing to every member within the request, and the results' single upload to the votes site, are scaled; BALLOT-PROTOCOL §3.2); `publication_not_configured` (503) until publication is configured; `503 {error: not_published, proposal_id}` when it was kept but its publication failed (retry with `/publish`). Served with `SV_BALLOTS_TABLE` |
-| `GET /v1/proposals/{id}` | `{proposal_id, proposal, proposal_hash, eligible, opens_at, closes_at, published}`: nothing that counts ballots before the results |
-| `POST /v1/proposals/{id}/publish` | `{sent}`: publishes a proposal whose publication failed, and sends it again to each eligible member. A proposal not published is no member's: a cast on it is `not_eligible`, `vote.status` `unknown_proposal`. `not_found` (404) |
-| `POST /v1/proposals/{id}/extend` `{approval_id, closes_at, outage: {from, to, source}}` | Needs `approval_id`: the admins' `vote.extend` approval of exactly this extension of this proposal, used up once (the same errors as creating). The extension (BALLOT-PROTOCOL §10.2), published and sent to each member: for a relay outage of over an hour within the window that is over (its `to` not after now), by its length rounded up to the hour, 24 h in all at most; an outage still going on near the close is extended in parts (§10.2). `invalid_extension` (400), `outage_not_over` (422) for an outage still going on, `too_late` (409) once the close has passed. Requesting the `vote.extend` approval itself answers `outage_not_over` (422) for an outage still going on. A vote has at most 24 extensions (`invalid_extension` past that) |
-| `POST /v1/proposals/{id}/close` | Needs only the API key: it publishes what the closed vote counted and decides nothing (it is refused before `closes_at` + 1 minute). `{proposal_id, results_hash, tally, counts}`: counts the vote and publishes the results (BALLOT-PROTOCOL §7), or reports them if already published. `not_closed` (409) before `closes_at` + 1 minute; `collecting` (503) until the relay's messages from before then are all handled: retry |
+| `POST /v1/proposals` `{approval_id, title, text, choices, decision, quorum, binding, removed_may_vote, opens_at, closes_at, outage_rule}` | Needs `approval_id`: the admins' `proposal.create` approval of exactly this input (see "Admin approvals"); it is checked and used up once (`approval_required` 400 without one; `approval_not_found`, `approval_not_approved`, `approval_wrong_action`, `approval_mismatch`, `approval_expired` 403; `approval_used` 409). `201 {proposal_id, proposal_hash, eligible, unsigned, sending}`: the proposal is made from the active connections at this moment whose vault advertised the vote feature (BALLOT-PROTOCOL §3.2), published, and sent to each in the background (BALLOT-PROTOCOL §3): `sending` is how many it is being sent to, and a member a send misses asks with `vote.status`; choices are `{label}` only: the service assigns the ids `c1`, `c2`, … and always adds `abstain`; `text` is empty or the title, `quorum.text` empty, `outage_rule` empty or the default (see "Admin approvals"). `decision` is how the vote is decided (BALLOT-PROTOCOL §3.5), always given: `{rule: "majority", base, threshold: null}`, `{rule: "threshold", base, threshold: {num, den}}` (a fraction above one half, `den` at most 10, in lowest terms) or `{rule: "plurality", base: null, threshold: null}`, with `base` one of `cast` (ballots for a real choice), `voted` (every ballot, abstain included) or `elig` (every eligible member); `quorum.min_ballots` is at most 100,000; `removed_may_vote` must be `false` (`invalid_proposal` otherwise; requesting the approval answers `field_not_shown`; BALLOT-PROTOCOL 0.14.1). `unsigned` is how many of the `eligible` connections have no pinned credential key: their member has never signed in on the connection, and their vault refuses `vote.cast` with `not_signed_in` until they do (VAULT-MESSAGING §10.19.5); members sign in to the service themselves (on a test deployment only, `POST /v1/signins/unsigned`, `svctl signin -unsigned`). `invalid_proposal` (400) for one outside the bounds of BALLOT-PROTOCOL §3.1 (member vaults refuse those) or with no such connection; `quorum_unreachable` (400) when `quorum.min_ballots` is more than the eligible members, before the approval is used (requesting the approval already answers it then); `too_many_eligible` (400, with `max_eligible`: 1000) when the roster has more than 1,000 eligible members, before the approval is used (requesting the `proposal.create` approval already answers `too_many_eligible` then, before the admins are asked) (a chosen limit, kept until the results' single upload to the votes site is scaled; members are already sent to in the background; BALLOT-PROTOCOL §3.2); `publication_not_configured` (503) until publication is configured; `bundle_check_not_configured` (503), before the approval is used, when no vault release pins vote trust roots for `SV_SIGSTORE` (alarm `proposal_bundle_unverified`); `503 {error: not_published, proposal_id}` when it was kept but its publication failed (retry with `/publish`), with `reason: bundle_unverified` when it was published but its bundle is one a member vault would refuse, so it is not sent (`/publish` then answers `503 bundle_unverified` until it checks). Served with `SV_BALLOTS_TABLE` |
+| `GET /v1/proposals/{id}` | `{proposal_id, proposal, proposal_hash, eligible, opens_at, closes_at, published, sends?}`: nothing that counts ballots before the results. `sends` (omitted when empty) says what became of the messages sent to members about it: `[{send, sent, queued, dropped}]`, one per send (`proposal`, `extended/<n>`, `closed`), counting messages deposited with the relay, waiting in the outbox (the member's connection is mid-reconnect, say) and ended there not confirmed deposited (one tried without an answer may still have reached the relay). `sending` from a publish counts the members a message is being sent to; a message is sent once deposited. The counts may fall short after a crash, and may exceed the members sent to when a send timed out but still went. A send run again (a publish) counts again; a dropped message is not sent again (its member learns of the vote as BALLOT-PROTOCOL §4.2, §8.3 and §10 say). The counts are kept until 14 days after the last message could still be deposited |
+| `POST /v1/proposals/{id}/publish` | `{sending}`: publishes a proposal whose publication failed, and sends it again to each eligible member in the background (`sending` is how many; 0 when those sends are still running, as it doesn't send twice, when the service is stopping, or once the results are published, when members are sent `vote.closed` instead). A proposal not published is no member's: a cast on it is `not_eligible`, `vote.status` `unknown_proposal`. `not_found` (404) |
+| `POST /v1/proposals/{id}/extend` `{approval_id, closes_at, outage: {from, to, source}}` | Needs `approval_id`: the admins' `vote.extend` approval of exactly this extension of this proposal, used up once (the same errors as creating). The extension (BALLOT-PROTOCOL §10.2), published and sent to each member in the background: for a relay outage of over an hour within the window that is over (its `to` not after now), by its length rounded up to the hour, 24 h in all at most; an outage still going on near the close is extended in parts (§10.2). `invalid_extension` (400), `outage_not_over` (422) for an outage still going on, `too_late` (409) once the close has passed. Requesting the `vote.extend` approval itself answers `outage_not_over` (422) for an outage still going on. A vote has at most 24 extensions (`invalid_extension` past that). `200 {v, proposal_id, n, closes_at, outage, sending, reason?}`: the extension, and `sending`, how many members `vote.extended` is queued to, sent in the background (queued, not delivered: what became of them is in `GET /v1/proposals/{id}` `sends`, `extended/<n>`, and a shutdown may cut the send short). `sending` is 0 with a `reason` when it is not sent: `bundle_unverified` when its bundle is one a member vault would refuse (alarm `proposal_bundle_unverified`), `stopping` when the service is stopping. Either way the extension is in effect all the same (the site holds it, and members learn of it there) but is not sent, then or later |
+| `POST /v1/proposals/{id}/close` | Needs only the API key: it publishes what the closed vote counted and decides nothing (it is refused before `closes_at` + 1 minute). `{proposal_id, results_hash, tally, counts, outcome}`: counts the vote and publishes the results (BALLOT-PROTOCOL §7), or reports them if already published. `outcome` is `{quorum_met, status, choice}`, computed from the tally by the proposal's `decision` (BALLOT-PROTOCOL §7.1): `status` is `decided` (with `choice`), `not_decided`, `tied` (plurality only) or `no_quorum`; it never weighs `counts.unhandled`, which is shown beside it. `not_closed` (409) before `closes_at` + 1 minute; `collecting` (503) until the relay's messages from before then are all handled: retry; `stamped_early` (503) while the results come back from the timestamp authority stamped before the close (the service's clock is ahead: see the alarm `results_stamped_early`). A retry is safe: it anchors nothing until the authority's time can have reached the close, so retry with backoff, and fix the clock. `collecting` is also the answer while the timestamp authority's time is before the close (0.13.12: the service's clock alone never starts the count), and `timestamp_unavailable` (503) when the authority's time can't be had or verified: retry |
 | `GET /v1/proposals/{id}/results` | `{results, results_sig, rows, bundle}` once published |
 | `GET /v1/anchor-key` | `{anchor_key, anchor_cert, service_ik, sigstore}`: the service's anchor key (DER SubjectPublicKeyInfo), certified by its identity key, for registering the service on votes.vettid.org (BALLOT-PROTOCOL §3.3) |
 | `GET /health` | `{status: "ok"}` (no key) |
 
 **Webhooks** (signed as `sdk/go/webhook` verifies): `connection.pending`
 `{invite_id, sas, name}`, `connection.added` `{invite_id, name, email_bound}`,
-`connection.declined` / `connection.expired` `{invite_id}`,
-`connection.removed` `{direction: in|out}`, `connection.suspended`
-`{reason: rotation_conflict}`, `signin.approved`
+`connection.declined` `{invite_id}`, `connection.expired` `{invite_id, reason?: pre29 | ended_all}` (a `connection.removed` or `connection.expired` for a record ended at a start may come twice, if the service stopped between its two writes: treat a repeat as one),
+`connection.removed` `{direction: in|out, reason?: pre29 | ended_all}`, `connection.suspended`
+`{reason: rotation_conflict | epoch | relay_moved_unlinked}`, `signin.approved`
 `{signin_id, key_changed}`, `signin.denied` `{signin_id, reason}`,
 `signin.expired` `{signin_id}`, each with its `connection_id`. `name` is
 the member's account name as their vault presents it. Admin approvals add
@@ -634,22 +1150,55 @@ both bind.
 
 **When a member moves phones** (VAULT-MESSAGING §3.4, 0.68.0). A
 transfer, a recovery or a `credential.rotate` rotates the member vault's
-keys, and the service follows each rotation, so the connection survives
-the move:
-- *Relay key.* `relay.address.update` moves the connection to the new
-  mailbox, with the tokens for it. The service answers with fresh tokens
-  for the new key, which is the member vault's signal that the service
-  has the address. The previous key is still recognized, for messages
-  already in flight and for resends of the update, until the first
-  message from the new key (or 30 days). The tokens issued to it are then
-  revoked. Only the current key can move the connection.
+keys. The service follows the identity and credential keys, so the
+connection survives those; it does not follow a relay key, which release
+29 does not rotate:
+- *Relay key.* `relay.address.update` is refused (audited
+  `address_update_refused`; nothing changes), as a member vault refuses
+  it: it moved a connection on the session's authentication alone, with
+  no signed relay links, so an old copy of a member's vault could
+  redirect the service's deposits. Release 29 rotates no relay key; the
+  relay-key rules of VAULT-MESSAGING §3.4.2 replace it later.
 - *Identity and KEM keys.* `identity.rotate`, signed by the old and the
   new key, is followed when it starts at the stored key. The member
   vault's rekey under the new key is then answered, and a rekey the
   service had started under the old keys is dropped. A member that
   rotated while the session was down reconnects with the chain in its
   `hs.init` (§6.6), and the service follows that the same way. Links it
-  already followed may come first. If two different
+  already followed may come first. A rekey may carry links too (S8,
+  0.85.0; a release-29 member vault sends its whole chain on every
+  rekey, to every peer, since 0.87.0): the service follows the links it
+  has not followed yet, at the rekey's verified `hs.fin` when the member
+  started it, and before installing the epoch when the service did. At
+  that `hs.fin` (a member's rekey or reconnect) the key the `hs.init` was
+  signed with is checked again against what was followed since: the
+  relay keeps no order, so `identity.rotate` statements may have moved
+  the stored key past it, and then the handshake is dropped
+  (`ancestor_ik`) instead of setting the key back. A member's rekey
+  answered under a key that a later rotation moved past is dropped at
+  that rotation. A second successor found while following links suspends
+  the connection, and the handshake that was being completed then
+  completes nothing. Links that would lead the identity back to a key it
+  already had (a cycle, such as A to B, then B to A) are refused, so
+  that "one successor per key" can still be judged. One gap: a second successor carried in an `hs.resp`
+  to the service's own rekey is refused by the handshake library before
+  the service sees it, so it shows only as failed rekeys (backed off),
+  not as `rotate_conflict`, unless it contradicts a link the service has
+  seen (below). `identity.rotate` carries the whole chain (`rotations`,
+  S8): links already followed are skipped, and the first one not followed
+  must start at the stored key (otherwise `unknown_ik`, or `unexpected`
+  for an ancestor); a new key that is an ancestor is refused
+  (`ik_rollback`), and so is one that is the stored key, which goes
+  beyond Table B and the member vault (it fails closed: such a link
+  could only lead back to a key already held). A malformed
+  `identity.rotate` (`bad_rotation`) is refused before rule C, as on the
+  member vault. Valid links the service has seen but not
+  followed (in a handshake not completed, an `identity.rotate` refused, a
+  rekey that passed its own checks) are kept, at most 32, and count for
+  "one successor per key" too (§3.4.1 rule C), checked before anything
+  else may refuse a session message or an `hs.resp` that carries them (a
+  reconnect `hs.init` is checked once it passes its own form, replay and
+  rate checks). If two different
   successors of one key arrive ("one successor per key"), the connection
   is suspended: nothing is sent or accepted, its sign-ins and
   approvals can't be answered, an ERROR with `alarm: rotate_conflict` is
@@ -859,16 +1408,20 @@ admin's connection.
     choices are `{label}` only: the service assigns the ids `c1`, `c2`, …
     in order and adds `abstain` (the ids a vote's ballots name). `text`
     must be empty or the title, `quorum.text` empty, `outage_rule` empty
-    or the default (`field_not_shown`); a label is at most 24 characters,
+    or the default, and `removed_may_vote` false (`field_not_shown`); `decision` must be one a proposal
+    may carry (`invalid_payload` otherwise); a label is at most 24 characters,
     distinct and not `Abstain`; titles and labels use printable ASCII and
     Latin-1 letters only (`unsupported_characters`), and a title is shown
-    whole or the approval is refused (`field_not_shown`); an extension's `outage.source` is an
+    whole or the approval is refused (`field_not_shown`): at most 35
+    bytes, counted as quoted (`"` and `\` count twice), so that a
+    two-choice motion always fits; an extension's `outage.source` is an
     `https://` URL of at most 32 bytes of visible ASCII, and its proposal must exist (the
     admins read its title: `unknown_proposal`). These
     two approvals take no `summary` (`invalid_summary` if one is given):
     the service builds what the admins read from the payload: `BINDING` or
-    `ADVISORY`, the window, the quorum's minimum, the choice labels and
-    the title (cut to fit, never the rest), or for an extension the
+    `ADVISORY`, the window (the close without its year), the quorum's
+    minimum, the rule (`rule >1/2 cast`, `rule >=2/3 elig`, `rule most`),
+    the choice labels and the title (shown whole or refused), or for an extension the
     proposal, the new close and the outage. A payload whose text cannot
     be shown whole (control or bidirectional characters, too many or too
     long labels, times outside the years 2000–2200) is refused.
@@ -903,6 +1456,37 @@ admin's connection.
   `servicevault.ActionHash` computes it, so the application can check the
   hash it is given; fixed vectors are in
   `sdk/go/servicevault/testdata/action_hash.json`.
+  - These canonical bytes are the approval's document. A member's vault
+    drops an approval challenge that carries a document it would not
+    accept, without a word to the service (VAULT-MESSAGING §10.4
+    "Approval documents"), so the approval would gather no answers. The
+    service is to send the document with its challenges (§15 item 53;
+    it does not yet), and must check it first as the vault will. So it
+    already refuses at once (`invalid_payload`, with `reason` and
+    `field`) an approval whose document is one:
+    - with a number that is not, in its canonical form, an integer from
+      0 to 2^53 − 1 (`reason: "number"`): `1.0`, `1e3` and `-0` are
+      `1`, `1000` and `0` there and pass; `-1`, `0.5`, `1e21` and
+      `9007199254740992` do not. **Carry a signed or fractional value,
+      or a larger one, as a string**;
+    - nested more than 16 levels (`depth`): the document object is one,
+      so the payload has at most 15, itself included;
+    - over 65,536 bytes (`size`; a payload within 16 KiB never is);
+    - with an `action` outside `[a-z0-9_.]{1,64}` or a `summary` over
+      1,024 bytes (`shape`; the service's own bounds are narrower, so
+      only an application building a document itself meets it).
+
+    An application that sent such numbers before this release had its
+    approvals answered, since no document went with them; it now gets
+    `invalid_payload` and carries those values as strings.
+
+    `field` is where, as a JSON pointer into the document (RFC 6901):
+    `/payload/change/amount`, or `/payload/push/0` for an array's first
+    element; the object or array one level too deep for `depth`;
+    `/action` or `/summary` for `shape`; empty for `size`. The SDK's `servicevault.ApprovalDocument` (and
+    `CheckDocument`) make the same checks, so an application can check
+    before it submits; `APIError.Reason` and `APIError.Field` carry the
+    refusal's.
 - *Timing.* An approval stays open for `SV_APPROVAL_TTL` (24 h; 1 h on
   staging, `SV_CHANNEL`).
   - With `SV_LONG_APPROVAL_CHALLENGES=true` each challenge lives as long
@@ -945,7 +1529,9 @@ admin's connection.
     challenges that still count, the fifth being kept for `admin.repin`
     and `admin_set.*`, or 5 for those. It counts each one until its expiry plus 24 hours, since
     a challenge held in the outbox can reach the member's vault as late as
-    its expiry, so it never counts fewer than the member's vault does.
+    its expiry, so it never counts fewer than the member's vault does. A
+    challenge counted is never taken back, even one dropped from the
+    outbox unsent when a force replaced it.
     The log starts empty when this version is first deployed, so for
     up to a challenge's expiry plus 24 hours after that, challenges sent
     before it are not counted. Every send is checked: creating an approval,
@@ -1233,6 +1819,7 @@ Emails are sent as given and are not printed back.
 | Document | Contents |
 |---|---|
 | [docs/SERVICE-VAULT.md](docs/SERVICE-VAULT.md) | Architecture and trust model |
+| [docs/RELEASE-29.md](docs/RELEASE-29.md) | How VAULT-MESSAGING §6.3.1 (release 29) reads for a service vault |
 | [docs/BALLOT-PROTOCOL.md](docs/BALLOT-PROTOCOL.md) | Secret-ballot protocol (to be written before ballot code) |
 | [docs/SOURCE.md](docs/SOURCE.md) | Pinned vettid-vault and vettid-relay commits |
 

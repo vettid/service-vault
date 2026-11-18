@@ -29,7 +29,7 @@ import (
 // deployment).
 const (
 	kindApproval = "apv"          // an approval
-	kindOpen     = "apv_open"     // approval id -> "" while it is pending
+	kindOpen     = "apv_open"     // approval id -> "" while it is pending, or settled with withdraws owed
 	kindReq      = "apv_req"      // challenge request id -> approval id
 	kindSeen     = "apv_seen"     // peer event id -> "": an answer already handled
 	kindAdmins   = "admin_set"    // "admins" -> the admin set
@@ -166,6 +166,10 @@ type Peer interface {
 	Connection(id string) (peer.ConnectionInfo, bool)
 	Authenticate(ctx context.Context, connID, ctxt, purpose string, ttl time.Duration) (string, error)
 	CancelChallenge(ctx context.Context, requestID string) (bool, error)
+	// ChallengeDeliveries reports, for each request id, whether the
+	// challenge Authenticate accepted has been deposited, waits in the
+	// outbox, or left it undelivered.
+	ChallengeDeliveries(requestIDs []string) map[string]peer.Delivery
 	// PinGov pins a connection's governance key to key, or to its
 	// credential key as it is now when key is empty (with onlyIfEmpty only
 	// if none is pinned). RepinGov moves it to key if that is still the
@@ -229,8 +233,8 @@ type Manager struct {
 	BoundConnection func(ctx context.Context, emailKey string) (string, bool, error)
 	// EligibleCount returns how many members a proposal made now would
 	// have, so a proposal.create approval the ballot manager would refuse
-	// (ballot.MaxEligible) is refused before the admins are asked; nil
-	// skips the check.
+	// (ballot.MaxEligible, or a quorum over the eligible members) is
+	// refused before the admins are asked; nil skips the check.
 	EligibleCount func(ctx context.Context) (int, error)
 	// Rate limits Create per action (SV_APPROVAL_LIMITS); nil: no limit.
 	Rate *RateLimit
@@ -240,9 +244,14 @@ type Manager struct {
 	mu        sync.Mutex
 	govWarned map[string]time.Time // admin -> when the migration last warned it waits for them
 	govDone   bool                 // migrateGov has seen every admin
-	lastID    string
-	kick      chan struct{}
-	once      sync.Once
+	// short: the admin set was below the threshold when last checked;
+	// shortLogged: when admins_short was last logged (noteShort).
+	short       bool
+	shortLogged time.Time
+	shortAdmins int // the set's size when last found short
+	lastID      string
+	kick        chan struct{}
+	once        sync.Once
 }
 
 // record is a stored approval.
@@ -266,8 +275,18 @@ type record struct {
 	Approvals []Approver        `json:"approvals,omitempty"`
 	Denials   []Denier          `json:"denials,omitempty"`
 	Pending   map[string]string `json:"pending,omitempty"` // admin connection id -> its outstanding challenge
-	Applied   *bool             `json:"applied,omitempty"`
-	Settled   time.Time         `json:"settled,omitzero"`
+	// Withdrawing: challenges replaced by a reminder whose CancelChallenge
+	// hasn't succeeded: a crash after the early save, a peer not started,
+	// or a store error in the peer's flush. Never counted (Answer counts
+	// Pending only); reevaluate withdraws them again until CancelChallenge
+	// succeeds, and the record stays in the open index until then, settled
+	// or not. CancelChallenge also succeeds when it couldn't queue the
+	// member's withdraw (the connection not active, or its outbox full):
+	// the peer then owes it until the challenge's exp (WithdrawOwed), so
+	// such a challenge is not kept here.
+	Withdrawing []Challenge `json:"withdrawing,omitempty"`
+	Applied     *bool       `json:"applied,omitempty"`
+	Settled     time.Time   `json:"settled,omitzero"`
 }
 
 func (r *record) answered(connID string) bool {
@@ -758,6 +777,10 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 		if n > ballot.MaxEligible {
 			return nil, errCode(CodeTooManyEligible)
 		}
+		// An invalid payload is refused by its summary below.
+		if q, err := ballot.ProposalMinBallots(payload); err == nil && q > int64(n) {
+			return nil, errCode(CodeQuorumUnreachable)
+		}
 	}
 	if req.Action == ActionVoteExtend {
 		// The admins are shown the proposal's title, from the store.
@@ -820,6 +843,19 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 		return nil, summaryError(err)
 	}
 	req.Summary = summary
+	// A member's vault silently drops a challenge whose document it would
+	// not accept (VAULT-MESSAGING §10.4 "Approval documents"), and the
+	// document is to go with every challenge (§15 item 53): refuse such
+	// an approval now, naming where, rather than ask for answers that
+	// would never come. When the challenges carry it, check it again where
+	// they are sent, for approvals made before this check.
+	if _, err := servicevault.ApprovalDocument(req.Action, req.Summary, payload); err != nil {
+		var de *servicevault.DocumentError
+		if errors.As(err, &de) {
+			return nil, &Error{Code: CodeInvalidPayload, Reason: de.Reason, Field: de.Field}
+		}
+		return nil, errCode(CodeInvalidPayload)
+	}
 	hash, err := servicevault.ActionHash(req.Action, req.Summary, payload)
 	if err != nil {
 		return nil, errCode(CodeInvalidPayload)
@@ -919,7 +955,7 @@ func (m *Manager) Create(ctx context.Context, req Request) (*Created, error) {
 		return nil, err
 	}
 	m.log().Info("approval requested", "approval_id", id, "action", r.Action, "threshold", th, "admins", len(set),
-		"challenged", len(sent))
+		"challenged", len(sent), "queued", queued(sent))
 	return &Created{ID: id, ActionHash: hash, Status: StatusPending, ExpiresAt: r.Exp, AskBudget: skipped}, nil
 }
 
@@ -963,9 +999,49 @@ func (m *Manager) challenge(ctx context.Context, b *batch, r *record, conns []st
 		r.Pending[c] = reqID
 		b.changes = append(b.changes, peer.Change{Kind: kindReq, ID: reqID, Data: []byte(r.ID),
 			Expires: r.Exp.Add(reqRetention)})
-		sent = append(sent, Challenge{ConnectionID: c, RequestID: reqID})
+		d := m.Peer.ChallengeDeliveries([]string{reqID})[reqID]
+		sent = append(sent, Challenge{ConnectionID: c, RequestID: reqID, Queued: d == peer.DeliveryQueued || d == peer.DeliveryUndelivered})
 	}
 	return sent, skipped, full
+}
+
+// queued counts the challenges of chs not deposited yet.
+func queued(chs []Challenge) int {
+	n := 0
+	for _, c := range chs {
+		if c.Queued {
+			n++
+		}
+	}
+	return n
+}
+
+// deliveries is where each admin's live challenge for r stands, by
+// admin, asked of the peer at once; an admin who holds none is absent
+// (peer.DeliveryNone).
+func (m *Manager) deliveries(r *record) map[string]peer.Delivery {
+	reqs := make([]string, 0, len(r.Pending))
+	for _, req := range r.Pending {
+		if req != "" {
+			reqs = append(reqs, req)
+		}
+	}
+	ds := m.Peer.ChallengeDeliveries(reqs)
+	out := make(map[string]peer.Delivery, len(r.Pending))
+	for a, req := range r.Pending {
+		if req == "" {
+			continue
+		}
+		d := ds[req]
+		if d == peer.DeliveryNone {
+			// Recorded, but the peer has no such challenge pending: it ended
+			// and its signin.expired has not been handled yet, or the peer has
+			// not loaded its state. As before the peer noted deliveries: live.
+			d = peer.DeliverySent
+		}
+		out[a] = d
+	}
+	return out
 }
 
 // errAskFull is an admin whose askLog is full (askBudget).
@@ -993,7 +1069,10 @@ func (m *Manager) canAsk(ctx context.Context, connID, action string, now time.Ti
 // send or the approval's batch then fails (counting one never sent only
 // refuses more). So sends that fail before going out (an admin not
 // reachable now, the peer's limits) still fill the log, and may refuse a
-// later forced reminder to that admin. It refuses (errAskFull) when the
+// later forced reminder to that admin; so does a challenge dropped from
+// the outbox unsent (a force replacing it while it waited there): the
+// log never takes one back, so it never counts fewer than reached the
+// member's vault. It refuses (errAskFull) when the
 // log is already full, so no send is a sixth.
 func (m *Manager) logAsk(ctx context.Context, connID, action string, exp time.Time) error {
 	l, ver, err := m.asksVersion(ctx, connID)
@@ -1031,10 +1110,32 @@ func (m *Manager) logAsk(ctx context.Context, connID, action string, exp time.Ti
 }
 
 func (m *Manager) cancel(ctx context.Context, chs []Challenge) {
+	m.cancelLeft(ctx, chs)
+}
+
+// cancelLeft withdraws chs and returns those whose withdraw failed. One
+// the peer no longer holds (answered, expired or withdrawn already) is
+// done.
+func (m *Manager) cancelLeft(ctx context.Context, chs []Challenge) []Challenge {
+	var left []Challenge
 	for _, c := range chs {
 		if _, err := m.Peer.CancelChallenge(ctx, c.RequestID); err != nil {
 			m.log().Warn("approval cancel", "request_id", c.RequestID, "err", errName(err))
+			left = append(left, c)
 		}
+	}
+	return left
+}
+
+// withdrawAgain withdraws r's Withdrawing challenges again and keeps
+// those that still fail.
+func (m *Manager) withdrawAgain(ctx context.Context, r *record) {
+	if len(r.Withdrawing) == 0 {
+		return
+	}
+	r.Withdrawing = m.cancelLeft(ctx, r.Withdrawing)
+	if len(r.Withdrawing) == 0 {
+		r.Withdrawing = nil
 	}
 }
 
@@ -1083,9 +1184,16 @@ func (m *Manager) Status(ctx context.Context, id string) (*Status, error) {
 		if err != nil {
 			return nil, err
 		}
+		ds := m.deliveries(r)
 		for _, a := range r.Admins {
-			if slices.Contains(set, a) && r.Pending[a] == "" && !r.answered(a) {
+			if !slices.Contains(set, a) || r.answered(a) {
+				continue
+			}
+			switch ds[a] {
+			case peer.DeliveryNone, peer.DeliveryUndelivered:
 				st.RemindNeeded = append(st.RemindNeeded, a)
+			case peer.DeliveryQueued:
+				st.Queued = append(st.Queued, a)
 			}
 		}
 		for _, a := range st.RemindNeeded {
@@ -1116,6 +1224,10 @@ var ErrNotFound = errors.New("approval: not found")
 // remind_needed ones), each lasting as long as the approval, and
 // CodeNothingToRemind when there are none (checked before the interval).
 // Otherwise to every admin who has not answered, replacing their challenge.
+// Either way, an admin whose challenge still waits in the outbox
+// (Status.Queued) is left out: it goes once their connection can take it.
+// CodeNothingToRemind answers when that leaves nobody (checked before the
+// interval). A challenge that left the outbox undelivered is replaced.
 // An admin at the approval's ask limit (askLimit: 4 approval challenges
 // that still count, or 5 for a repair action) is left out, with
 // their challenge not withdrawn; CodeAskBudget when that leaves nobody
@@ -1172,7 +1284,13 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 		conns = append(conns, a)
 	}
 	var skipped []AskBudget
-	cands, limited := 0, 0 // admins to remind; of those left out for a full or unreadable ask log
+	// Admins to remind; of those, left out for a full or unreadable ask
+	// log; admins left out because their challenge waits in the outbox.
+	cands, limited, waiting := 0, 0, 0
+	var ds map[string]peer.Delivery
+	if len(force) == 0 {
+		ds = m.deliveries(r)
+	}
 	for _, a := range r.Admins {
 		if len(force) > 0 {
 			break // only the named admins
@@ -1180,14 +1298,21 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 		if !slices.Contains(set, a) || r.answered(a) {
 			continue
 		}
-		if m.LongChallenges {
+		d := ds[a]
+		if d == peer.DeliveryQueued {
+			// Its challenge waits in the outbox (behind a reconnect, say) and
+			// goes once the connection can take it; another would wait the
+			// same way, and use one of the member's asks.
+			waiting++
+			continue
+		}
+		if m.LongChallenges && d == peer.DeliverySent {
 			// An admin who still holds a live challenge is not challenged
 			// again: it outlives RemindInterval, and each challenge that
 			// reaches a member's vault uses its approval bucket
-			// (VAULT-MESSAGING §10.4.1).
-			if r.Pending[a] != "" {
-				continue
-			}
+			// (VAULT-MESSAGING §10.4.1). One that left the outbox
+			// undelivered is replaced.
+			continue
 		}
 		cands++
 		// Before anything is withdrawn: an admin at the budget keeps the
@@ -1203,13 +1328,13 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 			}
 			continue
 		}
-		if old := r.Pending[a]; old != "" && !m.LongChallenges {
+		if old := r.Pending[a]; old != "" && (!m.LongChallenges || d == peer.DeliveryUndelivered) {
 			to = append(to, Challenge{ConnectionID: a, RequestID: old})
 			delete(r.Pending, a)
 		}
 		conns = append(conns, a)
 	}
-	if len(force) == 0 && m.LongChallenges && cands == 0 {
+	if len(force) == 0 && cands == 0 && (m.LongChallenges || waiting > 0) {
 		return nil, errCode(CodeNothingToRemind)
 	}
 	if len(force) == 0 && len(conns) == 0 && limited > 0 {
@@ -1218,10 +1343,42 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 	if now.Before(r.LastSent.Add(RemindInterval)) {
 		return nil, errCode(CodeTooSoon)
 	}
-	m.cancel(ctx, to)
 	ctxt, err := ChallengeContext(m.ServiceName, r.Action, r.Summary, r.Hash)
 	if err != nil {
 		return nil, err
+	}
+	if len(to) > 0 {
+		// The challenges replaced leave Pending in a write of their own,
+		// before they are withdrawn: a crash or a store error after the
+		// withdraw must not leave the stored record naming a challenge the
+		// peer has forgotten, its admin shown as holding a live one and
+		// left out of remind_needed (a withdrawn challenge has no expiry
+		// event to clear it). An answer to one stops counting here, as it
+		// would at the save below (Answer counts the outstanding one only).
+		// They are named in Withdrawing in the same write, so one whose
+		// withdraw doesn't happen (a crash next, or a failed cancel) is
+		// withdrawn again by reevaluate, not left live at the member's
+		// vault, where an approval of it would show but never count.
+		r.Withdrawing = append(r.Withdrawing, to...)
+		pre := m.batch(now)
+		if err := errors.Join(pre.save(r), pre.audit(&AuditEntry{Type: AuditReplaced, ApprovalID: r.ID, Challenges: to})); err != nil {
+			return nil, err
+		}
+		if err := pre.apply(ctx); err != nil {
+			return nil, err
+		}
+	}
+	left := m.cancelLeft(ctx, to)
+	done := map[string]bool{}
+	for _, c := range to {
+		done[c.RequestID] = true
+	}
+	for _, c := range left {
+		delete(done, c.RequestID)
+	}
+	r.Withdrawing = slices.DeleteFunc(r.Withdrawing, func(c Challenge) bool { return done[c.RequestID] })
+	if len(r.Withdrawing) == 0 {
+		r.Withdrawing = nil
 	}
 	if r.Pending == nil {
 		r.Pending = map[string]string{}
@@ -1245,7 +1402,7 @@ func (m *Manager) Remind(ctx context.Context, id string, force ...string) (*Remi
 	for _, c := range sent {
 		out.Reminded = append(out.Reminded, c.ConnectionID)
 	}
-	m.log().Info("approval reminded", "approval_id", r.ID, "challenged", len(sent), "forced", len(force) > 0)
+	m.log().Info("approval reminded", "approval_id", r.ID, "challenged", len(sent), "queued", queued(sent), "forced", len(force) > 0)
 	return out, nil
 }
 
@@ -1496,7 +1653,9 @@ func (m *Manager) settle(ctx context.Context, b *batch, r *record, status, reaso
 		out = append(out, Challenge{ConnectionID: c, RequestID: req})
 	}
 	r.Pending = nil
-	b.del(kindOpen, r.ID)
+	if len(r.Withdrawing) == 0 {
+		b.del(kindOpen, r.ID) // else reevaluate drops it once they are withdrawn
+	}
 	if status == StatusApproved && (r.Action == ActionAdminSetAdd || r.Action == ActionAdminSetRemove || r.Action == ActionAdminRepin) {
 		applied, err := m.applyAdminSet(ctx, b, r, set)
 		if err != nil {
@@ -1523,7 +1682,8 @@ func (m *Manager) settle(ctx context.Context, b *batch, r *record, status, reaso
 // applyAdminSet changes the admin set for an approved admin_set.*
 // action, if it still applies: an added connection must still be active
 // and not an admin; a removed one must still be an admin, and the set
-// never becomes empty this way.
+// never becomes empty this way. A peer whose start hasn't finished
+// (peer.ErrNotStarted) is an error, retried, not a moved key.
 func (m *Manager) applyAdminSet(ctx context.Context, b *batch, r *record, set []string) (bool, error) {
 	// Defence in depth: whatever settled the approval, the set is never
 	// changed on an approval signed with a changed key, or one that does
@@ -1543,7 +1703,7 @@ func (m *Manager) applyAdminSet(ctx context.Context, b *batch, r *record, set []
 		if err != nil || key == nil || !slices.Contains(set, target) || !m.active(target) {
 			return false, nil
 		}
-		if ok, err := m.Peer.RepinGov(ctx, target, key); errors.Is(err, peer.ErrNotFound) || err == nil && !ok {
+		if ok, err := m.Peer.RepinGov(ctx, target, key); !errors.Is(err, peer.ErrNotStarted) && errors.Is(err, peer.ErrNotFound) || err == nil && !ok {
 			return false, b.audit(&AuditEntry{Type: AuditGovKeyRefused, ApprovalID: r.ID, ConnectionID: target, Reason: ReasonAuthKeyMoved})
 		} else if err != nil {
 			return false, err
@@ -1564,7 +1724,7 @@ func (m *Manager) applyAdminSet(ctx context.Context, b *batch, r *record, set []
 		if len(r.AuthKey) == 0 {
 			return false, nil
 		}
-		if ok, err := m.Peer.RepinGov(ctx, target, r.AuthKey); errors.Is(err, peer.ErrNotFound) || err == nil && !ok {
+		if ok, err := m.Peer.RepinGov(ctx, target, r.AuthKey); !errors.Is(err, peer.ErrNotStarted) && errors.Is(err, peer.ErrNotFound) || err == nil && !ok {
 			return false, b.audit(&AuditEntry{Type: AuditGovKeyRefused, ApprovalID: r.ID, ConnectionID: target, Reason: ReasonAuthKeyMoved})
 		} else if err != nil {
 			return false, err
@@ -1614,11 +1774,17 @@ func (m *Manager) reevaluate(ctx context.Context) error {
 		now := m.now()
 		b := m.batch(now)
 		var settled []Challenge
+		wasPending := r != nil && r.Status == StatusPending
+		if r != nil {
+			m.withdrawAgain(ctx, r)
+		}
 		switch {
 		case r == nil:
 			b.del(kindOpen, o.ID)
 		case r.Status != StatusPending:
-			b.del(kindOpen, o.ID)
+			if len(r.Withdrawing) == 0 {
+				b.del(kindOpen, o.ID)
+			}
 		case !now.Before(r.Exp):
 			if settled, err = m.settle(ctx, b, r, StatusExpired, "", set); err != nil {
 				return err
@@ -1645,7 +1811,9 @@ func (m *Manager) reevaluate(ctx context.Context) error {
 		if err := b.apply(ctx); err != nil {
 			return err
 		}
-		if r != nil && r.Status != StatusPending {
+		// Only the pass that settled it: a settled record kept open for its
+		// Withdrawing list comes round again, and must not wake Run each time.
+		if wasPending && r.Status != StatusPending {
 			m.log().Info("approval settled", "approval_id", r.ID, "status", r.Status, "reason", r.Reason)
 			m.cancel(ctx, settled)
 			m.wake()
@@ -1947,8 +2115,7 @@ func (m *Manager) ConnectionRemoved(ctx context.Context, connID string) error {
 		// No approval can pass until the operator mends it: a lower m,
 		// or a bootstrap once the set is empty (README "Recovering
 		// admins").
-		m.log().Error("admin set below the threshold: approvals cannot pass", "alarm", "admins_short",
-			"admins", len(next), "threshold", th)
+		m.logShort(len(next), th)
 	}
 	m.wake()
 	return m.reevaluate(ctx)
@@ -1986,15 +2153,66 @@ func (m *Manager) Start(ctx context.Context) error {
 	case m.BootstrapKey != "" && st != nil && st.State == bootDone:
 		m.log().Info("admin bootstrap setting ignored: the bootstrap has happened", "admins", len(set))
 	}
+	m.noteShort(len(set))
 	return nil
 }
 
+// ShortAlarmEvery is how often admins_short is logged while the admin set
+// is below the threshold. The alarm counts the line over 5-minute
+// periods and clears on a period without it, so it is logged well
+// within one: the alarm stays raised for as long as the set is short.
+const ShortAlarmEvery = time.Minute
+
+// logShort logs admins_short and notes when.
+func (m *Manager) logShort(admins, th int) {
+	m.log().Error("admin set below the threshold: new approvals cannot pass", "alarm", "admins_short",
+		"admins", admins, "threshold", th)
+	m.short, m.shortLogged, m.shortAdmins = true, m.now(), admins
+}
+
+// holdShort logs admins_short again, at most every ShortAlarmEvery, when
+// the set was last seen short and its state can't be read now: it is not
+// known to be mended (fail secure). Caller holds m.mu.
+func (m *Manager) holdShort() {
+	if m.short && m.now().Sub(m.shortLogged) >= ShortAlarmEvery {
+		m.logShort(m.shortAdmins, m.threshold())
+	}
+}
+
+// noteShort logs admins_short while the set is below the threshold, at
+// most every ShortAlarmEvery, and one line when it is back at it (only
+// after this process saw it short: a restart with a lower threshold logs
+// none). "New approvals": an open one keeps the larger of its own
+// threshold and the current one. Caller holds m.mu.
+func (m *Manager) noteShort(admins int) {
+	th := m.threshold()
+	switch {
+	case admins < th:
+		if !m.short || m.now().Sub(m.shortLogged) >= ShortAlarmEvery {
+			m.logShort(admins, th)
+		}
+	case m.short:
+		m.log().Info("admin set back at the threshold: new approvals can pass", "admins", admins, "threshold", th)
+		m.short, m.shortLogged = false, time.Time{}
+	}
+}
+
 // Tick does the periodic work: bootstrap from an already bound, active
-// connection while the set is empty and a bootstrap applies; expire or settle the open
-// approvals. The webhooks are delivered by Hooks.Run.
+// connection while the set is empty and a bootstrap applies; log
+// admins_short while the set is below the threshold (noteShort); expire
+// or settle the open approvals. The webhooks are delivered by Hooks.Run.
 func (m *Manager) Tick(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// The set first, before the steps that can fail, so none of them can
+	// skip it. A failed read holds the alarm (the set is not known to be
+	// mended: fail secure) and ends nothing else: the rest of the tick
+	// runs as it would without this check.
+	if set, err := m.admins(ctx); err != nil {
+		m.holdShort()
+	} else {
+		m.noteShort(len(set))
+	}
 	if err := m.migrateGov(ctx); err != nil {
 		return err
 	}
@@ -2015,6 +2233,11 @@ func (m *Manager) Tick(ctx context.Context) error {
 			if ok && m.active(c) {
 				if err := m.bootstrap(ctx, c); err != nil {
 					return err
+				}
+				// The set it just filled, for the alarm: a failed read ends
+				// nothing (the next tick's check settles it).
+				if set, err := m.admins(ctx); err == nil {
+					m.noteShort(len(set))
 				}
 			}
 		}

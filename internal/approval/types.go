@@ -109,9 +109,14 @@ const (
 	AuditRequested = "approval.requested"
 	AuditResponse  = "approval.response"
 	AuditReminded  = "approval.reminded"
-	AuditApproved  = "approval.approved"
-	AuditDenied    = "approval.denied"
-	AuditExpired   = "approval.expired"
+	// AuditReplaced: a reminder replaced these challenges and is about to
+	// withdraw them. It is written before the withdraw, so it doesn't say
+	// the withdraw happened: the record names them in Withdrawing until it
+	// has, and an answer to one never counts either way.
+	AuditReplaced = "approval.replaced"
+	AuditApproved = "approval.approved"
+	AuditDenied   = "approval.denied"
+	AuditExpired  = "approval.expired"
 	// AuditConsumed: an approved proposal.create or vote.extend was used,
 	// once, for the proposal or extension it approved.
 	AuditConsumed        = "approval.consumed"
@@ -230,6 +235,10 @@ const (
 	CodeOutageNotOver     = "outage_not_over"   // Create vote.extend: the outage's to is after now (BALLOT-PROTOCOL §10.2)
 	CodeRateLimited       = "rate_limited"      // Create: the limit of the action's group (RateLimit) is reached
 
+	// Create proposal.create: the quorum's min_ballots is more than the
+	// eligible members (BALLOT-PROTOCOL §3.4).
+	CodeQuorumUnreachable = "quorum_unreachable"
+
 	// Using an approval (Consume).
 	CodeApprovalRequired    = "approval_required"     // no approval id
 	CodeApprovalNotFound    = "approval_not_found"    // no such approval
@@ -241,9 +250,19 @@ const (
 )
 
 // Error is a request the service refuses, with its API error code.
-type Error struct{ Code string }
+type Error struct {
+	Code string
+	// Reason and Field: for an invalid_payload whose document a member's
+	// vault would drop, servicevault.DocumentError's Reason and Field.
+	Reason, Field string
+}
 
-func (e *Error) Error() string { return "approval: " + e.Code }
+func (e *Error) Error() string {
+	if e.Reason == "" {
+		return "approval: " + e.Code
+	}
+	return fmt.Sprintf("approval: %s (%s %q)", e.Code, e.Reason, e.Field)
+}
 
 func errCode(c string) error { return &Error{Code: c} }
 
@@ -354,9 +373,17 @@ type Status struct {
 	// AskBudget, while pending: those of RemindNeeded at the ask budget.
 	AskBudget []AskBudget `json:"ask_budget,omitempty"`
 	// RemindNeeded, while pending: the admins asked who have not answered
-	// and hold no live challenge (it ran out, or could not be sent), so
-	// they see nothing on the phone until a reminder.
+	// and hold no live challenge (it ran out, could not be sent, or left
+	// the outbox undelivered), so they see nothing on the phone until a
+	// reminder.
 	RemindNeeded []string `json:"remind_needed"`
+	// Queued, while pending: the admins who have not answered whose
+	// challenge waits in the outbox, not yet deposited (behind a reconnect
+	// of their connection, for example). They see nothing on the phone
+	// yet; the challenge goes once their connection can take it, and a
+	// reminder leaves them out (it would wait the same way). One that
+	// ends there undelivered moves to RemindNeeded.
+	Queued []string `json:"queued,omitempty"`
 	// RemindAfter, with RemindNeeded: the earliest a reminder is accepted
 	// (RemindInterval after the last challenges were sent).
 	RemindAfter *time.Time `json:"remind_after,omitempty"`
@@ -396,6 +423,10 @@ type Admins struct {
 type Challenge struct {
 	ConnectionID string `json:"connection_id"`
 	RequestID    string `json:"request_id"`
+	// Queued: when the entry was written, the challenge had not been
+	// deposited: it waited in the outbox (Status.Queued), or had left it
+	// undelivered.
+	Queued bool `json:"queued,omitempty"`
 }
 
 // AuditEntry is one entry of the audit log. Entries are written once and

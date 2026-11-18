@@ -20,12 +20,20 @@ jobs:
         run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - name: go mod verify
         run: go mod verify
+      - name: go.mod is tidy (its direct requirements feed docs/SOURCE.md)
+        run: go mod tidy -diff && (cd tools/rootwatch && go mod tidy -diff)
       - name: go vet
         run: go vet ./...
       - name: staticcheck
         run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
       - name: go test -race
         run: go test -race -count=1 ./...
+      - name: the size and timing test at PlannedMaxEligible (left out under -race)
+        run: go test -count=1 -run 'TestMaxEligibleFitsOneItem' ./internal/ballot/
+      - name: devsigner tests (the in-memory anchor key maker, never in a release build)
+        run: go test -count=1 -tags devsigner ./cmd/service-vault/ ./internal/keystore/
+      - name: staticcheck (devsigner)
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 -tags devsigner ./cmd/service-vault/ ./internal/keystore/
       - name: build
         run: CGO_ENABLED=0 go build -trimpath -o /dev/null ./cmd/service-vault
 

@@ -44,6 +44,67 @@ func TestMerkleKnownAnswers(t *testing.T) {
 	}
 }
 
+// A Tree gives the same root and the same audit path for every leaf as
+// Root and Proof, in trees of 0 to 70 leaves, and refuses an index out
+// of range.
+func TestTreeMatchesProof(t *testing.T) {
+	for n := 0; n <= 70; n++ {
+		leaves := make([][]byte, n)
+		for i := range leaves {
+			leaves[i] = []byte{byte(i), byte(n), 7}
+		}
+		tr := NewTree(leaves)
+		if tr.Size() != n || hex.EncodeToString(tr.Root()) != hex.EncodeToString(Root(leaves)) {
+			t.Fatalf("n=%d: root or size differs", n)
+		}
+		for m := range n {
+			want, _ := Proof(leaves, m)
+			got, err := tr.Proof(m)
+			if err != nil || len(got) != len(want) {
+				t.Fatalf("n=%d m=%d: %v, %d hashes, want %d", n, m, err, len(got), len(want))
+			}
+			for i := range want {
+				if hex.EncodeToString(got[i]) != hex.EncodeToString(want[i]) {
+					t.Fatalf("n=%d m=%d: hash %d differs", n, m, i)
+				}
+			}
+			if !VerifyProof(tr.Root(), leaves[m], m, n, got) {
+				t.Fatalf("n=%d m=%d: doesn't verify", n, m)
+			}
+		}
+		for _, m := range []int{-1, n} {
+			if _, err := tr.Proof(m); err == nil {
+				t.Fatalf("n=%d: index %d accepted", n, m)
+			}
+		}
+	}
+	for n := 1; n <= 8; n++ {
+		if got := hex.EncodeToString(NewTree(ctTree(t, n)).Root()); got != ctRoots[n-1] {
+			t.Fatalf("tree root of %d: %s", n, got)
+		}
+	}
+}
+
+// What a Tree returns is a copy: changing a path or the root leaves the
+// tree's later answers as they were.
+func TestTreeCopies(t *testing.T) {
+	leaves := [][]byte{{1}, {2}, {3}, {4}, {5}}
+	tr := NewTree(leaves)
+	p, _ := tr.Proof(0)
+	p[0][0] ^= 1
+	r := tr.Root()
+	r[0] ^= 1
+	for m := range leaves {
+		q, _ := tr.Proof(m)
+		if !VerifyProof(Root(leaves), leaves[m], m, len(leaves), q) {
+			t.Fatalf("m=%d: a changed path changed the tree", m)
+		}
+	}
+	if hex.EncodeToString(tr.Root()) != hex.EncodeToString(Root(leaves)) {
+		t.Fatal("a changed root changed the tree")
+	}
+}
+
 // Every proof of every leaf, in trees of 1 to 33 leaves, verifies with
 // the RFC 9162 algorithm, and fails for another index, another tree's
 // root, another leaf or a shortened path. (An audit path doesn't bind
