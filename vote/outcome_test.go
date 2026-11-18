@@ -124,7 +124,7 @@ func decisionCases() []decisionCase {
 		c("threshold 9/10 of elig, removed may vote", `{"base":"elig","rule":"threshold","threshold":{"den":10,"num":9}}`, true, true),
 		c("threshold 1/1 of voted", `{"base":"voted","rule":"threshold","threshold":{"den":1,"num":1}}`, false, true),
 		c("plurality", `{"base":null,"rule":"plurality","threshold":null}`, false, true),
-		c("elig without removed_may_vote", `{"base":"elig","rule":"majority","threshold":null}`, false, false),
+		c("elig with removed_may_vote false (0.14.1)", `{"base":"elig","rule":"majority","threshold":null}`, false, true),
 		c("plurality with a base", `{"base":"cast","rule":"plurality","threshold":null}`, false, false),
 		c("majority without a base", `{"base":null,"rule":"majority","threshold":null}`, false, false),
 		c("threshold without its fraction", `{"base":"cast","rule":"threshold","threshold":null}`, false, false),
@@ -176,7 +176,7 @@ func (c *outcomeCase) proposal() *Proposal {
 
 func TestDecide(t *testing.T) {
 	for _, c := range outcomeCases() {
-		if err := c.Decision.Validate(c.RemovedMayVote); err != nil {
+		if err := c.Decision.Validate(); err != nil {
 			t.Fatalf("%s: decision: %v", c.Case, err)
 		}
 		got, err := Decide(c.proposal(), c.Tally, c.Ballots)
@@ -300,9 +300,9 @@ func TestResultsRefuseNegativeCounts(t *testing.T) {
 func TestProposalRefusesQuorumAndDecision(t *testing.T) {
 	ik := ed25519.NewKeyFromSeed(digest("ik")).Public().(ed25519.PublicKey)
 	for name, mod := range map[string]func(*Proposal){
-		"quorum over eligible": func(p *Proposal) { p.Quorum.MinBallots = p.Eligible + 1 },
-		"no decision":          func(p *Proposal) { p.Decision = Decision{} },
-		"elig, removed barred": func(p *Proposal) { p.Decision.Base = BaseOf(BaseElig) },
+		"quorum over eligible":  func(p *Proposal) { p.Quorum.MinBallots = p.Eligible + 1 },
+		"no decision":           func(p *Proposal) { p.Decision = Decision{} },
+		"plurality with a base": func(p *Proposal) { p.Decision.Rule = RulePlurality },
 	} {
 		p := testProposal(t, ik, [][]byte{digest("t1"), digest("t2")})
 		if _, err := EncodeProposal(p); err != nil {

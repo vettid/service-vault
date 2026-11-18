@@ -321,7 +321,7 @@ func (p *Proposal) Validate() error {
 	if !abstain {
 		return bad("without abstain")
 	}
-	if err := p.Decision.Validate(p.RemovedMayVote); err != nil {
+	if err := p.Decision.Validate(); err != nil {
 		return err
 	}
 	strs := []string{p.Title, p.Text, p.Quorum.Text, p.OutageRule}

@@ -10,35 +10,31 @@ import (
 )
 
 // The title limit is derived from the final summary strings (owner
-// decision on GC #1367, S-d): 31 bytes.
+// decision on GC #1367, S-d). With "removed votes" gone (0.14.1, GC
+// #1374), the extension summary bounds it: 35 bytes.
 func TestMaxTitleBytes(t *testing.T) {
-	if n := MaxTitleBytes(); n != 31 {
-		t.Fatalf("title limit %d, want 31", n)
+	if n := MaxTitleBytes(); n != 35 {
+		t.Fatalf("title limit %d, want 35", n)
 	}
 }
 
 // A two-choice "Approve"/"Reject" motion always fits: every decision,
-// binding or advisory, removed members voting or not, the largest quorum,
-// the widest times and the longest title, counted as quoted.
+// binding or advisory, the largest quorum, the widest times and the
+// longest title, counted as quoted.
 func TestWidestMotionAlwaysFits(t *testing.T) {
 	n := MaxTitleBytes()
 	titles := []string{strings.Repeat("T", n), `"` + strings.Repeat("T", n-2), strings.Repeat("é", n/2)}
 	for _, d := range validDecisions() {
 		for _, binding := range []bool{false, true} {
-			for _, rmv := range []bool{false, true} {
-				if d.Validate(rmv) != nil {
-					continue
-				}
-				for _, title := range titles {
-					in := input()
-					in.Title, in.Decision, in.Binding, in.RemovedMayVote = title, d, binding, rmv
-					in.Choices = []ChoiceInput{{Label: "Approve"}, {Label: "Reject"}}
-					in.Quorum.MinBallots = vote.MaxEligible
-					in.OpensAt, in.ClosesAt = 7258118400-vote.MaxWindow, 7258118400
-					s, err := ProposalSummary(mustCanon(t, in))
-					if err != nil || len(s) > maxSummary {
-						t.Fatalf("%s %+v binding %v removed %v: %d %v", title, d, binding, rmv, len(s), err)
-					}
+			for _, title := range titles {
+				in := input()
+				in.Title, in.Decision, in.Binding = title, d, binding
+				in.Choices = []ChoiceInput{{Label: "Approve"}, {Label: "Reject"}}
+				in.Quorum.MinBallots = vote.MaxEligible
+				in.OpensAt, in.ClosesAt = 7258118400-vote.MaxWindow, 7258118400
+				s, err := ProposalSummary(mustCanon(t, in))
+				if err != nil || len(s) > maxSummary {
+					t.Fatalf("%s %+v binding %v: %d %v", title, d, binding, len(s), err)
 				}
 			}
 		}
@@ -64,11 +60,23 @@ func TestSummaryShowsRule(t *testing.T) {
 	}
 	for want, d := range cases {
 		in := input()
-		in.Decision, in.RemovedMayVote = d, true
+		in.Decision = d
 		s, err := ProposalSummary(mustCanon(t, in))
-		if err != nil || !strings.Contains(s, "quorum 1, "+want) || !strings.Contains(s, ", removed votes, title ") {
+		if err != nil || !strings.Contains(s, "quorum 1, "+want) || strings.Contains(s, "removed") {
 			t.Errorf("%q: %q %v", want, s, err)
 		}
+	}
+}
+
+// elig needs no flag (0.14.1, E-a'): a vote of every eligible member is
+// made with removed_may_vote false.
+func TestCreateEligWithoutFlag(t *testing.T) {
+	m, _, _, a := strictManager(t)
+	in := input()
+	in.Decision.Base = vote.BaseOf(vote.BaseElig)
+	approveProposal(t, a, "a", in)
+	if _, err := m.Create(context.Background(), "a", in); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -77,9 +85,9 @@ func TestSummaryShowsRule(t *testing.T) {
 func TestCreateRefusesDecision(t *testing.T) {
 	ctx := context.Background()
 	for name, mod := range map[string]func(*ProposalInput){
-		"no decision":                func(i *ProposalInput) { i.Decision = vote.Decision{} },
-		"elig, removed may not vote": func(i *ProposalInput) { i.Decision.Base = vote.BaseOf(vote.BaseElig) },
-		"plurality with a base":      func(i *ProposalInput) { i.Decision.Rule = vote.RulePlurality },
+		"no decision":           func(i *ProposalInput) { i.Decision = vote.Decision{} },
+		"removed_may_vote true": func(i *ProposalInput) { i.RemovedMayVote = true },
+		"plurality with a base": func(i *ProposalInput) { i.Decision.Rule = vote.RulePlurality },
 		"threshold 4/6": func(i *ProposalInput) {
 			i.Decision = vote.Decision{Rule: vote.RuleThreshold, Base: vote.BaseOf(vote.BaseCast), Threshold: &vote.Threshold{Num: 4, Den: 6}}
 		},

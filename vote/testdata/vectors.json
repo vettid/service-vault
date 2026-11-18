@@ -1497,14 +1497,14 @@
    "valid": true
   },
   {
-   "case": "elig without removed_may_vote",
+   "case": "elig with removed_may_vote false (0.14.1)",
    "decision": {
     "base": "elig",
     "rule": "majority",
     "threshold": null
    },
    "removed_may_vote": false,
-   "valid": false
+   "valid": true
   },
   {
    "case": "plurality with a base",
