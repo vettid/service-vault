@@ -639,7 +639,10 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
     end, never extended. Through it only a
     `vote.cast` deposited under one of those tokens passes (and one the
     service can't judge yet, its proposal not published, is left at the
-    relay to come again). Nothing else
+    relay to come again: until the proposal is published, or the keys'
+    bound passes and it is dropped, it is an unacked message to every
+    count, so it can hold up another vote's count for its 24 hours, or
+    add to that vote's `counts.unhandled`). Nothing else
     is accepted (no evidence, no rekey, no response, no identity change),
     and nothing is answered: the member gets no receipt, and no
     `vote.closed`. The record is never the live connection, so a member
