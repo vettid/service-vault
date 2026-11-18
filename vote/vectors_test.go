@@ -51,14 +51,15 @@ type vectors struct {
 		ReceiptSig string `json:"receipt_sig"`
 		StatusMsg  string `json:"status_msg"`
 		StatusSig  string `json:"status_sig"`
-		Refusal    struct {
-			Connection  string `json:"connection"`
-			Type        string `json:"type"`
-			Code        string `json:"code"`
-			RequestHash string `json:"request_hash"`
-			Msg         string `json:"msg"`
-			Sig         string `json:"sig"`
-		} `json:"refusal"`
+		// Connection and StatusMsgMS are the status's (0.15.0).
+		Connection  string        `json:"connection"`
+		StatusMsgMS uint64        `json:"status_msg_ms"`
+		Refusal     refusalVector `json:"refusal"`
+		// RefusalNotHeld: a cast refused for a proposal not held, under
+		// the zero hash and H(ballot_leaf) (0.15.0).
+		RefusalNotHeld refusalVector `json:"refusal_not_held"`
+		// RefusalStatusUnknown: a vote.status refused unknown_proposal.
+		RefusalStatusUnknown refusalVector `json:"refusal_status_unknown"`
 	} `json:"service"`
 	Merkle    []merkleVector `json:"merkle"`
 	Ed25519   []sigVector    `json:"ed25519"`
@@ -86,6 +87,17 @@ type docVectors struct {
 	Rows         string `json:"rows"`
 	Results      string `json:"results"`
 	ResultsSig   string `json:"results_sig"`
+}
+
+// refusalVector is a refusal's signed fields, message and signature.
+type refusalVector struct {
+	ProposalHash string `json:"proposal_hash"`
+	Connection   string `json:"connection"`
+	Type         string `json:"type"`
+	Code         string `json:"code"`
+	RequestHash  string `json:"request_hash"`
+	Msg          string `json:"msg"`
+	Sig          string `json:"sig"`
 }
 
 type merkleVector struct {
@@ -158,13 +170,26 @@ func makeVectors(t *testing.T) *vectors {
 	s.Seed, s.IK, s.MsgMS = h(sseed), h(ssk.Public().(ed25519.PublicKey)), 1793606400123
 	receipt := must(ReceiptMsg(ph, leaf, s.MsgMS))
 	s.ReceiptMsg, s.ReceiptSig = h(receipt), h(must(suite.Sign(ssk, LabelReceipt, receipt)))
-	status := must(StatusMsg(v.ProposalID, tag, leaf))
+	conn := digest("example connection peer key")
+	s.Connection, s.StatusMsgMS = h(conn), 1793606500456
+	status := must(StatusMsg(ph, conn, tag, leaf, s.StatusMsgMS))
 	s.StatusMsg, s.StatusSig = h(status), h(must(suite.Sign(ssk, LabelStatus, status)))
 	r := &s.Refusal
-	conn := digest("example connection peer key")
-	r.Connection, r.Type, r.Code, r.RequestHash = h(conn), "vote.cast", "bad_ballot", h(digest(string(leaf)))
-	refusal := must(RefusalMsg(v.ProposalID, conn, tag, r.Type, r.Code, s.MsgMS, digest(string(leaf))))
+	r.ProposalHash, r.Connection, r.Type, r.Code, r.RequestHash = h(ph), h(conn), "vote.cast", "bad_ballot", h(digest(string(leaf)))
+	refusal := must(RefusalMsg(ph, v.ProposalID, conn, tag, r.Type, r.Code, s.MsgMS, digest(string(leaf))))
 	r.Msg, r.Sig = h(refusal), h(must(suite.Sign(ssk, LabelRefusal, refusal)))
+	// 0.15.0: a refusal for a proposal not held signs the zero hash, and
+	// for a cast, H(ballot_leaf).
+	u := &s.RefusalNotHeld
+	u.ProposalHash, u.Connection, u.Type, u.Code, u.RequestHash = h(NoProposal()), h(conn), "vote.cast", "not_eligible", h(digest(string(leaf)))
+	nh := must(RefusalMsg(NoProposal(), v.ProposalID, conn, nil, u.Type, u.Code, s.MsgMS, digest(string(leaf))))
+	u.Msg, u.Sig = h(nh), h(must(suite.Sign(ssk, LabelRefusal, nh)))
+	// A vote.status refusal for an unknown proposal: the zero hash, and
+	// request_hash = H(proposal_id).
+	st := &s.RefusalStatusUnknown
+	st.ProposalHash, st.Connection, st.Type, st.Code, st.RequestHash = h(NoProposal()), h(conn), "vote.status", "unknown_proposal", h(digest(v.ProposalID))
+	sr := must(RefusalMsg(NoProposal(), v.ProposalID, conn, nil, st.Type, st.Code, s.MsgMS, digest(v.ProposalID)))
+	st.Msg, st.Sig = h(sr), h(must(suite.Sign(ssk, LabelRefusal, sr)))
 
 	for _, n := range []int{0, 1, 2, 3, 5, 8} {
 		leaves := make([][]byte, n)
@@ -555,11 +580,24 @@ func TestEncodingBounds(t *testing.T) {
 	if _, err := good.Leaf(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RefusalMsg("01JBQZ0000000000000000000A", ph, nil, "vote.cast", "", 0, ph); err == nil {
+	id := "01JBQZ0000000000000000000A"
+	if _, err := RefusalMsg(ph, id, ph, nil, "vote.cast", "", 0, ph); err == nil {
 		t.Fatal("empty code accepted")
 	}
-	if _, err := StatusMsg("01JBQZ0000000000000000000A", tag[:5], nil); err == nil {
+	if _, err := RefusalMsg(ph[:5], id, ph, nil, "vote.cast", "bad_ballot", 0, ph); err == nil {
+		t.Fatal("short proposal hash accepted")
+	}
+	if _, err := RefusalMsg(ph, "nope", ph, nil, "vote.cast", "bad_ballot", 0, ph); err == nil {
+		t.Fatal("invalid proposal id accepted")
+	}
+	if _, err := StatusMsg(ph[:31], ph, tag, nil, 0); err == nil {
+		t.Fatal("short status proposal hash accepted")
+	}
+	if _, err := StatusMsg(ph, ph, tag[:5], nil, 0); err == nil {
 		t.Fatal("short tag accepted")
+	}
+	if _, err := StatusMsg(ph, ph[:31], tag, nil, 0); err == nil {
+		t.Fatal("short connection accepted")
 	}
 }
 
