@@ -118,6 +118,9 @@ func (p *Peer) keep(c *Connection, dir string, now time.Time) {
 		if c.SuspendedAtMS != 0 {
 			k.LeftAtMS = c.SuspendedAtMS
 		}
+		if old := p.kept[k.ID]; old != nil && old.kr != nil {
+			old.kr.Destroy()
+		}
 		p.kept[k.ID] = k
 		p.markDirty(kindKept, k.ID)
 		return
@@ -129,6 +132,9 @@ func (p *Peer) keep(c *Connection, dir string, now time.Time) {
 		}
 	}
 	sort.Strings(k.JTIs)
+	if old := p.kept[c.ID]; old != nil && old.kr != nil {
+		old.kr.Destroy() // a record kept before under this id goes now
+	}
 	if c.kr != nil {
 		kr, err := receiveOnly(c.kr.Export(), now.Add(KeptKeysFor), now, c.refusedEpoch)
 		if err != nil {

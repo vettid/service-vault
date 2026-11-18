@@ -556,3 +556,54 @@ func TestKeptGateDeposits(t *testing.T) {
 		}
 	}
 }
+
+// applyOrder records the kinds of each Apply's changes, in order.
+type applyOrder struct {
+	Store
+	calls [][]string
+}
+
+func (s *applyOrder) Apply(ctx context.Context, changes []Change) error {
+	var kinds []string
+	for _, c := range changes {
+		kinds = append(kinds, c.Kind)
+	}
+	s.calls = append(s.calls, kinds)
+	return s.Store.Apply(ctx, changes)
+}
+
+// A removal's flush writes the kept record before the connection's end,
+// so a flush split across store batches never ends the connection
+// without it.
+func TestKeptFlushedFirst(t *testing.T) {
+	f, _, _, cid := keptFixture(t)
+	rec := &applyOrder{Store: f.store}
+	f.storeWrap = rec
+	f.start()
+	if err := f.p.Remove(context.Background(), cid); err != nil {
+		t.Fatal(err)
+	}
+	for _, kinds := range rec.calls {
+		if !slices.Contains(kinds, kindKept) {
+			continue
+		}
+		if kinds[0] != kindKept {
+			t.Fatalf("the flush with the kept record writes %v first", kinds)
+		}
+		return
+	}
+	t.Fatal("no flush wrote the kept record")
+}
+
+// A kept record written again under the same id destroys the old one's
+// keys.
+func TestKeepDestroysOld(t *testing.T) {
+	f, _, _, cid := keptFixture(t)
+	c := f.p.conns[cid]
+	f.p.keep(c, "out", f.clk.Now())
+	old := f.p.kept[cid].kr
+	f.p.keep(c, "out", f.clk.Now())
+	if old.Current() != nil || len(old.Export().Retired) != 0 {
+		t.Fatal("the old kept keyring was not destroyed")
+	}
+}
