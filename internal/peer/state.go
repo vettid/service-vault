@@ -39,7 +39,7 @@ const (
 // must touch them all (internal/sealstore).
 func Kinds() []string {
 	return []string{kindConn, kindInvite, kindAwait, kindRequest, kindOutgoing, kindToken, kindOutbox, kindAuth, kindEvent,
-		kindMsg, kindInner, kindResp, kindLease, kindUnacked, kindOnce, kindIdentity, kindRelayReg, kindSend}
+		kindMsg, kindInner, kindResp, kindLease, kindUnacked, kindOnce, kindIdentity, kindRelayReg, kindSend, kindKept}
 }
 
 // Retention (VAULT-MESSAGING §8.2, §6.4).
@@ -700,6 +700,11 @@ func (p *Peer) flush(ctx context.Context) error {
 		keys = append(keys, k)
 	}
 	sort.Slice(keys, func(i, j int) bool {
+		// A removed connection's kept record goes first: a flush split
+		// across store batches then never ends the connection without it.
+		if (keys[i].kind == kindKept) != (keys[j].kind == kindKept) {
+			return keys[i].kind == kindKept
+		}
 		if keys[i].kind != keys[j].kind {
 			return keys[i].kind < keys[j].kind
 		}
@@ -790,6 +795,12 @@ func (p *Peer) load(ctx context.Context) error {
 			}
 			c.kr = kr
 			c.initEpochs()
+			if c.State == StateSuspended && c.SuspendedAtMS == 0 {
+				// Suspended before its time was recorded (0.14.2): the load's
+				// time marks it, so a later removal keeps a tombstone only.
+				c.SuspendedAtMS = uint64(p.now().UnixMilli())
+				p.markDirty(kindConn, c.ID)
+			}
 			if len(c.LegacyPrevRelayPK) > 0 {
 				moved = append(moved, c)
 			}

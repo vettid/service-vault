@@ -393,7 +393,7 @@ func (b *Box) castOnce(ctx context.Context, r *peer.VoteRequest) (peer.VoteAnswe
 	// doesn't. An active or stale connection hasn't left; a removed one's
 	// cast comes through its kept receive keys (peer, kept.go). The flag
 	// removed_may_vote is always false (0.14.1).
-	if r.LeftAtMS != 0 && r.MsgMS >= r.LeftAtMS {
+	if r.LeftAtMS != 0 && r.MsgMS >= r.LeftAtMS || r.Left != "" && r.LeftAtMS == 0 {
 		return b.refuse(o, r, m.Tag, CodeNotActive, reqHash)
 	}
 	// 4. The ballot and the credential signature, under the credential

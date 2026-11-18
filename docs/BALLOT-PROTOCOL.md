@@ -617,10 +617,13 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
     that caused the leave: a vault's `connection.removed`, the evidence,
     or the replacing connection's activating handshake. Those are the
     casts' clock, delivered in `msg_id` order, so a copy's cast after the
-    leave can't count. A leave no message caused (an operator removal, a
-    suspension found at start) takes the service's time. A suspension's
-    time stays first through a later removal or replacement, and
-    `left_at` is never changed.
+    leave can't count. A rotation conflict found while handling another
+    message takes that message's `msg_ms`. A leave no message caused (an
+    operator removal, a replacement activated by the operator's approval,
+    a suspension found at start) takes the service's time. A connection
+    suspended before 0.14.2 recorded times gets the time of the first
+    start that loads it. A suspension's time stays first through a later
+    removal or replacement, and `left_at` is never changed.
   - **The rule:** a cast counts only if its `msg_ms` is before the
     member's `left_at`. A cast the relay received before the leave
     counts even when the service handles it after (an outage backlog). A
@@ -629,9 +632,14 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
   - **Kept receive keys:** when a connection is removed or replaced, the
     service keeps a receive-only record of it, for every removed
     connection: its relay key, its standing tokens' ids and its
-    credential key, frozen at the removal, and its epochs' receive keys
-    without their send keys or rekey secrets. Through it only a
-    `vote.cast` deposited under one of those tokens passes. Nothing else
+    credential key, frozen at the removal, and the receive keys of the
+    epochs the live connection would still accept, without their send
+    keys or rekey secrets: an epoch destroyed by rule E, demoted or
+    abandoned is left out, and a superseded epoch keeps its own earlier
+    end, never extended. Through it only a
+    `vote.cast` deposited under one of those tokens passes (and one the
+    service can't judge yet, its proposal not published, is left at the
+    relay to come again). Nothing else
     is accepted (no evidence, no rekey, no response, no identity change),
     and nothing is answered: the member gets no receipt, and no
     `vote.closed`. The record is never the live connection, so a member
@@ -727,7 +735,9 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
     `record_at` counting as at it; a stale member hasn't left; a member
     whose leave is no longer on record, because it predates 0.14.2 or
     because the count runs more than 60 days after it, is counted, with
-    an alarm), and `unhandled` (messages of the
+    an alarm: that overcounts a member who left after `closes_at` and
+    whose record has gone, and the alarm can be noise when `record_at` is
+    long before the opening), and `unhandled` (messages of the
     window the count went ahead without, above); and the `outcome`
     (§7.1).
 - **Signature:** `results_sig = Sign(service IK, "vettid/vote/1/results\x00", proposal_hash ‖ H(results_bytes))`.
@@ -980,6 +990,9 @@ SubjectPublicKeyInfo; `?` marks a field present only where stated.
   It shows only in `counts.removed`, a count the service reports, which
   can be checked only against the organisation's audit record and by the
   removed members themselves.
+- **An operator removal bars at once** (0.14.2): from its `left_at`, a
+  removed member's cast is refused (`not_active`), whatever the vote's
+  base; only a cast the relay received earlier counts.
 - **A forced suspension** (0.14.2): anyone holding an old copy of a
   member's vault can cause fork evidence and so suspend the connection.
   That ends the member's voting in every open vote, even after they
@@ -1203,8 +1216,10 @@ item.
     the relay received it before the member's `left_at`. `left_at` is
     the relay's time of the message that caused the leave, else the
     service's. Stale is active. A removed or replaced connection's
-    receive-only record (bounded at 15 days) lets a backlog `vote.cast`
-    through and nothing else. Nothing is accepted once suspended.
+    receive-only record (bounded at 15 days, holding only the epochs the
+    live connection would accept, never extended) lets a backlog
+    `vote.cast` through and nothing else. Nothing is accepted once
+    suspended.
   - **§7:** `counts.removed` from the recorded leave times; a leave no
     longer on record is counted, with an alarm.
   - **§8.3, §9.2:** a member who left gets no receipt and no

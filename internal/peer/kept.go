@@ -130,7 +130,7 @@ func (p *Peer) keep(c *Connection, dir string, now time.Time) {
 	}
 	sort.Strings(k.JTIs)
 	if c.kr != nil {
-		kr, err := receiveOnly(c.kr.Export(), now.Add(KeptKeysFor))
+		kr, err := receiveOnly(c.kr.Export(), now.Add(KeptKeysFor), now, c.refusedEpoch)
 		if err != nil {
 			p.log().Error("a removed connection's receive keys could not be kept: a vote it cast before the removal and not yet handled is lost",
 				"alarm", "kept_keys_failed", "connection_id", c.ID, "err", err)
@@ -142,31 +142,52 @@ func (p *Peer) keep(c *Connection, dir string, now time.Time) {
 	p.markDirty(kindKept, k.ID)
 }
 
-// receiveOnly makes a keyring that can only open: every epoch of s
-// (current, pending and superseded) becomes a superseded one, without its
-// send key or rekey secret, kept until until. The keys of s are wiped.
-func receiveOnly(s handshake.KeyringState, until time.Time) (*handshake.Keyring, error) {
+// receiveOnly makes a keyring that can only open: the epochs of s
+// (current, pending and superseded) the live path would still accept
+// become superseded ones, without their send keys or rekey secrets, kept
+// until until or, for one already superseded, its own earlier end. An
+// epoch refused (destroyed by rule E, demoted, abandoned) or past its end
+// is left out, so the kept path never opens what the live one refuses.
+// The keys of s are wiped.
+func receiveOnly(s handshake.KeyringState, until, now time.Time, refused func(id []byte) bool) (*handshake.Keyring, error) {
 	var ro handshake.KeyringState
-	add := func(e handshake.EpochState) {
+	add := func(e handshake.EpochState, end time.Time) {
 		suite.Wipe(e.SendKey)
 		suite.Wipe(e.RK)
 		e.SendKey, e.RK = nil, nil
-		ro.Retired = append(ro.Retired, handshake.RetiredState{Epoch: e, Until: until})
+		if refused(e.ID) || !end.After(now) {
+			suite.Wipe(e.RecvKey)
+			return
+		}
+		ro.Retired = append(ro.Retired, handshake.RetiredState{Epoch: e, Until: end})
 	}
 	if s.Current != nil {
-		add(*s.Current)
+		add(*s.Current, until)
 	}
 	if s.Pending != nil {
-		add(*s.Pending)
+		add(*s.Pending, until)
 	}
 	for _, r := range s.Retired {
-		add(r.Epoch)
+		end := until
+		if r.Until.Before(end) {
+			end = r.Until
+		}
+		add(r.Epoch, end)
 	}
 	kr, err := handshake.ImportKeyring(ro)
 	for _, r := range ro.Retired {
 		suite.Wipe(r.Epoch.RecvKey) // ImportKeyring copied them
 	}
 	return kr, err
+}
+
+// refusedEpoch reports whether the live path refuses messages under the
+// epoch id (noteFromMember): destroyed by rule E, demoted, or abandoned.
+func (c *Connection) refusedEpoch(id []byte) bool {
+	if e := c.epochMeta(id); e != nil && (e.Destroyed || e.Demoted) {
+		return true
+	}
+	return c.abandonedMeta(id) != nil
 }
 
 // keptMessage tries the kept records of the sender's relay key for a
@@ -192,7 +213,8 @@ func (p *Peer) keptMessage(ctx context.Context, env *envelope.Envelope, msgID, j
 			p.audit("decrypt_failed", k.ID)
 			return ackAfterFlush, true, nil
 		}
-		return ackAfterFlush, true, p.keptCast(ctx, k, in, msgID, jti, now)
+		d, err := p.keptCast(ctx, k, in, msgID, jti, now)
+		return d, true, err
 	}
 	return 0, false, nil
 }
@@ -203,35 +225,40 @@ func (p *Peer) keptMessage(ctx context.Context, env *envelope.Envelope, msgID, j
 // connection's leave. Nothing else passes (no evidence, no rekey, no
 // response, no identity change), and nothing is answered: the connection
 // is gone.
-func (p *Peer) keptCast(ctx context.Context, k *keptConn, in *envelope.Inner, msgID, jti string, now time.Time) error {
+//
+// A cast the box leaves unanswered (ErrNoAnswer: its proposal not yet
+// published) is not acknowledged: the relay delivers it again, since the
+// removed member's vault can't send it again.
+func (p *Peer) keptCast(ctx context.Context, k *keptConn, in *envelope.Inner, msgID, jti string, now time.Time) (disposition, error) {
 	switch {
 	case jti == "" || !slices.Contains(k.JTIs, jti):
 		p.audit("kept_token_refused", k.ID)
-		return nil
+		return ackAfterFlush, nil
 	case in.Type != typeVoteCast || in.Re != "":
 		p.audit("kept_type_refused", k.ID)
-		return nil
+		return ackAfterFlush, nil
 	case in.CheckTime(now, true) != nil:
 		p.audit("stale_or_future", k.ID)
-		return nil
+		return ackAfterFlush, nil
 	case !p.rateAllow(k.ID, now):
 		p.audit("rate_limited", k.ID)
-		return nil
+		return ackAfterFlush, nil
 	case p.cfg.Votes == nil:
-		return nil
+		return ackAfterFlush, nil
 	}
 	ms, err := ulidMS(msgID)
 	if err != nil {
 		p.audit("bad_msg_id", k.ID)
-		return nil
+		return ackAfterFlush, nil
 	}
 	ikey := k.ID + "|" + in.ID
 	_, seen, err := p.cfg.Store.Get(ctx, kindInner, ikey)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if seen {
-		return nil // handled before; there is nothing to send again
+		p.audit("kept_seen", k.ID)
+		return ackAfterFlush, nil // handled before; there is nothing to send again
 	}
 	p.mark(kindInner, ikey, []byte{1}, now.Add(DedupeRetention))
 	p.log().Info("message", "connection_id", k.ID, "type", in.Type, "kept", true)
@@ -239,9 +266,12 @@ func (p *Peer) keptCast(ctx context.Context, k *keptConn, in *envelope.Inner, ms
 		LeftAtMS: k.LeftAtMS, Left: k.Kind, Type: in.Type, Body: in.Body, MsgMS: ms})
 	if errors.Is(err, ErrNoAnswer) {
 		p.unmark(kindInner, ikey)
-		return nil
+		return noAck, nil
 	}
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return ackAfterFlush, nil
 }
 
 // pruneKept destroys kept keys at KeptKeysFor and forgets tombstones at
@@ -252,16 +282,37 @@ func (p *Peer) pruneKept(now time.Time) {
 			if k.kr != nil {
 				k.kr.Destroy()
 			}
+			wipeKeyringState(k.Keyring)
 			delete(p.kept, id)
 			p.markDirty(kindKept, id)
 			continue
 		}
 		if k.kr != nil && !now.Before(k.At.Add(KeptKeysFor)) {
 			k.kr.Destroy()
+			wipeKeyringState(k.Keyring)
 			k.kr, k.Keyring = nil, nil
 			p.markDirty(kindKept, id)
 			p.log().Info("a removed connection's kept receive keys destroyed at their bound", "connection_id", id)
 		}
+	}
+}
+
+// wipeKeyringState wipes the keys of a stored keyring's copy.
+func wipeKeyringState(s *handshake.KeyringState) {
+	if s == nil {
+		return
+	}
+	for _, e := range []*handshake.EpochState{s.Current, s.Pending} {
+		if e != nil {
+			suite.Wipe(e.SendKey)
+			suite.Wipe(e.RecvKey)
+			suite.Wipe(e.RK)
+		}
+	}
+	for i := range s.Retired {
+		suite.Wipe(s.Retired[i].Epoch.SendKey)
+		suite.Wipe(s.Retired[i].Epoch.RecvKey)
+		suite.Wipe(s.Retired[i].Epoch.RK)
 	}
 }
 

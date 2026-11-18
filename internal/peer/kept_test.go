@@ -2,6 +2,9 @@ package peer
 
 import (
 	"context"
+	"crypto/ed25519"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -62,7 +65,7 @@ func TestReceiveOnlyKeyring(t *testing.T) {
 	f, _, m, cid := keptFixture(t)
 	c := f.p.conns[cid]
 	until := f.clk.Now().Add(KeptKeysFor)
-	kr, err := receiveOnly(c.kr.Export(), until)
+	kr, err := receiveOnly(c.kr.Export(), until, f.clk.Now(), c.refusedEpoch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,6 +314,9 @@ func TestKeptReplacedBacklog(t *testing.T) {
 	f.ms = nil
 	m2 := f.member(10) // the same member's keys, connecting again: the old connection is replaced
 	cid2 := f.connect(m2, "t")
+	if !f.signIn(m2, cid2) {
+		t.Fatal("sign-in failed")
+	}
 	if cid2 == cid {
 		t.Fatal("not a new connection")
 	}
@@ -341,6 +347,13 @@ func TestKeptReplacedBacklog(t *testing.T) {
 	if _, live := f.p.conns[cid2]; !live {
 		t.Fatal("the new connection is gone")
 	}
+	// The live lookup comes first: the new connection's cast is its own.
+	rv.reqs = nil
+	m2.Send(typeVoteCast, []byte(`{"new":1}`))
+	f.pump()
+	if cs := f.casts(rv); len(cs) != 1 || cs[0].ConnectionID != cid2 || cs[0].LeftAtMS != 0 {
+		t.Fatalf("the new connection's cast %+v", cs)
+	}
 }
 
 func tail600(s string) string { return s[max(0, len(s)-600):] }
@@ -361,5 +374,185 @@ func TestKeptPrunedAtStart(t *testing.T) {
 	f.pump()
 	if len(f.casts(rv)) != 0 {
 		t.Fatal("a cast opened with keys past their bound")
+	}
+}
+
+// An epoch the live path refuses (destroyed by rule E, demoted,
+// abandoned) is not in the kept keyring: a copy's cast under it, queued
+// before the removal, never reaches the box.
+func TestKeptRefusedEpochs(t *testing.T) {
+	for name, mark := range map[string]func(c *Connection){
+		"destroyed": func(c *Connection) { c.epochMeta(c.LastEpochID).Destroyed = true },
+		"demoted":   func(c *Connection) { c.epochMeta(c.LastEpochID).Demoted = true },
+		"abandoned": func(c *Connection) {
+			c.AbandonedMeta = append(c.AbandonedMeta, AbandonedEpoch{ID: slices.Clone(c.LastEpochID)})
+		},
+	} {
+		f, rv, m, cid := keptFixture(t)
+		m.Send(typeVoteCast, []byte(`{}`)) // queued before the removal
+		mark(f.p.conns[cid])
+		if err := f.p.Remove(context.Background(), cid); err != nil {
+			t.Fatal(err)
+		}
+		f.pump()
+		if len(f.casts(rv)) != 0 {
+			t.Errorf("%s: a cast under a refused epoch reached the box", name)
+		}
+	}
+}
+
+// A superseded epoch keeps its own earlier end, and one already past it
+// is left out: nothing is extended.
+func TestReceiveOnlyNeverExtends(t *testing.T) {
+	f, _, _, cid := keptFixture(t)
+	now := f.clk.Now()
+	st := f.p.conns[cid].kr.Export()
+	cur := *st.Current
+	expired, soon := cur, cur
+	expired.ID = append([]byte{0xee}, cur.ID[1:]...)
+	soon.ID = append([]byte{0xdd}, cur.ID[1:]...)
+	st = handshake.KeyringState{Retired: []handshake.RetiredState{
+		{Epoch: expired, Until: now.Add(-time.Second)},
+		{Epoch: soon, Until: now.Add(time.Hour)},
+	}}
+	kr, err := receiveOnly(st, now.Add(KeptKeysFor), now, func([]byte) bool { return false })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ro := kr.Export()
+	if len(ro.Retired) != 1 || ro.Retired[0].Epoch.ID[0] != 0xdd || !ro.Retired[0].Until.Equal(now.Add(time.Hour)) {
+		t.Fatalf("kept %+v", ro.Retired)
+	}
+}
+
+// A suspended connection set stale before its removal (as a replacement
+// does) still keeps a tombstone only, of kind suspended.
+func TestKeptSuspendedThenReplaced(t *testing.T) {
+	f, _, _, cid := keptFixture(t)
+	c := f.p.conns[cid]
+	f.p.suspendFor(c, SuspendEpoch, f.clk.Now())
+	c.State = StateStale
+	f.p.removeConnection(c, "replaced", f.clk.Now())
+	if k := f.p.kept[cid]; k == nil || k.kr != nil || k.Kind != LeftSuspended || k.LeftAtMS != c.SuspendedAtMS {
+		t.Fatalf("kept %+v", k)
+	}
+}
+
+// A suspension caused by a message is timed by the message's relay time.
+func TestSuspensionTimedByMessage(t *testing.T) {
+	f, _, _, cid := keptFixture(t)
+	at := f.clk.Now()
+	f.p.msgID = f.ulid(at)
+	f.clk.Advance(time.Hour)
+	f.p.suspendFor(f.p.conns[cid], SuspendEpoch, f.clk.Now())
+	f.p.msgID = ""
+	if got := f.p.conns[cid].SuspendedAtMS; got != uint64(at.UnixMilli()) {
+		t.Fatalf("suspended at %d, the message at %d", got, at.UnixMilli())
+	}
+}
+
+// A suspended connection without a recorded time is not a known leave,
+// and a start gives it one (a record from before the times were kept).
+func TestSuspendedWithoutTime(t *testing.T) {
+	f, _, _, cid := keptFixture(t)
+	c := f.p.conns[cid]
+	c.State = StateSuspended
+	if l := f.p.Left([]string{cid})[cid]; l.Known {
+		t.Fatalf("a suspension with no time reported known: %+v", l)
+	}
+	f.p.markDirty(kindConn, cid)
+	f.tick()
+	f.start()
+	if f.p.conns[cid].SuspendedAtMS == 0 {
+		t.Fatal("no suspension time set at load")
+	}
+}
+
+// A kept cast the box leaves unanswered (its proposal not yet published)
+// is left at the relay, and handled when it comes again.
+func TestKeptUnansweredRedelivered(t *testing.T) {
+	f, rv, m, cid := keptFixture(t)
+	m.Send(typeVoteCast, []byte(`{}`))
+	if err := f.p.Remove(context.Background(), cid); err != nil {
+		t.Fatal(err)
+	}
+	rv.fail = ErrNoAnswer
+	f.pump()
+	if len(f.casts(rv)) != 0 {
+		t.Fatal("an unanswered cast recorded")
+	}
+	f.clk.Advance(61 * time.Second) // the relay's lease on the unacked message ends
+	f.pump()
+	if len(f.casts(rv)) != 1 {
+		t.Fatalf("%d casts after a redelivery", len(f.casts(rv)))
+	}
+}
+
+// The rest of the gate: a response, a ts out of range, a repeat, the
+// rate, an empty token, another sender, and a bad ciphertext.
+func TestKeptGateRest(t *testing.T) {
+	f, rv, m, cid := keptFixture(t)
+	now := f.clk.Now()
+	m.SendInner(&envelope.Inner{ID: m.NewID(), Type: typeVoteCast, Re: m.NewID(), Status: envelope.StatusOK, TS: now, Body: []byte(`{}`)})
+	m.SendInner(&envelope.Inner{ID: m.NewID(), Type: typeVoteCast, TS: now.Add(time.Hour), Body: []byte(`{}`)})
+	dup := m.NewID()
+	m.SendInner(&envelope.Inner{ID: dup, Type: typeVoteCast, TS: now, Body: []byte(`{"dup":1}`)})
+	m.SendInner(&envelope.Inner{ID: dup, Type: typeVoteCast, TS: now, Body: []byte(`{"dup":1}`)})
+	for i := range PeerRateLimit + 5 {
+		m.SendInner(&envelope.Inner{ID: m.NewID(), Type: typeVoteCast, TS: now, Body: []byte(fmt.Sprintf(`{"n":%d}`, i))})
+	}
+	if err := f.p.Remove(context.Background(), cid); err != nil {
+		t.Fatal(err)
+	}
+	f.pump()
+	logs := f.logs.String()
+	// One minute's rate allows PeerRateLimit messages past the type and ts
+	// checks; the duplicate takes a slot and is then dropped as seen.
+	if n := len(f.casts(rv)); n != PeerRateLimit-1 {
+		t.Fatalf("%d casts reached the box, want %d", n, PeerRateLimit-1)
+	}
+	for _, want := range []string{"kept_type_refused", "stale_or_future", "kept_seen", "rate_limited"} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("no %s", want)
+		}
+	}
+}
+
+// Deposits the relay could hand over for a kept record but the gate
+// refuses: no token, another sender, a bad ciphertext. Each alone, with
+// the rate untouched.
+func TestKeptGateDeposits(t *testing.T) {
+	for _, c := range []string{"no token", "another sender", "bad ciphertext"} {
+		f, rv, m, cid := keptFixture(t)
+		now := f.clk.Now()
+		sealed, err := m.KR.Current().Seal(&envelope.Inner{ID: m.NewID(), Type: typeVoteCast, TS: now, Body: []byte(`{"x":1}`)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.p.Remove(context.Background(), cid); err != nil {
+			t.Fatal(err)
+		}
+		k := f.p.kept[cid]
+		sender, jti, payload := []byte(k.RelayPK), k.JTIs[0], sealed
+		want := ""
+		switch c {
+		case "no token":
+			jti, want = "", "kept_token_refused"
+		case "another sender":
+			sender, want = f.keys.Relay.Public().(ed25519.PublicKey), "unknown_kid"
+		case "bad ciphertext":
+			payload = slices.Clone(sealed)
+			payload[len(payload)-1] ^= 1
+			want = "decrypt_failed"
+		}
+		f.w.Redeliver(m.SvcMailbox(), relayclient.Message{MsgID: f.ulid(now), Sender: relayauth.EncodeKey(sender), JTI: jti,
+			DepositedAt: now.UTC().Format(time.RFC3339Nano), Payload: payload})
+		f.pump()
+		if len(f.casts(rv)) != 0 {
+			t.Errorf("%s: reached the box", c)
+		}
+		if !strings.Contains(f.logs.String(), want) {
+			t.Errorf("%s: no %s", c, want)
+		}
 	}
 }

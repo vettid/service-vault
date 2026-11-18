@@ -111,6 +111,12 @@ func (f *boxFixture) send(conn, typ string, body any, ms uint64, active bool) pe
 // sendLeft sends as a member whose connection left at leftAtMS (0: hasn't).
 func (f *boxFixture) sendLeft(conn, typ string, body any, ms, leftAtMS uint64) peer.VoteAnswer {
 	f.t.Helper()
+	return f.sendLeftKind(conn, typ, body, ms, leftAtMS, "")
+}
+
+// sendLeftKind is sendLeft with the leave's kind.
+func (f *boxFixture) sendLeftKind(conn, typ string, body any, ms, leftAtMS uint64, kind string) peer.VoteAnswer {
+	f.t.Helper()
 	j, _ := json.Marshal(body)
 	var cred []byte
 	if k, ok := f.creds[conn]; ok {
@@ -118,7 +124,7 @@ func (f *boxFixture) sendLeft(conn, typ string, body any, ms, leftAtMS uint64) p
 	}
 	a, err := f.box.Vote(context.Background(), &peer.VoteRequest{ConnectionID: conn,
 		PeerIK:        ed25519.NewKeyFromSeed(digest("peer " + conn)).Public().(ed25519.PublicKey),
-		CredentialKey: cred, LeftAtMS: leftAtMS, Type: typ, Body: j, MsgMS: ms})
+		CredentialKey: cred, LeftAtMS: leftAtMS, Left: kind, Type: typ, Body: j, MsgMS: ms})
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -253,6 +259,10 @@ func TestCastExtensionAndRemoval(t *testing.T) {
 	ms := f.during()
 	if a := f.sendLeft("c1", TypeCast, b1, ms, ms); a.Code != CodeNotActive {
 		t.Fatalf("a cast at the leave: %q", a.Code)
+	}
+	// A leave with no time is refused (fail closed).
+	if a := f.sendLeftKind("c1", TypeCast, b1, ms, 0, peer.LeftRemovedOut); a.Code != CodeNotActive {
+		t.Fatalf("a leave without a time: %q", a.Code)
 	}
 	if a := f.sendLeft("c1", TypeCast, b1, ms, ms+1); a.Code != "" {
 		t.Fatalf("a cast before the leave refused: %s", a.Code)
