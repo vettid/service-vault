@@ -344,6 +344,7 @@ func TestFieldsNotShownRefused(t *testing.T) {
 		"text":        func(i *ballot.ProposalInput) { i.Text = "A longer motion than the title" },
 		"quorum text": func(i *ballot.ProposalInput) { i.Quorum.Text = "A third of the members" },
 		"outage rule": func(i *ballot.ProposalInput) { i.OutageRule = "No extension, ever" },
+		"removed":     func(i *ballot.ProposalInput) { i.RemovedMayVote = true },
 	} {
 		in := proposalInput()
 		mod(&in)

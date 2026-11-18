@@ -106,11 +106,11 @@ func parseCanonical(payload []byte, v any) error {
 
 // What a proposal.create approval's payload carries, field by field
 // (BALLOT-PROTOCOL §3.4): the fields shown to the admins (title, choices'
-// labels, binding, removed_may_vote, opens_at, closes_at, quorum's
-// min_ballots, the decision), the fields the service sets (the choice ids, the default
+// labels, binding, opens_at, closes_at, quorum's min_ballots, the
+// decision), the fields the service sets (the choice ids, the default
 // abstain choice, outage_rule, record_at, the roster) and the fields it
 // refuses unless they say what the service would set anyway (text, quorum
-// text, outage_rule).
+// text, outage_rule, and removed_may_vote, which must be false).
 const (
 	// DefaultOutageRule is the outage_rule of every proposal (§10.2): the
 	// only value accepted, or empty.
@@ -219,10 +219,10 @@ var maxTitle = sync.OnceValue(func() int {
 })
 
 // widestProposal is the input of the widest creation summary but the
-// title: advisory, removed members voting, the largest quorum, the longest
-// rule text and the labels "Approve" and "Reject".
+// title: advisory, the largest quorum, the longest rule text and the
+// labels "Approve" and "Reject".
 func widestProposal() ProposalInput {
-	in := ProposalInput{Choices: []ChoiceInput{{Label: "Approve"}, {Label: "Reject"}}, RemovedMayVote: true,
+	in := ProposalInput{Choices: []ChoiceInput{{Label: "Approve"}, {Label: "Reject"}},
 		Quorum: vote.Quorum{MinBallots: vote.MaxEligible}}
 	for _, d := range validDecisions() {
 		if len(decisionText(d)) > len(decisionText(in.Decision)) || in.Decision.Rule == "" {
@@ -232,8 +232,7 @@ func widestProposal() ProposalInput {
 	return in
 }
 
-// validDecisions lists every decision a proposal may carry when removed
-// members may vote.
+// validDecisions lists every decision a proposal may carry.
 func validDecisions() []vote.Decision {
 	out := []vote.Decision{{Rule: vote.RulePlurality}}
 	for _, b := range []string{vote.BaseCast, vote.BaseVoted, vote.BaseElig} {
@@ -241,7 +240,7 @@ func validDecisions() []vote.Decision {
 		for den := int64(1); den <= vote.MaxThresholdDen; den++ {
 			for num := int64(1); num <= den; num++ {
 				d := vote.Decision{Rule: vote.RuleThreshold, Base: vote.BaseOf(b), Threshold: &vote.Threshold{Num: num, Den: den}}
-				if d.Validate(true) == nil {
+				if d.Validate() == nil {
 					out = append(out, d)
 				}
 			}
@@ -305,6 +304,11 @@ func checkInput(in *ProposalInput) error {
 	if in.OutageRule != "" && in.OutageRule != DefaultOutageRule {
 		return &ErrNotShown{"outage_rule"}
 	}
+	// A member who leaves can't vote after leaving (§3.1, 0.14.1): the
+	// flag is kept in the document, always false.
+	if in.RemovedMayVote {
+		return &ErrNotShown{"removed_may_vote"}
+	}
 	if len(in.Choices) < 2 || len(in.Choices) > MaxRealChoices {
 		return errors.New("ballot: two to sixteen choices")
 	}
@@ -332,7 +336,7 @@ func checkInput(in *ProposalInput) error {
 	if in.OpensAt >= in.ClosesAt || in.ClosesAt-in.OpensAt > vote.MaxWindow {
 		return errors.New("ballot: the window must close after it opens, within 7 days")
 	}
-	return in.Decision.Validate(in.RemovedMayVote)
+	return in.Decision.Validate()
 }
 
 // ProposalMinBallots is the quorum's min_ballots of a valid
@@ -394,9 +398,6 @@ func proposalSummaryText(in *ProposalInput, opens, closes string) string {
 	}
 	s := fmt.Sprintf("%s, opens %s, closes %s, quorum %d, rule %s, choices %s", kind, opens, closes[5:], in.Quorum.MinBallots,
 		decisionText(in.Decision), strings.Join(labels, "/"))
-	if in.RemovedMayVote {
-		s += ", removed votes"
-	}
 	return s + ", title " + strconv.Quote(in.Title)
 }
 

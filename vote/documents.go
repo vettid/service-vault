@@ -309,6 +309,9 @@ func (p *Proposal) Validate() error {
 		return bad("times")
 	case p.Eligible < 1 || p.Eligible > MaxEligible || len(p.RecordRoot) != HashLen:
 		return bad("record")
+	case p.RemovedMayVote:
+		// Always false (0.14.1): every verifier refuses true.
+		return bad("removed_may_vote")
 	}
 	seen, abstain := map[string]bool{}, false
 	for _, c := range p.Choices {
@@ -321,7 +324,7 @@ func (p *Proposal) Validate() error {
 	if !abstain {
 		return bad("without abstain")
 	}
-	if err := p.Decision.Validate(p.RemovedMayVote); err != nil {
+	if err := p.Decision.Validate(); err != nil {
 		return err
 	}
 	strs := []string{p.Title, p.Text, p.Quorum.Text, p.OutageRule}

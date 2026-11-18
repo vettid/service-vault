@@ -388,6 +388,8 @@ func (b *Box) castOnce(ctx context.Context, r *peer.VoteRequest) (peer.VoteAnswe
 	if !bytes.Equal(tag, m.Tag) {
 		return b.refuse(o, r, m.Tag, CodeBadBallot, reqHash)
 	}
+	// removed_may_vote is always false from 0.14.1; membership at the
+	// relay's time replaces this check in 0.14.2.
 	if !r.Active && !p.RemovedMayVote {
 		return b.refuse(o, r, m.Tag, CodeNotActive, reqHash)
 	}

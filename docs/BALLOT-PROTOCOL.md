@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.14.0 (2026-11-18)
+**Status:** 0.14.1 (2026-11-18)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -109,7 +109,7 @@ The proposal is a document (§8.5).
 | `decision` | How the vote is decided: a rule, its base and its threshold (§3.5; 0.14.0). |
 | `quorum` | The quorum rule, as text (UTF-8, at most 1,024 bytes, may be empty), and the number of ballots it needs (`min_ballots`, at least 0 and, from 0.14.0, at most `eligible`). `abstain` counts toward it. |
 | `binding` | Whether the organisation treats the result as binding. The protocol is the same either way. |
-| `removed_may_vote` | Whether a member removed or suspended after `record_at` may still vote. |
+| `removed_may_vote` | Always `false` (0.14.1; owner decision 2026-11-18): a member removed or suspended after `record_at` can't vote after leaving. The service refuses `true` before signing (§3.4), and every verifier refuses a proposal with `true`: a member's vault on arrival (VAULT-MESSAGING §10.19.4 step 2), the site's upload, and an observer (§8.4). |
 | `record_at` | The roster snapshot, at or before creation (§3.2) and at or before `opens_at`. |
 | `opens_at`, `closes_at` | The voting window, `opens_at` before `closes_at`: a ballot counts if the relay received it in `[opens_at, closes_at)` (§6). At most 7 days (owner decision). |
 | `eligible`, `record_root` | The number of eligible members, at least 1, and the Merkle root of their tags (§3.2). |
@@ -324,13 +324,13 @@ The label `New vote:` is the service's, put before every summary of this
 action (and `Extend vote:` before an extension's); the application
 writes no text of either. The summary is built from the payload: binding
 or advisory, the window, the quorum's minimum, the rule, the choices'
-labels, whether removed members may vote, and the title, all shown whole: an input whose summary does not fit the
+labels and the title, all shown whole: an input whose summary does not fit the
 context is refused, never
 cut, so a title that equals the motion can't hide the rest of it. For an extension it is the proposal (its title, from
 the service's copy, and its id), the new close, the outage and its source.
 
 (0.14.0.) The creation summary reads
-`BINDING, opens 2026-11-18 14:00Z, closes 11-25 14:00Z, quorum 10, rule >1/2 cast, choices "Approve"/"Reject", removed votes, title "…"`:
+`BINDING, opens 2026-11-18 14:00Z, closes 11-25 14:00Z, quorum 10, rule >1/2 cast, choices "Approve"/"Reject", title "…"`:
 - **The close is shown without its year:** it is at most 7 days after
   the opening, which is shown with it. An input whose window doesn't
   close after it opens, within 7 days, is refused before any summary is
@@ -338,8 +338,8 @@ the service's copy, and its id), the new close, the outage and its source.
 - **The rule** shows its comparison, its fraction and its base:
   `rule >1/2 cast`, `rule >=2/3 voted`, `rule >=9/10 elig`, or
   `rule most` for a plurality.
-- **`removed votes`** is shown when `removed_may_vote` is true, and
-  nothing when it is false.
+- (0.14.1) Nothing is shown for `removed_may_vote`: it is always
+  false. (0.14.0 showed `removed votes` when it was true.)
 
 **Every field of the executed proposal is shown, set by the service, or
 refused:**
@@ -348,7 +348,8 @@ refused:**
 |---|---|---|
 | `title` | shown whole; printable ASCII and Latin-1 letters only | as approved |
 | `choices` | shown: the labels, in order, each at most 24 characters, printable ASCII and Latin-1 letters only, distinct (also ignoring case) and none `Abstain`; an `id` is refused | the service assigns `c1`, `c2`, … in that order (matching §3.1's id grammar) and adds `abstain` (label `Abstain`) last, always |
-| `binding`, `removed_may_vote` | shown | as approved |
+| `binding` | shown | as approved |
+| `removed_may_vote` | refused unless `false` (0.14.1) | `false` |
 | `opens_at`, `closes_at` | shown | as approved |
 | `decision` | shown (`rule …`) | as approved; any other decision than §3.5 allows is refused |
 | `quorum.min_ballots` | shown; at most 100,000 | as approved; refused `quorum_unreachable` when it is more than the eligible members at the moment of use, before the approval is used (and when the approval is requested) |
@@ -367,11 +368,13 @@ every vote can be extended, a title is accepted at creation only if it
 fits whole in the longest extension summary (the longest source, the
 widest times), and so that a two-choice motion can always be approved,
 in the widest creation summary of one: advisory, `"Approve"`/`"Reject"`,
-`removed votes`, a quorum of 100,000, the longest rule and the widest
-times. Both are counted on the title as quoted (`"` and `\` take two
-bytes). That makes **at most 31 bytes** (0.14.0, owner decision
-2026-11-18; `MaxTitleBytes`, computed from the same summary builders and
-tested at its worst case). With other labels the creation summary must
+a quorum of 100,000, the longest rule and the widest times. Both are
+counted on the title as quoted (`"` and `\` take two bytes). That makes
+**at most 35 bytes** (`MaxTitleBytes`, computed from the same summary
+builders and tested at its worst case; the owner's rule of 2026-11-18 is
+that the limit is derived from the final strings). In 0.14.1 the
+extension summary sets it; with `removed votes` in the summary, 0.14.0's
+was 31. With other labels the creation summary must
 still fit whole.
 
 A refused field makes the approval request fail (`field_not_shown`, or
@@ -400,9 +403,9 @@ the signed tally.
   quorum. With a majority, or a threshold above one half, at most one
   real choice can qualify under any base: the real choices' counts sum
   to at most the base.
-- **`elig` only with `removed_may_vote: true`.** With removed members
-  barred, suspending likely supporters who haven't voted yet would make
-  them certain "against". What remains is in §9.2.
+- **`elig` has no condition** (0.14.1, owner decision 2026-11-18; in
+  0.14.0 it needed `removed_may_vote: true`). A member who leaves before
+  voting weighs as "against" under `elig`, so removals shape it; §9.2.
 - **Three or more choices:** `majority` or `threshold` often decides
   nothing (`not_decided`). The protocol has no runoff.
 - **Required.** The service fills in no decision (§3.4: the payload is
@@ -512,7 +515,7 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
 |---|---|---|
 | `not_eligible` | both | The connection has no tag for this proposal. |
 | `not_open`, `closed` | `vote.cast` | The relay's time is outside the window. |
-| `not_active` | `vote.cast` | Removed or suspended, and `removed_may_vote` is false. |
+| `not_active` | `vote.cast` | Removed or suspended (0.14.1: `removed_may_vote` is always false). |
 | `not_signed_in` | `vote.cast` | The member has never signed in, so no credential key is pinned (§5). |
 | `already_voted` | `vote.cast` | A different ballot is already recorded for this tag; the body also carries that ballot as `ballot` `{vk, choice_id, ballot_sig, pad}`, with its `ballot_msg_ms` and `receipt_sig`. |
 | `bad_ballot` | `vote.cast` | The tag isn't the connection's, the choice isn't the proposal's, or a signature fails. After a credential-key rotation (`connection.authenticate.rotated`, VAULT-MESSAGING §10.4) the vault may sign `cast_sig` again under its current key and send the same ballot once more; the service checks `cast_sig` under the key pinned when the cast arrives. |
@@ -579,7 +582,8 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
      `[opens_at, closes_at)`, as extended (§10.2). A ballot queued at
      the relay during an outage still counts.
   3. **Eligibility:** the connection is eligible, `record_tag` is its
-     tag, and it is active or `removed_may_vote` is true.
+     tag, and it is active (0.14.1: `removed_may_vote` is always false;
+     0.14.2 judges this at the relay's time).
   4. **Ballot:** `choice_id` is the proposal's, `ballot_sig` verifies
      under `vk`, and `cast_sig` verifies under the connection's pinned
      credential key (§2); with no key pinned, `not_signed_in`.
@@ -780,7 +784,8 @@ publishes its results has every member's check settle by itself.
    early or unverifiable bundle is kept, with an alarm, and not uploaded
    again. The vault also checks that the proposal
    and extensions in `results.json` are the ones it received; and its
-   row's proof. (0.14.0) From `results.json` alone it checks the tally
+   row's proof. (0.14.1) It refuses a proposal with `removed_may_vote`
+   true, on arrival and here. (0.14.0) From `results.json` alone it checks the tally
    and the outcome: the tally names exactly the proposal's choices,
    every count is at least 0, the tally's sum is `counts.ballots`, at
    most `counts.eligible`, which is the proposal's `eligible`, and
@@ -803,7 +808,7 @@ publishes its results has every member's check settle by itself.
 
 From votes.vettid.org alone:
 1. `results_sig` and every document's signature hold under the service's
-   identity key; every bundle verifies under a listed anchor key; the
+   identity key, and (0.14.1) the proposal's `removed_may_vote` is false; every bundle verifies under a listed anchor key; the
    service list verifies;
 2. `H(rows bytes)` is `rows_hash`; the tags are unique, number
    `eligible` and reach `record_root`; the rows reach `rows_root`;
@@ -925,15 +930,22 @@ SubjectPublicKeyInfo; `?` marks a field present only where stated.
   could show different readers different results. Each reader's own
   checks still hold for what they were shown.
 - **The site alone** can withhold a document, not alter one.
-- **The `elig` base and the roster** (0.14.0): under `elig` a member who
-  doesn't vote weighs as "against". So the eligible members who never
-  sign in (their vaults refuse to vote until they do, §3.2), and the
-  moment the operator picks for `record_at`, shape the outcome. `elig` is
-  allowed only with `removed_may_vote: true` (§3.5), so suspending a
-  supporter can't bar their vote.
+- **The `elig` base and the roster** (0.14.0; 0.14.1): under `elig` a
+  member who doesn't vote weighs as "against". So the eligible members
+  who never sign in (their vaults refuse to vote until they do, §3.2),
+  the moment the operator picks for `record_at`, and every removal or
+  suspension during the vote shape the outcome. An operator removal bars
+  a member who hasn't voted yet at once and, under `elig`, makes them a
+  certain "against".
+  It shows only in `counts.removed`, a count the service reports, which
+  can be checked only against the organisation's audit record and by the
+  removed members themselves.
+- **Until 0.14.2:** a ballot the relay received before a removal but that
+  the service handles after it is still refused (the cast is judged when
+  it is handled). 0.14.2 judges it at the relay's time.
 - **A quorum made unreachable later:** `quorum_unreachable` is judged at
-  creation. With `removed_may_vote: false`, removals after it can still
-  leave fewer members able to vote than the quorum needs.
+  creation. Removals after it can still leave fewer members able to vote
+  than the quorum needs.
 - **Unhandled messages:** a `decided` outcome can be narrower than
   `counts.unhandled`; those messages may have held ballots. It is shown
   beside the outcome (§7.1), not weighed in it.
@@ -1125,13 +1137,34 @@ item.
     or `plurality`, of `cast`, `voted` or `elig`. Ties are `tied`; the
     outcome's wording is generic (§7.1); the service fills in no
     default.
-14. **The approval summary** shows the rule, the close without its year
-    and `removed votes`; titles are at most 31 bytes (§3.4).
-15. **`elig` only with `removed_may_vote: true`** (§3.5).
+14. **The approval summary** shows the rule and the close without its
+    year; the title limit is derived from the final strings (§3.4).
+15. **`removed_may_vote` is always `false`,** and `elig` has no condition
+    (0.14.1; GC #1374; in 0.14.0 `elig` needed `removed_may_vote: true`).
 16. **`counts.unhandled` is shown beside the outcome,** never weighed in
     it (§7.1).
 
 ## Changes
+
+- **0.14.1 (2026-11-18):** (owner decision 2026-11-18, GC #1374: D1-c′,
+  E-a′)
+  - **§3.1, §3.4:** `removed_may_vote` stays in the proposal, always
+    `false`. The service refuses `true` (`field_not_shown`), and
+    summaries no longer show `removed votes`. The title limit, still
+    derived from the summary builders, becomes 35 bytes.
+  - **§3.5:** `elig` no longer needs `removed_may_vote: true`.
+  - **§5, §6, §8.3, §8.4:** every verifier refuses a proposal with
+    `removed_may_vote: true`, a value check (fail closed); `not_active`
+    and step 3 no longer read as if the flag operates.
+  - **§9.2:** what removals do to `elig`, plainly, and the gap until
+    0.14.2.
+  - **§11:** one decision vector changes (`elig` with `removed_may_vote`
+    false is valid), the decisions with `elig` are judged with the flag
+    false, and `proposal_removed_may_vote_true` is a refused proposal.
+  - **§12:** item 15.
+  - **No schema change.** The 0.14.0 vault, site and app cards build
+    against 0.14.1.
+  - When a leave ends a member's voting (the relay's time) is 0.14.2.
 
 - **0.14.0 (2026-11-18):** (owner decision 2026-11-18, GC #1367) How a
   vote is decided.

@@ -65,9 +65,8 @@ func gcd(a, b int64) int64 {
 	return a
 }
 
-// Validate checks a decision (§3.5). removedMayVote is the proposal's:
-// the base elig is allowed only when removed members may still vote.
-func (d *Decision) Validate(removedMayVote bool) error {
+// Validate checks a decision (§3.5).
+func (d *Decision) Validate() error {
 	bad := func(what string) error { return fmt.Errorf("ballot: decision %s", what) }
 	switch d.Rule {
 	case RulePlurality:
@@ -79,11 +78,7 @@ func (d *Decision) Validate(removedMayVote bool) error {
 			return bad("without a base")
 		}
 		switch *d.Base {
-		case BaseCast, BaseVoted:
-		case BaseElig:
-			if !removedMayVote {
-				return bad("base elig without removed_may_vote")
-			}
+		case BaseCast, BaseVoted, BaseElig:
 		default:
 			return bad("base")
 		}
@@ -106,7 +101,7 @@ func (d *Decision) Validate(removedMayVote bool) error {
 // doesn't name exactly the proposal's choices, a negative count, a sum
 // other than ballots, or more ballots than eligible members.
 func Decide(p *Proposal, tally map[string]int64, ballots int64) (Outcome, error) {
-	if err := p.Decision.Validate(p.RemovedMayVote); err != nil {
+	if err := p.Decision.Validate(); err != nil {
 		return Outcome{}, err
 	}
 	if len(tally) != len(p.Choices) || ballots < 0 || ballots > p.Eligible {
