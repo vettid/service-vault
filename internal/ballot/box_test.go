@@ -101,6 +101,16 @@ func (f *boxFixture) castBody(conn, choice string) (map[string]string, []byte) {
 
 func (f *boxFixture) send(conn, typ string, body any, ms uint64, active bool) peer.VoteAnswer {
 	f.t.Helper()
+	var left uint64
+	if !active {
+		left = 1 // left long before
+	}
+	return f.sendLeft(conn, typ, body, ms, left)
+}
+
+// sendLeft sends as a member whose connection left at leftAtMS (0: hasn't).
+func (f *boxFixture) sendLeft(conn, typ string, body any, ms, leftAtMS uint64) peer.VoteAnswer {
+	f.t.Helper()
 	j, _ := json.Marshal(body)
 	var cred []byte
 	if k, ok := f.creds[conn]; ok {
@@ -108,7 +118,7 @@ func (f *boxFixture) send(conn, typ string, body any, ms uint64, active bool) pe
 	}
 	a, err := f.box.Vote(context.Background(), &peer.VoteRequest{ConnectionID: conn,
 		PeerIK:        ed25519.NewKeyFromSeed(digest("peer " + conn)).Public().(ed25519.PublicKey),
-		CredentialKey: cred, Active: active, Type: typ, Body: j, MsgMS: ms})
+		CredentialKey: cred, LeftAtMS: leftAtMS, Type: typ, Body: j, MsgMS: ms})
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -237,14 +247,15 @@ func TestCastExtensionAndRemoval(t *testing.T) {
 	if a := f.send("c0", TypeCast, body, uint64(f.p.ClosesAt)*1000+1000, true); a.Code != "" {
 		t.Fatalf("a cast inside the extension refused: %s", a.Code)
 	}
-	// removed_may_vote lets an inactive connection vote. No proposal
-	// carries true from 0.14.1 (this one is changed in memory); 0.14.2
-	// replaces the check with membership at the relay's time.
-	f.p.RemovedMayVote = true
-	f.open.p = f.p
+	// Membership at the relay's time (0.14.2): a cast the relay received
+	// before the member left counts; one at the leave or after doesn't.
 	b1, _ := f.castBody("c1", "yes")
-	if a := f.send("c1", TypeCast, b1, f.during(), false); a.Code != "" {
-		t.Fatalf("removed member refused: %s", a.Code)
+	ms := f.during()
+	if a := f.sendLeft("c1", TypeCast, b1, ms, ms); a.Code != CodeNotActive {
+		t.Fatalf("a cast at the leave: %q", a.Code)
+	}
+	if a := f.sendLeft("c1", TypeCast, b1, ms, ms+1); a.Code != "" {
+		t.Fatalf("a cast before the leave refused: %s", a.Code)
 	}
 }
 
@@ -257,7 +268,7 @@ func TestCastNeedsSignIn(t *testing.T) {
 	body["credential_key"] = base64.StdEncoding.EncodeToString(f.creds["c0"].Public().(ed25519.PublicKey))
 	j, _ := json.Marshal(body)
 	a, err := f.box.Vote(context.Background(), &peer.VoteRequest{ConnectionID: "c0",
-		PeerIK: ed25519.NewKeyFromSeed(digest("peer c0")).Public().(ed25519.PublicKey), Active: true, Type: TypeCast, Body: j, MsgMS: f.during()})
+		PeerIK: ed25519.NewKeyFromSeed(digest("peer c0")).Public().(ed25519.PublicKey), Type: TypeCast, Body: j, MsgMS: f.during()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,7 +356,7 @@ func TestUnpublishedProposal(t *testing.T) {
 	// never a final refusal, and an alarm for the operator.
 	for typ, b := range map[string]any{TypeCast: body, TypeStatus: q} {
 		j, _ := json.Marshal(b)
-		if _, err := f.box.Vote(context.Background(), &peer.VoteRequest{ConnectionID: "c0", Active: true, Type: typ, Body: j, MsgMS: f.during()}); !errors.Is(err, ErrUnpublished) {
+		if _, err := f.box.Vote(context.Background(), &peer.VoteRequest{ConnectionID: "c0", Type: typ, Body: j, MsgMS: f.during()}); !errors.Is(err, ErrUnpublished) {
 			t.Fatalf("%s: %v", typ, err)
 		}
 	}

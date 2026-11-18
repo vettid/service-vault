@@ -376,6 +376,7 @@ func (p *Peer) removeConnectionFor(c *Connection, dir, reason string, now time.T
 	} else {
 		p.dropUndelivered(c, "undelivered_removed", nil)
 	}
+	p.keep(c, dir, now) // before its keys and tokens go (kept.go)
 	p.denyConnTokens(c.ID, now)
 	c.Reconnecting = false // ended, not failed
 	if c.kr != nil {
@@ -533,6 +534,9 @@ func (p *Peer) RepinGov(ctx context.Context, connID string, key []byte) (bool, e
 // requests and challenges past their expiry, rekeys due, tokens to
 // re-mint or refresh (§6.4, §6.5, §7.2, §7.4).
 func (p *Peer) housekeeping(now time.Time) {
+	// First, before any early return: Start runs it too, so a restore that
+	// brings back kept keys past their bound drops them before a message.
+	p.pruneKept(now)
 	if p.mintWait(now) {
 		// A lost mailbox's wait (mailbox.go): rekeys, reconnects and
 		// re-mints would mint tokens the relay refuses. A few minutes late.

@@ -115,6 +115,11 @@ type Connection struct {
 	Standing  HeldToken `json:"standing"`
 	Reconnect HeldToken `json:"reconnect"`
 
+	// SuspendedAtMS is when the connection was suspended, in Unix
+	// milliseconds (kept.go, leaveMS); 0 when it isn't, or was suspended
+	// before the time was recorded.
+	SuspendedAtMS uint64 `json:"suspended_at_ms,omitempty"`
+
 	Keyring     handshake.KeyringState `json:"keyring"`
 	LastEpochID []byte                 `json:"last_epoch_id,omitempty"`
 	// Reconnecting is set while a reconnect we started is open, from its
@@ -649,6 +654,16 @@ func (p *Peer) recordData(k key) ([]byte, time.Time, error) {
 			return nil, exp, nil
 		}
 		v, exp = t, t.Until.Add(SendTallyRetention+storeMargin)
+	case kindKept:
+		kc := p.kept[k.id]
+		if kc == nil {
+			return nil, exp, nil
+		}
+		if kc.kr != nil {
+			st := kc.kr.Export()
+			kc.Keyring = &st
+		}
+		v, exp = kc, kc.At.Add(KeptRecordFor+storeMargin)
 	default:
 		return nil, exp, fmt.Errorf("peer: unknown record kind %q", k.kind)
 	}
@@ -877,6 +892,21 @@ func (p *Peer) load(ctx context.Context) error {
 			}
 			p.sends[t.Ref] = t
 			return t.Ref, nil
+		}},
+		{kindKept, func(b []byte) (string, error) {
+			k := &keptConn{}
+			if err := json.Unmarshal(b, k); err != nil {
+				return "", err
+			}
+			if k.Keyring != nil {
+				kr, err := handshake.ImportKeyring(*k.Keyring)
+				if err != nil {
+					return "", err
+				}
+				k.kr = kr
+			}
+			p.kept[k.ID] = k
+			return k.ID, nil
 		}},
 		{kindAuth, func(b []byte) (string, error) {
 			c := &challenge{}

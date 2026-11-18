@@ -216,7 +216,7 @@ func TestCastGuardRetry(t *testing.T) {
 	f.box.Store = &openHook{BoxStore: rs, after: bump}
 	body, _ = f.castBody("c1", "no")
 	j, _ := json.Marshal(body)
-	_, err := f.box.Vote(ctx, &peer.VoteRequest{ConnectionID: "c1", Type: TypeCast, Body: j, MsgMS: f.during(), Active: true,
+	_, err := f.box.Vote(ctx, &peer.VoteRequest{ConnectionID: "c1", Type: TypeCast, Body: j, MsgMS: f.during(),
 		CredentialKey: f.creds["c1"].Public().(ed25519.PublicKey)})
 	if !errors.Is(err, ErrGuard) {
 		t.Fatalf("a second change: %v", err)

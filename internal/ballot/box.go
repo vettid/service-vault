@@ -388,9 +388,12 @@ func (b *Box) castOnce(ctx context.Context, r *peer.VoteRequest) (peer.VoteAnswe
 	if !bytes.Equal(tag, m.Tag) {
 		return b.refuse(o, r, m.Tag, CodeBadBallot, reqHash)
 	}
-	// removed_may_vote is always false from 0.14.1; membership at the
-	// relay's time replaces this check in 0.14.2.
-	if !r.Active && !p.RemovedMayVote {
+	// Membership at the relay's time (§6 step 3, 0.14.2): a cast the
+	// relay received before the member left counts, one at or after it
+	// doesn't. An active or stale connection hasn't left; a removed one's
+	// cast comes through its kept receive keys (peer, kept.go). The flag
+	// removed_may_vote is always false (0.14.1).
+	if r.LeftAtMS != 0 && r.MsgMS >= r.LeftAtMS {
 		return b.refuse(o, r, m.Tag, CodeNotActive, reqHash)
 	}
 	// 4. The ballot and the credential signature, under the credential

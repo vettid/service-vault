@@ -26,10 +26,15 @@ type VoteRequest struct {
 	// CredentialKey is the member's credential key pinned at the first
 	// signed connection.authenticate.response, or nil.
 	CredentialKey []byte
-	// Active is false once the connection is no longer active.
-	Active bool
-	Type   string
-	Body   []byte
+	// LeftAtMS is when the connection left (kept.go), in Unix
+	// milliseconds: 0 while it hasn't. An active or stale connection hasn't
+	// left; a cast whose MsgMS is at or after LeftAtMS was made after the
+	// member left (BALLOT-PROTOCOL 0.14.2 §6).
+	LeftAtMS uint64
+	// Left is the kind of the leave (LeftRemovedIn, ...), "" while none.
+	Left string
+	Type string
+	Body []byte
 	// MsgMS is the relay's time of the message, from its msg_id
 	// (RELAY-PROTOCOL §6.2), in Unix milliseconds.
 	MsgMS uint64
@@ -66,8 +71,10 @@ func (p *Peer) vote(ctx context.Context, c *Connection, in *envelope.Inner, ikey
 		p.audit("bad_msg_id", c.ID)
 		return nil
 	}
+	// A live connection reaching here is active or stale (a suspended one
+	// is dropped at dispatch): it hasn't left.
 	a, err := p.cfg.Votes.Vote(ctx, &VoteRequest{ConnectionID: c.ID, PeerIK: c.Peer.IK, CredentialKey: c.AuthKey,
-		Active: c.State == StateActive, Type: in.Type, Body: in.Body, MsgMS: ms})
+		Type: in.Type, Body: in.Body, MsgMS: ms})
 	if err != nil {
 		return err
 	}

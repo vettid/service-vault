@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"github.com/vettid/service-vault/internal/ballot/ballottest"
 	"github.com/vettid/service-vault/vote"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -22,7 +23,17 @@ import (
 type fakeRoster []string
 
 func (r fakeRoster) Eligible() []string { return append([]string{}, r...) }
-func (r fakeRoster) Active() []string   { return append([]string{}, r...) }
+
+// Left: a member not on the fake roster left with no record of when.
+func (r fakeRoster) Left(ids []string) map[string]peer.Leave {
+	out := map[string]peer.Leave{}
+	for _, id := range ids {
+		if !slices.Contains(r, id) {
+			out[id] = peer.Leave{}
+		}
+	}
+	return out
+}
 
 // EligibleUnsigned: the fake roster has every key pinned.
 func (r fakeRoster) EligibleUnsigned() []string { return nil }
@@ -312,7 +323,7 @@ func TestCreateProposal(t *testing.T) {
 	asMap["proposal_id"], asMap["choice_id"] = c.ProposalID, "c2"
 	body, _ = json.Marshal(asMap)
 	a, err := box.Vote(ctx, &peer.VoteRequest{ConnectionID: "c0", PeerIK: m.IK, CredentialKey: cred.Public().(ed25519.PublicKey),
-		Active: true, Type: TypeCast, Body: body, MsgMS: uint64(input().OpensAt)*1000 + 1})
+		Type: TypeCast, Body: body, MsgMS: uint64(input().OpensAt)*1000 + 1})
 	if err != nil || a.Code != "" {
 		t.Fatalf("cast: %q, %v", a.Code, err)
 	}
@@ -424,7 +435,7 @@ func castFor(t *testing.T, m *Manager, id, conn, choice string, ms uint64) strin
 	body, _ := json.Marshal(map[string]any{"proposal_id": id, "record_tag": bal.RecordTag, "vk": bal.VK, "choice_id": choice,
 		"ballot_sig": bal.BallotSig, "cast_sig": csig})
 	a, err := (&Box{Store: m.Store, Sign: m.Sign}).Vote(ctx, &peer.VoteRequest{ConnectionID: conn, PeerIK: m.IK,
-		CredentialKey: cred.Public().(ed25519.PublicKey), Active: true, Type: TypeCast, Body: body, MsgMS: ms})
+		CredentialKey: cred.Public().(ed25519.PublicKey), Type: TypeCast, Body: body, MsgMS: ms})
 	if err != nil {
 		t.Fatal(err)
 	}
