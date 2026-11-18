@@ -27,7 +27,9 @@ type roster []string
 
 func (r roster) Eligible() []string         { return append([]string{}, r...) }
 func (r roster) EligibleUnsigned() []string { return nil }
-func (r roster) Active() []string           { return append([]string{}, r...) }
+
+// Left: nobody leaves.
+func (r roster) Left([]string) map[string]peer.Leave { return nil }
 
 type sink struct{}
 

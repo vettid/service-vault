@@ -559,6 +559,14 @@ destination.
 - `ballot_not_counted`: a stored ballot failed the count's re-check
   (tag, credential signature or time) and was left out; the ERROR line
   names the proposal and the tag.
+- `removed_unknown`: members of a vote left with no record of when
+  (removed before leave times were recorded, or the vote is counted more
+  than 60 days after a removal, when the record is forgotten). They are
+  counted in `counts.removed` (BALLOT-PROTOCOL §7, 0.14.2); the ERROR
+  line names the proposal.
+- `kept_keys_failed`: a removed connection's receive-only keys could not
+  be kept (BALLOT-PROTOCOL §6, 0.14.2): a vote it cast before the removal
+  and not yet handled is lost. The ERROR line names the connection.
 - `ballots_off`: the ballot copy's key (`ballot-copy-key`) is missing
   while proposals or copied ballots exist, or isn't the key the copy's
   ballots are under (the copy holds a key check). The daemon runs with

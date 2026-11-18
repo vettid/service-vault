@@ -30,9 +30,10 @@ type Roster interface {
 	// pinned: their vault refuses a vote until the member has signed in
 	// on the connection (VAULT-MESSAGING §10.19.5).
 	EligibleUnsigned() []string
-	// Active lists the active ones, whether or not their vault takes
-	// votes: a member not among them is removed or suspended (§10.1).
-	Active() []string
+	// Left reports, for each of ids that has left (removed, replaced or
+	// suspended), when (§7, 0.14.2): an active or stale connection isn't
+	// listed, and one with no record of its leave is listed not Known.
+	Left(ids []string) map[string]peer.Leave
 }
 
 // Sender sends a message to a member's vault over its connection.

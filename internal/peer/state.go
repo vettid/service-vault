@@ -39,7 +39,7 @@ const (
 // must touch them all (internal/sealstore).
 func Kinds() []string {
 	return []string{kindConn, kindInvite, kindAwait, kindRequest, kindOutgoing, kindToken, kindOutbox, kindAuth, kindEvent,
-		kindMsg, kindInner, kindResp, kindLease, kindUnacked, kindOnce, kindIdentity, kindRelayReg, kindSend}
+		kindMsg, kindInner, kindResp, kindLease, kindUnacked, kindOnce, kindIdentity, kindRelayReg, kindSend, kindKept}
 }
 
 // Retention (VAULT-MESSAGING §8.2, §6.4).
@@ -114,6 +114,11 @@ type Connection struct {
 
 	Standing  HeldToken `json:"standing"`
 	Reconnect HeldToken `json:"reconnect"`
+
+	// SuspendedAtMS is when the connection was suspended, in Unix
+	// milliseconds (kept.go, leaveMS); 0 when it isn't, or was suspended
+	// before the time was recorded.
+	SuspendedAtMS uint64 `json:"suspended_at_ms,omitempty"`
 
 	Keyring     handshake.KeyringState `json:"keyring"`
 	LastEpochID []byte                 `json:"last_epoch_id,omitempty"`
@@ -649,6 +654,16 @@ func (p *Peer) recordData(k key) ([]byte, time.Time, error) {
 			return nil, exp, nil
 		}
 		v, exp = t, t.Until.Add(SendTallyRetention+storeMargin)
+	case kindKept:
+		kc := p.kept[k.id]
+		if kc == nil {
+			return nil, exp, nil
+		}
+		if kc.kr != nil {
+			st := kc.kr.Export()
+			kc.Keyring = &st
+		}
+		v, exp = kc, kc.At.Add(KeptRecordFor+storeMargin)
 	default:
 		return nil, exp, fmt.Errorf("peer: unknown record kind %q", k.kind)
 	}
@@ -685,6 +700,11 @@ func (p *Peer) flush(ctx context.Context) error {
 		keys = append(keys, k)
 	}
 	sort.Slice(keys, func(i, j int) bool {
+		// A removed connection's kept record goes first: a flush split
+		// across store batches then never ends the connection without it.
+		if (keys[i].kind == kindKept) != (keys[j].kind == kindKept) {
+			return keys[i].kind == kindKept
+		}
 		if keys[i].kind != keys[j].kind {
 			return keys[i].kind < keys[j].kind
 		}
@@ -775,6 +795,12 @@ func (p *Peer) load(ctx context.Context) error {
 			}
 			c.kr = kr
 			c.initEpochs()
+			if c.State == StateSuspended && c.SuspendedAtMS == 0 {
+				// Suspended before its time was recorded (0.14.2): the load's
+				// time marks it, so a later removal keeps a tombstone only.
+				c.SuspendedAtMS = uint64(p.now().UnixMilli())
+				p.markDirty(kindConn, c.ID)
+			}
 			if len(c.LegacyPrevRelayPK) > 0 {
 				moved = append(moved, c)
 			}
@@ -877,6 +903,21 @@ func (p *Peer) load(ctx context.Context) error {
 			}
 			p.sends[t.Ref] = t
 			return t.Ref, nil
+		}},
+		{kindKept, func(b []byte) (string, error) {
+			k := &keptConn{}
+			if err := json.Unmarshal(b, k); err != nil {
+				return "", err
+			}
+			if k.Keyring != nil {
+				kr, err := handshake.ImportKeyring(*k.Keyring)
+				if err != nil {
+					return "", err
+				}
+				k.kr = kr
+			}
+			p.kept[k.ID] = k
+			return k.ID, nil
 		}},
 		{kindAuth, func(b []byte) (string, error) {
 			c := &challenge{}

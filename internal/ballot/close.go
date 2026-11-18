@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/vettid/service-vault/vote"
+	"sort"
 	"time"
 
 	"github.com/vettid/service-vault/internal/peer"
@@ -254,7 +255,7 @@ func (m *Manager) Close(ctx context.Context, id string) (*ResultsSummary, error)
 			if !caught {
 				return nil, ErrNotCaught
 			}
-			removed := m.removed(o)
+			removed := m.removed(o, p)
 			o.Published, o.Unhandled, o.Removed = true, &unhandled, &removed
 			if err := m.Store.SaveProposal(ctx, o, false); err != nil {
 				return nil, err
@@ -296,17 +297,33 @@ func (m *Manager) Close(ctx context.Context, id string) (*ResultsSummary, error)
 	return &ResultsSummary{ProposalID: id, ResultsHash: sum(pr.Results), Tally: res.Tally, Counts: res.Counts, Outcome: res.Outcome}, nil
 }
 
-// removed counts the proposal's members no longer on the roster.
-func (m *Manager) removed(o *OpenProposal) int64 {
-	active := map[string]bool{}
-	for _, c := range m.Roster.Active() {
-		active[c] = true
-	}
-	var removed int64
+// removed counts the proposal's members who left in [record_at,
+// closes_at in force), by their recorded leave times (§7, 0.14.2): a leave
+// before record_at counts as at record_at; a stale member hasn't left. A
+// member with no record of its leave left (removed before leave times were
+// recorded, or its tombstone forgotten after peer.KeptRecordFor) is
+// counted, with an alarm.
+func (m *Manager) removed(o *OpenProposal, p *vote.Proposal) int64 {
+	ids := make([]string, 0, len(o.Members))
 	for c := range o.Members {
-		if !active[c] {
+		ids = append(ids, c)
+	}
+	sort.Strings(ids)
+	from, to := uint64(p.RecordAt)*1000, uint64(o.ClosesAt)*1000
+	var removed, unknown int64
+	for _, l := range m.Roster.Left(ids) {
+		if !l.Known {
+			removed++
+			unknown++
+			continue
+		}
+		if max(l.AtMS, from) < to {
 			removed++
 		}
+	}
+	if unknown > 0 {
+		m.log().Error("members left with no record of when: counted as removed", "proposal_id", p.ProposalID,
+			"members", unknown, "alarm", "removed_unknown")
 	}
 	return removed
 }

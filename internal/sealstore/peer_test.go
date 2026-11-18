@@ -13,6 +13,13 @@ import (
 	"github.com/vettid/service-vault/internal/sealstore"
 )
 
+// noVotes answers every vote request with nothing.
+type noVotes struct{}
+
+func (noVotes) Vote(context.Context, *peer.VoteRequest) (peer.VoteAnswer, error) {
+	return peer.VoteAnswer{}, nil
+}
+
 // A peer on the sealed store connects a member, restarts with its state,
 // and leaves nothing of its session keys or held tokens in the table.
 func TestPeerOnSealedStore(t *testing.T) {
@@ -30,9 +37,10 @@ func TestPeerOnSealedStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	sv := w.View(keys.Relay)
+	var votes peer.Votes
 	start := func() *peer.Peer {
 		p, err := peer.New(peer.Config{Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Keys: keys, Relay: sv, RelayURL: peertest.RelayURL,
-			Store: st, Now: clk.Now, Profile: peer.Profile{FirstName: "VettID", LastName: "Member Service"}})
+			Store: st, Now: clk.Now, Profile: peer.Profile{FirstName: "VettID", LastName: "Member Service"}, Votes: votes})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -97,5 +105,37 @@ func TestPeerOnSealedStore(t *testing.T) {
 	pump()
 	if len(m.Challenges) != 1 {
 		t.Fatal("no challenge after restart")
+	}
+	// With votes on, a removal leaves a kept record (its receive keys): it
+	// is sealed too, under a kind peer.Kinds() lists, so a rotation
+	// reseals it (BALLOT-PROTOCOL 0.14.2).
+	votes = noVotes{}
+	p = start()
+	if err := p.Remove(ctx, rec.ConnID); err != nil {
+		t.Fatal(err)
+	}
+	pump()
+	kept := 0
+	for _, k := range peer.Kinds() {
+		recs, _ := mem.Load(ctx, k)
+		if k == "kept" {
+			kept = len(recs)
+		}
+		for _, r := range recs {
+			if bytes.Contains(r.Data, []byte(m.SvcStand)) || bytes.Contains(r.Data, []byte("recv_key")) || bytes.Contains(r.Data, []byte("keyring")) {
+				t.Fatalf("%s %s stored in the clear", k, r.ID)
+			}
+		}
+	}
+	if kept != 1 {
+		t.Fatalf("%d kept records", kept)
+	}
+	for _, k := range mem.Kinds() {
+		if !known[k] {
+			t.Fatalf("the peer wrote kind %q, which peer.Kinds() does not list", k)
+		}
+	}
+	if p = start(); p == nil {
+		t.Fatal("no restart with a kept record")
 	}
 }

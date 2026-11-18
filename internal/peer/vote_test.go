@@ -57,7 +57,7 @@ func TestVoteRouted(t *testing.T) {
 		t.Fatalf("%d requests reached the box", len(rv.reqs))
 	}
 	r := rv.reqs[0]
-	if r.ConnectionID != cid || r.Type != "vote.status" || !r.Active || !r.PeerIK.Equal(m.IK.Public().(ed25519.PublicKey)) || r.CredentialKey == nil {
+	if r.ConnectionID != cid || r.Type != "vote.status" || r.LeftAtMS != 0 || !r.PeerIK.Equal(m.IK.Public().(ed25519.PublicKey)) || r.CredentialKey == nil {
 		t.Fatalf("request %+v", r)
 	}
 	if want := uint64(sent.UnixMilli()); r.MsgMS < want-1000 || r.MsgMS > want+1000 {

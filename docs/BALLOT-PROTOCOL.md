@@ -1,6 +1,6 @@
 # Ballot Protocol
 
-**Status:** 0.14.1 (2026-11-18)
+**Status:** 0.14.2 (2026-11-18)
 (MEMBER-SERVICE-PLAN §10, item 5.0). It replaces the secret-ballot
 design of MEMBER-SERVICE-PLAN §8 (owner decision 2026-10-29); the plan
 in member-service is to be updated to point here. Choices are marked:
@@ -515,7 +515,7 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
 |---|---|---|
 | `not_eligible` | both | The connection has no tag for this proposal. |
 | `not_open`, `closed` | `vote.cast` | The relay's time is outside the window. |
-| `not_active` | `vote.cast` | Removed or suspended (0.14.1: `removed_may_vote` is always false). |
+| `not_active` | `vote.cast` | The member had left (removed, replaced or suspended) at the cast's relay time (0.14.2, §6 "Leaving"). |
 | `not_signed_in` | `vote.cast` | The member has never signed in, so no credential key is pinned (§5). |
 | `already_voted` | `vote.cast` | A different ballot is already recorded for this tag; the body also carries that ballot as `ballot` `{vk, choice_id, ballot_sig, pad}`, with its `ballot_msg_ms` and `receipt_sig`. |
 | `bad_ballot` | `vote.cast` | The tag isn't the connection's, the choice isn't the proposal's, or a signature fails. After a credential-key rotation (`connection.authenticate.rotated`, VAULT-MESSAGING §10.4) the vault may sign `cast_sig` again under its current key and send the same ballot once more; the service checks `cast_sig` under the key pinned when the cast arrives. |
@@ -582,8 +582,8 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
      `[opens_at, closes_at)`, as extended (§10.2). A ballot queued at
      the relay during an outage still counts.
   3. **Eligibility:** the connection is eligible, `record_tag` is its
-     tag, and it is active (0.14.1: `removed_may_vote` is always false;
-     0.14.2 judges this at the relay's time).
+     tag, and the member hadn't left at the cast's `msg_ms` (0.14.2,
+     "Leaving" below; `removed_may_vote` is always false, 0.14.1).
   4. **Ballot:** `choice_id` is the proposal's, `ballot_sig` verifies
      under `vk`, and `cast_sig` verifies under the connection's pinned
      credential key (§2); with no key pinned, `not_signed_in`.
@@ -608,6 +608,48 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
   and its `msg_ms` is inside the window; one that fails isn't counted.
   `counts.unhandled` and `counts.removed` are fixed when collection
   ends, in the same save as `published`, and a retried count uses them.
+- **Leaving** (0.14.2; owner decision 2026-11-18, GC #1374). A member
+  leaves when their connection is removed (by their vault, or by the
+  service), replaced (a new connection with the same identity or relay
+  key, §7.4 of VAULT-MESSAGING), or suspended (fork evidence, a rotation
+  conflict, an unlinked relay move).
+  - **When:** `left_at` is the relay's time (`msg_ms`) of the message
+    that caused the leave: a vault's `connection.removed`, the evidence,
+    or the replacing connection's activating handshake. Those are the
+    casts' clock, delivered in `msg_id` order, so a copy's cast after the
+    leave can't count. A rotation conflict found while handling another
+    message takes that message's `msg_ms`. A leave no message caused (an
+    operator removal, a replacement activated by the operator's approval,
+    a suspension found at start) takes the service's time. A connection
+    suspended before 0.14.2 recorded times gets the time of the first
+    start that loads it. A suspension's time stays first through a later
+    removal or replacement, and `left_at` is never changed.
+  - **The rule:** a cast counts only if its `msg_ms` is before the
+    member's `left_at`. A cast the relay received before the leave
+    counts even when the service handles it after (an outage backlog). A
+    `stale` connection (a relay refusal, or any reconnect in progress)
+    hasn't left.
+  - **Kept receive keys:** when a connection is removed or replaced, the
+    service keeps a receive-only record of it, for every removed
+    connection: its relay key, its standing tokens' ids and its
+    credential key, frozen at the removal, and the receive keys of the
+    epochs the live connection would still accept, without their send
+    keys or rekey secrets: an epoch destroyed by rule E, demoted or
+    abandoned is left out, and a superseded epoch keeps its own earlier
+    end, never extended. Through it only a
+    `vote.cast` deposited under one of those tokens passes (and one the
+    service can't judge yet, its proposal not published, is left at the
+    relay to come again). Nothing else
+    is accepted (no evidence, no rekey, no response, no identity change),
+    and nothing is answered: the member gets no receipt, and no
+    `vote.closed`. The record is never the live connection, so a member
+    who connects again is unaffected. A suspended connection keeps no
+    keys: nothing is accepted once suspended (VAULT-MESSAGING §3.4).
+  - **Bounds:** the keys are destroyed 15 days after the removal: the
+    7-day window, 24 h of extensions, the 24 h wait for an unacked
+    message and 6 days' slack for a delayed count, below the 16 days an
+    inner `ts` may be old. The leave itself (connection, `left_at`, kind)
+    is kept for 60 days, for `counts.removed`.
 - **The record** of each connection's tag, ballot, `cast_sig` and
   `msg_ms` is kept for the organisation's records (owner decision
   2026-10-29), sealed like the service vault's other records. It is not
@@ -688,8 +730,14 @@ choice. See VAULT-MESSAGING 0.83.6 §10.19.5.
   - **`results.json`:** the proposal and any extensions with their
     signatures, `rows_hash = H(rows bytes)`, `rows_root` (the Merkle
     root over the row leaves, §8.2), the tally per choice, and the
-    counts: `eligible`, `ballots`, `removed` (members removed or
-    suspended after `record_at`), and `unhandled` (messages of the
+    counts: `eligible`, `ballots`, `removed` (0.14.2: the members whose
+    `left_at` is in [`record_at`, `closes_at` in force), a leave before
+    `record_at` counting as at it; a stale member hasn't left; a member
+    whose leave is no longer on record, because it predates 0.14.2 or
+    because the count runs more than 60 days after it, is counted, with
+    an alarm: that overcounts a member who left after `closes_at` and
+    whose record has gone, and the alarm can be noise when `record_at` is
+    long before the opening), and `unhandled` (messages of the
     window the count went ahead without, above); and the `outcome`
     (§7.1).
 - **Signature:** `results_sig = Sign(service IK, "vettid/vote/1/results\x00", proposal_hash ‖ H(results_bytes))`.
@@ -796,7 +844,9 @@ publishes its results has every member's check settle by itself.
    - it never cast: the row is empty;
    - it cast but has neither receipt nor refusal: the row may carry its
      ballot or be empty; either is shown as "unconfirmed", not as a
-     failure.
+     failure. (0.14.2) A member who left gets no receipt for a cast the
+     service judged after the leave and no `vote.closed`: their vault's
+     check, if it runs, can only show "unconfirmed".
 4. **Outcome:** a failure is shown to the member with the evidence: the
    signed proposal, the receipt or signed refusals, and the results. The
    app can export it. A receipt for a ballot the results lack or change
@@ -940,9 +990,19 @@ SubjectPublicKeyInfo; `?` marks a field present only where stated.
   It shows only in `counts.removed`, a count the service reports, which
   can be checked only against the organisation's audit record and by the
   removed members themselves.
-- **Until 0.14.2:** a ballot the relay received before a removal but that
-  the service handles after it is still refused (the cast is judged when
-  it is handled). 0.14.2 judges it at the relay's time.
+- **An operator removal bars at once** (0.14.2): from its `left_at`, a
+  removed member's cast is refused (`not_active`), whatever the vote's
+  base; only a cast the relay received earlier counts.
+- **A forced suspension** (0.14.2): anyone holding an old copy of a
+  member's vault can cause fork evidence and so suspend the connection.
+  That ends the member's voting in every open vote, even after they
+  connect again (a replacement is a leave, and the new connection isn't
+  a member of votes already open).
+- **Clocks** (0.14.2): an operator removal's `left_at` is the service's
+  time, compared with the relay's `msg_ms`. A skew S between them moves
+  by up to S which casts made just around the removal are refused; that
+  is accepted. A relay that lies about times could backdate a copy's
+  cast: the same trust as the window (§6).
 - **A quorum made unreachable later:** `quorum_unreachable` is judged at
   creation. Removals after it can still leave fewer members able to vote
   than the quorum needs.
@@ -1100,7 +1160,8 @@ item.
    Also **decisions** (`decisions`), valid and refused, each judged as
    a proposal's member (an absent or unknown member is refused); **outcome
    objects** (`outcome_shapes`), consistent and not; and a second set of
-   documents (`documents_decided`) whose outcome is `decided`.
+   documents (`documents_decided`) whose outcome is `decided`. (0.14.1)
+   `proposal_removed_may_vote_true`: a proposal every verifier refuses.
 
 ## 12. Decisions for the owner
 
@@ -1143,8 +1204,28 @@ item.
     (0.14.1; GC #1374; in 0.14.0 `elig` needed `removed_may_vote: true`).
 16. **`counts.unhandled` is shown beside the outcome,** never weighed in
     it (§7.1).
+17. **A leave ends voting at its relay time,** and a cast before it
+    counts (§6 "Leaving", 0.14.2; GC #1374). Stale is active; nothing is
+    accepted once suspended; a replacement is a leave.
 
 ## Changes
+
+- **0.14.2 (2026-11-18):** (owner decision 2026-11-18, GC #1374: D2-c,
+  R-a) When a leave ends voting.
+  - **§6 "Leaving" (new), step 3, §5 `not_active`:** a cast counts if
+    the relay received it before the member's `left_at`. `left_at` is
+    the relay's time of the message that caused the leave, else the
+    service's. Stale is active. A removed or replaced connection's
+    receive-only record (bounded at 15 days, holding only the epochs the
+    live connection would accept, never extended) lets a backlog
+    `vote.cast` through and nothing else. Nothing is accepted once
+    suspended.
+  - **§7:** `counts.removed` from the recorded leave times; a leave no
+    longer on record is counted, with an alarm.
+  - **§8.3, §9.2:** a member who left gets no receipt and no
+    `vote.closed`; a forced suspension; the clocks.
+  - **§11:** names `proposal_removed_may_vote_true`.
+  - **No change** to the messages, the documents or the vectors.
 
 - **0.14.1 (2026-11-18):** (owner decision 2026-11-18, GC #1374: D1-c′,
   E-a′)
@@ -1163,7 +1244,7 @@ item.
     false, and `proposal_removed_may_vote_true` is a refused proposal.
   - **§12:** item 15.
   - **No schema change.** The 0.14.0 vault, site and app cards build
-    against 0.14.1.
+    against 0.14.1, and owe the refusal of `true`.
   - When a leave ends a member's voting (the relay's time) is 0.14.2.
 
 - **0.14.0 (2026-11-18):** (owner decision 2026-11-18, GC #1367) How a

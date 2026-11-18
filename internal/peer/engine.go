@@ -119,6 +119,7 @@ type Peer struct {
 
 	mu         sync.Mutex
 	conns      map[string]*Connection
+	kept       map[string]*keptConn // removed connections' receive-only records (kept.go)
 	invites    map[string]*InviteRecord
 	awaiting   map[string]*awaiting
 	requests   map[string]*request
@@ -203,7 +204,7 @@ func New(cfg Config) (*Peer, error) {
 		return nil, err
 	}
 	return &Peer{cfg: cfg, instance: hex.EncodeToString(inst),
-		conns: map[string]*Connection{}, invites: map[string]*InviteRecord{}, awaiting: map[string]*awaiting{},
+		conns: map[string]*Connection{}, kept: map[string]*keptConn{}, invites: map[string]*InviteRecord{}, awaiting: map[string]*awaiting{},
 		requests: map[string]*request{}, outgoing: map[string]*outgoing{}, issued: map[string]*IssuedToken{},
 		challenges: map[string]*challenge{}, sends: map[string]*sendTally{}, rates: map[string]*rateWindow{}, outboxFull: map[string]bool{}, refreshOwed: map[string]bool{},
 		dirty: map[key]struct{}{}, versions: map[key]uint64{}, evWake: make(chan struct{}, 1)}, nil
@@ -822,6 +823,12 @@ func (p *Peer) handleMessage(ctx context.Context, m relayclient.Message, now tim
 			p.audit("decrypt_failed", c.ID)
 			return ackAfterFlush, nil
 		}
+	}
+	// A removed connection's kept receive keys (kept.go): a vote.cast
+	// queued before the removal is still judged, never as the live
+	// connection's (a re-added member shares the relay key).
+	if d, ok, err := p.keptMessage(ctx, env, m.MsgID, m.JTI, sender, now); ok || err != nil {
+		return d, err
 	}
 	// Not an active epoch: hs.fin for a handshake awaiting it, or a
 	// message under a request's epoch before activation (0.10.3).

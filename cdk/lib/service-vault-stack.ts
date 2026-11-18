@@ -147,6 +147,10 @@ export const ALARMS = {
   signer_bundle_unverified: 'The anchor signer returned a bundle whose signature is not the pinned anchor key\'s over the document: it is not kept, and the document is not taken as published. Treat it as a security event (README "signer_bundle_unverified")',
   /** A stored ballot failed the count's re-check and was left out (internal/ballot/close.go): the results may differ from what members were told. */
   ballot_not_counted: 'A stored ballot was not counted: it failed the count\'s re-check (tag, credential signature or time); look at the ERROR line for the proposal and tag',
+  /** Members of a vote left with no record of when (internal/ballot/close.go): counted as removed; BALLOT-PROTOCOL §7, 0.14.2. */
+  removed_unknown: 'Members of a vote left with no record of when they left (removed before leave times were recorded, or counted more than 60 days after the removal): counts.removed counts them; look at the ERROR line for the proposal.',
+  /** A removed connection's receive keys could not be kept (internal/peer/kept.go): a cast it made before the removal and not yet handled is lost. */
+  kept_keys_failed: 'A removed connection\'s receive keys could not be kept: a vote it cast before the removal and not yet handled is lost; look at the ERROR line for the connection.',
   /** An admin's governance key can't be pinned yet: the peer doesn't know the admin's connection (internal/approval/approval.go, a WARN, at most hourly per admin). Until it can, that admin's governance approvals don't count. */
   gov_migration_waiting: 'An admin\'s governance key is not pinned yet because the service doesn\'t know that admin\'s connection: their governance approvals (admin set, re-pin, proposals, extensions, contract templates) don\'t count until it does (README "gov_migration_waiting")',
   /** A removed connection left fewer admins than the threshold (internal/approval/approval.go): no approval can pass. */

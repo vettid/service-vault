@@ -325,6 +325,9 @@ func (p *Peer) suspendFor(c *Connection, reason string, now time.Time) {
 		return
 	}
 	c.State = StateSuspended
+	if c.SuspendedAtMS == 0 {
+		c.SuspendedAtMS = p.leaveMS(now) // when it left (kept.go)
+	}
 	p.dropUndelivered(c, "undelivered_suspended", nil)
 	p.dropConnOutgoing(c)
 	p.abandonPending(c, "suspended", false, now)
