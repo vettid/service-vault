@@ -468,7 +468,8 @@ func (b *Box) receiptAnswer(proposalID string, rec *BallotRecord) (peer.VoteAnsw
 type refusalBody struct {
 	RefusalSig []byte `json:"refusal_sig"`
 	// ProposalHash is the hash refusal_sig binds (0.15.0): the published
-	// proposal's, or 32 zero bytes when none is held under the id.
+	// proposal's, or 32 zero bytes when none is held under the id. An
+	// unsigned refusal omits it.
 	ProposalHash []byte `json:"proposal_hash,omitempty"`
 	MsgMS        uint64 `json:"msg_ms"`
 	Connection   []byte `json:"connection"`
@@ -506,11 +507,11 @@ func (b *Box) refusal(o *OpenProposal, r *peer.VoteRequest, tag []byte, code str
 	}
 	// The proposal's hash, or NoProposal when no published proposal is
 	// held under the id (§4.2, 0.15.0).
-	ph := vote.NoProposal
+	ph := vote.NoProposal()
 	if o != nil && o.Bundle != nil {
 		ph = sum(o.Doc)
 	}
-	msg, err := vote.RefusalMsg(ph, conn[:], tag, r.Type, code, r.MsgMS, reqHash)
+	msg, err := vote.RefusalMsg(ph, id, conn[:], tag, r.Type, code, r.MsgMS, reqHash)
 	if err != nil {
 		return nil, err
 	}

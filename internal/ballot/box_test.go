@@ -174,7 +174,7 @@ func (f *boxFixture) checkRefusal(a peer.VoteAnswer, conn, code string, tag, req
 	if !bytes.Equal(x.Connection, c[:]) || !bytes.Equal(x.RecordTag, tag) {
 		f.t.Fatalf("%s: refusal names another connection or tag", code)
 	}
-	msg, _ := vote.RefusalMsg(f.v.ph, c[:], tag, TypeCast, code, x.MsgMS, reqHash)
+	msg, _ := vote.RefusalMsg(f.v.ph, f.p.ProposalID, c[:], tag, TypeCast, code, x.MsgMS, reqHash)
 	if !bytes.Equal(x.ProposalHash, f.v.ph) {
 		f.t.Fatalf("%s: refusal names another proposal hash", code)
 	}

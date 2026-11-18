@@ -139,8 +139,9 @@ func ReceiptMsg(proposalHash, ballotLeaf []byte, msgMS uint64) ([]byte, error) {
 
 // NoProposal is the proposal hash a refusal signs when the service holds no
 // published proposal under the id named (§4.2, 0.15.0): 32 zero bytes,
-// accepted only with unknown_proposal or not_eligible.
-var NoProposal = make([]byte, HashLen)
+// accepted only with unknown_proposal or not_eligible. A fresh slice each
+// call.
+func NoProposal() []byte { return make([]byte, HashLen) }
 
 // StatusMsg is proposal_hash ‖ lp(connection) ‖ lp(record_tag) ‖
 // H(ballot_leaf or empty) ‖ u64(status_msg_ms), signed under LabelStatus
@@ -158,17 +159,20 @@ func StatusMsg(proposalHash, connection, recordTag, ballotLeaf []byte, statusMsg
 	return binary.BigEndian.AppendUint64(b, statusMsgMS), nil
 }
 
-// RefusalMsg is proposal_hash ‖ lp(connection) ‖ lp(record_tag) ‖
-// lp(type) ‖ lp(code) ‖ u64(msg_ms) ‖ request_hash, signed under
-// LabelRefusal (§4.2, 0.15.0). proposalHash is NoProposal when the service
-// holds no published proposal under the id; connection is H(the
-// connection's peer identity key); recordTag may be empty.
-func RefusalMsg(proposalHash, connection, recordTag []byte, typ, code string, msgMS uint64, requestHash []byte) ([]byte, error) {
-	if len(proposalHash) != HashLen || len(connection) != HashLen || (len(recordTag) != 0 && len(recordTag) != HashLen) ||
+// RefusalMsg is proposal_hash ‖ lp(proposal_id) ‖ lp(connection) ‖
+// lp(record_tag) ‖ lp(type) ‖ lp(code) ‖ u64(msg_ms) ‖ request_hash,
+// signed under LabelRefusal (§4.2, 0.15.0). proposalID is the id the
+// request named; proposalHash is NoProposal() when the service holds no
+// published proposal under it; connection is H(the connection's peer
+// identity key); recordTag may be empty.
+func RefusalMsg(proposalHash []byte, proposalID string, connection, recordTag []byte, typ, code string, msgMS uint64, requestHash []byte) ([]byte, error) {
+	if len(proposalHash) != HashLen || !ValidProposalID(proposalID) || len(connection) != HashLen ||
+		(len(recordTag) != 0 && len(recordTag) != HashLen) ||
 		typ == "" || len(typ) > 64 || code == "" || len(code) > 64 || len(requestHash) != HashLen {
 		return nil, errField
 	}
 	b := append([]byte{}, proposalHash...)
+	b = lp(b, []byte(proposalID))
 	b = lp(b, connection)
 	b = lp(b, recordTag)
 	b = lp(b, []byte(typ))
