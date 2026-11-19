@@ -61,7 +61,7 @@ describe('targets and the topic', () => {
     expect(trust).toHaveLength(1);
     expect(trust[0].Principal).toEqual({ Service: 'events.amazonaws.com' });
     expect(trust[0].Condition.StringEquals).toEqual({ 'aws:SourceAccount': SIGNER_ACCT });
-    expect(s(trust[0].Condition.ArnLike['aws:SourceArn'])).toMatch(/:events:.*:rule\/\*/);
+    expect(trust[0].Condition.ArnLike).toEqual({ 'aws:SourceArn': { 'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, `:events:us-east-1:${SIGNER_ACCT}:rule/*`]] } });
     const rp = Object.values<any>(t.findResources('AWS::IAM::Policy')).filter((p) => s(p.Properties.Roles).includes('TopicPublishRole'))
       .flatMap((p) => p.Properties.PolicyDocument.Statement);
     expect(rp).toHaveLength(1);
