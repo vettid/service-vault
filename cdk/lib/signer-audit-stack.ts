@@ -51,7 +51,8 @@ export interface SignerAuditStackProps extends cdk.StackProps {
  *    path inside the signer account is still seen from here.
  *
  * Deployed from the owner's session, before AnchorSigner-<env> (whose
- * replication needs the bucket). Nothing in bin/ deploys it (P1.6 wires it).
+ * replication needs the bucket). bin/key-protection-staging.ts deploys it
+ * ahead of AnchorSigner-staging.
  */
 export class SignerAuditStack extends cdk.Stack {
   readonly bucket: s3.Bucket;

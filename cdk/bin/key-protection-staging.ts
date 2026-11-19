@@ -45,4 +45,4 @@ const signer = new AnchorSignerStack(app, 'AnchorSigner-staging', {
 });
 // SignerAudit first (the locked bucket and the bus name the signer's roles):
 // the order only, no references between the stacks.
-signer.addDependency(audit);
+signer.addStackDependency(audit);
