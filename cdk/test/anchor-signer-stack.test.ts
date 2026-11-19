@@ -41,7 +41,7 @@ fs.writeFileSync(zipPath, makeZip('bootstrap', binary, true));
 const base: AnchorSignerStackProps = {
   envName: 'staging', taskRoleArn: TASK_ROLE, breakGlassRoleArn: BREAK_GLASS, signingRoleArn: BREAK_GLASS,
   votesBucketName: 'votes-staging-site', alarmEmail: 'owner@example.org', signatureValidityDays: 365,
-  env: { account: SIGNER_ACCT, region: 'us-east-1' },
+  auditAccount: '777788889999', env: { account: SIGNER_ACCT, region: 'us-east-1' },
 };
 const release = { zipPath, bootstrapSha256: SHA, objectKey: 'signed/anchor-signer-v1.zip', objectVersion: 'v1version' };
 const synth = (props: Partial<AnchorSignerStackProps> = {}) =>
