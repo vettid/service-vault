@@ -215,8 +215,8 @@ github.com/titanous/rocacheck v0.0.0-20171023193734-afe73141d399 h1:e/5i7d4oYZ+C
 github.com/titanous/rocacheck v0.0.0-20171023193734-afe73141d399/go.mod h1:LdwHTNJT99C5fTAzDz0ud328OgXz+gierycbcIx2fRs=
 github.com/vettid/vettid-relay v0.0.0-20261115002831-ff3b8249a875 h1:BlYE3FF7/RIGdtpXK3JQDphfuznRIdpk19uzqs53+8o=
 github.com/vettid/vettid-relay v0.0.0-20261115002831-ff3b8249a875/go.mod h1:d+zS5Kxndcr/zEndHaDVEZaWeuGWFuE9Mh45k3PiCxg=
-github.com/vettid/vettid-vault v0.0.0-20261112163356-425a5aeaef1b h1:PruGOUiHb4+ayWZmcwEJIdhYfhwdp0Ljb2Ccb6qZ9Y0=
-github.com/vettid/vettid-vault v0.0.0-20261112163356-425a5aeaef1b/go.mod h1:/O9fPHzrLzsp1lpgMENRRl2civR+mHRHkEbs1ETO5lo=
+github.com/vettid/vettid-vault v0.0.0-20261117213943-99a64eeff1ed h1:+RuJXtq5OwIrdfpnT57w0ugSlMwpyJqK0c5oIJdnZ/g=
+github.com/vettid/vettid-vault v0.0.0-20261117213943-99a64eeff1ed/go.mod h1:/O9fPHzrLzsp1lpgMENRRl2civR+mHRHkEbs1ETO5lo=
 github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 h1:ilQV1hzziu+LLM3zUTJ0trRztfwgjqKnBWNtSRkbmwM=
 github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78/go.mod h1:aL8wCCfTfSfmXjznFBSZNN13rSJjlIOI1fUNAtF7rmI=
 go.opentelemetry.io/auto/sdk v1.2.1 h1:jXsnJ4Lmnqd11kwkBV2LgLoFMZKizbCi5fNZ/ipaZ64=
