@@ -68,5 +68,26 @@
     "sha256": "450ecccb42a792e46039b0522bd10a29ceadc99146750839ed0031b59e5645c7",
     "pinned_sha256": "7571a9347499e2d267fe615e72b599d5a524e649eefb9d9cd2de60a5a4c7fe79",
     "reason": "the pinned file adds one refusal to proposal validation, choice labels distinct and non-empty once folded (FoldLabel, golang.org/x/text/unicode/norm; VAULT-MESSAGING 0.88.12 §10.19.4): this release accepts a superset (fail-safe); the service doesn't run the pinned Validate on its own proposals but refuses the same itself: a choice label that is empty, repeated or Abstain in ballot.checkInput's choice-label loop (internal/ballot/approved.go), so no label folds to empty (the pinned k == \"\" refusal); its strings.ToLower key groups labels as the fold does only while latin() admits no more than printable ASCII and the Latin-1 letters (it leaves out ª, µ and º too), so widening latin() needs a real fold check there: beyond that set the two part ways on long s (U+017F), format characters (the soft hyphen U+00AD is in Latin-1), sequences NFC changes, and classes such as µ/μ and σ/ς; no init, no package-level variable written, nothing a bundle or root check uses; see GC #11068"
+  },
+  {
+    "release": "staging/30",
+    "path": "build settings (go.mod go/toolchain/godebug, //go:debug)",
+    "sha256": "fc4f4ecec34485e299de514648fd150d9f187c2222e750ee0cf4938b79ea886d",
+    "pinned_sha256": "d2d5468944732a3963ffcc483f097f355d970629b96c22dfc200f8f117f4b90c",
+    "reason": "the vault release was built with toolchain go1.26.10 and the service with go1.26.11, a patch release; the verifier's source is the same. Of go1.26.11's changes, the verifier's dependencies reach only: the crypto/fips140 compliance changes (a self-test run when generating keys, the FIPS service indicator of HKDF-Expand, an OAEP check in FIPS 140-only mode), none of which changes a verification result; and two compiler fixes (#81865, a store eliminated by the branchelim pass; #81869, a shift constant's type), which make the service's build the correct one if they differ. net/http, crypto/tls and the cgo build fixes are outside the verifier. Listed with vettid/service-vault#196 (GO-2026-6859)"
+  },
+  {
+    "release": "staging/31",
+    "path": "build settings (go.mod go/toolchain/godebug, //go:debug)",
+    "sha256": "fc4f4ecec34485e299de514648fd150d9f187c2222e750ee0cf4938b79ea886d",
+    "pinned_sha256": "d2d5468944732a3963ffcc483f097f355d970629b96c22dfc200f8f117f4b90c",
+    "reason": "the vault release was built with toolchain go1.26.10 and the service with go1.26.11, a patch release; the verifier's source is the same. Of go1.26.11's changes, the verifier's dependencies reach only: the crypto/fips140 compliance changes (a self-test run when generating keys, the FIPS service indicator of HKDF-Expand, an OAEP check in FIPS 140-only mode), none of which changes a verification result; and two compiler fixes (#81865, a store eliminated by the branchelim pass; #81869, a shift constant's type), which make the service's build the correct one if they differ. net/http, crypto/tls and the cgo build fixes are outside the verifier. Listed with vettid/service-vault#196 (GO-2026-6859)"
+  },
+  {
+    "release": "staging/32",
+    "path": "build settings (go.mod go/toolchain/godebug, //go:debug)",
+    "sha256": "fc4f4ecec34485e299de514648fd150d9f187c2222e750ee0cf4938b79ea886d",
+    "pinned_sha256": "d2d5468944732a3963ffcc483f097f355d970629b96c22dfc200f8f117f4b90c",
+    "reason": "the vault release was built with toolchain go1.26.10 and the service with go1.26.11, a patch release; the verifier's source is the same. Of go1.26.11's changes, the verifier's dependencies reach only: the crypto/fips140 compliance changes (a self-test run when generating keys, the FIPS service indicator of HKDF-Expand, an OAEP check in FIPS 140-only mode), none of which changes a verification result; and two compiler fixes (#81865, a store eliminated by the branchelim pass; #81869, a shift constant's type), which make the service's build the correct one if they differ. net/http, crypto/tls and the cgo build fixes are outside the verifier. Listed with vettid/service-vault#196 (GO-2026-6859)"
   }
 ]
