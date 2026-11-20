@@ -2,7 +2,7 @@ module github.com/vettid/service-vault
 
 go 1.26.0
 
-toolchain go1.26.10
+toolchain go1.26.11
 
 require (
 	filippo.io/edwards25519 v1.1.0
