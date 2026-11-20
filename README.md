@@ -471,12 +471,11 @@ destination.
     `internal/vaultroots/testdata/verifier_differences.json` lists it,
     keyed by the sha256 of both files, with the reason it is safe: a
     change on either side asks for a new review. Today it lists staging
-    25 and 26, whose `strictjson` and proposal validation are more
-    lenient than the service's (the service refuses first) and whose
-    `votewire.go` and `body.go` lack things no check uses; staging 27,
-    whose proposal validation is more lenient; and staging 30, whose
-    `suite.go` only adds a constant. The service doesn't run the pinned
-    proposal validation on its own proposals: it refuses an eligible
+    30, 31 and 32's build settings (built with go1.26.10, the service
+    with go1.26.11), and for staging 30 its `votewire/jcs.go`, which
+    holds inline the JCS writer the pinned version has in `vms/jcs`, and
+    the `vms/jcs/jcs.go` it doesn't have. The service doesn't run the
+    pinned proposal validation on its own proposals: it refuses an eligible
     count above `vote.MaxEligible` in `vote.Proposal.Validate`, and an
     empty, repeated or Abstain choice label in `ballot.checkInput`'s
     choice-label loop (`internal/ballot/approved.go`). That loop compares

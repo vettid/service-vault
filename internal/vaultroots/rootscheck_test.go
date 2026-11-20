@@ -21,7 +21,7 @@ package vaultroots
 // It also requires, for each of those releases, the vault's bundle
 // verifier at its tag to be the one the service runs (verifierCheck,
 // verifier_check_test.go): every non-test Go file of votewire and of the
-// vettid-vault packages votewire imports (strictjson, suite), equal byte
+// vettid-vault packages votewire imports (strictjson, suite, jcs), equal byte
 // for byte to the vettid-vault version go.mod pins; no import of a
 // vettid-vault package at the tag that the pinned votewire doesn't have;
 // only Go files, docs and testdata in those packages; and the release's

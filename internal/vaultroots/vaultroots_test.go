@@ -57,8 +57,8 @@ func TestCheckRealStagingBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sets) != 1 || fmt.Sprint(sets[0].Releases) != "[25 26 27 30]" {
-		t.Fatalf("%+v (want the identical roots of releases 25, 26, 27 and 30 as one set)", sets)
+	if len(sets) != 1 || fmt.Sprint(sets[0].Releases) != "[30 31 32]" {
+		t.Fatalf("%+v (want the identical roots of releases 30, 31 and 32 as one set)", sets)
 	}
 }
 
@@ -123,7 +123,7 @@ func TestCheckEverySet(t *testing.T) {
 // A file that isn't release-<n>.json, or roots that don't parse, fail
 // the load: nothing is checked against a set that isn't the release's.
 func TestParseRefusesStrayFiles(t *testing.T) {
-	good, err := files.ReadFile("roots/staging/release-25.json")
+	good, err := files.ReadFile("roots/staging/release-30.json")
 	if err != nil {
 		t.Fatal(err)
 	}
