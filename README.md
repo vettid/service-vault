@@ -472,9 +472,10 @@ destination.
     keyed by the sha256 of both files, with the reason it is safe: a
     change on either side asks for a new review. Today it lists staging
     30, 31 and 32's build settings (built with go1.26.10, the service
-    with go1.26.11), and staging 30's `votewire/jcs.go`, which holds
-    inline the JCS writer the pinned version has in `vms/jcs`. The service doesn't run the pinned
-    proposal validation on its own proposals: it refuses an eligible
+    with go1.26.11), and for staging 30 its `votewire/jcs.go`, which
+    holds inline the JCS writer the pinned version has in `vms/jcs`, and
+    the `vms/jcs/jcs.go` it doesn't have. The service doesn't run the
+    pinned proposal validation on its own proposals: it refuses an eligible
     count above `vote.MaxEligible` in `vote.Proposal.Validate`, and an
     empty, repeated or Abstain choice label in `ballot.checkInput`'s
     choice-label loop (`internal/ballot/approved.go`). That loop compares
