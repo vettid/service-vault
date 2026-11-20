@@ -2,7 +2,7 @@ module github.com/vettid/service-vault/tools/rootwatch
 
 go 1.26.0
 
-toolchain go1.26.10
+toolchain go1.26.11
 
 require github.com/sigstore/sigstore-go v1.3.0
 
